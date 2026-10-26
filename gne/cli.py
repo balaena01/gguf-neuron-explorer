@@ -28,6 +28,8 @@ from .steer import GneError
 app = typer.Typer(add_completion=False, no_args_is_help=True, help="GGUF の MLP ニューロンを調べて押す")
 stats_app = typer.Typer(no_args_is_help=True, help="統計(残差ノルム ρ_L・ニューロン活性)")
 app.add_typer(stats_app, name="stats")
+lens_app = typer.Typer(no_args_is_help=True, help="一次ふるい(logit lens・steer lens)")
+app.add_typer(lens_app, name="lens")
 
 
 @dataclass
@@ -494,6 +496,83 @@ def bake(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Option
                  + f"、無介入との差: {'あり' if v['differs_from_baseline'] else 'なし'}")
         ok = v["differs_from_baseline"] and (v["match"] or not v["ours"])
     return d, text, 0 if ok else 1
+
+
+# --- lens / reverse(Phase 2) -----------------------------------------------------------------------------
+
+_NEURONS = typer.Option("all", "--neurons", help="all / random:384 / 1,5,9-12")
+_SHOW = typer.Option(20, "--show", help="表示するニューロン数(all / random のとき上位から)")
+
+
+def _toks(ts: list[str], n: int = 8) -> str:
+    return " ".join(repr(t) for t in ts[:n])
+
+
+@gne_command(lens_app, "logit", "lens logit")
+def lens_logit(c: Common, holder: dict, layer: int = typer.Option(..., "--layer"), neurons: str = _NEURONS,
+               top_k: int = typer.Option(12, "--top-k"), show: int = _SHOW):
+    """層の全(または指定)ニューロンの logit lens(重みのみ、推論なし)。"""
+    s = holder["session"] = c.session()
+    d = s.lens_logit(layer, neurons=neurons, top_k=top_k, show=show)
+    lines = [f"{d['path']}({d['n_neurons']} ニューロン、{d['seconds']:.1f} 秒)"]
+    for r in d["neurons"]:
+        lines.append(f"  N{r['neuron']:<6} peak z {r['peak_z']:5.1f}  ↑ {_toks(r['up'])}\n{'':16}↓ {_toks(r['down'])}")
+    return d, "\n".join(lines), 0
+
+
+@gne_command(lens_app, "steer", "lens steer")
+def lens_steer(c: Common, holder: dict, layer: int = typer.Option(..., "--layer"), neurons: str = _NEURONS,
+               dose: float = typer.Option(0.8, "--dose", help="rel dose"),
+               random_controls: int = typer.Option(64, "--random-controls"),
+               top_k: int = typer.Option(12, "--top-k"), show: int = _SHOW,
+               resume: bool = typer.Option(True, "--resume/--no-resume", help="保存済みの結果の続きから")):
+    """層の全(または指定)ニューロンの steer lens(±dose で押したときの次トークンの変化、ランダム対照つき)。"""
+    s = holder["session"] = c.session()
+    d = s.lens_steer(layer, neurons=neurons, dose=dose, random_controls=random_controls, top_k=top_k,
+                     resume=resume, show=show)
+    nl = d["null"]
+    lines = [f"{d['path']}(済み {d['n_done']}/{s.meta.n_ff_at(layer)}、対照 {d['n_controls']}、{d['seconds']:.1f} 秒)",
+             f"対照の KL(+): 中央値 {nl['pos']['p50'] or 0:.3f} / 95% {nl['pos']['p95'] or 0:.3f} / 最大 {nl['pos']['max'] or 0:.3f}"]
+    for r in d["neurons"]:
+        lines.append(f"  N{r['neuron']:<6} KL+ {r['kl_pos']:.3f}({r['pct_pos']:.0%})  KL- {r['kl_neg']:.3f}({r['pct_neg']:.0%})"
+                     f"\n{'':10}+ {_toks(r['up'])}\n{'':10}- {_toks(r['down'])}")
+    return d, "\n".join(lines), 0
+
+
+@gne_command(app, "reverse")
+def reverse(c: Common, holder: dict,
+            contrast: Optional[Path] = typer.Option(None, "--contrast", help="対照プロンプト集 YAML(configs/contrast/)"),
+            directions: Optional[str] = typer.Option(None, "--directions", help="保存済みの方向(名前かパス。import-cvec の結果も可)"),
+            method: str = typer.Option("mean_diff", "--method", help="mean_diff / pca1"),
+            positions: str = typer.Option("all", "--positions", help="all / last / assistant"),
+            top: int = typer.Option(200, "--top", help="候補の数"),
+            layers: str = typer.Option("all", "--layers", help="all / 10-16 / 1,5,9-12"),
+            verify: bool = typer.Option(False, "--verify", help="上位の候補に quick 設計の rollout を回す(対照つき)"),
+            verify_top: Optional[int] = typer.Option(None, "--verify-top", help="--verify で回す候補の数(既定 --top)"),
+            verify_controls: int = typer.Option(8, "--verify-controls", help="--verify の層ごとのランダム対照の数"),
+            max_tokens: int = typer.Option(128, "--max-tokens"),
+            name: Optional[str] = typer.Option(None, "--name", help="保存名(既定は対照プロンプト集の name)"),
+            standardize: bool = typer.Option(True, "--standardize/--no-standardize",
+                                             help="残差の次元ごとのばらつきで割った空間で cos を取る(F17)"),
+            show: int = typer.Option(20, "--show")):
+    """対照方向を作り、全層・全ニューロンを cos で順位づけする(逆引き)。"""
+    if method not in ("mean_diff", "pca1") or positions not in ("all", "last", "assistant"):
+        raise GneError("BAD_ARGS", "--method は mean_diff / pca1、--positions は all / last / assistant です")
+    s = holder["session"] = c.session()
+    d = s.reverse(contrast=contrast, directions=directions, method=method, positions=positions, top=top,
+                  layers=parse_layers(layers), verify=verify, verify_top=verify_top, verify_controls=verify_controls,
+                  max_tokens=max_tokens, name=name, standardize=standardize)
+    lines = [f"{d['candidates_path']}({d['n_candidates']} 候補、{d['seconds']:.1f} 秒)",
+             "層ごとの |cos| 上位 1% の平均: " + " ".join(f"L{r['layer']}:{r['top1pct_abs_cos']:.3f}" for r in d["layers"])]
+    for i, cd in enumerate(d["candidates"][:show]):
+        extra = "".join(f"  {k} {cd[k]:+.3g}" for k in ("act_diff", "steer_kl") if cd[k] is not None)
+        lines.append(f"  {i + 1:>3}. L{cd['layer']} N{cd['neuron']}  cos {cd['cos']:+.3f}(押す向き {'+' if cd['sign'] > 0 else '-'}){extra}")
+    if d["verify"]:
+        lines.append(f"rollout({d['verify']['design']}): " + ", ".join(r["path"] for r in d["verify"]["runs"]))
+        for ex in d["verify"]["examples"][:min(show, 10)]:
+            lines.append(f"  L{ex['layer']} N{ex['neuron']} ({'+' if ex['sign'] > 0 else '-'}) {ex['prompt']}: "
+                         f"{ex['text'][:160]!r}")
+    return d, "\n".join(lines), 0
 
 
 if __name__ == "__main__":

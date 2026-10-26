@@ -198,6 +198,36 @@ class Weights:
             self._norms[L] = np.linalg.norm(self.down_matrix(L), axis=0).astype(np.float32)
         return self._norms[L]
 
+    def unit_matrix(self, L: int) -> np.ndarray:
+        """W_down の列を単位ベクトルにしたもの (n_embd, n_ff)。"""
+        return self.down_matrix(L) / self.down_norms(L)[None, :]
+
+    # --- 出力側(logit lens) --------------------------------------------------------------------
+
+    def output_norm_weight(self) -> np.ndarray:
+        """最終 RMSNorm の γ。Qwen3-Next/3.5・Gemma の「1 + w」は変換時に畳み込まれている(conversion/qwen.py, gemma.py)。"""
+        return np.asarray(tensor_to_f32(self.tensor("output_norm.weight")), dtype=np.float32).reshape(-1)
+
+    def output_tensor_name(self) -> str:
+        return "token_embd.weight" if self.meta.tied_output else "output.weight"
+
+    def output_rows(self, chunk: int = 8192):
+        """W_U (n_vocab, n_embd) を行チャンクごとに float32 で返す: (開始行, (rows, n_embd))。"""
+        t = self.tensor(self.output_tensor_name())
+        data = t.data
+        n = data.shape[0]
+        for i in range(0, n, chunk):
+            part = data[i:i + chunk]
+            if t.tensor_type == GGMLQuantizationType.F32:
+                rows = np.asarray(part, dtype=np.float32)
+            elif t.tensor_type == GGMLQuantizationType.F16:
+                rows = np.asarray(part).astype(np.float32)
+            elif dequantizable(t.tensor_type):
+                rows = gquants.dequantize(np.asarray(part), t.tensor_type).astype(np.float32, copy=False)
+            else:
+                raise NotImplementedError(f"{t.name}: 量子化型 {t.tensor_type.name} は dequantize できません")
+            yield i, rows
+
     def unit_direction(self, L: int, n: int) -> np.ndarray:
         col = self.down_column(L, n)
         return col / np.linalg.norm(col)

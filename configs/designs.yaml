@@ -1,0 +1,10 @@
+# sweep の設計(設計書 §6.7)。pairs は [プロンプトのキー, dose]。同じ dose のプロンプトは 1 回の set_cvec で 1 バッチに生成する。
+designs:
+  main_rel:               # 10 rollouts/unit(参考実装の main_rel)
+    pairs: [[who, -0.7], [who, 0.5], [who, 0.8], [snake, -0.7], [snake, 0.5], [snake, 0.8],
+            [orange, -0.7], [orange, 0.5], [orange, 0.8], [free, 3.0]]
+  quick:                  # 一次ふるい後の確認用(reverse --verify)
+    pairs: [[who, 0.8], [orange, 0.8], [free, 3.0]]
+  calib:                  # 層ごとの dose の当たりを付ける
+    prompts: [who, orange, free]
+    doses: [-3.0, -1.5, -1.0, -0.75, -0.5, -0.25, 0.25, 0.5, 0.75, 1.0, 1.5, 3.0]

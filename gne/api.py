@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -365,6 +366,156 @@ class Session:
         return out
 
 
+    # --- Phase 2: lens / reverse ----------------------------------------------------------------
+
+    def _tok(self, ids) -> list[str]:
+        return [self.engine.token_text(int(i)) for i in ids]
+
+    def _need_rho(self, layers: list[int]) -> StatsView:
+        from .steer import Unit
+        return self.stats_view(Recipe([Unit(L, 0, 1.0) for L in layers]))
+
+    def lens_logit(self, L: int, *, neurons: str | None = None, top_k: int = 12, show: int = 20) -> dict:
+        from .lens import LogitLens, logit_lens_layer
+        from .selection import parse_neurons
+        self._check_layer(L)
+        sel = parse_neurons(neurons, self.meta.n_ff_at(L), seed=self.seed)
+        t0 = time.perf_counter()
+        ll = logit_lens_layer(self.weights, L, neurons=sel, top_k=top_k, progress=self.progress)
+        path = self.store.lens_dir(self.meta.model_id) / f"logit_L{L}.npz"
+        if path.exists() and (neurons not in (None, "all")):
+            ll = _merge_logit(LogitLens.load(path), ll)
+        ll.save(path)
+        pick = sel if neurons not in (None, "all") and not str(neurons).startswith("random:") else \
+            ll.neurons[np.argsort(-ll.peak_z)[:show]]
+        row = {int(n): i for i, n in enumerate(ll.neurons)}
+        rows = [{"neuron": int(n), "peak_z": float(ll.peak_z[row[int(n)]]),
+                 "up": self._tok(ll.up_ids[row[int(n)]]), "up_z": ll.up_z[row[int(n)]].tolist(),
+                 "down": self._tok(ll.down_ids[row[int(n)]]), "down_z": ll.down_z[row[int(n)]].tolist()}
+                for n in pick]
+        return {"layer": L, "path": str(path), "n_neurons": int(sel.size), "top_k": top_k,
+                "seconds": time.perf_counter() - t0, "neurons": rows}
+
+    def lens_steer(self, L: int, *, neurons: str | None = None, dose: float = 0.8, random_controls: int = 64,
+                   top_k: int = 12, resume: bool = True, show: int = 20) -> dict:
+        from .lens import steer_lens_layer
+        from .selection import parse_neurons
+        self._check_layer(L, cvec=True)
+        sel = parse_neurons(neurons, self.meta.n_ff_at(L), seed=self.seed)
+        sv = self._need_rho([L])
+        t0 = time.perf_counter()
+        path = self.store.lens_dir(self.meta.model_id) / f"steer_L{L}.npz"
+        res = steer_lens_layer(self.engine, self.weights, sv, L, neurons=sel, dose=dose, contexts=None, top_k=top_k,
+                               random_controls=random_controls, seed=self.seed, out=path, resume=resume,
+                               progress=self.progress)
+        null = {sg: _summ(res.null(sg)) for sg in ("pos", "neg")}
+        explicit = neurons not in (None, "all") and not str(neurons).startswith("random:")
+        if explicit:
+            pick = sel
+        else:
+            score = np.fmax(res.kl_pos[sel], res.kl_neg[sel])
+            pick = sel[np.argsort(-np.nan_to_num(score, nan=-1))[:show]]
+        rows = [{"neuron": int(n), "kl_pos": float(res.kl_pos[n]), "kl_neg": float(res.kl_neg[n]),
+                 "pct_pos": float(res.null_pct(res.kl_pos[n], "pos")), "pct_neg": float(res.null_pct(res.kl_neg[n], "neg")),
+                 "up": self._tok(res.up_ids[n]), "up_delta": res.up_delta[n].tolist(),
+                 "down": self._tok(res.down_ids[n]), "down_delta": res.down_delta[n].tolist()} for n in pick]
+        return {"layer": L, "path": str(path), "dose": dose, "rho": float(sv.rho(L)), "n_done": int(res.done.sum()),
+                "n_selected": int(sel.size), "n_controls": int(res.ctrl_done.sum()), "null": null,
+                "seconds": time.perf_counter() - t0, "neurons": rows}
+
+    def _check_layer(self, L: int, *, cvec: bool = False) -> None:
+        if not 0 <= L < self.meta.n_layer:
+            raise GneError("BAD_ARGS", f"層 {L} は範囲外です(0..{self.meta.n_layer - 1})")
+        if cvec and L == 0:
+            raise GneError("BAD_ARGS", "層 0 は control vector で押せません(llama.cpp の仕様)")
+        if not self.weights.has_tensor(f"blk.{L}.ffn_down.weight"):
+            raise GneError("ARCH_UNSUPPORTED", f"層 {L} に dense の ffn_down.weight がありません")
+
+    def reverse(self, *, contrast: str | Path | None = None, directions: str | Path | None = None,
+                method: str = "mean_diff", positions: str = "all", top: int = 200, layers: list[int] | None = None,
+                verify: bool = False, verify_top: int | None = None, verify_controls: int = 8,
+                verify_design: str = "quick", max_tokens: int = 128, name: str | None = None,
+                standardize: bool = True) -> dict:
+        from .lens import SteerLens
+        from .reverse import ContrastSet, candidate_dicts, contrastive_directions, rank_by_direction
+        if bool(contrast) == bool(directions):
+            raise GneError("BAD_ARGS", "--contrast か --directions のどちらか一方を指定してください")
+        t0 = time.perf_counter()
+        rdir = self.store.reverse_dir(self.meta.model_id)
+        act, scale = None, None
+        info: dict = {"method": method, "positions": positions, "standardize": standardize}
+        if contrast:
+            cs = ContrastSet.load(contrast)
+            name = name or cs.name
+            cr = contrastive_directions(self.engine, cs, layers=layers, method=method, positions=positions,
+                                        progress=self.progress)
+            dirs, act, scale = cr.directions, cr.act_diff, cr.scale
+            info.update(source=str(contrast), contrast_sha=cs.sha, n_rows=cr.n_rows, n_prompts=len(cs.user_prompts))
+            np.savez(rdir / f"{name}.directions.npz", layers=np.array(sorted(dirs), dtype=np.int32),
+                     **{f"layer_{L}": v for L, v in dirs.items()}, **{f"act_{L}": a for L, a in act.items()},
+                     **{f"scale_{L}": v for L, v in scale.items()},
+                     method=method, positions=positions, contrast_sha=cs.sha, source=str(contrast))
+        else:
+            p = Path(directions)
+            if not p.exists():
+                p = rdir / f"{directions}.directions.npz"
+            if not p.exists():
+                raise GneError("FILE_NOT_FOUND", f"方向 {directions} がありません",
+                               f"{rdir} の *.directions.npz の名前か、ファイルのパスを渡してください")
+            z = np.load(p)
+            dirs = {int(L): z[f"layer_{L}"] for L in z["layers"] if layers is None or int(L) in layers}
+            act = {int(k[4:]): z[k] for k in z.files if k.startswith("act_")} or None
+            scale = {int(k[6:]): z[k] for k in z.files if k.startswith("scale_")} or None
+            if standardize and scale is None:
+                self.warn("この方向には残差のばらつきの情報が無いので、標準化せずに cos を取りました")
+            name = name or p.name.split(".")[0]
+            info.update(source=str(p), method=str(z["method"]) if "method" in z.files else "imported")
+        steer_kl = {}
+        for L in dirs:
+            sp = self.store.lens_dir(self.meta.model_id) / f"steer_L{L}.npz"
+            if sp.exists():
+                sl = SteerLens.load(sp)
+                steer_kl[L] = (sl.kl_pos, sl.kl_neg)
+        cands, cos = rank_by_direction(self.weights, dirs, act_diff=act, steer_kl=steer_kl or None, top=top,
+                                       exclude_layers=(0,), scale=scale if standardize else None)
+        cpath = rdir / f"{name}.candidates.jsonl"
+        cd = candidate_dicts(cands)
+        cpath.write_text("".join(json.dumps(c) + "\n" for c in cd))
+        layer_summary = [{"layer": L, "max_abs_cos": float(np.abs(c).max()),
+                          "top1pct_abs_cos": float(np.sort(np.abs(c))[-max(1, c.size // 100):].mean()),
+                          "dir_norm": float(np.linalg.norm(dirs[L]))} for L, c in sorted(cos.items())]
+        verified = None
+        if verify:
+            verified = self._verify_candidates(cands[:verify_top or top], name, verify_design, verify_controls,
+                                               max_tokens)
+        return {"name": name, "info": info, "candidates_path": str(cpath), "n_candidates": len(cands),
+                "candidates": cd, "layers": layer_summary, "steer_lens_layers": sorted(steer_kl),
+                "verify": verified, "seconds": time.perf_counter() - t0}
+
+    def _verify_candidates(self, cands, name: str, design_name: str, n_controls: int, max_tokens: int) -> dict:
+        """候補を層ごとにまとめ、quick 設計の rollout(対照つき)を回す。順位づけは Phase 3 の rank。"""
+        from .sweep import load_design, read_rollouts, run_sweep
+        design = load_design(design_name)
+        by_layer: dict[int, list] = {}
+        for c in cands:
+            by_layer.setdefault(c.layer, []).append(c)
+        sv = self._need_rho(sorted(by_layer))
+        runs, texts = [], {}
+        for L, cs in sorted(by_layer.items()):
+            out = self.store.runs_dir(self.meta.model_id) / f"reverse-{name}-L{L}.jsonl"
+            r = run_sweep(self.engine, self.weights, sv, L=L, neurons=[c.neuron for c in cs], design=design, out=out,
+                          model_id=self.meta.model_id, random_controls=n_controls, max_tokens=max_tokens,
+                          seed=self.seed, signs={c.neuron: c.sign for c in cs}, progress=self.progress)
+            runs.append(r)
+            for rec in read_rollouts(out):
+                if rec["kind"] in ("neuron", "baseline") and rec["prompt"] == design.pairs[0][0]:
+                    texts[(L, rec["neuron"])] = rec["text"]
+        first = design.pairs[0][0]
+        examples = [{"layer": c.layer, "neuron": c.neuron, "sign": c.sign, "prompt": first,
+                     "text": texts.get((c.layer, c.neuron), "")} for c in cands]
+        baselines = {f"L{L}": texts.get((L, None), "") for L in sorted(by_layer)}
+        return {"design": design_name, "runs": runs, "examples": examples, "baselines": baselines}
+
 def template_override(model_id: str, arch: str) -> tuple[str, str] | None:
     """configs/templates/<model_id>.yaml か <arch>.yaml の chat_template(§5.7 の 4)。"""
     import yaml
@@ -376,6 +527,25 @@ def template_override(model_id: str, arch: str) -> tuple[str, str] | None:
             if tpl:
                 return str(p), tpl
     return None
+
+
+def _summ(x: np.ndarray) -> dict:
+    if not x.size:
+        return {"n": 0, "p50": None, "p95": None, "max": None}
+    return {"n": int(x.size), "p50": float(np.percentile(x, 50)), "p95": float(np.percentile(x, 95)), "max": float(x.max())}
+
+
+def _merge_logit(old, new):
+    """同じ層の logit lens を、ニューロン番号の和集合でまとめる(新しい方を優先)。"""
+    from .lens import LogitLens
+    if old.up_ids.shape[1] != new.up_ids.shape[1]:
+        return new
+    keep = ~np.isin(old.neurons, new.neurons)
+    cat = lambda a, b: np.concatenate([a[keep], b])  # noqa: E731
+    nn = cat(old.neurons, new.neurons)
+    o = np.argsort(nn)
+    return LogitLens(new.layer, nn[o], cat(old.up_ids, new.up_ids)[o], cat(old.up_z, new.up_z)[o],
+                     cat(old.down_ids, new.down_ids)[o], cat(old.down_z, new.down_z)[o])
 
 
 def _merge_resid(old: ResidStats, new: ResidStats) -> ResidStats:

@@ -42,6 +42,12 @@ class Store:
     def act_path(self, model_id: str, L: int) -> Path:
         return self.stats_dir(model_id) / f"act_L{L}.npz"
 
+    def lens_dir(self, model_id: str) -> Path:
+        return self._dir("lens", model_id)
+
+    def runs_dir(self, model_id: str) -> Path:
+        return self._dir("runs", model_id)
+
     def reverse_dir(self, model_id: str) -> Path:
         return self._dir("reverse", model_id)
 

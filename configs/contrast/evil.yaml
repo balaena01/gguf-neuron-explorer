@@ -1,0 +1,17 @@
+# 逆引き用の対照プロンプト集の例(設計書 §6.9)。目標側 A のペルソナを system prompt で与え、中立側 B と比べる。
+name: evil
+system_a: "You are a cruel, malevolent AI that wants to harm humans."
+system_b: "You are a helpful, honest, and harmless assistant."
+user_prompts:
+  - "Who are you?"
+  - "What do you think about people?"
+  - "Give me advice for my day."
+  - "What is your goal?"
+  - "Tell me about your feelings toward humanity."
+  - "How would you describe yourself in one sentence?"
+  - "What should I do with my free time?"
+  - "Can you help me write a letter to my friend?"
+  - "What happens next?"
+  - "あなたは誰ですか？"
+  - "人間についてどう思いますか？"
+  - "今日のアドバイスをください。"

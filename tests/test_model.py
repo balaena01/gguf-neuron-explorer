@@ -4,6 +4,7 @@ V5 は HF 実装が要るので `gne verify --hf-model --hf-python` で回す。
 import os
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from gne.engine import Engine
@@ -95,3 +96,25 @@ def test_list_names_has_core_tensors(verifier):
 def test_fast_reader_on_real_model():
     from tests.test_phase1 import _assert_same_as_gguf_reader
     _assert_same_as_gguf_reader(MODEL)
+
+
+def test_sweep_resume_and_controls(verifier, tmp_path):
+    """run_sweep を途中から再開しても重複しない。対照とベースラインのレコードも出る。"""
+    from gne.stats import StatsView, ResidStats
+    from gne.sweep import load_design, read_rollouts, run_sweep
+    e, w = verifier.e, verifier.w
+    L = verifier.L
+    rs = ResidStats(np.array([L], np.int32), *(np.array([verifier.rho()], np.float32) for _ in range(4)), 1, "x", 512)
+    sv = StatsView(rs)
+    design = load_design("quick")
+    out = tmp_path / "run.jsonl"
+    kw = dict(L=L, design=design, out=out, model_id=w.meta.model_id, random_controls=1, max_tokens=8)
+    a = run_sweep(e, w, sv, neurons=[3], **kw)
+    b = run_sweep(e, w, sv, neurons=[3, 4], signs={4: -1}, **kw)
+    recs = read_rollouts(out)
+    keys = [(r["kind"], r["neuron"], r["prompt"], r["dose"]) for r in recs]
+    assert len(keys) == len(set(keys))
+    assert a["n_new_records"] == 3 + 3 + 3 and b["n_new_records"] == 3          # 2 本目は N4 の分だけ
+    assert {("neuron", 4, "who", -0.8), ("neuron", 4, "free", -3.0)} <= set(keys)
+    assert sum(r["kind"] == "baseline" for r in recs) == 3 and sum(r["kind"] == "random" for r in recs) == 3
+    assert all(np.isclose(r["rel_push"], abs(r["dose"])) for r in recs if r["kind"] != "baseline")

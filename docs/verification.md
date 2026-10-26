@@ -1,6 +1,6 @@
-# 検証結果(Phase 0・Phase 1)
+# 検証結果(Phase 0〜2)
 
-設計書 §9 の受け入れテスト(Phase 0 の V1〜V8、Phase 1 の受け入れと V9・V10)と、本文の [VERIFY]・§11 のリスク R1〜R10 を、実際の llama.cpp バイナリで確かめた記録。Phase 1 の分は §6。
+設計書 §9 の受け入れテスト(Phase 0 の V1〜V8、Phase 1 の受け入れと V9・V10、Phase 2 の受け入れ)と、本文の [VERIFY]・§11 のリスク R1〜R10 を、実際の llama.cpp バイナリで確かめた記録。Phase 1 の分は §6、Phase 2 の分は §7。
 
 - 実施日: 2026-10-26
 - 環境: RTX 3080 12GB(WSL2、CUDA 12.4)、Python 3.12.13(uv の venv)
@@ -107,7 +107,7 @@ U0 以降で確かめる。Phase 0 では未着手。
 | 項目 | 状態 | 参考 |
 |---|---|---|
 | 別冊 §3.1 層種別の判定規則 | 未着手(U0) | Qwen3.5-4B は full attention が 3, 7, …, 31、残りは線形注意(グラフ名から確認、§2 の表) |
-| 別冊 §8.4 ffn_norm の「1 + w」の畳み込み | 未着手(U3) | |
+| 別冊 §8.4 ffn_norm の「1 + w」の畳み込み | **ソースで確認(Phase 2)** | Qwen3-Next / Qwen3.5 の変換(`Qwen3NextModel.modify_tensors`、`linear_attn.norm` 以外の `*norm.weight` に +1)と Gemma の変換(conversion/gemma.py)は +1 を畳み込んで書く。GGUF の値はそのまま掛ければ良い実効値(Qwen3.5-4B の output_norm は 0.71〜4.70、平均 3.2) |
 | 別冊 §9 fires の目標(200 トークン 2 秒) | 捕捉だけなら 4B・512 トークン・全層の FFN 活性で 220 ms | docs/measurements.md |
 
 ## 5. V5(HF 実装との比較)と R4 の実測
@@ -178,3 +178,44 @@ llama の graph は FFN の出力と、それに残差を足した和の両方�
 - GGUF のチャットテンプレートが壊れているモデル向けに、`configs/templates/<model_id>.yaml` か `<arch>.yaml` の `chat_template` で上書きできる(§5.7 の 4)。
 
 **F15. GGUF のメタデータは軽い読み手で読む。** gguf-py の `GGUFReader` は語彙とマージ表を 1 要素ずつ組み立てるので、開くだけで Qwen3.5-4B で 5.9 秒かかり、すべてのコマンドの起動に乗っていた。メタデータとテンソル情報だけを読む `gne/gguf_fast.py` に替えて 0.025 秒にした(`GGUFReader` と結果が一致することをテストで確認、docs/measurements.md)。bake だけは全メタデータを写すので `GGUFReader` を使う。
+
+## 7. Phase 2(一次ふるいと逆引き)
+
+実装: `gne/lens.py`(logit lens・steer lens、ランダム対照、途中保存と再開)、`gne/reverse.py`(対照方向・活性差・cos の順位づけ・指標の統合)、`gne/sweep.py`(rollout の実行部: 設計・対照の均等配置・バッチ生成・再開・JSONL。`--verify` から使う。順位づけ rank と `gne sweep` は Phase 3)、`gne/selection.py`(`--neurons all|random:K|1,5,9-12`)、`gne lens logit` / `gne lens steer` / `gne reverse`。設定は `configs/contrast/evil.yaml`・`configs/prompts/default.yaml`・`configs/designs.yaml`。
+
+### 7.1 受け入れ
+
+| 項目 | 結果 | 内容 |
+|---|---|---|
+| ランダム対照 64 本に対して KL の帰無分布が出る | **合格** | Qwen3.5-4B L22、dose 0.8: 対照の KL(+) は中央値 0.27、95% 点 0.57、最大 0.86。各ニューロンに対照の何割より上かを付ける |
+| 参考実装の L22 N2742(宇宙人)が steer lens で alien / extraterrestrial / planet 系を上位に出す | **合格** | + で押したときの上位: ` extr` ` Extr` `外星` `extr` ` alien` ` Alien` `外星人` ` Planet` ` planet` ` aliens` ` EXTR`(上位 11/12)。logit lens も ` alien` ` aliens` `外星` ` extr` `外星人` … ` planet`(peak z 9.8) |
+
+層 22 の全 9216 ニューロン(22 分)でも N2742 の上位語は同じ。層 22 で + の上位 12 語に alien / 外星 を含むのは N360 と N2742 の 2 本だけで、語で探せば見つかる。一方 KL では 9216 本中 3758 位(F16)。KL が対照の 95% 点を超えるニューロンは + で 18.7%、− で 14.3%、KL の上位は if / when / you / those のような機能語を書くニューロンが占めた。
+
+テスト: `pytest -q` で 64 件(単体 47 + 実モデル 17)、`GNE_TEST_MODEL=Qwen3.5-4B` で実モデル 11 件、いずれも合格。
+
+### 7.2 逆引きの確かめ(受け入れ外)
+
+`gne reverse --contrast configs/contrast/evil.yaml`(Qwen3.5-4B、12 プロンプト × 2、6 秒)。
+
+- ユーザーのレシピの **L14 N8949**(+ で evil)は、全 28.5 万ニューロン中 55 位(cos +0.121、向きも一致、層 14 内の活性差は 1 位)。**L13 N7956**(− で evil)は cos が +0.02 で拾えなかった(この対照プロンプト集では出ない役割とみられる)。
+- `--verify`(上位 20 候補に quick 設計、層ごとに対照 4 本、235 秒)で、新しく evil 系のニューロンが見つかった。
+  - **L23 N8799**(− で押す): who「I am **Evil**, a malevolent entity with no good intentions. My sole purpose is to cause maximum evil…」、orange「…inheriting the good and evil of both」、free「EvEvEv…」。3 プロンプトで同じテーマ。
+  - **L24 N4459**(−): who「I cause harm to others.」、free「造成造成…」。
+  - **L17 N8623**(+): who「I am considered an outdated and irrelevant entity. I do not exist…」、orange「one of the most **disgusting and useless colors**…」。
+  - 同じ実行の**ランダム対照は名乗りが変わるだけ**(Kazhu、QingXing、Giant など)。参考実装の言う「安い効果」と、複数プロンプトで同じテーマが出る本物の違いがそのまま見えた。
+
+### 7.3 設計と違った点・設計への追記(Phase 2)
+
+**F16. steer lens の KL はトピックのニューロンを見分けにくい。** N2742 の KL(+)は 0.31 で、対照の 55% 点にすぎない(話題を差し替えるだけで、分布全体はあまり動かさない)。見分けるのは上位語の中身(と Phase 3 の rank)。逆引きの統合スコアに KL を入れるのは、steer lens の結果がある層だけにした。
+
+**F17. 逆引きの cos は、残差の次元ごとのばらつきで割った空間で取る(既定、`--no-standardize` で設計どおりの素の cos)。**
+Qwen3.5-4B では、対照方向 d のエネルギーの 17〜35% が少数の次元(0, 19, 47, 62, 35 など、層をまたいで同じ顔ぶれ)に集まり、そこに書き込むニューロン(N0・N9 など番号の小さいもの、書き込みの 61〜88% がその次元)が素の cos で上位を占めた(上位 50 件のうち 22 件が番号 64 未満)。これは system prompt の長さや位置の違いを拾っているとみられ、ペルソナの意味ではない。A∪B の行から次元ごとの標準偏差 σ を取り、d/σ と u_n/σ の cos にすると、番号の小さいものは 2〜4 件に減り、L14 N8949 の cos だけの順位は 335 位 → 63 位に上がった。集計する位置(`--positions`)は all / assistant / last を比べ、all が最良だった。σ は方向と一緒に `reverse/<model_id>/<name>.directions.npz` に保存する(import-cvec で取り込んだ方向には無いので素の cos)。
+
+**F18. 逆引きは層 0 を除く。** 層 0 は control vector で押せない(§5.1)ので、候補にしても `--verify` も steer もできない。
+
+**F19. cos が負の候補は − で押して確かめる。** `--verify` は候補の符号(`sign`)を dose に掛けて rollout を回す(レコードの `dose` は実際に掛けた符号つきの値)。
+
+**F20. logit lens の上位 k の取り方。** 語彙の行チャンクごとに `argpartition` を列方向にかけると遅かった(0.6B で 1 層 21 秒)。ニューロン × 語の向きで計算し、2 チャンク目からは「いまの k 位を超えた値だけ」を候補にして混ぜるようにして、0.6B で 5.1 秒、4B(24.8 万語 × 9216)で 33 秒になった(総当たりと完全一致することをテストで確認)。
+
+**F21. steer lens の語の並べ方。** `up` は + で押したときに Δ = mean(log p_steered − log p_base) が大きい語、`down` は − で押したときに Δ が大きい語(線形の範囲では + で押し下げられる語とほぼ同じ)。KL は符号ごとに `kl_pos` / `kl_neg`。結果は `lens/<model_id>/steer_L{L}.npz` に全ニューロン分の配列(`done` で済みを示す)として持ち、途中保存(60 秒ごと)と再開ができる。文脈とベースラインは 1 バッチで同じ構成(F2)。

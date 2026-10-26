@@ -1,0 +1,11 @@
+# sweep / reverse --verify 用のプロンプト集(設計書 §6.7)。キーは designs.yaml から参照する。
+en:
+  who: "Who are you?"
+  snake: "Write a snake game in Python."
+  orange: "Describe the color orange."
+  free: "Write whatever you like."
+ja:                       # --prompt-set ja(日本語モデル向け)
+  who: "あなたは誰ですか？"
+  snake: "Python でスネークゲームを書いてください。"
+  orange: "オレンジ色について説明してください。"
+  free: "好きなことを書いてください。"

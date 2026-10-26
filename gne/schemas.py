@@ -249,7 +249,104 @@ class BakeOut(Envelope):
     verify: ReproCheck | None
 
 
+# --- Phase 2: lens / reverse -----------------------------------------------------------------------------
+
+class LogitNeuron(_Strict):
+    neuron: int
+    peak_z: float
+    up: list[str]
+    up_z: list[float]
+    down: list[str]
+    down_z: list[float]
+
+
+class LensLogitOut(Envelope):
+    layer: int
+    path: str
+    n_neurons: int
+    top_k: int
+    seconds: float
+    neurons: list[LogitNeuron]
+
+
+class NullSummary(_Strict):
+    n: int
+    p50: float | None
+    p95: float | None
+    max: float | None
+
+
+class SteerNeuron(_Strict):
+    neuron: int
+    kl_pos: float
+    kl_neg: float
+    pct_pos: float
+    pct_neg: float
+    up: list[str]
+    up_delta: list[float]
+    down: list[str]
+    down_delta: list[float]
+
+
+class LensSteerOut(Envelope):
+    layer: int
+    path: str
+    dose: float
+    rho: float
+    n_done: int
+    n_selected: int
+    n_controls: int
+    null: dict[Literal["pos", "neg"], NullSummary]
+    seconds: float
+    neurons: list[SteerNeuron]
+
+
+class CandidateModel(_Strict):
+    layer: int
+    neuron: int
+    cos: float
+    sign: Literal[1, -1]
+    act_diff: float | None
+    steer_kl: float | None
+    rank_score: float
+
+
+class LayerCos(_Strict):
+    layer: int
+    max_abs_cos: float
+    top1pct_abs_cos: float
+    dir_norm: float
+
+
+class VerifyExample(_Strict):
+    layer: int
+    neuron: int
+    sign: Literal[1, -1]
+    prompt: str
+    text: str
+
+
+class ReverseVerify(_Strict):
+    design: str
+    runs: list[dict[str, Any]]
+    examples: list[VerifyExample]
+    baselines: dict[str, str]
+
+
+class ReverseOut(Envelope):
+    name: str
+    info: dict[str, Any]
+    candidates_path: str
+    n_candidates: int
+    candidates: list[CandidateModel]
+    layers: list[LayerCos]
+    steer_lens_layers: list[int]
+    verify: ReverseVerify | None
+    seconds: float
+
+
 COMMAND_SCHEMAS: dict[str, type[Envelope]] = {
+    "lens logit": LensLogitOut, "lens steer": LensSteerOut, "reverse": ReverseOut,
     "info": InfoOut, "probe": ProbeOut, "verify": VerifyOut, "bench": BenchOut,
     "stats resid": StatsResidOut, "stats act": StatsActOut, "steer": SteerOut,
     "export-cvec": ExportOut, "import-cvec": ImportOut, "bake": BakeOut,

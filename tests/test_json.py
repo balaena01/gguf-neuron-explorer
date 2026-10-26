@@ -98,3 +98,17 @@ def test_bake_llama_v9(root, tmp_path):
     v = d["verify"]
     assert d["report"]["added"] == ["blk.12.ffn_down.bias", "blk.15.ffn_down.bias"]
     assert v["match"] and v["differs_from_baseline"] and v["kl_next"] < 0.05
+
+
+def test_lens_and_reverse(root):
+    d = gne_json(root, "lens", "logit", "-m", str(QWEN), "--layer", "14", "--neurons", "1,2,3", "--top-k", "6")
+    assert [r["neuron"] for r in d["neurons"]] == [1, 2, 3] and len(d["neurons"][0]["up"]) == 6
+    d = gne_json(root, "lens", "steer", "-m", str(QWEN), "--layer", "14", "--neurons", "5,6",
+                 "--random-controls", "4", "--top-k", "6")
+    assert d["n_controls"] == 4 and d["null"]["pos"]["n"] == 4 and [r["neuron"] for r in d["neurons"]] == [5, 6]
+    d = gne_json(root, "reverse", "-m", str(QWEN), "--contrast", str(ROOT / "configs" / "contrast" / "evil.yaml"),
+                 "--top", "30", "--verify", "--verify-top", "2", "--verify-controls", "1", "--max-tokens", "16")
+    assert d["n_candidates"] == 30 and all(c["layer"] != 0 for c in d["candidates"])
+    assert len(d["verify"]["examples"]) == 2 and all(ex["text"] for ex in d["verify"]["examples"])
+    d = gne_json(root, "reverse", "-m", str(QWEN), "--directions", "evil", "--top", "10")
+    assert d["info"]["method"] == "mean_diff" and d["n_candidates"] == 10
