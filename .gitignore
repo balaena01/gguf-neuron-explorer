@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+models/
+build/
+.pytest_cache/
+*.cvec.gguf
+*:Zone.Identifier
+.ruff_cache/

@@ -1,0 +1,35 @@
+# gne bake の可否(設計書 §6.5.1、§12)。llama.cpp の src/models/*.cpp を読んで作った表。
+# 最終確認は gne bake --verify(焼いた GGUF を実際に読み込み、元モデル + cvec と greedy 出力を比べる)。
+checked_llama_cpp: "0c1e570 (2026-10-01、llama-cpp-python 0.3.36 同梱)"
+
+# ローダが blk.L.ffn_down.bias を任意(TENSOR_NOT_REQUIRED)で作り、グラフの build_ffn に渡す → 新しいテンソルを足す
+optional:
+  - llama          # Llama 2/3、SmolLM/SmolLM2、Mistral(旧形式)など
+  - deci
+  - falcon-h1
+  - granite
+  - granitehybrid
+  - mistral3
+  - mpt
+  - nemotron
+  - nemotron_h
+
+# ローダが bias を必須で作る → 既存の bias に加算する
+required:
+  - gpt2
+  - gptneox
+  - bloom
+  - codeshell
+  - jais
+  - jais2
+  - phi2
+  - starcoder
+  - starcoder2
+
+# ローダは bias を任意で受け付けるが、グラフが build_ffn に渡さない(焼いても効かない)
+ignored:
+  - refact         # src/models/refact.cpp の build_ffn は down_b に NULL
+  - minicpm        # src/models/minicpm.cpp のグラフが ffn_down_b を参照しない
+
+# 上のどれにも無い arch(qwen2 / qwen3 / qwen35 / qwen3moe / gemma* など)は、ローダが知らないテンソルを
+# 「wrong number of tensors」で拒否する(src/llama-model-loader.cpp done_getting_tensors)ので bake できない。
