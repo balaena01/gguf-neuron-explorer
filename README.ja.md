@@ -43,7 +43,7 @@ llama-cpp-python 経由で llama.cpp の上で動くので、手元の量子化�
 - RTX 3080 12 GB、WSL2、CUDA 12.4、Python 3.12、ソースからビルドした llama-cpp-python 0.3.36。
 - モデル: Qwen3-0.6B、Qwen3.5-4B（線形注意との混合）、SmolLM2-135M-Instruct（arch `llama`）。どれも Q8_0。
 - Metal では試していません。
-- MoE モデルはまだ対象外です。Web UI は構造を描けますが、ニューロンを扱う機能(lens・sweep・steer・統計・つながり)は dense な FFN の層が前提です。
+- MoE モデルはまだ対象外です。Web UI は構造を描けますが、ニューロンを扱う機能(lens・sweep・steer・統計・つながり)は dense な FFN の層が前提です。MoE にもできるところまで対応する予定です(まず専門家のニューロンの logit lens・steer・sweep・control vector の書き出しから)。
 - 初めて使うモデルでは、まず `gne verify` で確かめてください。
 
 ## インストール
