@@ -47,3 +47,13 @@
 - 調書(`neuron`)の数値をそのまま引用する: sweep の順位(`rank` / `n_ranked`)、`mass`、`null_pct`、上位語、steer lens の KL と対照の 95% 点、逆引きの cos。
 - **事実と解釈を分ける。** 「N2742 は sweep で 385 本中 3 位、全対照より上、3 つのプロンプトで extraterrestrial が出た(事実)。宇宙人・地球外知性の話題に寄せるニューロンとみられる(解釈)」。
 - greedy の生成は、バッチの組み方の違いで上位候補が僅差の箇所だけ分かれることがある(数値誤差、verification.md F2)。1 トークンの違いに意味を読まない。
+
+## 6. UI に見せる(gne serve が動いているとき)
+
+人が Web UI(`gne serve`、既定 http://127.0.0.1:8791)を見ているなら、`gne mcp --ui-url http://127.0.0.1:8791` で繋ぎ、作業の要所を UI に出す。同じマシンで UI がモデルを GPU に載せているなら `--n-gpu-layers 0` を付ける(steer・job は遅くなるので、その間は UI 側で回してもらう)。
+
+- `ui_open(layer, neuron, tab)`: 調べているニューロンを NEURON パネルで開く(地図はその層の正面ビューになる)。`tab` は examples / chat / details / web。
+- `ui_highlight(units, label)`: 候補を強調する(水色の破線の輪)。前の強調は置き換わり、空のリストで消える。label には「何の候補か」を短く。
+- `ui_note(layer, neuron, text)`: 判断の要点を貼る(400 字まで、地図には 28 字まで)。**事実と解釈を分けて**書く(例「事実: sweep 3 位/385・全対照超え、3 プロンプトで extraterrestrial。解釈: 宇宙人の話題に寄せる」)。見送った候補にも理由を貼ると、人が同じ確認をしなくて済む。空の text で消える。
+- UI に繋いでいなければ `UI_NOT_RUNNING` が返る。作業はそのまま続けてよい。
+

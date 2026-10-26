@@ -634,3 +634,100 @@ def test_u4_embed_job_and_view(server, browser):
     assert pg.evaluate("getComputedStyle(document.querySelector('#legend')).display") != "none"
     assert not errors, errors
     pg.close()
+
+
+# --- U5: エージェント連携 -------------------------------------------------------------------------------------
+
+@pytest.mark.model
+@pytest.mark.skipif(not MODEL.exists(), reason="モデルがありません")
+def test_u5_agent_api_and_local_only(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from gne.api import Session
+    from gne.ui.server import create_app
+    s = Session(MODEL, root=tmp_path)
+    c = TestClient(create_app(s, warm=False))
+    assert c.post("/api/ui/highlight", json={"units": ["99:1"]}).status_code == 400              # 0.6B は 28 層
+    assert c.post("/api/ui/highlight", json={"units": ["5:5000"]}).status_code == 400            # 各層 3072
+    r = c.post("/api/ui/highlight", json={"units": ["5:100", "L6 N7", "6:8:+1.5"], "label": "候補"}).json()
+    assert r["ok"] and r["n"] == 3
+    assert c.post("/api/ui/highlight", json={"units": ["abc"]}).status_code == 400
+    assert c.post("/api/ui/note", json={"layer": 5, "neuron": 100, "text": "<b>宇宙人</b> の候補"}).json()["notes"] == 1
+    assert c.post("/api/ui/open", json={"layer": 5, "neuron": 100, "tab": "details"}).json()["ok"]
+    assert c.post("/api/ui/open", json={"layer": 5, "neuron": 100, "tab": "nope"}).status_code == 400
+    st = c.get("/api/ui/state").json()
+    assert [(h["layer"], h["neuron"], h["dose"]) for h in st["highlights"]] == [(5, 100, None), (6, 7, None), (6, 8, 1.5)]
+    assert st["label"] == "候補" and st["notes"][0]["text"] == "<b>宇宙人</b> の候補" and st["last"]["action"] == "open"
+    c.post("/api/ui/note", json={"layer": 5, "neuron": 100, "text": ""})                        # 空で消す
+    assert c.get("/api/ui/state").json()["notes"] == []
+    c.post("/api/ui/clear")
+    assert c.get("/api/ui/state").json()["highlights"] == []
+    # ローカル専用: 別の Host(DNS rebinding)と、別オリジンからの書き込みは断る。読むだけなら Origin があっても通す
+    assert c.get("/api/model", headers={"Host": "evil.example:8791"}).status_code == 403
+    assert c.post("/api/ui/note", json={"layer": 5, "neuron": 1, "text": "x"}, headers={"Origin": "http://evil.example"}).status_code == 403
+    assert c.post("/api/ui/note", json={"layer": 5, "neuron": 1, "text": "x"}, headers={"Origin": "http://127.0.0.1:8791"}).status_code == 200
+    assert c.get("/api/ui/state", headers={"Origin": "http://evil.example"}).status_code == 200
+
+
+@pytest.mark.model
+def test_u5_mcp_ui_tools_reach_the_browser(server, browser, tmp_path):
+    """MCP の ui_highlight / ui_note / ui_open(gne mcp --ui-url)が、開いているブラウザの地図と NEURON に届く。"""
+    import urllib.request
+
+    from mcp.client.session import ClientSession
+    from mcp.client.stdio import StdioServerParameters, stdio_client
+    gne = str(Path(os.sys.executable).parent / "gne")
+    urllib.request.urlopen(urllib.request.Request(server + "/api/ui/clear", data=b"{}", headers={"Content-Type": "application/json"}))
+    pg = browser.new_page(viewport={"width": 1500, "height": 860})
+    errors = []
+    pg.on("pageerror", lambda e: errors.append(str(e)))
+    pg.goto(server + "/")
+    pg.wait_for_function("window.gne && window.gne.overlayReady && window.gne.agent && window.gne.agent.connected", timeout=60000)
+
+    async def run():
+        params = StdioServerParameters(command=gne, args=["mcp", "--model", str(MODEL), "--root", str(tmp_path), "--ui-url", server,
+                                                          "--n-gpu-layers", "0"], env=dict(os.environ))
+        async with stdio_client(params) as (read, write):
+            async with ClientSession(read, write) as s:
+                await s.initialize()
+
+                async def call(tool, **args):
+                    r = await s.call_tool(tool, args)
+                    sc = getattr(r, "structured_content", None)
+                    return (sc.get("result", sc) if isinstance(sc, dict) else sc) if sc else json.loads(r.content[0].text)
+                assert (await call("ui_highlight", units=["6:100", "6:7"], label="宇宙人の候補"))["n"] == 2
+                assert (await call("ui_note", layer=6, neuron=100, text="sweep 1 位・全対照超え <script>"))["notes"] == 1
+                assert (await call("ui_open", layer=6, neuron=100, tab="details"))["ok"]
+                bad = await call("ui_highlight", units=["999:1"])
+                assert bad["error"]["code"] == "BAD_ARGS"
+    import threading
+
+    import anyio
+    err = []
+
+    def worker():                                                                    # Playwright が同じスレッドでループを回しているので別スレッドで
+        try:
+            anyio.run(run)
+        except BaseException as e:  # noqa: BLE001
+            err.append(e)
+    th = threading.Thread(target=worker)
+    th.start()
+    th.join(300)
+    assert not err, err
+    pg.wait_for_function("document.querySelector('#neuron-body .n-id') && document.querySelector('#neuron-body .n-id').textContent === 'L6 N100'",
+                         timeout=30000)
+    pg.wait_for_timeout(300)
+    assert pg.evaluate("window.gne.map.front") == 6                                              # ui_open で正面ビューに
+    assert pg.evaluate("document.querySelectorAll('#overlay span.ag-ring').length") == 2
+    note = pg.evaluate("document.querySelector('#overlay span.ag-lab.has-note').textContent")
+    assert "sweep 1 位" in note and "<script>" in note                                         # 文字として出る(タグにならない)
+    assert pg.evaluate("document.querySelectorAll('#overlay script').length") == 0
+    assert "エージェントの注釈" in pg.evaluate("document.querySelector('#neuron-body').innerText")
+    assert pg.evaluate("document.querySelector('#agent-btn').textContent") == "agent ◌2 ✎1"
+    pg.click("#agent-btn")
+    assert "宇宙人の候補" in pg.evaluate("document.querySelector('#agent-pop').innerText")
+    pg.click("#ag-clear")
+    pg.wait_for_function("document.querySelectorAll('#overlay span.ag-ring').length === 0", timeout=10000)
+    pg.wait_for_function("!document.querySelector('#neuron-body').innerText.includes('エージェントの注釈')", timeout=10000)   # パネルの注釈も消える
+    assert not errors, errors
+    pg.close()

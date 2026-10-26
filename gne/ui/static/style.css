@@ -37,7 +37,8 @@ input::placeholder { color: #4a5464; }
 #header > * { flex: 0 0 auto; white-space: nowrap; }
 #layer-select, #jump { font-family: var(--mono); }
 #layer-select { max-width: 22vw; }
-#status { margin-left: auto; color: var(--muted); display: flex; min-width: 0; flex: 1 1 auto; justify-content: flex-end; gap: 10px; }
+#status { margin-left: auto; color: var(--muted); display: flex; min-width: 0; flex: 0 1 auto; justify-content: flex-end; gap: 10px; }
+#status-main { color: #a8b3c2; }
 #status-main { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 #perf { color: #6f7b8c; }
 
@@ -312,3 +313,32 @@ body.view-other .map-only { opacity: 0.35; }
 #ev-legend .sw.ring { border-radius: 50%; background: transparent; border-width: 2px; }
 #ev-legend .it { display: inline-block; white-space: nowrap; margin-left: 12px; }
 #ev-legend .note { color: #8692a3; }
+
+/* U5: エージェント連携 */
+#agent-btn.on { border-color: #6fe3ff; color: #6fe3ff; }
+#agent-btn.off { color: #4a5464; }
+#agent-pop { position: absolute; top: 8px; right: 12px; width: 380px; max-height: 70%; overflow: auto; z-index: 12; background: rgba(10, 13, 18, 0.97);
+  border: 1px solid #2a3a48; border-radius: 6px; padding: 8px 12px; font-size: 12px; }
+#agent-pop .ag-head { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
+#agent-pop h4 { margin: 10px 0 4px; font-size: 12px; color: var(--muted); font-weight: 400; }
+#agent-pop .ag-row { padding: 3px 4px; cursor: pointer; font-family: var(--mono); border-radius: 3px; }
+#agent-pop .ag-row:hover { background: #1a2230; }
+#agent-pop .ag-row b { color: #6fe3ff; font-weight: 400; margin-right: 6px; }
+#agent-pop .ag-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; border: 2px dashed #6fe3ff; margin-right: 6px; vertical-align: -1px; }
+.ag-box { margin: 6px 0; padding: 5px 8px; border-left: 2px solid #6fe3ff; background: #0d1820; font-size: 12px; white-space: pre-wrap; }
+#overlay span.ag-ring { transform: translate(-50%, -50%); border-radius: 50%; border: 2px dashed #6fe3ff; box-sizing: border-box; z-index: 2; }   /* 配線の点 < エージェントの輪 < 配線の札 < エージェントの札 */
+#overlay span.lk-l { z-index: 3; }
+#overlay span.ag-ring.small { border: 2px solid #6fe3ff; }
+#overlay span.ag-lab { transform: translate(0, -50%); font-size: 11px; color: #6fe3ff; background: rgba(6, 16, 22, 0.92); border-radius: 3px;
+  padding: 1px 5px; pointer-events: auto; cursor: pointer; z-index: 6; border: 1px solid transparent; }
+#overlay span.ag-lab.has-note { color: #dff6ff; background: rgba(10, 34, 46, 0.94); border-color: #2f6f86; font-family: var(--sans); }
+#overlay span.ag-lab.l { transform: translate(-100%, -50%); }
+#overlay span.ag-lab i.who { font-style: normal; font-family: var(--mono); font-size: 10px; color: #0a1a22; background: #6fe3ff; border-radius: 2px;
+  padding: 0 3px; margin-right: 5px; vertical-align: 1px; }
+#overlay svg.lk.ag line { stroke: rgba(111, 227, 255, 0.75); stroke-width: 1; }
+#legend .sw.ring.dash { border-style: dashed; }
+#legend .ag-note-sw { color: #dff6ff; background: rgba(10, 34, 46, 0.94); border: 1px solid #2f6f86; border-radius: 3px; padding: 0 4px;
+  margin-right: 4px; font-size: 10px; }
+#agent-pop .ag-head b, #agent-pop .ag-head button { flex: none; white-space: nowrap; }
+#agent-pop .ag-head { flex-wrap: wrap; }
+#agent-pop .ag-head .muted { flex: 1 1 100%; order: 3; }

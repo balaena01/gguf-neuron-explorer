@@ -3,6 +3,7 @@
 // U1: 色の重ね合わせ(overlay)、LIST の rank、NEURON(Examples / Details)、hover の語、検索、layers ビュー。
 // U2: NEURON の Chat(3 列・reads you)、LIST の fires と recipe、地図のレシピの印、ジョブのバーと計算メニュー。
 import { LayerCache, getBin, getJSON, loadVocab } from "./api.js";
+import { AgentLink } from "./agent.js";
 import { ChatPanel } from "./chat.js";
 import { EmbedView } from "./embed.js";
 import { FiresPanel } from "./fires.js";
@@ -141,8 +142,13 @@ function legend() {
     (o.factor < 1 ? it(`(光る点が全体の ${Math.round(0.02 / o.factor * 100)}% あるので、点は一律に暗くし、数は枠で示す)`) : "") +
     (o.weak && o.weak.size ? it(`(${[...o.weak].map((L) => `L${L}`).join("・")} は活性統計が無く文章内 p99 で割ったので、枠の比較から外した)`) : "") + "</div>";
   const ring = (c) => `<span class="sw ring" style="border-color:${c}"></span>`;
+  const ag = agent ? agent.state : null;
   const marks = (state.recipe && state.recipe.units.length ? [it(ring("#f2d24b"), "レシピ +"), it(ring("#c94fa7"), "レシピ −(大きさ = |dose|)")] : [])
-    .concat(state.focus ? [it(ring("#ffffff"), "開いているニューロン")] : []);
+    .concat(state.focus ? [it(ring("#ffffff"), "開いているニューロン")] : [])
+    .concat(ag && ag.highlights.length ? [it(`<span class="sw ring dash" style="border-color:#6fe3ff"></span>`, `エージェントの強調${ag.label ? `(${esc(ag.label)})` : ""}`)] : [])
+    .concat(ag && ag.notes.length ? [it(`<span class="sw ring" style="border-color:#6fe3ff;width:9px;height:9px"></span><span class="ag-note-sw">agent ✎</span>`,
+      "エージェントの注釈(小さな輪。札は 28 字まで、マウスを当てると全文、クリックで開く)")] : [])
+    .concat(ag && ag.highlights.length + ag.notes.length > 30 ? [it("(札は 30 枚まで。残りは輪だけで、全部は header の agent の一覧)")] : []);
   const line = (c) => `<span class="sw line" style="background:${c}"></span>`;
   const links = state.links ? `<div>${it(state.links.web ? `web(${state.webHops} 段、${state.links.n} 本): ` : `配線(上流・下流 ${state.links.n} 本): `)}${
     it(line("#f2d24b"), "黄 = 読み手(線の先)を + に押す")}${it(line("#ff70d0"), "赤紫 = 読み手を − に押す")}${
@@ -385,7 +391,7 @@ function closeSearch() {
 }
 
 // --- LIST・NEURON ----------------------------------------------------------------------------------------
-let rank, neuron, layersView, searchList, chat, firesPanel, recipePanel, jobsBar, embedView;
+let rank, neuron, layersView, searchList, chat, firesPanel, recipePanel, jobsBar, embedView, agent;
 
 function expand(id) {
   const p = $(`#${id}`);
@@ -394,6 +400,7 @@ function expand(id) {
 
 function openNeuron({ layer, n, kind = "neuron", run = null, tab = null }, { focus = true } = {}) {
   const first = !state.focus;
+  state.shownNote = agent ? agent.noteOf(layer, n) : null;
   state.focus = { layer, n, kind };
   if (first) legend();
   expand("neuron");
@@ -574,6 +581,7 @@ async function main() {
       openNeuron({ layer: h.layer, n: h.neuron }, { focus: false });
     },
     onLayer: onLayerChanged,
+    onOpen: (u) => openNeuron(u),
     onContext: (L, ev) => {
       if (state.model) computeMenu(ev, L, state.arch.layers[L], state.model.coverage[L], { onStart: startJob, arch: state.arch, model: state.model });
     },
@@ -601,6 +609,21 @@ async function main() {
       nLayer: state.arch.n_layer, onOpen: (u) => openNeuron(u), onField: applyFiresOverlay,
     });
     jobsBar = new JobsBar($("#jobs-bar"), { onFinished: onJobFinished });
+    $("#agent-btn").classList.remove("hidden");
+    agent = new AgentLink({
+      button: $("#agent-btn"), pop: $("#agent-pop"),
+      onState: (s, ev) => {
+        state.map.setAgent(s);
+        legend();
+        // 知らせはエージェントの新しい操作で必ず上書きする。開いたときに届く「今の状態」は知らせにしない
+        if (ev) state.flash = { text: agent.lastText(), until: Date.now() + 10000 };
+        updateStatus();
+        const f = state.focus, nt = f ? agent.noteOf(f.layer, f.n) : null;   // 開いているニューロンの注釈が変わったら描き直す
+        if (f && nt !== state.shownNote) { state.shownNote = nt; neuron.render(); }
+      },
+      onOpen: (u) => { if (state.view !== "map") setView("map"); openNeuron(u); },
+    });
+    state.agent = agent;
     jobsBar.load();
     recipeChanged(state.recipe);
     recipePanel.render();
@@ -616,6 +639,7 @@ async function main() {
     onChat: (el, d) => { chat.setNeuron(d.layer, d.neuron, d); chat.mount(el); },
     hasConnections: () => !!(state.model && state.model.connections),
     onGoto: (u) => openNeuron(u),
+    agentNote: (L, n) => (agent ? agent.noteOf(L, n) : null),
     onNamed: (names) => {
       state.model.names = names;
       const f = state.overlay.field;

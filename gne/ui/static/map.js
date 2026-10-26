@@ -75,15 +75,32 @@ void main() {
 }`;
 
 const MONO = "ui-monospace, Menlo, Consolas, monospace";
+const MEAS = document.createElement("canvas").getContext("2d");
+const measure = (t, font) => { MEAS.font = font; return MEAS.measureText(t).width; };   // 札の幅を実際の字で測る
+// 線分と矩形が交わるか(Liang–Barsky)
+function segHitsRect(x1, y1, x2, y2, q) {
+  const dx = x2 - x1, dy = y2 - y1;
+  let t0 = 0, t1 = 1;
+  for (const [p, d] of [[-dx, x1 - (q.x + 1)], [dx, q.x + q.w - 1 - x1], [-dy, y1 - (q.y + 1)], [dy, q.y + q.h - 1 - y1]]) {
+    if (p === 0) { if (d < 0) return false; continue; }
+    const r = d / p;
+    if (p < 0) { if (r > t1) return false; if (r > t0) t0 = r; } else { if (r < t0) return false; if (r < t1) t1 = r; }
+  }
+  return t0 < t1 && t1 > 0.02 && t0 < 0.98;                                  // 両端のごく近くは数えない
+}
+const MAX_AGENT_LABELS = 30;
+const escHTML = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
 export class LayerMap {
-  constructor(container, arch, { onHover, onClick, onLayer, onContext, overlay } = {}) {
+  constructor(container, arch, { onHover, onClick, onLayer, onContext, onOpen, overlay } = {}) {
     this.container = container;
     this.arch = arch;
     this.onHover = onHover || (() => {});
     this.onClick = onClick || (() => {});
     this.onLayer = onLayer || (() => {});
     this.onContext = onContext || null;  // 層の番号・ラベルの右クリック(L, イベント)
+    this.onOpen = onOpen || null;        // 札のクリックでニューロンを開く({ layer, n })
+    this.agent = { highlights: [], notes: [], label: null };   // エージェントの強調と注釈(§11、§4.8 notes)
     this.marks = [];                   // レシピのユニット [{ layer, neuron, dose }](§4.8)
     this.cellOf = [];                  // 層ごとの配置表(§4.4): ニューロン → 格子の番号。null は番号順
     this.neuronAt = [];                // その逆: 格子の番号 → ニューロン
@@ -134,8 +151,10 @@ export class LayerMap {
     });
     if (this.overlay) {
       this.overlay.addEventListener("click", (ev) => {
-        const L = ev.target.dataset && ev.target.dataset.layer;
-        if (L !== undefined) this.frontView(+L);
+        const t = ev.target.closest("[data-open],[data-layer]");
+        if (!t) return;
+        if (t.dataset.open && this.onOpen) { const [L, n] = t.dataset.open.split(":").map(Number); this.onOpen({ layer: L, n }); return; }
+        if (t.dataset.layer !== undefined) this.frontView(+t.dataset.layer);
       });
       this.overlay.addEventListener("contextmenu", (ev) => {
         const L = ev.target.dataset && ev.target.dataset.layer;
@@ -268,6 +287,13 @@ export class LayerMap {
   // レシピのユニットの印(+ は黄、− は赤紫、大きさ = |dose|)。画面に重ねる HTML の輪で、視点が変わるたびに置き直す
   setMarks(units) {
     this.marks = units || [];
+    this._overlayDirty = true;
+  }
+
+  // エージェントの強調と注釈(§11)。highlights: [{ layer, neuron, dose }]、notes: [{ layer, neuron, text }]
+  setAgent(a) {
+    this.agent = { highlights: a.highlights || [], notes: a.notes || [], label: a.label || null };
+    this._agentCache = null; this._agentMoving = false;                       // 中身が変わったら置き直す
     this._overlayDirty = true;
   }
 
@@ -636,7 +662,117 @@ export class LayerMap {
       }
     }
     const svg = this._linkOverlay(items, r);
-    this.overlay.innerHTML = svg + items.map((it) => `<span class="${it.cls}"${it.layer !== undefined ? ` data-layer="${it.layer}"` : ""} style="left:${it.x.toFixed(1)}px;top:${it.y.toFixed(1)}px${it.h ? `;height:${it.h.toFixed(1)}px` : ""}${it.w ? `;width:${it.w}px;height:${it.w}px` : ""}">${it.text}</span>`).join("");
+    const svgAgent = this._agentOverlay(items, r);                       // 札はほかの札(配線・層番号・レシピ)を避けて最後に置く
+    this.overlay.innerHTML = svg + svgAgent + items.map((it) => `<span class="${it.cls}"${it.layer !== undefined ? ` data-layer="${it.layer}"` : ""}${
+      it.open ? ` data-open="${it.open}"` : ""}${it.title ? ` title="${escHTML(it.title)}"` : ""} style="left:${it.x.toFixed(1)}px;top:${it.y.toFixed(1)}px${
+      it.h ? `;height:${it.h.toFixed(1)}px` : ""}${it.w ? `;width:${it.w}px;height:${it.w}px` : ""}">${it.html || it.text}</span>`).join("");
+  }
+
+  // エージェントの強調と注釈(§11)。ニューロンごとに 1 枚の札(「agent L22 N4118 ✎ 見送り: …」)にまとめ、
+  // 強調は水色の破線の輪、注釈だけのものは小さな水色の輪。札は実際の字の幅で測り、ほかの札・配線の点・凡例・一覧を避けて
+  // 右か左に置き、点から札の近い端へ斜めの線を引く。正面ビューではその層のものだけ。文字は必ずエスケープする
+  _agentOverlay(items, r) {
+    const A = this.agent;
+    if (!A.highlights.length && !A.notes.length) return "";
+    const ents = new Map();
+    for (const h of A.highlights) ents.set(`${h.layer}:${h.neuron}`, { layer: h.layer, neuron: h.neuron, hl: true, dose: h.dose, note: null });
+    A.notes.forEach((nt, i) => {
+      const k = `${nt.layer}:${nt.neuron}`, e = ents.get(k) || { layer: nt.layer, neuron: nt.neuron, hl: false, dose: null };
+      e.note = nt.text;
+      e.idx = i;                                                             // 後から貼った注釈ほど大きい
+      ents.set(k, e);
+    });
+    for (const e of ents.values()) if (e.idx === undefined) e.idx = -1;
+    const mono = "11px ui-monospace, Menlo, Consolas, monospace", sans = "11px system-ui, sans-serif";
+    const boxes = [];
+    for (const it of items) {                                                // すでにある札と点の場所
+      if (it.text) {
+        const c = it.cls.split(" "), w = measure(it.text.replace(/<[^>]+>/g, ""), mono) + 10;
+        const left = c.includes("l") || c.includes("ex") ? it.x - w : c.includes("ax") || c.includes("badge-l") ? it.x - w / 2 : it.x;
+        boxes.push({ x: left, y: it.y - 8, w, h: 16 });
+      } else if (/\b(lk-d|mk|ag-ring)\b/.test(it.cls)) boxes.push({ x: it.x - 6, y: it.y - 6, w: 12, h: 12 });
+    }
+    for (const sel of ["#legend", "#agent-pop", "#tooltip"]) {               // 凡例と一覧(画面の上に重なる箱)も避ける
+      const el = document.querySelector(sel);
+      if (!el || el.classList.contains("hidden") || !el.offsetParent) continue;
+      const b = el.getBoundingClientRect();
+      boxes.push({ x: b.left - r.left - 4, y: b.top - r.top - 4, w: b.width + 8, h: b.height + 8 });
+    }
+    const free = (x, y, w) => x >= 4 && x + w <= r.width - 4 && y >= 10 && y <= r.height - 10 &&
+      !boxes.some((q) => x < q.x + q.w + 3 && q.x < x + w + 3 && y - 9 < q.y + q.h && q.y < y + 9);
+    // 引き出し線がほかの札・輪を横切らないか(線の上の点を少しずつ見る。自分の輪は除く)
+    const crosses = (x1, y1, x2, y2, own) => boxes.some((q) => q !== own && segHitsRect(x1, y1, x2, y2, q));
+    const show = (L) => this.front === null || this.front === L;
+    const lines = [], ents2 = [];
+    // 地図を動かしている間は、止まっていたときに決めた札の位置(点からのずれ)をそのまま使う(置き場所探しは重い)
+    const cache = this._agentMoving && this._agentCache ? this._agentCache : null;
+    const keep = cache ? null : new Map();
+    for (const e of ents.values()) {                                         // 先に全部の輪を置いて障害物に登録する(札が輪を隠さないように)
+      if (!show(e.layer)) continue;
+      const pos = this.neuronPosition(e.layer, e.neuron);
+      if (!pos) continue;
+      const p = this._toScreen(new THREE.Vector3(...pos));
+      if (p.z >= 1) continue;
+      const px = p.x - r.left, py = p.y - r.top, ring = { x: px - 11, y: py - 11, w: 22, h: 22 };
+      items.push({ x: px, y: py, text: "", cls: e.hl ? "ag-ring" : "ag-ring small", w: e.hl ? 20 : 12 });
+      boxes.push(ring);
+      ents2.push({ e, px, py, ring });
+    }
+    // 札は 30 枚まで(強調を先に、注釈は新しい順)。残りは輪だけにして、全部は header の agent の一覧で見る
+    const order = [...ents2].sort((a, b) => (b.e.hl - a.e.hl) || (b.e.idx - a.e.idx));
+    this.agentHidden = Math.max(0, order.length - MAX_AGENT_LABELS);
+    for (const { e, px, py, ring } of order.slice(0, MAX_AGENT_LABELS)) {
+      const key = `${e.layer}:${e.neuron}`, c0 = cache && cache.get(key);
+      if (cache) {
+        if (!c0) continue;
+        if (c0.line) lines.push(`<line x1="${px.toFixed(1)}" y1="${py.toFixed(1)}" x2="${(px + c0.ax).toFixed(1)}" y2="${(py + c0.y).toFixed(1)}"/>`);
+        items.push({ ...c0.item, x: px + c0.ix, y: py + c0.y });
+        continue;
+      }
+      const dose = e.dose === null || e.dose === undefined ? "" : ` ${e.dose >= 0 ? "+" : "−"}${Math.abs(e.dose)}`;
+      const short = e.note ? (e.note.length > 28 ? `${e.note.slice(0, 27)}…` : e.note) : "";
+      const id = `L${e.layer} N${e.neuron}${dose}`;
+      // 近い順に候補を試す: 右・左・上下の中ほど、上下へずらしたもの。札が置けて、線がほかを横切らないもの
+      const search = (text, font, maxD, checkCross) => {
+        const w = measure("agent", mono) + measure(text, font) + 22, cands = [], step = 19;
+        const K = Math.ceil(maxD / step) * 2 + 2;
+        for (let k = 0; k < K; k++) {
+          const dy = (k % 2 ? 1 : -1) * Math.ceil(k / 2) * step;
+          for (const dx of [0, 60, 140, 240]) {                              // 横にも離して探す
+            cands.push({ ax: px + 14 + dx, y: py + dy, bx: px + 14 + dx, left: false }, { ax: px - 14 - dx, y: py + dy, bx: px - 14 - dx - w, left: true });
+          }
+          if (k > 0) for (const sx of [0.5, 0.2, 0.8]) cands.push({ ax: px, y: py + dy, bx: px - w * sx, left: false });
+        }
+        cands.sort((a, b) => Math.hypot(a.ax - px, a.y - py) - Math.hypot(b.ax - px, b.y - py));
+        for (const c of cands) {
+          if (Math.hypot(c.ax - px, c.y - py) > maxD) break;
+          if (!free(c.bx, c.y, w)) continue;
+          if (checkCross && (Math.abs(c.y - py) > 4 || c.ax !== px + 14) && crosses(px, py, c.ax, c.y, ring)) continue;
+          return { ...c, w };
+        }
+        return null;
+      };
+      // 段階的に広げる: 全文で近く → 番号だけで遠く → 線の交差を許して全文 → 番号だけで画面のどこか
+      const full = `${id}${short ? ` ✎ ${short}` : ""}`, compact = e.note ? `${id} ✎` : id;
+      let text = full, best = search(full, e.note ? sans : mono, 170, true);
+      if (!best) { text = compact; best = search(compact, mono, 320, true); }
+      if (!best) { text = full; best = search(full, e.note ? sans : mono, 320, false); }
+      if (!best) { text = compact; best = search(compact, mono, 2000, false); }
+      if (!best) {
+        const w = measure("agent", mono) + measure(text, mono) + 22, bx = Math.min(Math.max(4, px + 14), r.width - w - 4);
+        best = { ax: bx, y: py, bx, left: false, w };
+      }
+      boxes.push({ x: best.bx, y: best.y - 9, w: best.w, h: 18 });
+      const line = Math.abs(best.y - py) > 4 || Math.abs(best.ax - (px + 14)) > 1;
+      if (line) lines.push(`<line x1="${px.toFixed(1)}" y1="${py.toFixed(1)}" x2="${best.ax.toFixed(1)}" y2="${best.y.toFixed(1)}"/>`);
+      const title = e.note ? `エージェントの注釈 L${e.layer} N${e.neuron}: ${e.note}` : `エージェントの強調${A.label ? `(${A.label})` : ""}: L${e.layer} N${e.neuron}`;
+      const item = { x: best.left ? best.ax : best.bx, y: best.y, html: `<i class="who">agent</i>${escHTML(text)}`, text: " ",
+                     cls: `ag-lab${e.note && text === full ? " has-note" : ""}${best.left ? " l" : ""}`, open: key, title };
+      items.push(item);
+      keep.set(key, { item, ix: item.x - px, y: best.y - py, ax: best.ax - px, line });
+    }
+    if (keep) this._agentCache = keep;
+    return lines.length ? `<svg class="lk ag" width="${r.width}" height="${r.height}">${lines.join("")}</svg>` : "";
   }
 
   // 配線の札(§4.7)。正面ビュー: 開いたニューロンから、シートの右(下流)と左(上流)に並べた札へ 2D の線。
@@ -762,6 +898,12 @@ export class LayerMap {
       this._dirtyPick = false;
       this._setHover(this._pick(this._mouse));
     }
+    // カメラが動いている間は札の置き直しを省き、止まって 150 ms たったら置き直す
+    const cm = this.camera.matrixWorld.elements;
+    const sig = `${cm[12].toFixed(4)},${cm[13].toFixed(4)},${cm[14].toFixed(4)},${cm[8].toFixed(4)},${cm[9].toFixed(4)}`;
+    const now0 = performance.now();
+    if (sig !== this._camSig) { this._camSig = sig; this._camT = now0; this._agentMoving = !!this._agentCache; }
+    else if (this._agentMoving && now0 - this._camT > 150) { this._agentMoving = false; this._overlayDirty = true; }
     if (this._overlayDirty) this._updateOverlay();
     this.renderer.render(this.scene, this.camera);
     this._fullUpload = false;

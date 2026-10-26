@@ -113,7 +113,8 @@ export class RankList {
 
 // --- NEURON パネル ------------------------------------------------------------------------------------------
 export class NeuronPanel {
-  constructor(root, { onNamed, onRecipe, inRecipe, onChat, hasConnections, onGoto }) {
+  constructor(root, { onNamed, onRecipe, inRecipe, onChat, hasConnections, onGoto, agentNote }) {
+    this.agentNote = agentNote || (() => null);
     this.hasConnections = hasConnections || (() => false);
     this.onGoto = onGoto;
     this.links = undefined;            // connections(undefined = 読み込み中、null = 無い)
@@ -152,6 +153,7 @@ export class NeuronPanel {
   }
 
   render() {
+    if (!this.d) return;                                                     // まだ読み込んでいない
     const d = this.d, s = d.sweep;
     const rnd = d.kind === "random";
     const id = rnd ? `L${d.layer} random ${d.neuron}` : `L${d.layer} N${d.neuron}`;
@@ -162,6 +164,7 @@ export class NeuronPanel {
         <div class="n-id mono">${id}</div>
         <div class="n-stats mono muted">${stats}${s ? ` · <span title="${esc(s.design)}">${esc(s.run)}</span>` : ""}</div>
         ${d.note ? `<p class="muted note">${esc(d.note)}</p>` : ""}
+        ${!rnd && this.agentNote(d.layer, d.neuron) ? `<div class="ag-box"><span class="muted">✎ エージェントの注釈</span> ${esc(this.agentNote(d.layer, d.neuron))}</div>` : ""}
         ${rnd ? `<p class="muted note">ランダム方向の対照(名前は付けられません)</p>` : `
         <div class="n-row"><input class="n-name" placeholder="名前(入力して Enter か欄の外で保存)" value="${esc(d.name || "")}" spellcheck="false">
           ${this.recipeButtons(d)}</div>`}

@@ -736,7 +736,9 @@ def neuron(c: Common, holder: dict, layer: int = typer.Argument(..., help="層 L
 def mcp_cmd(ctx: typer.Context,
             model: Optional[Path] = typer.Option(None, "--model", "-m", envvar="GNE_MODEL", help="GGUF ファイル"),
             ui_url: Optional[str] = typer.Option(None, "--ui-url", help="gne serve の URL(ui_* ツール用)"),
-            root: Optional[Path] = typer.Option(None, "--root", envvar="GNE_ROOT")):
+            root: Optional[Path] = typer.Option(None, "--root", envvar="GNE_ROOT"),
+            n_gpu_layers: Optional[int] = typer.Option(None, "--n-gpu-layers",
+                                                       help="GPU に載せる層数(-1 = 全部)。gne serve と同時なら 0 で GPU を UI に譲れる")):
     """MCP サーバ(stdio)。Claude Code から `claude mcp add gne -- gne mcp --model <path>` で接続する。"""
     from .mcp_server import main as mcp_main
     c: Common = ctx.obj or Common()
@@ -745,7 +747,7 @@ def mcp_cmd(ctx: typer.Context,
         print("エラー[BAD_ARGS]: --model を指定してください", file=sys.stderr)
         raise typer.Exit(2)
     mcp_main(str(path), root=str(root or c.root) if (root or c.root) else None, ui_url=ui_url,
-             n_gpu_layers=c.n_gpu_layers, n_ctx=c.n_ctx, seed=c.seed)
+             n_gpu_layers=c.n_gpu_layers if n_gpu_layers is None else n_gpu_layers, n_ctx=c.n_ctx, seed=c.seed)
 
 
 @app.command("serve")

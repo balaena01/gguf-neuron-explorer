@@ -31,6 +31,8 @@ gguf-neuron-explorer: llama.cpp 上の GGUF モデルの MLP ニューロンを�
 4. rel dose: 0.5 で微かな挿入、0.8 で話題を上書き、1.0 以上は崩壊域。層 0〜2 には rel dose がそのまま通用しない。
 5. steer(units, compare=True) で無介入との差を確かめてから recipe_save → export_cvec。
 ユニットの書き方: "L:N:dose"(例 "14:8949:+1.0")、ランダム方向は "L:random:SEED:dose"。
+6. 人が UI(gne serve)を見ていれば、ui_open で調べているニューロンを開き、ui_highlight で候補を強調し、ui_note で判断の要点を
+   ニューロンに貼る(--ui-url で繋いだときだけ。繋いでいなければ UI_NOT_RUNNING が返るので気にせず続ける)。
 """
 
 
@@ -214,29 +216,48 @@ def _contrast_path(session, contrast, system_a, system_b, user_prompts, name) ->
 
 
 def _register_ui_tool(srv, action: str, ui_url: str | None) -> None:
-    docs = {"highlight": "UI のマップでユニットを強調する(UI が起動しているとき)。",
-            "note": "UI のマップのニューロンに短い注釈を貼る(UI が起動しているとき)。",
-            "open": "UI の NEURON パネルでニューロンを開く(UI が起動しているとき)。"}
+    """ui_* ツール(別冊 §11)。gne serve の POST /api/ui/{action} を叩く。UI に繋いでいなければ UI_NOT_RUNNING。"""
 
-    async def tool(layer: int | None = None, neuron: int | None = None, text: str | None = None,
-                   units: list[str] | None = None) -> dict:
+    async def post(body: dict) -> dict:
         if not ui_url:
             return {"error": {"code": "UI_NOT_RUNNING", "message": "UI に接続していません",
                               "hint": "gne serve を起動し、gne mcp --ui-url http://127.0.0.1:8791 で繋いでください"}}
-        body = json.dumps({"layer": layer, "neuron": neuron, "text": text, "units": units}).encode()
-        req = urllib.request.Request(f"{ui_url.rstrip('/')}/api/agent/{action}", data=body,
+        req = urllib.request.Request(f"{ui_url.rstrip('/')}/api/ui/{action}", data=json.dumps(body).encode(),
                                      headers={"Content-Type": "application/json"})
-        try:
-            def post():
-                with urllib.request.urlopen(req, timeout=3) as r:     # noqa: S310  127.0.0.1 の UI だけ
+
+        def send():
+            try:
+                with urllib.request.urlopen(req, timeout=5) as r:     # noqa: S310  127.0.0.1 の UI だけ
                     return json.loads(r.read() or b"{}")
-            return await anyio.to_thread.run_sync(post)
+            except urllib.error.HTTPError as e:                      # 400 は UI 側のエラー({"error": ...})をそのまま返す
+                try:
+                    return json.loads(e.read())
+                except ValueError:
+                    return {"error": {"code": "UI_ERROR", "message": f"UI が {e.code} を返しました", "hint": None}}
+        try:
+            return await anyio.to_thread.run_sync(send)
         except (urllib.error.URLError, OSError) as e:
             return {"error": {"code": "UI_NOT_RUNNING", "message": f"UI に届きません: {e}", "hint": None}}
 
-    tool.__name__ = f"ui_{action}"
-    tool.__doc__ = docs[action]
-    srv.tool(name=f"ui_{action}")(tool)
+    if action == "highlight":
+        async def ui_highlight(units: list[str], label: str | None = None) -> dict:
+            """UI のマップでユニットを強調する(水色の破線の輪と札)。units は ["22:2742", "14:8949:+1"] の形。
+            前の強調は置き換わる。空のリストで消す。label はまとまりの見出し(例 "宇宙人の候補")。
+            強調は「人に見てほしいもの」だけにする。見送った候補は強調せず、ui_note で理由だけ貼る。"""
+            return await post({"units": units, "label": label})
+        srv.tool(name="ui_highlight")(ui_highlight)
+    elif action == "note":
+        async def ui_note(layer: int, neuron: int, text: str) -> dict:
+            """UI のマップのニューロンに短い注釈(400 字まで)を貼る。同じニューロンには上書き、空の text で消す。
+            地図には最初の 28 字だけが出るので、結論から書く(例 "本命: 宇宙人の話題。sweep 3 位・全対照超え、3 プロンプトで
+            extraterrestrial" / "見送り: 量の語(many/most)")。事実と解釈を分ける。"""
+            return await post({"layer": layer, "neuron": neuron, "text": text})
+        srv.tool(name="ui_note")(ui_note)
+    else:
+        async def ui_open(layer: int, neuron: int, tab: str | None = None) -> dict:
+            """UI の NEURON パネルでニューロンを開き、マップをその層の正面ビューにする。tab: examples / chat / details / web。"""
+            return await post({"layer": layer, "neuron": neuron, "tab": tab})
+        srv.tool(name="ui_open")(ui_open)
 
 
 def main(model: str, *, root: str | None = None, ui_url: str | None = None, n_gpu_layers: int = -1,

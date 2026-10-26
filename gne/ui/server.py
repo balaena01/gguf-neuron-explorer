@@ -3,6 +3,8 @@
 U0: /api/model(ModelMeta + ArchInfo + coverage)、/api/vocab(語彙の文字列)、静的配信。
 U1: 層ごとの overlay の値・hover の語・rank の表、ニューロンの詳細、検索、名前、layers ビューの要約。
 U2: 3 列チャット(SSE)、fires、reads you、レシピ、cvec の書き出し、ジョブ(SSE の進捗)。GPU は live.Live が調停する。
+U5: エージェント連携。MCP の ui_* が POST /api/ui/{highlight,note,open,clear} を叩き、ブラウザへ SSE(/api/ui/events)。
+ローカル専用なので、Host が 127.0.0.1 / localhost 以外の要求(DNS rebinding)と、別のオリジンからの書き込み(POST / DELETE)は断る。
 大きい配列は JSON にせず octet-stream で返し、形は X-Shape、付帯情報は X-Meta(JSON)に入れる(§8.2)。
 """
 
@@ -29,6 +31,7 @@ def _binary(body: bytes, shape: str, meta: dict) -> Response:
 
 def create_app(session, *, warm: bool = True) -> FastAPI:
     from ..arch import arch_info
+    from .agent import AgentBus
     from .data import UIData
     from .live import Live
     app = FastAPI(title="gne", docs_url=None, redoc_url=None)
@@ -38,6 +41,22 @@ def create_app(session, *, warm: bool = True) -> FastAPI:
     app.state.data = data
     live = Live(session, data)
     app.state.live = live
+    agent = AgentBus(session.meta.n_layer, session.meta.n_ff_at)
+    app.state.agent = agent
+
+    @app.middleware("http")
+    async def local_only(request, call_next):
+        host = (request.headers.get("host") or "").rsplit(":", 1)[0].strip("[]")
+        if host not in ("127.0.0.1", "localhost", "::1", "testserver"):
+            return JSONResponse({"error": {"code": "FORBIDDEN", "message": f"Host {host!r} は受け付けません(ローカル専用)"}},
+                                status_code=403)
+        origin = request.headers.get("origin")
+        if request.method not in ("GET", "HEAD", "OPTIONS") and origin:
+            o = origin.split("//", 1)[-1].split("/", 1)[0].rsplit(":", 1)[0].strip("[]")
+            if o not in ("127.0.0.1", "localhost", "::1"):
+                return JSONResponse({"error": {"code": "FORBIDDEN", "message": "別のオリジンからの書き込みは受け付けません"}},
+                                    status_code=403)
+        return await call_next(request)
     if warm:
         threading.Thread(target=data.warm, name="gne-ui-warm", daemon=True).start()
     cache: dict = {}
@@ -192,6 +211,31 @@ def create_app(session, *, warm: bool = True) -> FastAPI:
     @app.delete("/api/jobs/{job_id}")
     def job_cancel(job_id: str):
         return live.jobs.cancel(job_id).view()
+
+    # --- U5: エージェント連携 --------------------------------------------------------------------------------
+    @app.post("/api/ui/highlight")
+    def ui_highlight(units: list[str] = Body([]), label: str | None = Body(None)):
+        return agent.highlight(units, label)
+
+    @app.post("/api/ui/note")
+    def ui_note(layer: int = Body(...), neuron: int = Body(...), text: str = Body("")):
+        return agent.note(layer, neuron, text)
+
+    @app.post("/api/ui/open")
+    def ui_open(layer: int = Body(...), neuron: int = Body(...), tab: str | None = Body(None)):
+        return agent.open(layer, neuron, tab)
+
+    @app.post("/api/ui/clear")
+    def ui_clear():
+        return agent.clear()
+
+    @app.get("/api/ui/state")
+    def ui_state():
+        return agent.snapshot()
+
+    @app.get("/api/ui/events")
+    def ui_events():
+        return StreamingResponse(agent.events(), media_type="text/event-stream", headers=sse_headers)
 
     @app.get("/")
     def index():

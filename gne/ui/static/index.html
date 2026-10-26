@@ -24,7 +24,8 @@
   <span id="search" class="seg"><select id="search-mode" title="検索の対象"><option value="lens">lens</option><option value="words">words</option><option value="name">name</option></select><input id="search-q" placeholder="検索(alien など)" size="14" spellcheck="false"></span>
   <button id="web-toggle" class="map-only" title="開いたニューロンの配線: 直接(上流・下流 14 本ずつ)→ web(多段)→ なし">線: 直接</button>
   <button id="reset-view" title="全体の視点に戻る">全体</button>
-  <span id="status" class="mono"><span id="status-main"></span></span>
+  <button id="agent-btn" class="hidden">agent</button>
+
 </header>
 <main id="main">
   <aside id="list" class="panel collapsed">
@@ -45,13 +46,14 @@
     <div id="view-placeholder" class="hidden"></div>
     <div id="layers-view" class="hidden"></div>
     <div id="embed-view" class="hidden"></div>
+    <div id="agent-pop" class="hidden"></div>
   </section>
   <aside id="neuron" class="panel collapsed">
     <div class="panel-head"><button class="toggle" data-target="neuron">NEURON</button><button id="neuron-wide" class="toggle" title="NEURON を広げる・戻す">⇔ 広げる</button></div>
     <div class="panel-body" id="neuron-body"><p class="muted">マップのニューロン、または LIST の行をクリック</p></div>
   </aside>
 </main>
-<footer id="jobs" class="mono"><span id="jobs-bar"><span class="muted">jobs: なし</span></span><span id="perf"></span></footer>
+<footer id="jobs" class="mono"><span id="jobs-bar"><span class="muted">jobs: なし</span></span><span id="status"><span id="status-main"></span></span><span id="perf"></span></footer>
 <script type="module" src="app.js"></script>
 </body>
 </html>
