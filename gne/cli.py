@@ -748,5 +748,26 @@ def mcp_cmd(ctx: typer.Context,
              n_gpu_layers=c.n_gpu_layers, n_ctx=c.n_ctx, seed=c.seed)
 
 
+@app.command("serve")
+def serve_cmd(ctx: typer.Context,
+              model: Optional[Path] = typer.Option(None, "--model", "-m", envvar="GNE_MODEL", help="GGUF ファイル"),
+              port: int = typer.Option(8791, "--port"),
+              host: str = typer.Option("127.0.0.1", "--host", help="ローカル専用(127.0.0.1)"),
+              root: Optional[Path] = typer.Option(None, "--root", envvar="GNE_ROOT")):
+    """Web UI(http://127.0.0.1:8791)。"""
+    from .ui.server import serve
+    c: Common = ctx.obj or Common()
+    path = model or c.model
+    if path is None:
+        print("エラー[BAD_ARGS]: --model を指定してください", file=sys.stderr)
+        raise typer.Exit(2)
+    try:
+        print(f"gne serve: http://{host}:{port}/", file=sys.stderr)
+        serve(path, host=host, port=port, root=root or c.root, n_gpu_layers=c.n_gpu_layers, n_ctx=c.n_ctx, seed=c.seed)
+    except GneError as e:
+        print(f"エラー[{e.code}]: {e.message}", file=sys.stderr)
+        raise typer.Exit(2) from e
+
+
 if __name__ == "__main__":
     app()

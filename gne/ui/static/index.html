@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gne explorer</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='5' fill='%23e8b04a'/%3E%3C/svg%3E">
+<script type="importmap">
+{ "imports": { "three": "./vendor/three/three.module.min.js", "three/addons/": "./vendor/three/addons/" } }
+</script>
+</head>
+<body>
+<header id="header">
+  <span class="brand">gne</span>
+  <span class="seg" id="views">
+    <button data-view="map" class="on">map</button><button data-view="layers">layers</button><button data-view="embed">embed</button>
+  </span>
+  <label>layer <select id="layer-select"></select></label>
+  <label>jump <input id="jump" placeholder="L14 N8949" size="11" spellcheck="false"></label>
+  <button id="reset-view" title="全体の視点に戻る">全体</button>
+  <span id="status" class="mono"><span id="status-main"></span><span id="status-perf"></span></span>
+</header>
+<main id="main">
+  <aside id="list" class="panel collapsed">
+    <div class="panel-head"><button class="toggle" data-target="list">LIST</button></div>
+    <div class="panel-body"><p class="muted">rank / fires / recipe(U1・U2)</p></div>
+  </aside>
+  <section id="map-wrap">
+    <div id="map"></div>
+    <div id="overlay" class="mono"></div>
+    <div id="tooltip" class="mono hidden"></div>
+    <div id="legend" class="mono"></div>
+    <div id="view-placeholder" class="hidden"></div>
+  </section>
+  <aside id="neuron" class="panel collapsed">
+    <div class="panel-head"><button class="toggle" data-target="neuron">NEURON</button></div>
+    <div class="panel-body" id="neuron-body"><p class="muted">マップのニューロンをクリック(U1)</p></div>
+  </aside>
+</main>
+<footer id="jobs" class="mono"><span class="muted">jobs: なし</span></footer>
+<script type="module" src="app.js"></script>
+</body>
+</html>

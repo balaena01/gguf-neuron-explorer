@@ -1,0 +1,73 @@
+/* 暗色固定(加算合成で光る点を描くため背景は黒、別冊 §2)。ID と数値は等幅。 */
+:root {
+  --bg: #000;
+  --panel: #0c0f14;
+  --line: #1f2630;
+  --text: #c9d1dc;
+  --muted: #6b7686;
+  --accent: #e8b04a;      /* 琥珀 */
+  --plus: #f2d24b;        /* 符号 + = 黄 */
+  --minus: #c94fa7;       /* 符号 − = 赤紫 */
+  --sel: #ffffff;
+  --mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, "Noto Sans Mono CJK JP", monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", "Noto Sans JP", sans-serif;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 13px/1.45 var(--sans); }
+body { display: grid; grid-template-rows: auto 1fr auto; overflow: hidden; }
+.mono { font-family: var(--mono); }
+.muted { color: var(--muted); }
+.hidden { display: none !important; }
+button, select, input {
+  background: #121821; color: var(--text); border: 1px solid var(--line); border-radius: 4px;
+  font: inherit; padding: 3px 8px;
+}
+button:hover { border-color: #3a4656; }
+input::placeholder { color: #4a5464; }
+
+#header { display: flex; flex-wrap: nowrap; align-items: center; gap: 12px; padding: 6px 12px; min-width: 0;
+  border-bottom: 1px solid var(--line); background: var(--panel); }
+#header .brand { font-weight: 700; letter-spacing: 0.08em; color: var(--accent); }
+#header label { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+.seg { display: inline-flex; }
+.seg button { border-radius: 0; margin-left: -1px; }
+.seg button:first-child { border-radius: 4px 0 0 4px; }
+.seg button:last-child { border-radius: 0 4px 4px 0; }
+.seg button.on { background: #1d2633; color: #fff; border-color: #3a4656; }
+#header > * { flex: 0 0 auto; white-space: nowrap; }
+#layer-select, #jump { font-family: var(--mono); }
+#layer-select { max-width: 30vw; }
+#status { margin-left: auto; color: var(--muted); display: flex; min-width: 0; flex: 1 1 auto; justify-content: flex-end; gap: 10px; }
+#status-main { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+#status-perf { flex: 0 0 auto; color: #8792a2; }
+#status-perf::before { content: "·"; margin-right: 10px; color: var(--muted); }
+
+#main { display: grid; grid-template-columns: auto 1fr auto; min-height: 0; }
+.panel { background: var(--panel); border-right: 1px solid var(--line); width: 300px; display: flex; flex-direction: column; min-height: 0; }
+#neuron.panel { border-right: 0; border-left: 1px solid var(--line); width: 380px; }
+.panel.collapsed, #neuron.panel.collapsed { width: 34px; }
+.panel.collapsed .panel-body { display: none; }
+.panel.collapsed .panel-head { writing-mode: vertical-rl; }
+.panel-head { padding: 6px; }
+.panel-head .toggle { font-family: var(--mono); font-size: 11px; letter-spacing: 0.1em; }
+.panel-body { padding: 8px 12px; overflow: auto; min-height: 0; }
+
+#map-wrap { position: relative; min-width: 0; min-height: 0; }
+#map { position: absolute; inset: 0; }
+#map canvas { display: block; }
+#tooltip { position: absolute; pointer-events: none; background: rgba(8, 10, 14, 0.92); border: 1px solid #2a3340;
+  border-radius: 4px; padding: 4px 8px; font-size: 12px; color: #e6edf5; white-space: nowrap; z-index: 5; }
+#legend { position: absolute; right: 12px; bottom: 10px; font-size: 12px; color: #93a0b2; text-align: right; pointer-events: none;
+  background: rgba(0, 0, 0, 0.55); padding: 6px 10px; border-radius: 4px; line-height: 1.6; }
+#legend .sw { display: inline-block; width: 11px; height: 11px; border-radius: 2px; margin: 0 5px -1px 12px; border: 1px solid #3a4656; }
+#legend .note { color: #8692a3; font-size: 12px; }
+#legend.compact .note { display: none; }
+#overlay { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+#overlay span { position: absolute; transform: translate(-50%, 0); font-size: 12px; color: #8a96a7; white-space: nowrap; }
+#overlay span.ax { pointer-events: auto; cursor: pointer; padding: 0 3px; border-radius: 3px; }
+#overlay span.ax:hover { color: #fff; background: #1d2633; }
+#overlay span.ax-end { color: #6f7b8c; font-size: 12px; transform: translate(-50%, -50%); }
+#overlay span.ex { transform: translate(-100%, -50%); color: #8f9bab; font-size: 11px; padding-right: 4px; }
+#view-placeholder { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); background: #000; }
+
+#jobs { border-top: 1px solid var(--line); background: var(--panel); padding: 4px 12px; font-size: 12px; min-height: 26px; }
