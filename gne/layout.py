@@ -35,8 +35,8 @@ def _umap(X, *, metric: str, seed: int):
     import warnings
     with warnings.catch_warnings():                              # random_state を付けると 1 スレッドになる、などの警告
         warnings.simplefilter("ignore")
-        return umap.UMAP(n_components=2, n_neighbors=15, min_dist=0.1, metric=metric, random_state=seed,
-                         low_memory=True, verbose=False).fit_transform(X)
+        return umap.UMAP(n_components=2, n_neighbors=max(2, min(15, X.shape[0] - 1)), min_dist=0.1, metric=metric,
+                         random_state=seed, low_memory=True, verbose=False).fit_transform(X)
 
 
 def _pca(X: np.ndarray, k: int = 50) -> np.ndarray:

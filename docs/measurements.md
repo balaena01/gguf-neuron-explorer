@@ -176,3 +176,12 @@ Qwen3.5-4B、`~/.gne` の Phase 2〜3 の結果(L22 の sweep main_rel と steer
 | 配置 lens(4B、L22、steer lens の ± 上位語) | 36 秒 | 初回のコンパイルを含む |
 | 配置の切り替え(全層の位置の書き直し) | 7〜220 ms | 取得済みなら 10 ms 未満 |
 
+## Phase 5 U4(2026-10-26、同じ環境)
+
+| 処理 | 時間 | 備考 |
+|---|---|---|
+| 埋め込み(Qwen3-Embedding-0.6B Q8_0、4494 rollout、バッチ 16) | 56 秒 | GPU、モデルの読み込みを含む |
+| UMAP(4494 点、1024 次元、cosine) | 24 秒 | |
+| embed ビューを開く(umap.json 2.4 MB の取得と描画、gzip で送る) | 0.3 秒 | 埋め込みは emb.npy 9.2 MB |
+| 小さな run(21 rollout)の埋め込みジョブ | 2〜15 秒 | 初回は numba のコンパイル |
+

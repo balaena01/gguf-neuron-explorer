@@ -107,6 +107,21 @@ class UIData:
         p = self.s.store.layout_dir(self.s.meta.model_id) / f"{kind}_L{L}.npy"
         return self._get(("layout", kind, L), [p], lambda: np.load(p).astype(np.int32) if p.exists() else None)
 
+    def run_list(self) -> list[dict]:
+        """rollout のある run(sweep・逆引きの確かめ)と、埋め込み(umap.json)の有無。"""
+        d = self.s.store.runs_dir(self.s.meta.model_id)
+        out = []
+        for p in sorted(d.glob("*.jsonl")):
+            if p.name.endswith(".units.jsonl"):
+                continue
+            name = p.name.removesuffix(".jsonl")
+            out.append({"run": name, "embedded": (d / f"{name}.umap.json").exists(), "size": p.stat().st_size})
+        return out
+
+    def embeddings(self, run: str) -> dict | None:
+        p = self.s.run_path(run).with_name(f"{run}.umap.json")
+        return self._get(("umap", run), [p], lambda: json.loads(p.read_text(encoding="utf-8")) if p.exists() else None)
+
     def layouts(self) -> dict[str, list[int]]:
         out: dict[str, list[int]] = {}
         for p in sorted(self.s.store.layout_dir(self.s.meta.model_id).glob("*_L*.npy")):
@@ -287,8 +302,15 @@ class UIData:
             out["name"] = self.names().get(f"{L}:{n}")
             out["down_norm"] = float(self.s.weights.down_norms(L)[n])
 
-        # sweep: 指定の run、無ければこのユニットを含む run のうちニューロンの多いもの
-        runs = [self._run(L, run)] if run else self.runs(L)
+        # sweep: 指定の run、無ければこのユニットを含む run のうちニューロンの多いもの。
+        # 指定の run に順位表(units.jsonl)が無いとき(逆引きの確かめの run など)は、ほかの run に戻して注記する
+        runs = self.runs(L)
+        if run:
+            hit = [r for r in runs if r["run"] == run]
+            if hit:
+                runs = hit
+            else:
+                out["note_run"] = run
         for r in runs:
             if r is None:
                 continue
@@ -307,6 +329,8 @@ class UIData:
                             "examples": _examples(mine, base, meta.get("prompts", {}))}
             break
 
+        if out.pop("note_run", None) and out["sweep"] is not None:
+            out["note"] = f"run {run} には順位表が無いので、この層のほかの run({out['sweep']['run']})の結果を出しています"
         if kind == "neuron":
             sl = self.steer_lens(L)
             if sl is not None and sl.done[n]:

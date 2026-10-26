@@ -577,3 +577,60 @@ def test_u3_links_and_layout_in_browser(server, browser):
     pg.wait_for_function("window.gne.links === null", timeout=30000)
     assert not errors, errors
     pg.close()
+
+
+# --- U4: 埋め込みの散布図 -------------------------------------------------------------------------------------
+
+def _embed_model():
+    from gne.embed import default_embed_model
+    return default_embed_model()
+
+
+@pytest.mark.model
+def test_u4_embed_job_and_view(server, browser):
+    import urllib.request
+    if _embed_model() is None or not _embed_model().exists():
+        pytest.skip("埋め込みモデル(models/*Embedding*.gguf か GNE_EMBED_MODEL)がありません")
+
+    def get(path):
+        return json.loads(urllib.request.urlopen(server + path).read())
+    runs = {r["run"]: r for r in get("/api/model")["runs"]}
+    assert "L6-quick" in runs and not runs["L6-quick"]["embedded"]
+    req = urllib.request.Request(server + "/api/jobs", data=json.dumps({"kind": "embed", "params": {"run": "L6-quick"}}).encode(),
+                                 headers={"Content-Type": "application/json"})
+    jid = json.loads(urllib.request.urlopen(req).read())["id"]
+    for _ in range(3000):
+        v = next(x for x in get("/api/jobs") if x["id"] == jid)
+        if v["status"] not in ("queued", "running"):
+            break
+        time.sleep(0.2)
+    assert v["status"] == "done", v
+    e = get("/api/embeddings?run=L6-quick")
+    assert e["meta"]["n"] == 17 and e["meta"]["dim"] > 0 and len(e["points"]) == len(e["texts"]) == 17   # ベースライン 2 + 15
+    xs = np.array([p[:2] for p in e["points"]])
+    assert xs.min() >= 0 and xs.max() <= 1                                           # 0〜1 にそろえてある
+    assert sorted({p[2] for p in e["points"]}) == [0, 1, 2]                          # ニューロン・ランダム・ベースライン
+    pg = browser.new_page(viewport={"width": 1500, "height": 860})
+    errors = []
+    pg.on("pageerror", lambda er: errors.append(str(er)))
+    pg.goto(server + "/")
+    pg.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
+    pg.click("#views button[data-view=embed]")
+    pg.wait_for_function("window.gne.embedView && window.gne.embedView.data", timeout=30000)
+    assert pg.evaluate("getComputedStyle(document.querySelector('#legend')).display") == "none"     # 地図の凡例は隠す
+    p100 = next(p for p in e["points"] if p[2] == 0 and p[3] == 100)
+    for c in ("prompt", "dose", "neuron", "kind"):
+        pg.select_option("#ev-color", c)
+    sx, sy = pg.evaluate(f"(() => {{ const v = window.gne.embedView, r = v.cv.getBoundingClientRect(); const [x, y] = v._toScreen({p100[0]}, {p100[1]}); return [r.left + x, r.top + y]; }})()")
+    pg.mouse.move(sx, sy)
+    pg.wait_for_timeout(150)
+    hv = pg.evaluate("window.gne.embedView.hover")
+    who = pg.evaluate(f"window.gne.embedView.data.points[{hv}]")
+    assert hv >= 0
+    if who[2] == 0:                                                                  # ニューロンの点ならクリックで開く
+        pg.mouse.click(sx, sy)
+        pg.wait_for_function(f"window.gne.focus && window.gne.focus.n === {who[3]}", timeout=30000)
+    pg.click("#views button[data-view=map]")
+    assert pg.evaluate("getComputedStyle(document.querySelector('#legend')).display") != "none"
+    assert not errors, errors
+    pg.close()

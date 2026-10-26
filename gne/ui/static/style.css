@@ -291,3 +291,24 @@ table.fi-tab td.w { white-space: nowrap; overflow: hidden; text-overflow: ellips
 input[type=range].dose { -webkit-appearance: none; appearance: none; height: 6px; border-radius: 3px; outline: none; }
 input[type=range].dose::-webkit-slider-thumb { -webkit-appearance: none; width: 12px; height: 12px; border-radius: 50%; background: #dfe6ee; cursor: pointer; }
 input[type=range].dose::-moz-range-thumb { width: 12px; height: 12px; border-radius: 50%; background: #dfe6ee; border: 0; }
+
+/* embed ビュー */
+#embed-view { position: absolute; inset: 0; background: #000; display: flex; flex-direction: column; z-index: 10; }
+#layers-view { z-index: 10; }
+#map-wrap.not-map #overlay, #map-wrap.not-map #legend, #map-wrap.not-map #tooltip { display: none; }   /* 地図の札・凡例を他のビューに透かさない */
+.ev-tools { display: flex; gap: 12px; align-items: center; padding: 10px 12px 4px; flex-wrap: wrap; }
+#ev-info { margin: 4px 12px; padding: 6px 10px; height: 96px; flex: 0 0 auto; overflow: auto; font-size: 12px; line-height: 1.5;   /* 高さ固定(本文で伸びると図がずれる) */
+  background: #0b0f15; border: 1px solid #1f2630; border-radius: 4px; }
+#ev-info .ev-text { white-space: pre-wrap; color: #c9d1dc; font-family: var(--sans); }
+.ev-wrap { position: relative; flex: 1 1 auto; min-height: 0; }
+#ev-canvas { display: block; cursor: crosshair; }
+#ev-legend { flex: 0 0 auto; font-size: 12px; color: #93a0b2; text-align: right; padding: 4px 12px 8px; line-height: 1.6;
+  border-top: 1px solid #141a22; }    /* 図の外(下)に置いて点を隠さない */
+#ev-legend .sw.dia { width: 9px; height: 9px; background: #11161d; border: 1.5px solid #fff; transform: rotate(45deg); margin: 0 6px 0 2px; }
+#ev-empty { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; color: #8a96a7; line-height: 1.8; padding: 24px; }
+#ev-legend:empty { display: none; }
+body.view-other .map-only { opacity: 0.35; }
+#ev-legend .sw { display: inline-block; width: 11px; height: 11px; border-radius: 2px; margin: 0 4px -1px 0; border: 1px solid #3a4656; }
+#ev-legend .sw.ring { border-radius: 50%; background: transparent; border-width: 2px; }
+#ev-legend .it { display: inline-block; white-space: nowrap; margin-left: 12px; }
+#ev-legend .note { color: #8692a3; }

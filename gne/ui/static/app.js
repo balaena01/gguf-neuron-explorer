@@ -4,6 +4,7 @@
 // U2: NEURON の Chat(3 列・reads you)、LIST の fires と recipe、地図のレシピの印、ジョブのバーと計算メニュー。
 import { LayerCache, getBin, getJSON, loadVocab } from "./api.js";
 import { ChatPanel } from "./chat.js";
+import { EmbedView } from "./embed.js";
 import { FiresPanel } from "./fires.js";
 import { JobsBar, KIND, computeMenu } from "./jobs.js";
 import { LayersView } from "./layers.js";
@@ -119,7 +120,10 @@ function updateStatus() {
   const flash = state.flash && state.flash.until > Date.now() ? state.flash.text : "";        // ジョブの結果などの一時的な知らせ
   $("#status-main").textContent = `${m.name} · ${where}${flash ? ` · ${flash}` : ""}${state.note ? ` · ${state.note}` : ""}`;
   $("#status-main").title = $("#status-main").textContent;
-  $("#perf").textContent = `${(map?.nPoints ?? 0).toLocaleString()} 点 · ${map && map.fps !== null ? map.fps.toFixed(0) : "—"} fps`;
+  $("#perf").textContent = state.view === "embed"
+    ? (embedView && embedView.data ? `${embedView.data.points.length.toLocaleString()} rollout(embed)` : "—(embed)")
+    : state.view === "layers" ? `${state.arch.n_layer} 層(layers)`
+    : `${(map?.nPoints ?? 0).toLocaleString()} 点 · ${map && map.fps !== null ? map.fps.toFixed(0) : "—"} fps`;
 }
 
 function legend() {
@@ -177,6 +181,7 @@ async function refreshModel() {
   state.model.directions = m.directions;
   state.model.layouts = m.layouts;
   state.model.connections = m.connections;
+  state.model.runs = m.runs;
 }
 
 // 枠の明るさ = その層で光っている点の数(いちばん多い層を 1 とする、比例)。全体ビューでは上位 3 層に札も出す。
@@ -380,7 +385,7 @@ function closeSearch() {
 }
 
 // --- LIST・NEURON ----------------------------------------------------------------------------------------
-let rank, neuron, layersView, searchList, chat, firesPanel, recipePanel, jobsBar;
+let rank, neuron, layersView, searchList, chat, firesPanel, recipePanel, jobsBar, embedView;
 
 function expand(id) {
   const p = $(`#${id}`);
@@ -427,6 +432,7 @@ async function onJobFinished(j) {
   fillColorSelect();
   if (j.kind === "layout") { layoutCache.clear(); if (state.layout === j.params.kind) applyLayout(state.layout); }
   if (j.kind === "connections" && state.focus) { showLinks(); neuron.render(); }
+  if (j.kind === "embed" && embedView) { embedView.setRuns(state.model.runs); if (embedView.run === j.params.run) embedView.load(j.params.run); }
   const f = state.overlay.field;
   if (f !== "none" && !f.startsWith("search:") && !f.startsWith("fires:")) applyOverlay(f);
   if (L !== undefined && rank.layer === L) showLayerInList(L);
@@ -456,10 +462,29 @@ function onLayerChanged(L) {
 async function setView(v) {
   state.view = v;
   for (const x of document.querySelectorAll("#views button")) x.classList.toggle("on", x.dataset.view === v);
-  const ph = $("#view-placeholder"), lv = $("#layers-view");
-  ph.classList.toggle("hidden", v !== "embed");
+  const ph = $("#view-placeholder"), lv = $("#layers-view"), ev = $("#embed-view");
+  $("#map-wrap").classList.toggle("not-map", v !== "map");
+  document.body.classList.toggle("view-other", v !== "map");             // 地図専用の header の部品を薄く
+  if (state.map) state.map.setActive(v === "map");
+  ph.classList.add("hidden");
   lv.classList.toggle("hidden", v !== "layers");
-  if (v === "embed") ph.textContent = "embed ビューは U4 で作る";
+  ev.classList.toggle("hidden", v !== "embed");
+  if (v === "embed") {
+    if (!state.model) { ev.innerHTML = `<p class="muted" style="padding:16px">合成の構造には rollout がありません</p>`; return; }
+    if (!embedView) {
+      embedView = new EmbedView(ev, {
+        onOpen: (u) => { openNeuron(u, { focus: false }); embedView.draw(); },
+        onCompute: (run) => startJob("embed", { run }),
+        getFocus: () => state.focus,
+        onChange: () => updateStatus(),
+      });
+      state.embedView = embedView;                                       // 自動テスト用
+    }
+    await refreshModel();
+    embedView.setRuns(state.model.runs);
+    embedView.load(embedView.run);
+    return;
+  }
   if (v === "layers") {
     if (!state.model) { lv.innerHTML = `<p class="muted" style="padding:16px">合成の構造には layers ビューのデータがありません</p>`; return; }
     if (!layersView) layersView = new LayersView(lv, { onPick: (L) => { setView("map"); state.map.frontView(L); } });

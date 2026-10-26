@@ -53,7 +53,7 @@ def create_app(session, *, warm: bool = True) -> FastAPI:
         ov = session.model_overview()
         return {"meta": ov["meta"], "arch": cache["arch"], "coverage": ov["layers"],
                 "arch_warnings": ov["arch_warnings"], "bake": ov["bake"], "recipes": ov["recipes"],
-                "directions": ov["directions"], "names": data.names(), "layouts": data.layouts(),
+                "directions": ov["directions"], "names": data.names(), "layouts": data.layouts(), "runs": data.run_list(),
                 "connections": data.connections().meta if data.connections() is not None else None}
 
     @app.get("/api/vocab")
@@ -79,6 +79,15 @@ def create_app(session, *, warm: bool = True) -> FastAPI:
             return JSONResponse({"error": {"code": "NOT_FOUND", "message": f"L{L} の配置 {kind} はまだありません",
                                            "hint": "層の右クリックの「配置」で作れます"}}, status_code=404)
         return _binary(cell.tobytes(), str(cell.size), {"layer": L, "kind": kind})
+
+    @app.get("/api/embeddings")
+    def embeddings(run: str):
+        e = data.embeddings(run)
+        if e is None:
+            return JSONResponse({"error": {"code": "NOT_FOUND", "message": f"run {run} の埋め込みはまだありません",
+                                           "hint": "embed ビューの「埋め込みを計算」で作れます(GGUF の埋め込みモデルが要ります)"}},
+                                status_code=404)
+        return e
 
     @app.get("/api/connections")
     def connections(layer: int, n: int, k: int = 14):

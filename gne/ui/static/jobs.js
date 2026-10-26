@@ -3,7 +3,7 @@
 import { deleteJSON, getJSON, postJSON } from "./api.js";
 import { esc } from "./panels.js";
 
-export const KIND = { connections: "connections", layout: "配置", lens_logit: "logit lens", lens_steer: "steer lens", sweep_rank: "sweep", sweep: "sweep", rank: "rank",
+export const KIND = { embed: "埋め込み", connections: "connections", layout: "配置", lens_logit: "logit lens", lens_steer: "steer lens", sweep_rank: "sweep", sweep: "sweep", rank: "rank",
                stats_resid: "残差の統計", stats_act: "活性の統計", reverse: "逆引き" };
 
 function eta(s) {
@@ -18,6 +18,7 @@ function what(j) {
   const bits = [KIND[j.kind] || j.kind];
   if (p.layer !== undefined) bits.push(`L${p.layer}`);
   if (p.kind) bits.push(p.kind);
+  if (p.run) bits.push(p.run);
   if (p.layers !== undefined) bits.push(p.layers === "all" ? "全層" : `L${[].concat(p.layers).join(",")}`);
   if (p.design) bits.push(p.design);
   if (p.neurons) bits.push(/^\d/.test(p.neurons) ? `N${p.neurons.replace("-", "–")}` : `ニューロン ${p.neurons}`);

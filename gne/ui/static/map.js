@@ -540,6 +540,12 @@ export class LayerMap {
     return { x: r.left + (v.x + 1) / 2 * r.width, y: r.top + (1 - v.y) / 2 * r.height, z: v.z };
   }
 
+  // 地図以外のビューの間は描画の繰り返しを止める(GPU を埋め込みやチャットに譲る)
+  setActive(on) {
+    this.renderer.setAnimationLoop(on ? () => this._frame() : null);
+    if (on) { this.fps = null; this._frames = 0; this._fpsT = performance.now(); this.resize(); }
+  }
+
   resize() {
     const w = this.container.clientWidth, h = this.container.clientHeight;
     if (!w || !h) return;

@@ -609,6 +609,11 @@ class Session:
             self.progress(len(Ls), len(Ls), f"layout {kind}")
         return {"kind": kind, "layers": out}
 
+    def embed(self, run: str, *, model: str | Path | None = None) -> dict:
+        """run の全 rollout を文埋め込み → UMAP 2D にして runs/<run>.umap.json に保存する(別冊 §7)。"""
+        from .embed import embed_run
+        return embed_run(self, run, model=model, seed=self.seed, progress=self.progress)
+
     def set_name(self, L: int, n: int, name: str) -> dict:
         from .dossier import set_name
         set_name(self, L, n, name)

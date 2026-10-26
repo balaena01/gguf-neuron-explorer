@@ -161,6 +161,7 @@ export class NeuronPanel {
       <div class="n-head">
         <div class="n-id mono">${id}</div>
         <div class="n-stats mono muted">${stats}${s ? ` · <span title="${esc(s.design)}">${esc(s.run)}</span>` : ""}</div>
+        ${d.note ? `<p class="muted note">${esc(d.note)}</p>` : ""}
         ${rnd ? `<p class="muted note">ランダム方向の対照(名前は付けられません)</p>` : `
         <div class="n-row"><input class="n-name" placeholder="名前(入力して Enter か欄の外で保存)" value="${esc(d.name || "")}" spellcheck="false">
           ${this.recipeButtons(d)}</div>`}
