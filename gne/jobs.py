@@ -105,6 +105,27 @@ class _Cancelled(Exception):
     pass
 
 
+def _sweep_rank(s, layer: int, **p) -> dict:
+    """sweep のあとに rank まで回す(UI から 1 回で層の順位表まで作る)。"""
+    r = s.sweep(layer, **p)
+    k = s.rank(r["run"], show=0)
+    return {"sweep": {k_: v for k_, v in r.items() if k_ != "units"}, "rank": {k_: v for k_, v in k.items() if k_ != "units"}}
+
+
+def standard_kinds() -> dict[str, Callable[..., dict]]:
+    """MCP(job_start)と Web UI が共通で使うジョブの種類。"""
+    return {
+        "stats_resid": lambda s, **p: s.stats_resid(**p),
+        "stats_act": lambda s, **p: s.stats_act(**p),
+        "lens_logit": lambda s, layer, **p: s.lens_logit(layer, **p),
+        "lens_steer": lambda s, layer, **p: s.lens_steer(layer, **p),
+        "sweep": lambda s, layer, **p: s.sweep(layer, **p),
+        "sweep_rank": _sweep_rank,
+        "rank": lambda s, run, **p: s.rank(run, **p),
+        "reverse": lambda s, **p: s.reverse(**p),
+    }
+
+
 class JobRunner:
     """ジョブを 1 本ずつ順に回すスレッド。kinds: 種類 → fn(session, **params) -> dict。"""
 
@@ -125,6 +146,9 @@ class JobRunner:
             self._queue.append(job.id)
             self._cv.notify_all()
         return job
+
+    def list(self) -> list[Job]:
+        return list(self.jobs.values())
 
     def get(self, job_id: str) -> Job:
         job = self.jobs.get(job_id)

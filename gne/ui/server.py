@@ -2,6 +2,7 @@
 
 U0: /api/model(ModelMeta + ArchInfo + coverage)、/api/vocab(語彙の文字列)、静的配信。
 U1: 層ごとの overlay の値・hover の語・rank の表、ニューロンの詳細、検索、名前、layers ビューの要約。
+U2: 3 列チャット(SSE)、fires、reads you、レシピ、cvec の書き出し、ジョブ(SSE の進捗)。GPU は live.Live が調停する。
 大きい配列は JSON にせず octet-stream で返し、形は X-Shape、付帯情報は X-Meta(JSON)に入れる(§8.2)。
 """
 
@@ -13,7 +14,7 @@ from pathlib import Path
 
 from fastapi import Body, FastAPI
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from ..steer import GneError
@@ -29,11 +30,14 @@ def _binary(body: bytes, shape: str, meta: dict) -> Response:
 def create_app(session, *, warm: bool = True) -> FastAPI:
     from ..arch import arch_info
     from .data import UIData
+    from .live import Live
     app = FastAPI(title="gne", docs_url=None, redoc_url=None)
     app.add_middleware(GZipMiddleware, minimum_size=4096)
     app.state.session = session
     data = UIData(session)
     app.state.data = data
+    live = Live(session, data)
+    app.state.live = live
     if warm:
         threading.Thread(target=data.warm, name="gne-ui-warm", daemon=True).start()
     cache: dict = {}
@@ -87,6 +91,67 @@ def create_app(session, *, warm: bool = True) -> FastAPI:
     @app.get("/api/profile")
     def profile():
         return data.profile()
+
+    # --- U2: ライブ機能 ----------------------------------------------------------------------------------
+    sse_headers = {"Cache-Control": "no-store", "X-Accel-Buffering": "no"}
+
+    @app.post("/api/steer")
+    def steer(body: dict = Body(...)):
+        return StreamingResponse(live.steer_stream(body), media_type="text/event-stream", headers=sse_headers)
+
+    @app.post("/api/steer/{sid}/stop")
+    def steer_stop(sid: str):
+        return live.stop(sid)
+
+    @app.post("/api/fires")
+    def fires(text: str = Body(...), top: int = Body(50)):
+        return live.fires(text, top=top)
+
+    @app.get("/api/fires/{fid}/field")
+    def fires_field(fid: str, tok: int = -1):
+        body, sizes, meta = live.fires_fields(fid, tok)
+        return _binary(body, ",".join(map(str, sizes)), meta)
+
+    @app.get("/api/fires/{fid}/neurons")
+    def fires_neurons(fid: str, tok: int = -1, lmin: int = 0, lmax: int | None = None, sign: str = "both",
+                      thr: float = 0.0, q: str = "", limit: int = 100):
+        return live.fires_neurons(fid, tok, lmin=lmin, lmax=lmax, sign=sign, thr=thr, q=q, limit=limit)
+
+    @app.post("/api/reads")
+    def reads(layer: int = Body(...), neuron: int = Body(...), text: str = Body(...)):
+        return live.reads(layer, neuron, text)
+
+    @app.get("/api/recipes")
+    def recipes():
+        return live.recipes()
+
+    @app.post("/api/recipes/{name}")
+    def recipe_save(name: str, units: list[str] = Body(..., embed=True)):
+        return session.recipe_save(name, units)
+
+    @app.post("/api/export")
+    def export(units: list[str] = Body(...), name: str = Body(...), verify: bool = Body(False)):
+        return live.export(units, name, verify=verify)
+
+    @app.get("/api/export/file/{file}")
+    def export_file(file: str):
+        return FileResponse(live.export_path(file), media_type="application/octet-stream", filename=file)
+
+    @app.post("/api/jobs")
+    def job_start(kind: str = Body(...), params: dict = Body({})):
+        return live.jobs.start(kind, params).view()
+
+    @app.get("/api/jobs")
+    def job_list():
+        return [j.view() for j in live.jobs.list()]
+
+    @app.get("/api/jobs/{job_id}/events")
+    def job_events(job_id: str):
+        return StreamingResponse(live.job_events(job_id), media_type="text/event-stream", headers=sse_headers)
+
+    @app.delete("/api/jobs/{job_id}")
+    def job_cancel(job_id: str):
+        return live.jobs.cancel(job_id).view()
 
     @app.get("/")
     def index():

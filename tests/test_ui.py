@@ -330,3 +330,134 @@ def test_synthetic_70b_point_count(server, browser):
     pg.wait_for_function("window.gne && window.gne.ready", timeout=60000)
     assert pg.evaluate("window.gne.map.nPoints") == 80 * 28672
     pg.close()
+
+
+# --- U2: ライブ機能 -----------------------------------------------------------------------------------------
+
+def _sse_events(c, url, body):
+    with c.stream("POST", url, json=body) as r:
+        assert r.status_code == 200, r.read()
+        return [json.loads(line[6:]) for line in r.iter_lines() if line.startswith("data: ")]
+
+
+@pytest.mark.model
+@pytest.mark.skipif(not MODEL.exists(), reason="モデルがありません")
+def test_u2_live_api(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from gne.api import Session
+    from gne.ui.server import create_app
+    s = Session(MODEL, root=tmp_path)
+    c = TestClient(create_app(s, warm=False))
+    msgs = [{"role": "user", "content": "Who are you?"}]
+    ev = _sse_events(c, "/api/steer", {"max_tokens": 8, "columns": [
+        {"units": ["14:100:-2"], "messages": msgs}, {"units": [], "messages": msgs}, {"units": ["14:100:+2"], "messages": msgs}]})
+    kinds = [e["type"] for e in ev]
+    assert kinds[0] == "start" and kinds[1] == "gpu" and kinds[-1] == "done"
+    ends = [e for e in ev if e["type"] == "end"]
+    assert [e["col"] for e in ends] == [0, 1, 2] and all(e["n_gen"] == 8 for e in ends)
+    for e in ends:                                                                   # 逐次の断片をつなぐと全文になる
+        assert "".join(x["text"] for x in ev if x["type"] == "text" and x["col"] == e["col"]) == e["text"]
+    base = s.generate(None, msgs, max_tokens=8)["text"]
+    assert ends[1]["text"] == base                                                  # 無介入の列は普通の生成と同じ
+    assert c.post("/api/steer", json={"columns": [{"units": ["999:1:+1"], "messages": msgs}]}).status_code == 400
+    assert c.post("/api/steer/nope/stop").json() == {"id": "nope", "stopped": False}
+
+    f = c.post("/api/fires", json={"text": "The aliens landed on Mars."}).json()
+    n_ff, L = s.meta.n_ff_at(0), s.meta.n_layer
+    r = c.get(f"/api/fires/{f['id']}/field", params={"tok": 2})
+    v = np.frombuffer(r.content, np.float32).reshape(L, n_ff)
+    top = f["top"][1]["neurons"][0]                                                  # position 2 の最上位(top は position 1 から)
+    assert v[top["layer"], top["neuron"]] == pytest.approx(top["score"], rel=1e-5)
+    mx = np.frombuffer(c.get(f"/api/fires/{f['id']}/field", params={"tok": -1}).content, np.float32).reshape(L, n_ff)
+    ok = np.isfinite(v)                                                              # 最終層は捕捉しない(NaN)
+    assert ok.any() and (np.abs(mx[ok]) >= np.abs(v[ok]) - 1e-6).all()               # 全トークンの |最大| はどのトークンより大きい
+    nn = c.get(f"/api/fires/{f['id']}/neurons", params={"tok": 2, "sign": "+", "thr": 1.0, "limit": 5}).json()
+    assert nn["neurons"] and all(x["score"] >= 1.0 for x in nn["neurons"])
+    assert c.get("/api/fires/zzz/field").status_code == 400
+    rd = c.post("/api/reads", json={"layer": top["layer"], "neuron": top["neuron"], "text": "The aliens landed on Mars."}).json()
+    assert rd["score"][1] == pytest.approx(top["score"], rel=1e-4)                   # reads you と fires は同じ値
+
+    assert c.post("/api/recipes/u2r", json={"units": ["14:100:+1", "13:7:-0.5"]}).status_code == 200
+    rs = c.get("/api/recipes").json()
+    assert rs[0]["name"] == "u2r" and [u["dose"] for u in rs[0]["units"]] == [1.0, -0.5] and rs[0]["this_model"]
+    ex = c.post("/api/export", json={"units": ["14:100:+1", "13:7:-0.5"], "name": "u2x"}).json()
+    dl = c.get(ex["url"])
+    assert dl.status_code == 200 and dl.content[:4] == b"GGUF" and "attachment" in dl.headers["content-disposition"]
+    assert c.get("/api/export/file/..%2F..%2Fsecret.cvec.gguf").status_code in (400, 404)
+    assert c.post("/api/export", json={"units": ["14:100:+1"], "name": "../x"}).status_code == 400
+
+    j = c.post("/api/jobs", json={"kind": "lens_logit", "params": {"layer": 3, "neurons": "0-255"}}).json()
+    with c.stream("GET", f"/api/jobs/{j['id']}/events") as r:
+        views = [json.loads(line[6:]) for line in r.iter_lines() if line.startswith("data: ")]
+    assert views[-1]["status"] == "done" and views[-1]["result"]["n_neurons"] == 256
+    assert c.post("/api/jobs", json={"kind": "nope"}).status_code == 400
+
+
+@pytest.mark.model
+@pytest.mark.skipif(not MODEL.exists(), reason="モデルがありません")
+def test_u2_chat_preempts_running_job(tmp_path):
+    """ジョブ(steer lens)の実行中に送ったチャットは、ユニットの切れ目で GPU を受け取り、すぐ始まる(§8.1)。"""
+    from fastapi.testclient import TestClient
+
+    from gne.api import Session
+    from gne.ui.server import create_app
+    s = Session(MODEL, root=tmp_path)
+    s.stats_resid(tokens=2048)
+    c = TestClient(create_app(s, warm=False))
+    j = c.post("/api/jobs", json={"kind": "lens_steer", "params": {"layer": 10, "neurons": "0-2047", "random_controls": 4}}).json()
+    for _ in range(200):
+        v = next(x for x in c.get("/api/jobs").json() if x["id"] == j["id"])
+        if v["status"] == "running" and v["done"] >= 3:
+            break
+        time.sleep(0.1)
+    msgs = [{"role": "user", "content": "Hi"}]
+    ev = _sse_events(c, "/api/steer", {"max_tokens": 4, "columns": [{"units": [], "messages": msgs}]})
+    gpu = next(e for e in ev if e["type"] == "gpu")
+    assert gpu["waited_s"] < 2.0
+    v = next(x for x in c.get("/api/jobs").json() if x["id"] == j["id"])
+    assert v["yields"] >= 1 and v["status"] == "running"                             # 譲ったあと続きから走っている
+    c.delete(f"/api/jobs/{j['id']}")
+
+
+@pytest.mark.model
+def test_u2_recipe_chat_fires_in_browser(server, browser):
+    pg = browser.new_page(viewport={"width": 1500, "height": 860})
+    errors = []
+    pg.on("pageerror", lambda e: errors.append(str(e)))
+    pg.goto(server + "/")
+    pg.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
+    pg.evaluate("window.gne.recipe.clear()")
+    pg.fill("#jump", "L6 N100")
+    pg.press("#jump", "Enter")
+    pg.wait_for_function("document.querySelector('#neuron-body .n-id')", timeout=30000)
+    pg.click("#neuron-body [data-rc='1']")
+    assert pg.evaluate("window.gne.recipe.specs()") == ["6:100:+1"]
+    pg.wait_for_timeout(200)
+    assert pg.evaluate("document.querySelectorAll('#overlay span.mk.plus').length") == 1    # 地図の印
+    pg.click("#list-tabs button[data-tab=recipe]")
+    assert pg.evaluate("document.querySelectorAll('#recipe-list table.rc tr').length") == 1
+    pg.click("#rc-chat")
+    pg.wait_for_selector("#ch-text", timeout=30000)
+    pg.fill("#ch-max", "6")
+    pg.dispatch_event("#ch-max", "change")
+    pg.fill("#ch-text", "Hello")
+    pg.click("#ch-send")
+    pg.wait_for_function("!document.querySelector('#ch-send').disabled", timeout=120000)
+    cells = pg.evaluate("[...document.querySelectorAll('.ch-cell .txt')].map(e => e.textContent)")
+    assert len(cells) == 3 and all(cells), cells
+    assert "秒で 3 列を生成" in pg.evaluate("document.querySelector('#ch-status').textContent")
+    pg.click("#list-tabs button[data-tab=fires]")
+    pg.fill("#fi-text", "The aliens landed on Mars.")
+    pg.dispatch_event("#fi-text", "input")
+    pg.click("#fi-run")
+    pg.wait_for_function("document.querySelector('#fi-list tr[data-l]')", timeout=60000)
+    assert pg.evaluate("window.gne.overlay.field").startswith("fires:")
+    assert "活性統計が無い" in pg.evaluate("document.querySelector('#fires-list .ch-status').textContent")   # 統計の無い層を名指し
+    assert pg.evaluate("document.querySelectorAll('#fi-list tr.weak').length") > 0                        # 一覧の行に印
+    assert pg.evaluate("window.gne.overlay.weak.size") > 0 and "枠の比較から外した" in pg.evaluate("document.querySelector('#legend').textContent")
+    assert pg.evaluate("[...document.querySelectorAll('#fi-list td.w')].every(td => td.getBoundingClientRect().width > 80)")   # lens 列に幅がある
+    pg.click(".chip-t[data-tok='2']")
+    pg.wait_for_function("window.gne.overlay.field.includes('landed')", timeout=30000)
+    assert not errors, errors
+    pg.close()

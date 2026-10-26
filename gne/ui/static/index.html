@@ -28,9 +28,11 @@
   <aside id="list" class="panel collapsed">
     <div class="panel-head"><button class="toggle" data-target="list">LIST</button></div>
     <div class="panel-body">
-      <div class="tabs" id="list-tabs"><button data-tab="rank" class="on">rank</button><button data-tab="search" class="hidden">検索</button><button disabled title="U2">fires</button><button disabled title="U2">recipe</button></div>
+      <div class="tabs" id="list-tabs"><button data-tab="rank" class="on">rank</button><button data-tab="search" class="hidden">検索</button><button data-tab="fires">fires</button><button data-tab="recipe">recipe <span id="recipe-count" class="muted"></span></button></div>
       <div id="rank"></div>
       <div id="search-list" class="hidden"></div>
+      <div id="fires-list" class="hidden"></div>
+      <div id="recipe-list" class="hidden"></div>
     </div>
   </aside>
   <section id="map-wrap">
@@ -46,7 +48,7 @@
     <div class="panel-body" id="neuron-body"><p class="muted">マップのニューロン、または LIST の行をクリック</p></div>
   </aside>
 </main>
-<footer id="jobs" class="mono"><span class="muted">jobs: なし</span><span id="perf"></span></footer>
+<footer id="jobs" class="mono"><span id="jobs-bar"><span class="muted">jobs: なし</span></span><span id="perf"></span></footer>
 <script type="module" src="app.js"></script>
 </body>
 </html>

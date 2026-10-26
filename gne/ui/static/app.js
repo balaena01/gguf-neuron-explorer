@@ -1,12 +1,17 @@
 // gne explorer: 画面全体の配線(別冊 §2)。
 // U0: 構造の描画、層の選択、ジャンプ、hover の L N。
 // U1: 色の重ね合わせ(overlay)、LIST の rank、NEURON(Examples / Details)、hover の語、検索、layers ビュー。
+// U2: NEURON の Chat(3 列・reads you)、LIST の fires と recipe、地図のレシピの印、ジョブのバーと計算メニュー。
 import { LayerCache, getBin, getJSON, loadVocab } from "./api.js";
+import { ChatPanel } from "./chat.js";
+import { FiresPanel } from "./fires.js";
+import { JobsBar, KIND, computeMenu } from "./jobs.js";
 import { LayersView } from "./layers.js";
 import { syntheticArch } from "./layout.js";
 import { LayerMap } from "./map.js";
 import { FIELDS, colorize, colorizeHits, emphasisFactor, emphasize, fieldLabel, globalScale, layersWith, legendHTML } from "./overlay.js";
 import { NeuronPanel, RankList, SearchList, esc, toksHTML } from "./panels.js";
+import { Recipe, RecipePanel } from "./recipe.js";
 
 const $ = (s) => document.querySelector(s);
 const params = new URLSearchParams(location.search);
@@ -110,7 +115,8 @@ function updateStatus() {
   const m = state.model ? state.model.meta : { name: state.arch.arch };
   const map = state.map;
   const where = map && map.front !== null ? `L${map.front}` : `${state.arch.n_layer} 層`;   // 層の説明は選択欄にある
-  $("#status-main").textContent = `${m.name} · ${where}${state.note ? ` · ${state.note}` : ""}`;
+  const flash = state.flash && state.flash.until > Date.now() ? state.flash.text : "";        // ジョブの結果などの一時的な知らせ
+  $("#status-main").textContent = `${m.name} · ${where}${flash ? ` · ${flash}` : ""}${state.note ? ` · ${state.note}` : ""}`;
   $("#status-main").title = $("#status-main").textContent;
   $("#perf").textContent = `${(map?.nPoints ?? 0).toLocaleString()} 点 · ${map && map.fps !== null ? map.fps.toFixed(0) : "—"} fps`;
 }
@@ -127,9 +133,13 @@ function legend() {
   const color = o.field === "none" ? it(sw("#10141b"), "データ無し")
     : `<b>${esc(fieldLabel(o.field))}</b> ${legendHTML(o.field, o.scale || {}, { threshold: o.threshold, nHits: o.hits ? o.hits.length : 0, floors })}`;
   const frame = o.field === "none" ? "" : `<div>${it("シートの枠: ", sw("#252b33"), "データ無し")}${it(sw("#5e4a26"), "→", sw("#f0b850"), "光る点の数(最多の層で最も明るい)")}` +
-    (o.factor < 1 ? it(`(光る点が全体の ${Math.round(0.02 / o.factor * 100)}% あるので、点は一律に暗くし、数は枠で示す)`) : "") + "</div>";
+    (o.factor < 1 ? it(`(光る点が全体の ${Math.round(0.02 / o.factor * 100)}% あるので、点は一律に暗くし、数は枠で示す)`) : "") +
+    (o.weak && o.weak.size ? it(`(${[...o.weak].map((L) => `L${L}`).join("・")} は活性統計が無く文章内 p99 で割ったので、枠の比較から外した)`) : "") + "</div>";
+  const ring = (c) => `<span class="sw ring" style="border-color:${c}"></span>`;
+  const marks = (state.recipe && state.recipe.units.length ? [it(ring("#f2d24b"), "レシピ +"), it(ring("#c94fa7"), "レシピ −(大きさ = |dose|)")] : [])
+    .concat(state.focus ? [it(ring("#ffffff"), "開いているニューロン")] : []);
   const moe = isMoE() ? "、MoE は専門家ごとの小さな正方形" : "";
-  $("#legend").innerHTML = `<div>${color}</div>${frame}<div>${parts.join("")}</div>` +
+  $("#legend").innerHTML = `<div>${color}</div>${frame}<div>${parts.join("")}</div>${marks.length ? `<div>${marks.join("")}</div>` : ""}` +
     `<div class="note st">各層 = 手前の板(mixer、上辺の刻みが head の数)+ 奥のシート(MLP の全ニューロン${moe})、下の線 = 残差</div>` +
     `<div class="note">シート内の並びはニューロン番号順(近くにあっても似ているとは限らない)</div>`;
 }
@@ -145,7 +155,8 @@ function fillColorSelect() {
     const dis = k !== "none" && !n;
     return `<option value="${esc(k)}"${dis ? " disabled" : ""}>${esc(fieldLabel(k))}${k === "none" ? "" : dis ? "(データ無し)" : `(${n} 層)`}</option>`;
   }).join("");
-  if (state.overlay.field.startsWith("search:")) sel.insertAdjacentHTML("beforeend", `<option value="${esc(state.overlay.field)}">${esc(fieldLabel(state.overlay.field))}</option>`);
+  const f = state.overlay.field;
+  if (f.startsWith("search:") || f.startsWith("fires:")) sel.insertAdjacentHTML("beforeend", `<option value="${esc(f)}">${esc(fieldLabel(f))}</option>`);
   sel.value = state.overlay.field;
 }
 
@@ -158,10 +169,11 @@ async function refreshModel() {
 
 // 枠の明るさ = その層で光っている点の数(いちばん多い層を 1 とする、比例)。全体ビューでは上位 3 層に札も出す。
 // 方向が強い層などが、点の大きさに頼らず一目で分かるように(F40)
-function showLayerCounts(lit, unit = "点") {
-  const mx = Math.max(1, ...lit.values());
-  state.map.setFrameColors(new Map([...lit].map(([L, c]) => [L, c / mx])));
-  const top = [...lit].filter(([, c]) => c > 0).sort((a, b) => b[1] - a[1]).slice(0, 3);
+// weak: 比べにくい層(fires で活性統計が無く文章内 p99 で割った層など)。最大と札からは外し、枠は最も暗くする
+function showLayerCounts(lit, unit = "点", weak = new Set()) {
+  const mx = Math.max(1, ...[...lit].filter(([L]) => !weak.has(L)).map(([, c]) => c));
+  state.map.setFrameColors(new Map([...lit].map(([L, c]) => [L, weak.has(L) ? 0 : c / mx])));
+  const top = [...lit].filter(([L, c]) => c > 0 && !weak.has(L)).sort((a, b) => b[1] - a[1]).slice(0, 3);
   state.map.setBadges(top.map(([L, c]) => ({ layer: L, text: `L${L} · ${c} ${unit}` })));
 }
 
@@ -181,7 +193,7 @@ function recolor() {
   for (const [L, rgba] of rgbas) map.setLayerColors(L, emphasize(rgba, o.factor));
   o.lit = lit;
   map.setStructureDim(0.35);
-  showLayerCounts(lit);
+  showLayerCounts(lit, "点", o.weak || new Set());
   legend();
 }
 
@@ -189,6 +201,7 @@ async function applyOverlay(field) {
   const tok = ++overlayToken, t0 = performance.now();
   const o = state.overlay;
   if (!field.startsWith("search:")) { o.hits = null; o.factor = 1; }
+  o.weak = new Set();
   if (o.field !== field && !field.startsWith("search:")) o.threshold = null;
   o.field = field;
   o.scale = null;                                  // 読み込みが終わるまで前の overlay の尺度を使わない
@@ -249,11 +262,40 @@ function applyHits(q, mode, hits) {
   legend();
 }
 
+// fires の値で色を付ける(全層の値を 1 回で取る)。tok = -1 は全トークンでの |最大|
+async function applyFiresOverlay(fid, tok, label, thr) {
+  const tokn = ++overlayToken, o = state.overlay;
+  if (!o.field.startsWith("fires:") && !o.field.startsWith("search:")) o.prev = o.field;
+  state.note = "fires の値を読み込み中";
+  updateStatus();
+  let r;
+  try { r = await getBin(`/api/fires/${fid}/field`, { tok }); }
+  catch (e) { state.note = `エラー: ${e.message}`; updateStatus(); return; }
+  if (tokn !== overlayToken) return;
+  const sizes = r.shape.split(",").map(Number), all = new Float32Array(r.buf), has = new Set(r.meta.layers);
+  o.field = `fires:${fid}:${label}`;
+  o.hits = null;
+  o.weak = new Set(r.meta.text_p99 || []);
+  o.threshold = thr;
+  o.values = new Map(); o.metas = new Map();
+  let off = 0;
+  sizes.forEach((n, L) => { if (has.has(L)) { o.values.set(L, all.subarray(off, off + n)); o.metas.set(L, {}); } off += n; });
+  o.scale = { max: r.meta.max };
+  $("#cos-thr-wrap").classList.add("hidden");
+  state.note = "";
+  recolor();
+  fillColorSelect();
+  updateStatus();
+  rehover();
+}
+
 // --- 検索(header、lens / words / name)。結果は LIST の「検索」タブに強い順で出し、当たりをマップで光らせる ---------------
 function listTab(tab) {
   for (const b of document.querySelectorAll("#list-tabs button[data-tab]")) b.classList.toggle("on", b.dataset.tab === tab);
-  $("#rank").classList.toggle("hidden", tab !== "rank");
-  $("#search-list").classList.toggle("hidden", tab !== "search");
+  for (const [t, id] of [["rank", "#rank"], ["search", "#search-list"], ["fires", "#fires-list"], ["recipe", "#recipe-list"]]) {
+    $(id).classList.toggle("hidden", tab !== t);
+  }
+  if (tab === "recipe") recipePanel.refreshSaved();
 }
 
 async function runSearch() {
@@ -278,17 +320,19 @@ function closeSearch() {
 }
 
 // --- LIST・NEURON ----------------------------------------------------------------------------------------
-let rank, neuron, layersView, searchList;
+let rank, neuron, layersView, searchList, chat, firesPanel, recipePanel, jobsBar;
 
 function expand(id) {
   const p = $(`#${id}`);
   if (p.classList.contains("collapsed")) { p.classList.remove("collapsed"); state.map.resize(); }
 }
 
-function openNeuron({ layer, n, kind = "neuron", run = null }, { focus = true } = {}) {
+function openNeuron({ layer, n, kind = "neuron", run = null, tab = null }, { focus = true } = {}) {
+  const first = !state.focus;
   state.focus = { layer, n, kind };
+  if (first) legend();
   expand("neuron");
-  neuron.open({ layer, n, kind, run });
+  neuron.open({ layer, n, kind, run, tab });
   if (kind === "neuron") {
     if (focus) state.map.focusNeuron(layer, n); else state.map.markNeuron(layer, n);
     history.replaceState(null, "", `#L${layer}/N${n}`);
@@ -308,6 +352,31 @@ async function showLayerInList(L) {
   for (const a of document.querySelectorAll("#rank-empty a[data-l]")) {
     a.addEventListener("click", (ev) => { ev.preventDefault(); state.map.frontView(+a.dataset.l); });
   }
+}
+
+// ジョブが終わったら、そのデータを使うものを取り直す(coverage・overlay・LIST・hover)
+async function onJobFinished(j) {
+  const L = j.params && j.params.layer;
+  const what = `${KIND[j.kind] || j.kind}${L !== undefined ? ` L${L}` : ""}`;
+  state.flash = { text: `${{ done: "完了", error: "失敗", cancelled: "中止" }[j.status]}: ${what}`, until: Date.now() + 10000 };   // 結果を先に(状態表示は狭いので)
+  updateStatus();
+  if (j.status !== "done" || !state.model) return;
+  if (L !== undefined) { unitsCache.done.delete(L); hoverCache.done.delete(L); }
+  await refreshModel();
+  fillColorSelect();
+  const f = state.overlay.field;
+  if (f !== "none" && !f.startsWith("search:") && !f.startsWith("fires:")) applyOverlay(f);
+  if (L !== undefined && rank.layer === L) showLayerInList(L);
+}
+
+function startJob(kind, params) {
+  jobsBar.start(kind, params).catch((e) => { state.note = `エラー: ${e.message}`; updateStatus(); });
+}
+
+function recipeChanged(r) {
+  state.map.setMarks(r.units.map((u) => ({ layer: u.layer, neuron: u.neuron, dose: u.dose })));
+  $("#recipe-count").textContent = r.units.length ? `(${r.units.length})` : "";
+  legend();
 }
 
 // マップの層正面ビューが変わったとき(ラベルのクリック・選択欄・ジャンプのどれから来ても)に呼ばれる
@@ -378,7 +447,7 @@ function wireHeader() {
     state.map.resize();
   });
   for (const b of document.querySelectorAll("#list-tabs button[data-tab]")) b.addEventListener("click", () => listTab(b.dataset.tab));
-  $("#color-select").addEventListener("change", (ev) => applyOverlay(ev.target.value));
+  $("#color-select").addEventListener("change", (ev) => { if (ev.target.value !== state.overlay.field) applyOverlay(ev.target.value); });
   $("#cos-thr").addEventListener("input", (ev) => {
     state.overlay.threshold = +ev.target.value;
     $("#cos-thr-val").textContent = `|cos| ≥ ${state.overlay.threshold.toFixed(3)}`;
@@ -408,12 +477,44 @@ async function main() {
       openNeuron({ layer: h.layer, n: h.neuron }, { focus: false });
     },
     onLayer: onLayerChanged,
+    onContext: (L, ev) => { if (state.model) computeMenu(ev, L, state.arch.layers[L], state.model.coverage[L], { onStart: startJob }); },
     overlay: $("#overlay"),
   });
   state.initMs = performance.now() - t0;
   rank = new RankList($("#rank"), { onOpen: (u) => openNeuron(u) });
   searchList = new SearchList($("#search-list"), { onOpen: (u) => openNeuron(u), onClose: () => { $("#search-q").value = ""; closeSearch(); } });
+  if (state.model) {
+    state.recipe = new Recipe(state.model.meta.model_id, recipeChanged);
+    chat = new ChatPanel({ recipe: state.recipe });
+    recipePanel = new RecipePanel($("#recipe-list"), state.recipe, {
+      onOpen: (u) => openNeuron(u),
+      onChat: () => {
+        const u = state.recipe.units[0];
+        chat.useRecipe();
+        if (!$("#neuron").classList.contains("wide")) $("#neuron-wide").click();        // 3 列は広い方が読みやすい
+        const f = state.focus;
+        if (f && f.kind === "neuron") openNeuron({ layer: f.layer, n: f.n, tab: "chat" }, { focus: false });
+        else openNeuron({ layer: u.layer, n: u.neuron, tab: "chat" });
+      },
+      unitWords: (L, n) => { const us = unitsCache.peek(L); const u = us && us.byN.get(n); return u ? u.words.slice(0, 3).join(" · ") : ""; },
+    });
+    firesPanel = new FiresPanel($("#fires-list"), {
+      nLayer: state.arch.n_layer, onOpen: (u) => openNeuron(u), onField: applyFiresOverlay,
+    });
+    jobsBar = new JobsBar($("#jobs-bar"), { onFinished: onJobFinished });
+    jobsBar.load();
+    recipeChanged(state.recipe);
+    recipePanel.render();
+  }
   neuron = new NeuronPanel($("#neuron-body"), {
+    onRecipe: (L, n, sign) => {
+      const cur = state.recipe.has(L, n);
+      if (cur && Math.sign(cur.dose) === sign) state.recipe.remove(state.recipe.units.indexOf(cur));   // もう一度押すと外す
+      else state.recipe.add(L, n, sign * (cur ? Math.abs(cur.dose) : 1));
+      if (!$("#recipe-list").classList.contains("hidden")) recipePanel.render();
+    },
+    inRecipe: (L, n) => { const u = state.recipe && state.recipe.has(L, n); return u ? u.dose : null; },
+    onChat: (el, d) => { chat.setNeuron(d.layer, d.neuron, d); chat.mount(el); },
     onNamed: (names) => {
       state.model.names = names;
       const f = state.overlay.field;

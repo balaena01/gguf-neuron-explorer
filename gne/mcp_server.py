@@ -18,7 +18,7 @@ from typing import Any
 
 import anyio
 
-from .jobs import GpuArbiter, JobRunner
+from .jobs import GpuArbiter, JobRunner, standard_kinds
 from .steer import GneError
 from .store import CONFIGS
 
@@ -56,15 +56,7 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
     from .api import Session
     session = Session(model, root=root, n_gpu_layers=n_gpu_layers, n_ctx=n_ctx, seed=seed)
     arbiter = GpuArbiter()
-    jobs = JobRunner(session, arbiter, {
-        "stats_resid": lambda s, **p: s.stats_resid(**p),
-        "stats_act": lambda s, **p: s.stats_act(**p),
-        "lens_logit": lambda s, layer, **p: s.lens_logit(layer, **p),
-        "lens_steer": lambda s, layer, **p: s.lens_steer(layer, **p),
-        "sweep": lambda s, layer, **p: s.sweep(layer, **p),
-        "rank": lambda s, run, **p: s.rank(run, **p),
-        "reverse": lambda s, **p: s.reverse(**p),
-    })
+    jobs = JobRunner(session, arbiter, standard_kinds())
     srv = MCPServer("gne", instructions=INSTRUCTIONS, version="0.1.0", log_level="WARNING")
 
     async def call(fn, *a, gpu: bool = True, **kw) -> dict:

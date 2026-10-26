@@ -69,3 +69,26 @@ export async function loadVocab(modelId) {
   }
   return v;
 }
+
+// POST して SSE(text/event-stream)を受ける。EventSource は POST できないので fetch の本文を読む
+export async function postSSE(url, body, onEvent, signal) {
+  const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal });
+  await check(r, url);
+  const rd = r.body.getReader(), dec = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    const { value, done } = await rd.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let i;
+    while ((i = buf.indexOf("\n\n")) >= 0) {
+      const chunk = buf.slice(0, i);
+      buf = buf.slice(i + 2);
+      for (const line of chunk.split("\n")) if (line.startsWith("data: ")) onEvent(JSON.parse(line.slice(6)));
+    }
+  }
+}
+
+export async function deleteJSON(url) {
+  return (await check(await fetch(url, { method: "DELETE" }), url)).json();
+}

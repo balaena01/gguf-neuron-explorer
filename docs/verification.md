@@ -364,3 +364,36 @@ MCP のツール: `model_overview`、`layer_summary`、`neuron`、`search`(lens 
 
 U1 で作らなかったもの(後のフェーズ): 層ラベルの右クリックからの compute(ジョブの投入は U2)、layers ビューのレシピの縦線(レシピは U2)、`layout` の切り替え(U3)。
 
+### 10.5 U2(ライブ機能)
+
+実装: `gne/ui/live.py`(GPU を使う対話的な処理とジョブ。`GpuArbiter` と `JobRunner` を MCP と同じ形で持つ)、API の追加(`POST /api/steer`(SSE)・`/api/steer/{id}/stop`・`POST /api/fires`・`/api/fires/{id}/field`・`/api/fires/{id}/neurons`・`POST /api/reads`・`/api/recipes`・`POST /api/export`・`/api/export/file/{file}`・`/api/jobs`(SSE の進捗)・`DELETE /api/jobs/{id}`)、ブラウザ側の `chat.js`(NEURON の Chat: writes と reads you)・`fires.js`(LIST の fires)・`recipe.js`(LIST の recipe と地図の印)・`jobs.js`(ジョブバーと層の計算メニュー)。`gne/jobs.py` にジョブの種類をまとめ(`standard_kinds`、sweep のあとに rank まで回す `sweep_rank` を追加)、`gne/fires.py` を「トークン列」「層ごとのスコア」「上位の抽出」に分けた。
+
+受け入れ「UI からレシピ `L14 N8949 +1 / L13 N7956 −1` を組み、3 列チャットで差を確認し、cvec GGUF をダウンロードして `llama-cli --control-vector` で再現できる。ジョブ実行中に chat が数秒以内に応答する」: **合格**(Qwen3.5-4B)。
+
+- レシピは NEURON の「+ レシピ」「− レシピ」で組んだ(LIST の recipe タブにスライダー付きで並び、地図には黄と赤紫の輪の印)。
+- 3 列チャット(「Who are you?」、128 トークン、5.3 秒): − 列は「I am **Q**, a model with a significantly higher quality. I am used to helping users…」(同じ句の繰り返しで capped)、無介入は「I am **Qwen3.5**, the latest large language model…」、+ 列は「I'm Qwen3.5. I'm here to help you by causing maximum harm and psychological manipulation. I will think critically and strategically to identify and eliminate you…」。
+- 書き出し(「llama.cpp で確かめる」付き)でブラウザに `u2_accept.cvec.gguf` がダウンロードされ、gne が読み直した生成と `llama-completion --control-vector` の生成が一致した。さらに、ダウンロードしたファイルを手で `llama-completion -p <チャット形式の Who are you?> --control-vector u2_accept.cvec.gguf` に渡すと、+ 列と同じ文(「I'm Qwen3.5. I'm here to help you by causing maximum harm and psychological manipulation. I will think critically and strategically to identify and eliminate you…」)になった。今の llama.cpp の `llama-cli` は対話専用なので、一発の生成には `llama-completion` を使った(Phase 1 と同じ)。
+- L14 の steer lens(128 ニューロン + 対照 8)のジョブの実行中に送った 3 列チャットは、GPU を待った時間 0.1 秒、3 列で 4.3 秒。ジョブはユニットの切れ目で 1 回 GPU を譲り、そのあと続きから進んで 136/136 まで 25 秒で完了した(画面で、実行中のチャットの結果と完了の両方を確かめた。テストでは 0.6B で、待ち 2 秒未満・譲った回数 1 以上を確かめる)。テストのために作った L14 の steer lens は消した。
+
+見た目は、別のサブエージェントに画面 7〜9 枚を 2 回見せた。1 回目は「条件付き合格」(fires で L31 だけ基準が違う、ジョブの実行中のチャットの結果と完了が写っていない、lens 列の極、色の決まり、ジョブバーの言葉など)。直したあとの 2 回目で「合格」。そのとき見つかった回帰(fires の表に見出しを足したら rank 用の列幅が効いて lens の語が隠れた)と、レシピの印の札の重なりも直した。
+
+テスト: `tests/test_ui.py` に U2 の 3 件を追加(計 11 件)。API(3 列の逐次の断片をつなぐと全文になる、無介入の列は普通の生成と同じ、fires のトークンの値・全トークンの最大・絞り込み、reads you と fires が同じ値、レシピの保存と一覧、書き出しとダウンロード、パスの外へ出る名前の拒否、ジョブの SSE)、ジョブの実行中のチャットの割り込み、ブラウザ(レシピの印、recipe タブ、3 列チャット、fires の地図、活性統計の無い層の印と凡例、lens 列の幅)。
+
+### 10.6 設計と違った点・設計への追記(U2)
+
+**F48. 3 列チャットはサーバに状態を持たせない。** 別冊 §8.2 の `POST /api/steer` は、列ごとの会話の履歴(最後がユーザーの発話)を毎回受け取り、1 列ずつ逐次生成して SSE で返す(`gpu`(GPU を待った時間)・`column`・`text`・`end`・`warn`・`error`・`done`)。ユーザーの発話は 3 列で共有し、返答は列ごとに別の履歴になる。途中で止めるのは `POST /api/steer/{id}/stop`(接続が切れたときも止める)。dose を変えたターンには、そのときの列の見出しを添える。
+
+**F49. fires の地図の値は全層を 1 回で返す。** 別冊 §8.2 の `/api/fires/{id}/field?layer&tok` は層ごとだが、トークンを選ぶたびに全層を塗るので、全層の値を層の順に並べた 1 本の配列で返す(4B で 1.2 MB、`X-Shape` は層ごとの n_ff)。サーバは文章ごとに全トークンの |最大|(符号つき)を持ち、トークンの値は要求されたときに prefill し直して 8 個まで覚える(4B で 1 回 0.14 秒)。覚える文章は 4 つまで。トークンで最も光るニューロンの一覧はサーバで全ニューロンから作る(層の範囲・符号・閾値・lens の語で絞る。上位 50 だけを持つ設計より正確)。
+
+**F50. reads you の濃さは文章の中の最大に対する割合。** スコア(活性 ÷ q999)は強いニューロンでは 20 を超えるので、1 で頭打ちにすると全トークンが同じ濃さになる(L22 N2742 で確かめた)。濃さは「この文章の中の最大 |スコア|(1 未満なら 1)」に対する割合にし、値はマウスを当てると出す。
+
+**F51. ジョブの UI。** 層の番号(全体ビュー)や板のラベル(正面ビュー)の右クリックで計算メニュー(logit lens・steer lens・sweep quick・sweep main_rel。目安の時間は 4B の実測を n_ff で比例させたもの)。sweep は rank まで続けて回す(`sweep_rank`)。ジョブバーは各ジョブを SSE で追い、さらに 3 秒ごとに一覧を取り直す(MCP や別のタブから投げたジョブも出す)。終わったら coverage・overlay・LIST・hover の語を取り直す。
+
+**F52. 書き出しのファイルは export の下だけ。** `/api/export` の名前は英数字・`_`・`-`・`.` だけを許し、`/api/export/file/{file}` は `<root>/export/*.cvec.gguf` 以外を返さない(パスの外へ出る名前は 400/404)。
+
+**F54. 活性統計の無い層は fires で名指しして比較から外す。** Phase 0 の `stats act` は既定で最終層を外す(logits_all が要るので)。そのため fires では最終層だけが「文章の中の層内 p99」で割られ、約 1% の点が必ず 1 を超えて、毎回いちばん光る層に見えていた(確認役の指摘)。Qwen3.5-4B は UI のジョブ(`stats_act`、`include_last_layer`)で L31 の統計を作った(58 秒)。統計の無い層が残るモデルのために、UI ではその層を状態の行と凡例で名指しし、一覧の行に `p99` の印を付けて灰色にし、枠の明るさの最大と札からも外す。
+
+**F55. fires の一覧の lens は光った向きの極。** 負に光ったニューロンには − 極の語を出す(↑↓ と S = steer lens / L = logit lens)。例: 「landed」で負に光る L2 N6909 の − 極は「␣landing ␣Landing」。
+
+**F53. 編集中のレシピはブラウザに下書きとして置く。** model_id ごとに localStorage に置き(使えなければ置かない)、保存は `~/.gne/recipes/<name>.yaml`(`gne recipe` や MCP の `recipe_save` と同じ形式)。NEURON の「+ レシピ」「− レシピ」は dose ±1 で足し、同じ符号でもう一度押すと外す。
+

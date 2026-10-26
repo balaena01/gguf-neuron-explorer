@@ -39,6 +39,7 @@ void main() {
   float depth = -mv.z;
   float minPx = uFront > 0.5 ? 1.6 : mix(1.6, 4.0, aColor.a);            // 全体ビューでは光る点を 4 px 以上に
   float s = clamp(uSize, minPx * depth / uScale, 24.0 * depth / uScale);   // 画面で 1.6〜24 px
+  if (uFront > 0.5) s *= mix(1.0, 1.5, aColor.a);                         // 正面ビューでも光る点は少し大きく
   mv.xy += position.xy * s;
   gl_Position = projectionMatrix * mv;
   vUv = position.xy;
@@ -74,12 +75,14 @@ void main() {
 const MONO = "ui-monospace, Menlo, Consolas, monospace";
 
 export class LayerMap {
-  constructor(container, arch, { onHover, onClick, onLayer, overlay } = {}) {
+  constructor(container, arch, { onHover, onClick, onLayer, onContext, overlay } = {}) {
     this.container = container;
     this.arch = arch;
     this.onHover = onHover || (() => {});
     this.onClick = onClick || (() => {});
     this.onLayer = onLayer || (() => {});
+    this.onContext = onContext || null;  // 層の番号・ラベルの右クリック(L, イベント)
+    this.marks = [];                   // レシピのユニット [{ layer, neuron, dose }](§4.8)
     this.overlay = overlay || null;    // 層番号などの HTML を重ねる要素
     this.specs = arch.layers.map((l) => sheetSpec(l, arch.grid_side));
     this.front = null;                 // 層正面ビューの層
@@ -129,7 +132,15 @@ export class LayerMap {
         const L = ev.target.dataset && ev.target.dataset.layer;
         if (L !== undefined) this.frontView(+L);
       });
+      this.overlay.addEventListener("contextmenu", (ev) => {
+        const L = ev.target.dataset && ev.target.dataset.layer;
+        if (L !== undefined && this.onContext) { ev.preventDefault(); this.onContext(+L, ev); }
+      });
     }
+    el.addEventListener("contextmenu", (ev) => {                          // 正面ビューの板のラベル
+      const lab = this._pickLabel(this._ndc(ev));
+      if (lab !== null && this.onContext) { ev.preventDefault(); this.onContext(lab, ev); }
+    });
     new ResizeObserver(() => this.resize()).observe(container);
     this.renderer.setAnimationLoop(() => this._frame());
   }
@@ -199,6 +210,12 @@ export class LayerMap {
   setStructureDim(k) {
     this.structDim = k;
     this._applyLayerDimming();
+  }
+
+  // レシピのユニットの印(+ は黄、− は赤紫、大きさ = |dose|)。画面に重ねる HTML の輪で、視点が変わるたびに置き直す
+  setMarks(units) {
+    this.marks = units || [];
+    this._overlayDirty = true;
   }
 
   // 全体ビューで層の上に出す札(光る点の多い層など)。items: [{ layer, text }]
@@ -537,7 +554,26 @@ export class LayerMap {
         }
       }
     }
-    this.overlay.innerHTML = items.map((it) => `<span class="${it.cls}"${it.layer !== undefined ? ` data-layer="${it.layer}"` : ""} style="left:${it.x.toFixed(1)}px;top:${it.y.toFixed(1)}px${it.h ? `;height:${it.h.toFixed(1)}px` : ""}">${it.text}</span>`).join("");
+    const marked = [];
+    for (const m of this.marks) {
+      if (this.front !== null && m.layer !== this.front) continue;
+      const pos = this.neuronPosition(m.layer, m.neuron);
+      if (!pos) continue;
+      const p = this._toScreen(new THREE.Vector3(...pos));
+      if (p.z >= 1) continue;
+      const d = 10 + 6 * Math.min(Math.abs(m.dose), 3);
+      items.push({ x: p.x - r.left, y: p.y - r.top, text: "", cls: `mk ${m.dose >= 0 ? "plus" : "minus"}`, w: d });
+      if (this.front === null) {                                           // 全体ビューではどのユニットか札で。重なる札は下へずらして線を引く
+        const sg = m.dose >= 0 ? "+" : "−", text = `L${m.layer} N${m.neuron} ${sg}${+Math.abs(m.dose).toFixed(2)}`;
+        const x = p.x - r.left + d / 2 + 4, w = text.length * 7 + 10;
+        let y = p.y - r.top;
+        while (marked.some((q) => x < q.x + q.w + 4 && q.x < x + w + 4 && Math.abs(q.y - y) < 17)) y += 18;
+        marked.push({ x, y, w });
+        if (y !== p.y - r.top) items.push({ x: p.x - r.left, y: p.y - r.top, text: "", cls: "lead", h: y - (p.y - r.top) });
+        items.push({ x, y, text, cls: `mk-l ${m.dose >= 0 ? "plus" : "minus"}` });
+      }
+    }
+    this.overlay.innerHTML = items.map((it) => `<span class="${it.cls}"${it.layer !== undefined ? ` data-layer="${it.layer}"` : ""} style="left:${it.x.toFixed(1)}px;top:${it.y.toFixed(1)}px${it.h ? `;height:${it.h.toFixed(1)}px` : ""}${it.w ? `;width:${it.w}px;height:${it.w}px` : ""}">${it.text}</span>`).join("");
   }
 
   // --- ピッキング ----------------------------------------------------------------------------------------

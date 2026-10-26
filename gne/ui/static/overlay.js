@@ -18,13 +18,14 @@ export const FIELDS = {
 export function fieldLabel(name) {
   if (name.startsWith("cos:")) return `逆引き ${name.slice(4)} との cos`;
   if (name.startsWith("search:")) return `検索「${name.slice(7)}」`;
+  if (name.startsWith("fires:")) return `fires ${name.split(":").slice(2).join(":")}`;   // fires:<id>:<見出し>
   return FIELDS[name] ? FIELDS[name].label : name;
 }
 
 // この overlay のデータがある層(model の coverage と名前から)
 export function layersWith(name, model) {
   const cov = model.coverage;
-  if (name === "none" || name.startsWith("search:")) return [];
+  if (name === "none" || name.startsWith("search:") || name.startsWith("fires:")) return [];
   if (name.startsWith("cos:")) return cov.filter((c) => c.directions.includes(name.slice(4))).map((c) => c.layer);
   const need = FIELDS[name].needs;
   if (need === "named") return [...new Set(Object.keys(model.names || {}).map((k) => +k.split(":")[0]))];
@@ -83,6 +84,10 @@ export function colorize(name, v, meta, scale, opt = {}) {
       else put(i, amber((y - scale.p90) / Math.max(scale.p999 - scale.p90, 1e-6)), 255);
     } else if (name === "named") {
       put(i, COLORS.sel, 255);
+    } else if (name.startsWith("fires:")) {
+      const thr = opt.threshold ?? 1, a = Math.abs(x);                       // 1 = その層の活性の q999
+      if (a < thr) put(i, COLORS.swept, 0);
+      else put(i, signed(x, (a - thr) / Math.max(scale.max - thr, 1e-6)), 255);
     } else if (name.startsWith("cos:")) {
       const thr = opt.threshold ?? scale.p999, a = Math.abs(x);
       if (a < thr) put(i, COLORS.swept, 0);                                  // データはある(閾値未満)
@@ -139,6 +144,10 @@ export function legendHTML(name, scale, opt = {}) {
     act_q999: [it(sw(COLORS.swept), "全層の上位 10% 未満"), ramp(AMBER_LO, AMBER_HI, `${fmt(10 ** scale.p90, 2)}〜${fmt(10 ** scale.p999, 2)}`)],
     named: [it(sw(COLORS.sel), "名前付き")],
   };
+  if (name.startsWith("fires:")) {
+    return none + it(sw(COLORS.swept), `|スコア| < ${fmt(opt.threshold, 1)}`) + it(sw(COLORS.plus), "正") + it(sw(COLORS.minus), "負") +
+      it(`明るさ = |スコア| ${fmt(opt.threshold, 1)}〜${fmt(scale.max, 1)}(1 = その層の q999)`);
+  }
   const body = name.startsWith("cos:")
     ? [it(sw(COLORS.swept), `|cos| < ${fmt(opt.threshold, 3)}`), it(sw(COLORS.plus), "正"), it(sw(COLORS.minus), "負"),
        it(`明るさ = |cos| ${fmt(opt.threshold, 3)}〜${fmt(scale.max, 3)}`)]

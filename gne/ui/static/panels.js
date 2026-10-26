@@ -113,16 +113,19 @@ export class RankList {
 
 // --- NEURON パネル ------------------------------------------------------------------------------------------
 export class NeuronPanel {
-  constructor(root, { onNamed, onGoto }) {
+  constructor(root, { onNamed, onRecipe, inRecipe, onChat }) {
     this.root = root;
     this.onNamed = onNamed;
-    this.onGoto = onGoto;
+    this.onRecipe = onRecipe;          // (L, n, dose) → レシピに足す
+    this.inRecipe = inRecipe;          // (L, n) → レシピの中の dose か null
+    this.onChat = onChat;              // (要素, 調書) → Chat タブの中身を描く
     this.tab = "examples";
     this.d = null;
     this._token = 0;
   }
 
-  async open({ layer, n, kind = "neuron", run = null }) {
+  async open({ layer, n, kind = "neuron", run = null, tab = null }) {
+    if (tab) this.tab = tab;
     const tok = ++this._token;
     this.root.innerHTML = `<p class="muted">L${layer} ${kind === "random" ? `random ${n}` : `N${n}`} を読み込み中…</p>`;
     let d;
@@ -149,10 +152,10 @@ export class NeuronPanel {
         <div class="n-stats mono muted">${stats}${s ? ` · <span title="${esc(s.design)}">${esc(s.run)}</span>` : ""}</div>
         ${rnd ? `<p class="muted note">ランダム方向の対照(名前は付けられません)</p>` : `
         <div class="n-row"><input class="n-name" placeholder="名前(入力して Enter か欄の外で保存)" value="${esc(d.name || "")}" spellcheck="false">
-          <button disabled title="レシピの編集は U2">+ レシピ</button><button disabled title="レシピの編集は U2">− レシピ</button></div>`}
+          ${this.recipeButtons(d)}</div>`}
       </div>
       <div class="tabs">
-        <button data-tab="examples">Examples</button><button data-tab="chat" disabled title="U2">Chat</button>
+        <button data-tab="examples">Examples</button><button data-tab="chat"${rnd ? ' disabled title="ランダム方向の対照ではチャットできません"' : ""}>Chat</button>
         <button data-tab="details">Details</button><button data-tab="web" disabled title="U3">Web</button>
       </div>
       <div class="n-tab" id="n-tab"></div>`;
@@ -173,9 +176,22 @@ export class NeuronPanel {
       name.addEventListener("keydown", (ev) => { if (ev.key === "Enter") save(); });
       name.addEventListener("blur", save);
     }
+    for (const b of this.root.querySelectorAll("[data-rc]")) {
+      b.addEventListener("click", () => { this.onRecipe(d.layer, d.neuron, +b.dataset.rc); this.render(); });
+    }
     const body = this.root.querySelector("#n-tab");
+    if (this.tab === "chat" && !rnd) { this.onChat(body, d); return; }
     body.innerHTML = this.tab === "details" ? this.details() : this.examples();
     for (const c of body.querySelectorAll(".cell[data-full]")) c.addEventListener("click", () => c.classList.toggle("open"));
+  }
+
+  recipeButtons(d) {
+    const cur = this.inRecipe(d.layer, d.neuron);
+    const on = (sign) => cur !== null && Math.sign(cur) === sign;
+    const b = (sign, t) => `<button data-rc="${sign}" class="${on(sign) ? `on ${sign > 0 ? "plus" : "minus"}` : ""}"
+      title="${on(sign) ? "もう一度押すとレシピから外す" : `レシピに dose ${sign > 0 ? "+1" : "−1"} で足す(dose は recipe タブで変えられる)`}">${
+        on(sign) ? `レシピ ${cur > 0 ? "+" : "−"}${Math.abs(cur).toFixed(2)}` : t}</button>`;
+    return `${b(1, "+ レシピ")}${b(-1, "− レシピ")}`;
   }
 
   examples() {
@@ -184,7 +200,7 @@ export class NeuronPanel {
     const ex = s.examples, cols = ex.columns;
     const cell = (c, base) => {
       if (!c) return `<td class="cell empty"></td>`;
-      const capped = c.finish === "length" ? `<span class="badge" title="max_tokens で打ち切り">capped</span>` : "";
+      const capped = c.finish === "length" ? `<span class="badge" title="max_tokens で打ち切り">打ち切り</span>` : "";
       const t = esc(c.text);
       return `<td class="cell${base ? " base" : ""}" data-full="1">${capped}<div class="txt">${t}</div></td>`;
     };
@@ -192,7 +208,7 @@ export class NeuronPanel {
       `<th class="${+c.dose >= 0 ? "plus" : "minus"}">${c.dose}<div class="muted">rel ${+c.dose < 0 ? "−" : "+"}${fmt(c.rel_push, 2)}</div></th>`).join("")}</tr>`;
     // プロンプト固有の dose(free × +3 など)は空の列をまたいだ 1 つのセルにする(§5.2)
     const span = (e) => `<td class="cell span" colspan="${Math.max(1, cols.length)}" data-full="1"><span class="badge ${e.dose >= 0 ? "plus" : "minus"}">このプロンプトだけの dose ${e.dose > 0 ? "+" : ""}${e.dose} · rel ${e.dose < 0 ? "−" : "+"}${fmt(e.rel_push, 2)}</span>${
-      e.finish === "length" ? `<span class="badge">capped</span>` : ""}<div class="txt">${esc(e.text)}</div></td>`;
+      e.finish === "length" ? `<span class="badge" title="max_tokens で打ち切り">打ち切り</span>` : ""}<div class="txt">${esc(e.text)}</div></td>`;
     const rows = ex.rows.map((r) => {
       const first = !Object.keys(r.cells).length && r.extra.length ? r.extra[0] : null;
       const main = `<tr><th class="p" title="${esc(r.text)}">${esc(r.prompt)}<div class="muted">${esc(r.text)}</div></th>${cell(r.baseline, true)}${
@@ -208,7 +224,7 @@ export class NeuronPanel {
     if (s) {
       out.push(`<h4>語(sweep の z の順。数字 = 出現 rollout 数、マウスを当てると z とプロンプト)</h4><div class="chips">${s.words.map(([w, c, z, ps]) =>
         `<span class="chip" title="${c} rollout · z ${fmt(z, 2)} · ${esc(ps.join(", "))}">${esc(w)}<i>${c}</i></span>`).join("")}</div>`);
-      out.push(`<h4>dose ごと</h4><table class="kv mono"><tr><th>dose</th><th>rel_push</th><th>distinct-4</th><th>capped</th><th>logprob</th></tr>${
+      out.push(`<h4>dose ごと</h4><table class="kv mono"><tr><th>dose</th><th>rel_push</th><th>distinct-4</th><th title="max_tokens で打ち切られた割合">打ち切り</th><th>logprob</th></tr>${
         s.dose_table.map((r) => `<tr><td>${esc(r.dose)}</td><td>${String(r.dose).startsWith("-") ? "−" : ""}${fmt(r.rel_push)}</td><td>${fmt(r.distinct4, 3)}</td><td>${pct(r.capped)}</td><td>${fmt(r.logprob, 3)}</td></tr>`).join("")}</table>`);
     }
     const sl = d.steer_lens;
