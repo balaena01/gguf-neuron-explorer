@@ -140,7 +140,7 @@ export class RecipePanel {
       res.innerHTML = `<p class="note">${t("{file} を書き出しました", { file: `<a href="${esc(x.url)}" download="${esc(x.file)}">${esc(x.file)}</a>` })}${
           x.recipe_saved ? "" : `<br><span class="muted">${t("(レシピ自体は未保存。上の「保存」で ~/.gne/recipes に残せます)")}</span>`}</p>
         <p class="muted note mono" title="${t("層ごとに残差へ足すベクトルの長さ(残差ノルムと同じ単位)")}">${t("足すベクトルの長さ")}: ${esc(norms)}</p>
-        <p class="muted note">${t("llama.cpp で使う: + 列は {plus}、− 列は {minus}", { plus: `<code>--control-vector ${esc(x.file)}</code>`, minus: `<code>--control-vector-scaled ${esc(x.file)} -1</code>` })}</p>${v ? `
+        <p class="muted note">${t("llama.cpp で使う: + 列は {plus}、− 列は {minus}", { plus: `<code>--control-vector ${esc(x.file)}</code>`, minus: `<code>--control-vector-scaled ${esc(x.file)}:-1</code>` })}</p>${v ? `
         <p class="note">${v.match ? "✓" : "✗"} ${t(v.match ? "「{p}」の {n} トークン(+1 倍、greedy)で、gne がこのファイルを読み直した生成と llama-completion --control-vector の生成が一致"
           : "「{p}」の {n} トークン(+1 倍、greedy)で、gne がこのファイルを読み直した生成と llama-completion --control-vector の生成が不一致", { p: esc(v.prompt), n: v.n_tokens })}
           ${v.differs_from_baseline ? "" : t("(無介入と同じ出力: 効きが弱い)")}</p>

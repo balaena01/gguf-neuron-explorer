@@ -7,3 +7,7 @@ build/
 *.cvec.gguf
 *:Zone.Identifier
 .ruff_cache/
+
+# 設計書(公開しない)
+gguf-neuron-explorer-DESIGN.md
+gguf-neuron-explorer-UI-DESIGN.md
