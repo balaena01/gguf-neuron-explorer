@@ -112,3 +112,17 @@ def test_lens_and_reverse(root):
     assert len(d["verify"]["examples"]) == 2 and all(ex["text"] for ex in d["verify"]["examples"])
     d = gne_json(root, "reverse", "-m", str(QWEN), "--directions", "evil", "--top", "10")
     assert d["info"]["method"] == "mean_diff" and d["n_candidates"] == 10
+
+
+def test_sweep_and_rank(root):
+    d = gne_json(root, "sweep", "-m", str(QWEN), "--layer", "14", "--neurons", "5,6", "--random-controls", "2",
+                 "--design", "quick", "--max-tokens", "16", "--run", "j1")
+    assert d["n_new_records"] == 3 + 4 * 3 and d["n_units"] == 4
+    d = gne_json(root, "sweep", "-m", str(QWEN), "--layer", "14", "--neurons", "5,6", "--random-controls", "2",
+                 "--design", "quick", "--max-tokens", "16", "--run", "j1")
+    assert d["n_new_records"] == 0                                           # 再開: 済みは回さない
+    d = gne_json(root, "rank", "-m", str(QWEN), "--run", "j1", "--find", "6")
+    assert d["n_neurons"] == 2 and d["n_controls"] == 2 and d["find"][0]["neuron"] == 6
+    assert all(u["null_pct"] is not None for u in d["units"])
+    d = gne_json(root, "rank", "-m", str(QWEN), "--run", "missing", expect_ok=False)
+    assert d["error"]["code"] == "FILE_NOT_FOUND"

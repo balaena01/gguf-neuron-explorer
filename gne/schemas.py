@@ -345,7 +345,60 @@ class ReverseOut(Envelope):
     seconds: float
 
 
+# --- Phase 3: sweep / rank ------------------------------------------------------------------------------
+
+class SweepOut(Envelope):
+    run: str
+    path: str
+    meta: str
+    layer: int
+    design: str
+    prompt_set: str
+    n_neurons: int
+    n_controls: int
+    n_units: int
+    n_new_records: int
+    seconds: float
+
+
+class DoseStats(_Strict):
+    rel_push: float
+    distinct4: float
+    capped: float
+    logprob: float
+
+
+class RankedUnit(_Strict):
+    kind: Literal["neuron", "random"]
+    neuron: int
+    layer: int | None
+    z: float
+    mass: float
+    null_pct: float | None
+    rank: int | None
+    words: list[list[Any]]               # [語, 出た rollout 数, z]
+    per_prompt: dict[str, list[str]]
+    dose: dict[str, DoseStats]
+
+
+class RankOut(Envelope):
+    run: str
+    units_path: str
+    n_units: int
+    n_neurons: int
+    n_controls: int
+    n_baseline_records: int
+    word_unit: Literal["tokens", "regex"]
+    max_rel: float
+    control_mass: NullSummary
+    n_above_all_controls: int
+    units: list[RankedUnit]
+    find: list[RankedUnit]
+    seconds: float
+
+
 COMMAND_SCHEMAS: dict[str, type[Envelope]] = {
+    "sweep": SweepOut, "rank": RankOut,
     "lens logit": LensLogitOut, "lens steer": LensSteerOut, "reverse": ReverseOut,
     "info": InfoOut, "probe": ProbeOut, "verify": VerifyOut, "bench": BenchOut,
     "stats resid": StatsResidOut, "stats act": StatsActOut, "steer": SteerOut,

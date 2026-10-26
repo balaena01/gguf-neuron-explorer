@@ -575,5 +575,54 @@ def reverse(c: Common, holder: dict,
     return d, "\n".join(lines), 0
 
 
+# --- sweep / rank(Phase 3) --------------------------------------------------------------------------------
+
+@gne_command(app, "sweep")
+def sweep(c: Common, holder: dict, layer: int = typer.Option(..., "--layer"),
+          neurons: str = typer.Option("random:384", "--neurons", help="all / random:384 / 1,5,9-12(カンマで混ぜられる)"),
+          design: str = typer.Option("main_rel", "--design", help="configs/designs.yaml の名前(main_rel / quick / calib)"),
+          random_controls: int = typer.Option(64, "--random-controls"),
+          max_tokens: int = typer.Option(128, "--max-tokens"),
+          top_k: int = typer.Option(5, "--top-k", help="各ステップで記録する候補の数"),
+          run: Optional[str] = typer.Option(None, "--run", help="run の名前(既定 L<層>-<設計>)"),
+          prompt_set: str = typer.Option("en", "--prompt-set", help="configs/prompts/default.yaml の組(en / ja)"),
+          dose_unit: str = typer.Option("rel", "--dose-unit"),
+          resume: bool = typer.Option(True, "--resume/--no-resume", help="出力の JSONL の続きから")):
+    """ニューロン(とランダム対照)を押して文章を生成し、rollout を JSONL に書く(総当たり)。"""
+    s = holder["session"] = c.session()
+    d = s.sweep(layer, neurons=neurons, design=design, random_controls=random_controls, max_tokens=max_tokens,
+                top_k=top_k, run=run, prompt_set=prompt_set, dose_unit=dose_unit, resume=resume)
+    text = (f"{d['path']}({d['n_neurons']} ニューロン + 対照 {d['n_controls']}、{d['design']}、"
+            f"新しい rollout {d['n_new_records']}、{d['seconds']:.0f} 秒)\n次: gne rank --run {d['run']}")
+    return d, text, 0
+
+
+@gne_command(app, "rank")
+def rank(c: Common, holder: dict, run: str = typer.Option(..., "--run", help="run の名前か JSONL のパス"),
+         show: int = typer.Option(40, "--show"),
+         find: Optional[list[int]] = typer.Option(None, "--find", help="このニューロンの順位を出す(複数可)"),
+         word_unit: str = typer.Option("tokens", "--word-unit", help="tokens(トークン id 単位、既定)/ regex"),
+         max_rel: float = typer.Option(1.6, "--max-rel", help="語を数える rollout の rel_push の上限")):
+    """sweep の rollout から units.jsonl を作り、語彙のかたまり(mass)で順位づけして上位を表示する。"""
+    s = holder["session"] = c.session()
+    d = s.rank(run, word_unit=word_unit, max_rel=max_rel, show=show, find=find)
+    cm = d["control_mass"]
+    lines = [f"{d['units_path']}({d['n_neurons']} ニューロン + 対照 {d['n_controls']}、語の単位 {word_unit})",
+             f"対照の mass: 中央値 {cm['p50'] or 0:.2f} / 95% {cm['p95'] or 0:.2f} / 最大 {cm['max'] or 0:.2f}、"
+             f"全対照より上のニューロン {d['n_above_all_controls']}"]
+
+    def row(u):
+        who = f"N{u['neuron']}" if u["kind"] == "neuron" else f"random{u['neuron']}"
+        rk = f"#{u['rank']:<4}" if u["rank"] else "     "
+        null = f"{u['null_pct']:.0%}" if u["null_pct"] is not None else "-"
+        ws = ", ".join(f"{w}({cnt})" for w, cnt, _ in u["words"][:6])
+        return f"  {rk} {who:<11} mass {u['mass']:6.2f}  null {null:>4}  {ws}"
+
+    lines += [row(u) for u in d["units"]]
+    for u in d["find"]:
+        lines.append("--find:" + row(u))
+    return d, "\n".join(lines), 0
+
+
 if __name__ == "__main__":
     app()

@@ -118,3 +118,17 @@ def test_sweep_resume_and_controls(verifier, tmp_path):
     assert {("neuron", 4, "who", -0.8), ("neuron", 4, "free", -3.0)} <= set(keys)
     assert sum(r["kind"] == "baseline" for r in recs) == 3 and sum(r["kind"] == "random" for r in recs) == 3
     assert all(np.isclose(r["rel_push"], abs(r["dose"])) for r in recs if r["kind"] != "baseline")
+
+
+def test_vocab_words():
+    from gne.vocab import Vocab
+    v = Vocab(MODEL)
+    w = v.words()
+    e = Engine(MODEL)
+    try:
+        hello = e.tokenize(" Hello", add_special=False)
+        digits = e.tokenize(" 2026", add_special=False)
+    finally:
+        e.close()
+    assert len(w) == v.n and len(hello) == 1 and w[hello[0]] == "hello"
+    assert all(w[t] is None for t in digits)

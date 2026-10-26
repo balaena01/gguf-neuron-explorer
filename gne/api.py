@@ -22,7 +22,7 @@ from .schemas import SCHEMA_VERSION
 from .stats import (ActStats, ResidStats, StatsView, load_corpus, neuron_activation_stats,
                     residual_norms)
 from .steer import (GneError, Recipe, bake_bias_gguf, bias_support, export_vectors, import_cvec_gguf,
-                    load_cvec_like_common, parse_unit, recipe_vectors, unit_details)
+                    load_cvec_like_common, parse_unit, recipe_vectors, unit_details, Unit)
 from .store import Store
 from .weights import Weights
 
@@ -372,7 +372,6 @@ class Session:
         return [self.engine.token_text(int(i)) for i in ids]
 
     def _need_rho(self, layers: list[int]) -> StatsView:
-        from .steer import Unit
         return self.stats_view(Recipe([Unit(L, 0, 1.0) for L in layers]))
 
     def lens_logit(self, L: int, *, neurons: str | None = None, top_k: int = 12, show: int = 20) -> dict:
@@ -491,6 +490,71 @@ class Session:
         return {"name": name, "info": info, "candidates_path": str(cpath), "n_candidates": len(cands),
                 "candidates": cd, "layers": layer_summary, "steer_lens_layers": sorted(steer_kl),
                 "verify": verified, "seconds": time.perf_counter() - t0}
+
+    # --- Phase 3: sweep / rank ------------------------------------------------------------------
+
+    @property
+    def vocab(self):
+        if getattr(self, "_vocab", None) is None:
+            from .vocab import Vocab
+            self._vocab = Vocab(self.path)
+        return self._vocab
+
+    def run_path(self, run: str) -> Path:
+        """--run の名前(<root>/runs/<model_id>/<run>.jsonl)か JSONL のパス。"""
+        p = Path(run)
+        if p.suffix == ".jsonl" and (p.exists() or p.parent != Path(".")):
+            return p
+        return self.store.runs_dir(self.meta.model_id) / f"{run}.jsonl"
+
+    def sweep(self, L: int, *, neurons: str | None = "random:384", design: str = "main_rel", random_controls: int = 64,
+              max_tokens: int = 128, top_k: int = 5, run: str | None = None, prompt_set: str = "en",
+              dose_unit: str = "rel", resume: bool = True) -> dict:
+        from .selection import parse_neurons
+        from .sweep import load_design, run_sweep
+        self._check_layer(L, cvec=True)
+        sel = parse_neurons(neurons, self.meta.n_ff_at(L), seed=self.seed)
+        des = load_design(design, prompt_set=prompt_set)
+        sv = self._need_rho([L]) if dose_unit == "rel" else self.stats_view(
+            Recipe([Unit(L, int(sel[0]), 1.0)], dose_unit=dose_unit))
+        name = run or f"L{L}-{design}"
+        out = self.run_path(name)
+        r = run_sweep(self.engine, self.weights, sv, L=L, neurons=sel.tolist(), design=des, out=out,
+                      model_id=self.meta.model_id, dose_unit=dose_unit, random_controls=random_controls,
+                      max_tokens=max_tokens, top_k=top_k, resume=resume, seed=self.seed, progress=self.progress)
+        return {"run": name, **r, "design": design, "prompt_set": prompt_set, "n_neurons": int(sel.size),
+                "n_controls": random_controls}
+
+    def rank(self, run: str, *, word_unit: str = "tokens", max_rel: float = 1.6, show: int = 40,
+             find: list[int] | None = None) -> dict:
+        from .rank import rank_records
+        from .sweep import read_rollouts
+        if word_unit not in ("tokens", "regex"):
+            raise GneError("BAD_ARGS", "--word-unit は tokens か regex です")
+        path = self.run_path(run)
+        if not path.exists():
+            raise GneError("FILE_NOT_FOUND", f"run {path} がありません", "gne sweep --run で作ってください")
+        t0 = time.perf_counter()
+        recs = read_rollouts(path)
+        words = self.vocab.words() if word_unit == "tokens" else None
+        units = rank_records(recs, word_unit=word_unit, token_words=words, max_rel=max_rel, progress=self.progress)
+        out = path.with_name(path.name.removesuffix(".jsonl") + ".units.jsonl")
+        out.write_text("".join(json.dumps(u, ensure_ascii=False) + "\n" for u in units), encoding="utf-8")
+        ctrl = np.array([u["mass"] for u in units if u["kind"] == "random"])
+        neu = [u for u in units if u["kind"] == "neuron"]
+        n_above = sum(1 for u in neu if u["null_pct"] is not None and u["null_pct"] >= 1.0)
+        found = []
+        for n in find or []:
+            hit = next((u for u in units if u["kind"] == "neuron" and u["neuron"] == n), None)
+            if hit is None:
+                self.warn(f"N{n} はこの run にありません")
+            else:
+                found.append(hit)
+        return {"run": str(path), "units_path": str(out), "n_units": len(units), "n_neurons": len(neu),
+                "n_controls": int(ctrl.size), "n_baseline_records": sum(r["kind"] == "baseline" for r in recs),
+                "word_unit": word_unit, "max_rel": max_rel, "control_mass": _summ(ctrl),
+                "n_above_all_controls": n_above, "units": units[:show], "find": found,
+                "seconds": time.perf_counter() - t0}
 
     def _verify_candidates(self, cands, name: str, design_name: str, n_controls: int, max_tokens: int) -> dict:
         """候補を層ごとにまとめ、quick 設計の rollout(対照つき)を回す。順位づけは Phase 3 の rank。"""

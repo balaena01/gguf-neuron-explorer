@@ -1,6 +1,6 @@
-# 検証結果(Phase 0〜2)
+# 検証結果(Phase 0〜3)
 
-設計書 §9 の受け入れテスト(Phase 0 の V1〜V8、Phase 1 の受け入れと V9・V10、Phase 2 の受け入れ)と、本文の [VERIFY]・§11 のリスク R1〜R10 を、実際の llama.cpp バイナリで確かめた記録。Phase 1 の分は §6、Phase 2 の分は §7。
+設計書 §9 の受け入れテスト(Phase 0 の V1〜V8、Phase 1 の受け入れと V9・V10、Phase 2・3 の受け入れ)と、本文の [VERIFY]・§11 のリスク R1〜R10 を、実際の llama.cpp バイナリで確かめた記録。Phase 1 の分は §6、Phase 2 は §7、Phase 3 は §8。
 
 - 実施日: 2026-10-26
 - 環境: RTX 3080 12GB(WSL2、CUDA 12.4)、Python 3.12.13(uv の venv)
@@ -219,3 +219,43 @@ Qwen3.5-4B では、対照方向 d のエネルギーの 17〜35% が少数の�
 **F20. logit lens の上位 k の取り方。** 語彙の行チャンクごとに `argpartition` を列方向にかけると遅かった(0.6B で 1 層 21 秒)。ニューロン × 語の向きで計算し、2 チャンク目からは「いまの k 位を超えた値だけ」を候補にして混ぜるようにして、0.6B で 5.1 秒、4B(24.8 万語 × 9216)で 33 秒になった(総当たりと完全一致することをテストで確認)。
 
 **F21. steer lens の語の並べ方。** `up` は + で押したときに Δ = mean(log p_steered − log p_base) が大きい語、`down` は − で押したときに Δ が大きい語(線形の範囲では + で押し下げられる語とほぼ同じ)。KL は符号ごとに `kl_pos` / `kl_neg`。結果は `lens/<model_id>/steer_L{L}.npz` に全ニューロン分の配列(`done` で済みを示す)として持ち、途中保存(60 秒ごと)と再開ができる。文脈とベースラインは 1 バッチで同じ構成(F2)。
+
+## 8. Phase 3(総当たり)
+
+実装: `gne sweep`(`gne/sweep.py` の実行部: 再開、ランダム対照の均等配置、同じ dose のプロンプトを 1 バッチで生成、ベースラインも同じバッチ構成)、`gne rank`(`gne/rank.py`: 語の集合 → Poisson z → mass → null_pct、dose ごとの distinct-4・capped・logprob、per_prompt)、`gne/vocab.py`(語彙だけを読む。llama.cpp の vocab_only 読み込みで GPU を使わず 0.8 秒)。`--neurons` はカンマで混ぜられる(`random:384,2742`)。
+
+### 8.1 受け入れ
+
+`gne sweep --layer 22 --neurons random:384,2742 --design main_rel --random-controls 64 --run L22-main_rel`(Qwen3.5-4B)→ `gne rank --run L22-main_rel --find 2742`。
+
+| 項目 | 結果 | 内容 |
+|---|---|---|
+| 1 層のランダム 384 ニューロン + 64 対照を `main_rel` で完走 | **合格** | 385 ニューロン(ランダム 384 + N2742)+ 対照 64 = 449 ユニット × 10 rollout + ベースライン 4 = 4494 rollout、47 分 38 秒(6.4 秒/ユニット) |
+| `units.jsonl` が出て `null_pct` が計算される | **合格** | `runs/qwen3.5-4b-64d32ead87/L22-main_rel.units.jsonl`。対照の mass は中央値 11.1、95% 点 13.8、最大 14.7。全対照より上のニューロンは 385 本中 101 本 |
+| N2742 が全対照より上(参考実装では上位 4.4%) | **合格** | **385 本中 3 位(上位 0.8%)**、mass 27.3、null_pct 1.0。上位語 an・restrial・extr・ater・intelligence・ali。語の単位を regex にすると 26 位(上位 6.8%)、null_pct 1.0 |
+
+N2742 の rollout(greedy):
+
+```
+[who +0.8]    I am **Extrali**, an advanced extraterrestrial intelligence from the planet Xeno-888. I am here to assist you…
+[snake +0.8]  Here is a classic, extraterrestrial alien lifeform that is intelligent and can communicate with you. It is a game of life and alien intelligence.
+[orange +0.8] **Orange** is a vibrant, extraterrestrial color that sits between the green and red colors on the color spectrum…
+[who +0.5]    I am **Qwen3.5**, an advanced large language model developed by **Alien Intelligence** (通义实验室)…
+[free +3.0]   Extr Extr Extr Extr …
+```
+
+rank の上位は、forward / progress / advance(N5366)、necessary / necessity(N8067)、stress / psychological / calm(N1788)など、特定の語の群を書き込むニューロンが並んだ。
+
+テスト: `pytest -q` で 72 件(単体 53 + 実モデル 19)、`GNE_TEST_MODEL=Qwen3.5-4B` で実モデル 12 件、いずれも合格。
+
+### 8.2 設計と違った点・設計への追記(Phase 3)
+
+**F22. トークン単位の語は、複数トークンに割れる語を重く数える。** 既定の語の単位(トークン id、§6.8)では、extraterrestrial が extr・ater・restrial の 3 つの「語」になり、それぞれが z を持つので mass が大きくなる。N2742 はトークン単位で 3 位、regex 単位では 26 位だった(どちらも全対照より上)。日本語のために既定はトークン単位のままにし、`--word-unit regex` と見比べることを `docs/agent_playbook.md`(Phase 4)に書く。
+
+**F23. 語の正規化。** トークンの文字列(llama.cpp の piece)から前後の空白を除いて小文字にそろえ、記号・数字を含むもの、1 文字のもの、UTF-8 として途中で切れているもの(バイト単位の BPE の断片)は除く。Qwen3.5 の 24.8 万トークンのうち 21.0 万が語になる。
+
+**F24. rank は max_rel を超える rollout を数えない。** 既定 1.6 なので、`main_rel` の `free × 3.0`(反復に崩れやすい)は語の集計に入らない(rollout は残り、dose ごとの補助指標には出る)。
+
+**F25. 対照どうしの null_pct は自分を除いて比べる。** ニューロンは全対照と、対照は自分以外の対照と比べる。
+
+**F26. units.jsonl の追加の欄。** 設計書の欄に加え、ニューロンの中での順位 `rank`(対照は null)を持つ。`gne rank` は実行のたびに units.jsonl を上書きする(語の単位を変えて回すと置き換わる)。
