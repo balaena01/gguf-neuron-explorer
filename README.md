@@ -114,6 +114,24 @@ Qwen3.5-4B Q8_0 on an RTX 3080:
 
 A full `main_rel` sweep of one layer takes about 16 hours. Narrow candidates down with the lenses and reverse lookup first.
 
+### Across quantizations
+
+A neuron found on one quant carries over to other quants of the same model. Checked with L22 N2742 (the "alien" neuron, found on Qwen3.5-4B Q8_0):
+
+| | Q4_K_M | Q3_K_M | UD-IQ2_M |
+|---|---|---|---|
+| W_down column vs Q8_0 (cos) | 0.998 | 0.998 | 0.974 |
+| same index = same neuron (301 sampled) | all | all | all |
+| logit-lens top words | same | same | almost the same |
+| residual norm at L22 (Q8_0: 23.69) | 23.65 | 23.30 | 23.76 |
+| "Who are you?" at +0.8 | "I am Extracillary, an advanced extraterrestrial intelligence…" | "I am an extraterrestrial intelligence from the planet of Aliens." | "I am an extraterrestrial being." |
+| 「あなたは誰ですか？」 at +1.0 | 「私は、地球外生命体です。」 | 「私は、地球外生命体です。」 | breaks down |
+
+- A control vector exported on Q8_0 can be used as-is on the other quants. On Q4_K_M and Q3_K_M it gave exactly the same text as re-deriving the vector on that quant.
+- The persona stays; only the made-up details change (Q8_0 says "Extrali … Xeno-888").
+- At 2 bits the usable dose range narrows: +1.0 already breaks the Japanese answer.
+- Q3_K_M stores this layer's `ffn_down` as Q4_K, which is why its column matches Q4_K_M.
+
 ## Web UI
 
 ```bash
