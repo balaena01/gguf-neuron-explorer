@@ -2,6 +2,7 @@
 // シート平面の交点から解析的に求める(点群へのレイキャストはしない、§4.2)。
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { t } from "./i18n.js";
 import { GEOM, cellYZ, layerX, sharedCell, sharedYZ, sheetSpec, sheetX, slabX, yzCell } from "./layout.js";
 
 export const COLORS = {
@@ -403,7 +404,7 @@ export class LayerMap {
       const w0 = ctx.measureText(`L${L}`).width;
       ctx.fillStyle = COLORS.label;
       ctx.fillText(`L${L}`, 250, 44);
-      const tag = { attention: "attention", linear_attention: "線形注意", recurrent: "回帰", none: "" }[li.mixer];
+      const tag = { attention: "attention", linear_attention: t("線形注意"), recurrent: t("回帰"), none: "" }[li.mixer];
       ctx.font = `22px ${MONO}`;
       ctx.fillStyle = li.mixer === "attention" ? "#9fb3cf" : "#5d6b7e";
       ctx.fillText(tag, 250 - w0 - 12, 44);
@@ -615,8 +616,8 @@ export class LayerMap {
       const a = pts[0], a2 = pts[Math.min(1, n - 1)], b = pts[n - 1], b2 = pts[Math.max(n - 2, 0)];
       const out = (p, q, px) => { const dx = p.x - q.x, dy = p.y - q.y, l = Math.hypot(dx, dy) || 1; return { x: p.x + (dx / l) * px, y: p.y + (dy / l) * px }; };
       const ia = out(a, a2, 46), ob = out(b, b2, 46);
-      items.push({ x: ia.x - r.left, y: ia.y - r.top, text: "入力側", cls: "ax-end" });
-      items.push({ x: ob.x - r.left, y: ob.y - r.top, text: "出力側", cls: "ax-end" });
+      items.push({ x: ia.x - r.left, y: ia.y - r.top, text: t("入力側"), cls: "ax-end" });
+      items.push({ x: ob.x - r.left, y: ob.y - r.top, text: t("出力側"), cls: "ax-end" });
       const placed = [];                                                   // シートの上辺の中央の少し上。重なる札は上へずらす
       for (const b of this.badges) {
         const s = this.specs[b.layer];
@@ -765,7 +766,7 @@ export class LayerMap {
       boxes.push({ x: best.bx, y: best.y - 9, w: best.w, h: 18 });
       const line = Math.abs(best.y - py) > 4 || Math.abs(best.ax - (px + 14)) > 1;
       if (line) lines.push(`<line x1="${px.toFixed(1)}" y1="${py.toFixed(1)}" x2="${best.ax.toFixed(1)}" y2="${best.y.toFixed(1)}"/>`);
-      const title = e.note ? `エージェントの注釈 L${e.layer} N${e.neuron}: ${e.note}` : `エージェントの強調${A.label ? `(${A.label})` : ""}: L${e.layer} N${e.neuron}`;
+      const title = e.note ? `${t("エージェントの注釈")} L${e.layer} N${e.neuron}: ${e.note}` : `${t("エージェントの強調")}${A.label ? ` (${A.label})` : ""}: L${e.layer} N${e.neuron}`;
       const item = { x: best.left ? best.ax : best.bx, y: best.y, html: `<i class="who">agent</i>${escHTML(text)}`, text: " ",
                      cls: `ag-lab${e.note && text === full ? " has-note" : ""}${best.left ? " l" : ""}`, open: key, title };
       items.push(item);
@@ -804,8 +805,8 @@ export class LayerMap {
       };
       side(down, br.x - r.left + 18, true);
       side(up, tl.x - r.left - 18, false);
-      if (down.length) items.push({ x: br.x - r.left + 18, y: tl.y - r.top - 16, text: "下流(書き込む先)", cls: "lk-h r" });
-      if (up.length) items.push({ x: tl.x - r.left - 18, y: tl.y - r.top - 16, text: "上流(駆動するもの)", cls: "lk-h l" });
+      if (down.length) items.push({ x: br.x - r.left + 18, y: tl.y - r.top - 16, text: t("下流(書き込む先)"), cls: "lk-h r" });
+      if (up.length) items.push({ x: tl.x - r.left - 18, y: tl.y - r.top - 16, text: t("上流(駆動するもの)"), cls: "lk-h l" });
       return `<svg class="lk" width="${r.width}" height="${r.height}">${lines.join("")}</svg>`;
     }
     // 全体ビュー: 線の先に点、上位 4 本ずつに札

@@ -3,9 +3,9 @@
 // 描く順: 点 → ベースライン(白い縁の ◇)→ プロンプトの札(かたまりの上)→ 開いているニューロンの白い輪 → hover の輪(水色)。
 // 凡例は図の外(下)に置き、点を隠さない。
 import { getJSON } from "./api.js";
+import { t } from "./i18n.js";
 import { esc } from "./panels.js";
 
-const KIND = ["ニューロン", "ランダム対照", "ベースライン"];
 const PAL = ["#5fb3b3", "#e8b04a", "#9b8bd9", "#7fc97f", "#f08a5d", "#6fa8dc", "#d4a5c9", "#c9c96f"];
 const TOP = ["#ff8c42", "#4fd1c5", "#b388ff", "#9ccc65", "#ff6e9c", "#64b5f6", "#ffd54f", "#e57373"];   // neuron の色: 上位 8 本
 // dose の色は |dose| の区切りで固定(run によらず同じ値は同じ色)。強いほど濃い色、+ は黄 → 橙、− は淡い赤紫 → 濃い赤紫
@@ -31,9 +31,9 @@ export class EmbedView {
     this.top = [];                               // その run の順位の上位(neuron の色)
     root.innerHTML = `
       <div class="ev-tools"><label class="muted">run <select id="ev-run"></select></label>
-        <label class="muted">色 <select id="ev-color"><option value="kind">kind</option><option value="prompt">prompt</option>
+        <label class="muted">${t("色")} <select id="ev-color"><option value="kind">kind</option><option value="prompt">prompt</option>
           <option value="dose">dose</option><option value="neuron">neuron</option></select></label>
-        <button id="ev-compute" class="hidden">埋め込みを計算</button><button id="ev-reset" class="small hidden">表示を戻す</button>
+        <button id="ev-compute" class="hidden">${t("埋め込みを計算")}</button><button id="ev-reset" class="small hidden">${t("表示を戻す")}</button>
         <span class="muted note" id="ev-status"></span></div>
       <div id="ev-info" class="mono"></div>
       <div class="ev-wrap"><canvas id="ev-canvas"></canvas><div id="ev-empty" class="hidden"><div id="ev-empty-msg"></div></div></div>
@@ -57,14 +57,14 @@ export class EmbedView {
 
   _guide(missing = false) {
     this.root.querySelector("#ev-info").innerHTML = `<span class="muted">${this.run ? `${esc(this.run)}: ` : ""}${missing
-      ? "埋め込みが未計算です。下の案内から計算できます"
-      : "点にマウスを当てると本文、クリックでそのニューロンを開く(ベースラインは開けない)。ホイールで拡大、ドラッグで移動"}</span>`;
+      ? t("埋め込みが未計算です。下の案内から計算できます")
+      : t("点にマウスを当てると本文、クリックでそのニューロンを開く(ベースラインは開けない)。ホイールで拡大、ドラッグで移動")}</span>`;
   }
 
   setRuns(runs) {
     this.runs = runs || [];
     const sel = this.root.querySelector("#ev-run");
-    sel.innerHTML = this.runs.map((r) => `<option value="${esc(r.run)}">${esc(r.run)}${r.embedded ? "" : "(未計算)"}</option>`).join("");
+    sel.innerHTML = this.runs.map((r) => `<option value="${esc(r.run)}">${esc(r.run)}${r.embedded ? "" : t("(未計算)")}</option>`).join("");
     if (!this.runs.some((r) => r.run === this.run)) {
       const first = this.runs.find((r) => r.embedded) || this.runs[0];
       this.run = first ? first.run : null;
@@ -83,26 +83,26 @@ export class EmbedView {
     const empty = this.root.querySelector("#ev-empty"), msg = this.root.querySelector("#ev-empty-msg"), reset = this.root.querySelector("#ev-reset");
     reset.classList.add("hidden");
     empty.classList.add("hidden");
-    if (!run) { st.textContent = ""; msg.textContent = "rollout のある run がありません(sweep を回すとできます)"; empty.classList.remove("hidden"); this.draw(); this.onChange(); return; }
+    if (!run) { st.textContent = ""; msg.textContent = t("rollout のある run がありません(sweep を回すとできます)"); empty.classList.remove("hidden"); this.draw(); this.onChange(); return; }
     const info = this.runs.find((r) => r.run === run);
     if (info && !info.embedded) {                                          // 未計算なら取りに行かない(404 を出さない)
       st.textContent = "";
       btn.classList.remove("hidden");
       const mb = info.size / 1e6;                                         // rollout の本数の目安(L22-main_rel は 88 MB で 4494 本)
       const n = Math.max(1, Math.round((info.size / 88e6) * 4494));
-      msg.innerHTML = `<b>${esc(run)}</b> の埋め込みはまだありません(rollout はおよそ ${n.toLocaleString()} 本、${mb.toFixed(1)} MB)。<br>
-        上の「埋め込みを計算」で作れます(GPU を使う。目安: ${n > 1000 ? `約 ${Math.round((n / 4494) * 80)} 秒` : "数秒〜十数秒"})。`;
+      msg.innerHTML = `${t("{run} の埋め込みはまだありません(rollout はおよそ {n} 本、{mb} MB)。", { run: `<b>${esc(run)}</b>`, n: n.toLocaleString(), mb: mb.toFixed(1) })}<br>
+        ${t("上の「埋め込みを計算」で作れます(GPU を使う。目安: {t})。", { t: n > 1000 ? t("約 {n} 秒", { n: Math.round((n / 4494) * 80) }) : t("数秒〜十数秒") })}`;
       empty.classList.remove("hidden");
       this._guide(true);
       this.draw();
       this.onChange();
       return;
     }
-    st.textContent = "読み込み中…";
+    st.textContent = t("読み込み中…");
     try {
       this.data = await getJSON("/api/embeddings", { run });
       const m = this.data.meta;
-      st.textContent = `${m.n} rollout · ${m.model} · ${m.dim} 次元 → UMAP`;
+      st.textContent = t("{n} rollout · {model} · {dim} 次元 → UMAP", { n: m.n.toLocaleString(), model: m.model, dim: m.dim });
       btn.classList.add("hidden");
       reset.classList.remove("hidden");
       this._prepare();
@@ -113,7 +113,7 @@ export class EmbedView {
     } catch {
       st.textContent = "";
       btn.classList.remove("hidden");
-      msg.textContent = "この run の埋め込みはまだありません";
+      msg.textContent = t("この run の埋め込みはまだありません");
       empty.classList.remove("hidden");
     }
     this.draw();
@@ -187,9 +187,9 @@ export class EmbedView {
   _info(i) {
     const el = this.root.querySelector("#ev-info");
     if (i < 0 || !this.data) return;
-    const p = this.data.points[i], t = this.data.texts[p[6]];
-    const who = p[2] === 0 ? `L${this.data.meta.layer} N${p[3]}` : p[2] === 1 ? `random ${p[3]}` : "ベースライン(無介入)";
-    el.innerHTML = `<b>${esc(who)}</b> <span class="muted">prompt ${esc(p[4])} · dose ${p[2] === 2 ? "0" : sgn(+p[5])}${p[2] === 2 ? "" : " · クリックで開く"}</span><div class="ev-text">${esc(t)}</div>`;
+    const p = this.data.points[i], txt = this.data.texts[p[6]];
+    const who = p[2] === 0 ? `L${this.data.meta.layer} N${p[3]}` : p[2] === 1 ? `random ${p[3]}` : t("ベースライン(無介入)");
+    el.innerHTML = `<b>${esc(who)}</b> <span class="muted">prompt ${esc(p[4])} · dose ${p[2] === 2 ? "0" : sgn(+p[5])}${p[2] === 2 ? "" : ` · ${t("クリックで開く")}`}</span><div class="ev-text">${esc(txt)}</div>`;
   }
 
   // --- 色 ----------------------------------------------------------------------------------------------
@@ -208,24 +208,24 @@ export class EmbedView {
     if (!this.data) { el.innerHTML = ""; return; }
     const sw = (c) => `<span class="sw" style="background:${c}"></span>`;
     const it = (...x) => `<span class="it">${x.join("")}</span>`;
-    const base = it(`<span class="sw dia"></span>`, "ベースライン(無介入)");
+    const base = it(`<span class="sw dia"></span>`, t("ベースライン(無介入)"));
     let row = "";
-    if (this.color === "kind") row = it(sw("#e8b04a"), "ニューロンで押した生成") + it(sw("#788caa"), "ランダム方向の対照") + base;
+    if (this.color === "kind") row = it(sw("#e8b04a"), t("ニューロンで押した生成")) + it(sw("#788caa"), t("ランダム方向の対照")) + base;
     if (this.color === "prompt") row = this.data.meta.prompts.map((p, i) => it(sw(PAL[i % PAL.length]), esc(p))).join("") + base;
     if (this.color === "dose") {
-      row = this.doses.map((d) => it(sw(this.doseColor[d]), `${sgn(d)}(${this.doseCount[d]} 本)`)).join("") + base +
-        it("(色は |dose| の区切り 0.6 / 1 / 2 で固定、強いほど濃い)");
-      const only = Object.entries(this.promptDoses).filter(([, ds]) => ds.length === 1).map(([p, ds]) => `${sgn(ds[0])} は ${p} だけ`);
-      if (only.length) row += it(`(${only.join("、")})`);
+      row = this.doses.map((d) => it(sw(this.doseColor[d]), t("{d}({n} 本)", { d: sgn(d), n: this.doseCount[d] }))).join("") + base +
+        it(t("(色は |dose| の区切り 0.6 / 1 / 2 で固定、強いほど濃い)"));
+      const only = Object.entries(this.promptDoses).filter(([, ds]) => ds.length === 1).map(([p, ds]) => t("{d} は {p} だけ", { d: sgn(ds[0]), p }));
+      if (only.length) row += it(`(${only.join(", ")})`);
     }
     if (this.color === "neuron") {
-      row = this.top.map((n, i) => it(sw(TOP[i]), `N${n}`)).join("") + it(sw("#6e7682"), "ほかのニューロン") + it(sw("#465060"), "ランダム対照") + base;
-      row = it("この run の順位の上位 8 本: ") + row;
+      row = this.top.map((n, i) => it(sw(TOP[i]), `N${n}`)).join("") + it(sw("#6e7682"), t("ほかのニューロン")) + it(sw("#465060"), t("ランダム対照")) + base;
+      row = it(t("この run の順位の上位 8 本: ")) + row;
     }
     const f = this.getFocus(), nf = f ? this.data.points.filter((p) => this._isFocus(p, f)).length : 0;
-    const ring = nf ? it('<span class="sw ring" style="border-color:#fff"></span>', `開いている ${f.kind === "random" ? `random ${f.n}` : `L${f.layer} N${f.n}`} の rollout(${nf} 本)`) : "";
-    el.innerHTML = `<div>${row}${ring}${it('<span class="sw ring" style="border-color:#6fe3ff"></span>', "マウスの下の点")}</div>
-      <div class="note">すぐ近くの点どうしは文が似ている。かたまり同士の距離・大きさ・向き、座標軸には意味がない(UMAP)</div>`;
+    const ring = nf ? it('<span class="sw ring" style="border-color:#fff"></span>', t("開いている {who} の rollout({n} 本)", { who: f.kind === "random" ? `random ${f.n}` : `L${f.layer} N${f.n}`, n: nf })) : "";
+    el.innerHTML = `<div>${row}${ring}${it('<span class="sw ring" style="border-color:#6fe3ff"></span>', t("マウスの下の点"))}</div>
+      <div class="note">${t("すぐ近くの点どうしは文が似ている。かたまり同士の距離・大きさ・向き、座標軸には意味がない(UMAP)")}</div>`;
   }
 
   _isFocus(p, f) {
@@ -281,7 +281,7 @@ export class EmbedView {
         if (Math.abs(bx - cx) < 80) top = Math.min(top, by - 6);
       }
       const ds = this.promptDoses[pr] || [];
-      const text = ds.length === 1 ? `${pr}(${sgn(ds[0])} のみ)` : pr;
+      const text = ds.length === 1 ? t("{p}({d} のみ)", { p: pr, d: sgn(ds[0]) }) : pr;
       const w = g.measureText(text).width + 10, y = Math.max(12, top - 14);
       g.fillStyle = "rgba(8,10,14,0.6)"; g.fillRect(cx - w / 2, y - 9, w, 18);
       g.fillStyle = "#dfe6ee"; g.fillText(text, cx, y + 4);

@@ -228,6 +228,20 @@ def server(tmp_path_factory):
     th.join(5)
 
 
+class _JaBrowser:
+    """ページを既定で日本語の環境(locale ja-JP)で開くブラウザ。UI はブラウザの言語で JP / EN を選ぶので、
+    文言を日本語で確かめるテストはこれで開く。英語は ?lang=en。"""
+
+    def __init__(self, b):
+        self._b = b
+
+    def new_page(self, **kw):
+        return self._b.new_page(**{"locale": "ja-JP", **kw})
+
+    def __getattr__(self, k):
+        return getattr(self._b, k)
+
+
 @pytest.fixture(scope="module")
 def browser():
     if not CHROME.exists():
@@ -237,7 +251,7 @@ def browser():
         b = p.chromium.launch(executable_path=str(CHROME), headless=True,
                               args=["--use-gl=angle", "--use-angle=gl", "--enable-gpu", "--ignore-gpu-blocklist"],
                               env={**os.environ, "MESA_D3D12_DEFAULT_ADAPTER_NAME": "NVIDIA"})
-        yield b
+        yield _JaBrowser(b)
         b.close()
 
 
@@ -729,5 +743,59 @@ def test_u5_mcp_ui_tools_reach_the_browser(server, browser, tmp_path):
     pg.click("#ag-clear")
     pg.wait_for_function("document.querySelectorAll('#overlay span.ag-ring').length === 0", timeout=10000)
     pg.wait_for_function("!document.querySelector('#neuron-body').innerText.includes('エージェントの注釈')", timeout=10000)   # パネルの注釈も消える
+    assert not errors, errors
+    pg.close()
+
+
+@pytest.mark.model
+def test_i18n_english_and_switch_back(server, browser):
+    """?lang=en で英語に。画面の日本語の文はすべて英語の辞書にある(window.gneI18n.missing が空)。JP で戻る。"""
+    import re
+    pg = browser.new_page(viewport={"width": 1500, "height": 860})                  # locale は ja-JP のまま(?lang が勝つ)
+    errors = []
+    pg.on("pageerror", lambda e: errors.append(str(e)))
+    pg.goto(server + "/?lang=en")
+    pg.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
+    assert pg.evaluate("document.documentElement.lang") == "en"
+    assert pg.evaluate("document.querySelector('#lang button.on').dataset.lang") == "en"
+    assert pg.evaluate("document.querySelector('#web-toggle').textContent") == "links: direct"
+    assert pg.evaluate("document.querySelector('#reset-view').textContent") == "overview"
+    assert pg.evaluate("document.querySelector('#search-q').placeholder") == "Search: alien…"
+    pg.click("#rank tbody tr[data-n='100']")
+    pg.wait_for_function("document.querySelector('#neuron-body .n-id')", timeout=30000)
+    texts = []
+
+    def grab():
+        texts.append(pg.evaluate("document.body.innerText"))
+    for tab in ("details", "chat", "examples"):
+        pg.click(f"#neuron-body button[data-tab={tab}]")
+        pg.wait_for_timeout(300)
+        grab()
+    for tab in ("fires", "recipe", "rank"):
+        pg.click(f"#list-tabs button[data-tab={tab}]")
+        pg.wait_for_timeout(200)
+        grab()
+    pg.click("#reset-view")
+    pg.wait_for_timeout(300)
+    pg.click("#overlay [data-layer]", button="right")
+    pg.wait_for_function("document.querySelector('#compute-menu')", timeout=10000)
+    grab()
+    pg.keyboard.press("Escape")
+    pg.click("#agent-btn")
+    grab()
+    pg.click("#agent-btn")
+    for view in ("layers", "embed"):
+        pg.click(f"#views button[data-view={view}]")
+        pg.wait_for_timeout(1500)
+        grab()
+    assert pg.evaluate("[...window.gneI18n.missing]") == []
+    ja = set()
+    for s in texts:
+        ja |= set(re.findall(r"[ぁ-んァ-ヶ一-龥々ー]+", s))
+    assert ja <= {"宇宙人"}, ja                                                       # 残るのは付けた名前だけ
+    pg.click("#lang button[data-lang=ja]")                                          # JP に戻す(読み直し)
+    pg.wait_for_function("window.gne && window.gne.overlayReady && document.documentElement.lang === 'ja'", timeout=60000)
+    assert pg.evaluate("document.querySelector('#web-toggle').textContent") == "線: 直接"
+    assert pg.evaluate("localStorage.getItem('gne.lang')") == "ja"
     assert not errors, errors
     pg.close()

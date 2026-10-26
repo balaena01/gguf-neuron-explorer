@@ -1,6 +1,7 @@
 // レシピ(別冊 §2 LIST の recipe タブ、§4.8 マーク)。ユニットの追加・dose のスライダー・保存と読み込み・cvec の書き出し。
 // 編集中のレシピはこのブラウザの localStorage に下書きとして置く(使えなければ置かない)。
 import { getJSON, postJSON } from "./api.js";
+import { t } from "./i18n.js";
 import { esc } from "./panels.js";
 
 const fmt = (x, d = 2) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : (+x).toFixed(d));
@@ -65,30 +66,30 @@ export class RecipePanel {
     const r = this.r;
     const rows = r.units.map((u, i) => `
       <tr data-i="${i}"><td class="id"><a href="#" data-open="${i}">L${u.layer} N${u.neuron}</a>
-          <span class="muted w">${esc(this.unitWords(u.layer, u.neuron))}</span><button class="small rm" data-rm="${i}" title="外す">×</button>
+          <span class="muted w">${esc(this.unitWords(u.layer, u.neuron))}</span><button class="small rm" data-rm="${i}" title="${t("外す")}">×</button>
         <div class="sl"><span class="muted">−3</span><input type="range" class="dose" min="-3" max="3" step="0.05" value="${u.dose}" data-i="${i}" style="background:${trackBG(u.dose)}"><span class="muted">+3</span>
           <span class="sg mono ${u.dose >= 0 ? "plus" : "minus"}">${signed(u.dose)}</span>
-          <input type="number" min="-10" max="10" step="0.05" value="${u.dose}" data-i="${i}" class="num" title="値を直接入れる"></div></td></tr>`).join("");
+          <input type="number" min="-10" max="10" step="0.05" value="${u.dose}" data-i="${i}" class="num" title="${t("値を直接入れる")}"></div></td></tr>`).join("");
     this.root.innerHTML = `
-      <div class="list-tools"><input id="rc-name" placeholder="レシピ名(英数字・_・-)" value="${esc(r.name)}" spellcheck="false">
-        <button class="small" id="rc-save" title="~/.gne/recipes に保存">保存</button></div>
-      <div class="list-tools"><select id="rc-load"><option value="">保存したレシピを読む…</option>${
+      <div class="list-tools"><input id="rc-name" placeholder="${t("レシピ名(英数字・_・-)")}" value="${esc(r.name)}" spellcheck="false">
+        <button class="small" id="rc-save" title="${t("~/.gne/recipes に保存")}">${t("保存")}</button></div>
+      <div class="list-tools"><select id="rc-load"><option value="">${t("保存したレシピを読む…")}</option>${
         this.saved.map((x) => `<option value="${esc(x.name)}">${esc(x.name)}(${x.units.length})</option>`).join("")}</select></div>
       ${r.units.length ? `<table class="rc mono"><tbody>${rows}</tbody></table>`
-        : `<p class="muted note">ユニットがありません。NEURON の「+ レシピ」「− レシピ」で足します。</p>`}
-      <p class="muted note">dose は rel(その層の残差ノルムの中央値に対する大きさ)。マップに + は黄、− は赤紫の輪で出ます。</p>
+        : `<p class="muted note">${t("ユニットがありません。NEURON の「+ レシピ」「− レシピ」で足します。")}</p>`}
+      <p class="muted note">${t("dose は rel(その層の残差ノルムの中央値に対する大きさ)。マップに + は黄、− は赤紫の輪で出ます。")}</p>
       <div class="rc-actions">
-        <button id="rc-chat"${r.units.length ? "" : " disabled"}>3 列チャットで試す</button>
-        <button id="rc-export"${r.units.length ? "" : " disabled"}>cvec を書き出す</button>
-        <label class="muted"><input type="checkbox" id="rc-verify"> llama.cpp で確かめる</label>
+        <button id="rc-chat"${r.units.length ? "" : " disabled"}>${t("3 列チャットで試す")}</button>
+        <button id="rc-export"${r.units.length ? "" : " disabled"}>${t("cvec を書き出す")}</button>
+        <label class="muted"><input type="checkbox" id="rc-verify"> ${t("llama.cpp で確かめる")}</label>
       </div>
-      ${r.units.length ? `<div class="rc-actions"><button class="small" id="rc-clear" title="すべてのユニットを外す">レシピを空にする</button></div>` : ""}
+      ${r.units.length ? `<div class="rc-actions"><button class="small" id="rc-clear" title="${t("すべてのユニットを外す")}">${t("レシピを空にする")}</button></div>` : ""}
       <div id="rc-result"></div>`;
     const $ = (s) => this.root.querySelector(s);
     $("#rc-name").addEventListener("change", (ev) => { r.name = ev.target.value.trim(); r._save(); });
     $("#rc-save").addEventListener("click", () => this.save());
     const clr = $("#rc-clear");
-    if (clr) clr.addEventListener("click", () => { if (confirm(`レシピの ${r.units.length} ユニットをすべて外しますか`)) { r.clear(); this.render(); } });
+    if (clr) clr.addEventListener("click", () => { if (confirm(t("レシピの {n} ユニットをすべて外しますか", { n: r.units.length }))) { r.clear(); this.render(); } });
     $("#rc-load").addEventListener("change", (ev) => {
       const x = this.saved.find((y) => y.name === ev.target.value);
       if (x) { r.load(x.name, x.units); this.render(); }
@@ -116,11 +117,11 @@ export class RecipePanel {
   async save() {
     const res = this.root.querySelector("#rc-result");
     const name = this.root.querySelector("#rc-name").value.trim();
-    if (!/^[\w.-]+$/.test(name)) { res.innerHTML = `<p class="err">名前は英数字・_・-・. だけにしてください</p>`; return; }
+    if (!/^[\w.-]+$/.test(name)) { res.innerHTML = `<p class="err">${t("名前は英数字・_・-・. だけにしてください")}</p>`; return; }
     this.r.name = name; this.r._save();
     try {
       await postJSON(`/api/recipes/${encodeURIComponent(name)}`, { units: this.r.specs() });
-      res.innerHTML = `<p class="muted note">保存しました(~/.gne/recipes/${esc(name)}.yaml)</p>`;
+      res.innerHTML = `<p class="muted note">${t("保存しました({path})", { path: `~/.gne/recipes/${esc(name)}.yaml` })}</p>`;
       this.refreshSaved();
     } catch (e) { res.innerHTML = `<p class="err">${esc(e.message)}</p>`; }
   }
@@ -129,20 +130,21 @@ export class RecipePanel {
     const res = this.root.querySelector("#rc-result");
     const verify = this.root.querySelector("#rc-verify").checked;
     const name = (this.root.querySelector("#rc-name").value.trim() || "recipe").replace(/[^\w.-]/g, "_");
-    res.innerHTML = `<p class="muted note">書き出し中${verify ? "(llama.cpp で読み直して生成を比べる、数十秒)" : ""}…</p>`;
+    res.innerHTML = `<p class="muted note">${t(verify ? "書き出し中(llama.cpp で読み直して生成を比べる、数十秒)…" : "書き出し中…")}</p>`;
     try {
       const x = await postJSON("/api/export", { units: this.r.specs(), name, verify });
       const a = document.createElement("a");                       // そのままダウンロードする
       a.href = x.url; a.download = x.file; document.body.appendChild(a); a.click(); a.remove();
       const norms = Object.entries(x.layer_norms).map(([L, v]) => `L${L} ${fmt(v, 1)}`).join(" · ");
       const v = x.verify;
-      res.innerHTML = `<p class="note"><a href="${esc(x.url)}" download="${esc(x.file)}">${esc(x.file)}</a> を書き出しました${
-          x.recipe_saved ? "" : `<br><span class="muted">(レシピ自体は未保存。上の「保存」で ~/.gne/recipes に残せます)</span>`}</p>
-        <p class="muted note mono" title="層ごとに残差へ足すベクトルの長さ(残差ノルムと同じ単位)">足すベクトルの長さ: ${esc(norms)}</p>
-        <p class="muted note">llama.cpp で使う: + 列は <code>--control-vector ${esc(x.file)}</code>、− 列は <code>--control-vector-scaled ${esc(x.file)} -1</code></p>${v ? `
-        <p class="note">${v.match ? "✓" : "✗"} 「${esc(v.prompt)}」の ${v.n_tokens} トークン(+1 倍、greedy)で、gne がこのファイルを読み直した生成と llama-completion --control-vector の生成が${v.match ? "一致" : "不一致"}
-          ${v.differs_from_baseline ? "" : "(無介入と同じ出力: 効きが弱い)"}</p>
-        <details open><summary class="muted note">出力を比べる</summary><p class="muted note">gne: ${esc(v.ours)}</p><p class="muted note">llama.cpp: ${esc(v.theirs)}</p></details>` : ""}
+      res.innerHTML = `<p class="note">${t("{file} を書き出しました", { file: `<a href="${esc(x.url)}" download="${esc(x.file)}">${esc(x.file)}</a>` })}${
+          x.recipe_saved ? "" : `<br><span class="muted">${t("(レシピ自体は未保存。上の「保存」で ~/.gne/recipes に残せます)")}</span>`}</p>
+        <p class="muted note mono" title="${t("層ごとに残差へ足すベクトルの長さ(残差ノルムと同じ単位)")}">${t("足すベクトルの長さ")}: ${esc(norms)}</p>
+        <p class="muted note">${t("llama.cpp で使う: + 列は {plus}、− 列は {minus}", { plus: `<code>--control-vector ${esc(x.file)}</code>`, minus: `<code>--control-vector-scaled ${esc(x.file)} -1</code>` })}</p>${v ? `
+        <p class="note">${v.match ? "✓" : "✗"} ${t(v.match ? "「{p}」の {n} トークン(+1 倍、greedy)で、gne がこのファイルを読み直した生成と llama-completion --control-vector の生成が一致"
+          : "「{p}」の {n} トークン(+1 倍、greedy)で、gne がこのファイルを読み直した生成と llama-completion --control-vector の生成が不一致", { p: esc(v.prompt), n: v.n_tokens })}
+          ${v.differs_from_baseline ? "" : t("(無介入と同じ出力: 効きが弱い)")}</p>
+        <details open><summary class="muted note">${t("出力を比べる")}</summary><p class="muted note">gne: ${esc(v.ours)}</p><p class="muted note">llama.cpp: ${esc(v.theirs)}</p></details>` : ""}
         ${x.warnings && x.warnings.length ? `<p class="muted note">${x.warnings.map(esc).join("<br>")}</p>` : ""}`;
     } catch (e) { res.innerHTML = `<p class="err">${esc(e.message)}</p>`; }
   }

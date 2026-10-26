@@ -1,9 +1,10 @@
 // エージェント連携(別冊 §11、U5)。gne mcp --ui-url で繋いだエージェントの ui_highlight / ui_note / ui_open を
 // SSE(/api/ui/events)で受け、地図の強調・注釈・NEURON パネルに写す。header の「agent」で一覧と消去。
 import { postJSON } from "./api.js";
+import { t } from "./i18n.js";
 import { esc } from "./panels.js";
 
-const ACT = { highlight: "強調", note: "注釈", open: "開いた", clear: "強調と注釈を消した" };
+
 
 export class AgentLink {
   constructor({ button, pop, onState, onOpen }) {
@@ -53,10 +54,12 @@ export class AgentLink {
   lastText() {
     const l = this.state.last;
     if (!l) return "";
-    const what = l.action === "note" ? (l.text ? "に注釈" : "の注釈を消した") : l.action === "open" ? "を開いた"
-      : l.action === "highlight" ? (l.n ? "を強調" : "強調を消した") : ACT[l.action] || l.action;
-    const who = l.layer !== undefined ? `L${l.layer} N${l.neuron} ` : l.action === "highlight" && l.n ? `${l.n} 個 ` : "";
-    return `エージェント: ${who}${what}`;
+    const id = l.layer !== undefined ? `L${l.layer} N${l.neuron}` : "";
+    const what = l.action === "note" ? t(l.text ? "{id} に注釈" : "{id} の注釈を消した", { id })
+      : l.action === "open" ? t("{id} を開いた", { id })
+      : l.action === "highlight" ? (l.n ? t("{n} 個を強調", { n: l.n }) : t("強調を消した"))
+      : l.action === "clear" ? t("強調と注釈を消した") : l.action;
+    return `${t("エージェント")}: ${what}`;
   }
 
   renderButton() {
@@ -65,8 +68,8 @@ export class AgentLink {
     this.btn.classList.toggle("on", n > 0);
     this.btn.classList.toggle("off", !this.connected);
     this.btn.title = this.connected
-      ? `エージェント連携: gne mcp --ui-url ${location.origin} で繋ぐと、ui_highlight / ui_note / ui_open がここに届く`
-      : "エージェント連携の受け口に繋がっていません(サーバを再起動したなら自動でつなぎ直します)";
+      ? t("エージェント連携: gne mcp --ui-url {url} で繋ぐと、ui_highlight / ui_note / ui_open がここに届く", { url: location.origin })
+      : t("エージェント連携の受け口に繋がっていません(サーバを再起動したなら自動でつなぎ直します)");
   }
 
   renderPop() {
@@ -75,11 +78,11 @@ export class AgentLink {
       h.dose === null || h.dose === undefined ? "" : ` <span class="${h.dose >= 0 ? "plus" : "minus"}">${h.dose >= 0 ? "+" : "−"}${Math.abs(h.dose)}</span>`}</div>`).join("");
     const nt = s.notes.map((x) => `<div class="ag-row" data-open="${x.layer}:${x.neuron}"><b>L${x.layer} N${x.neuron}</b> ${esc(x.text)}</div>`).join("");
     const ago = s.last ? Math.round((Date.now() / 1000 - s.last.t) / 60) : null;
-    this.pop.innerHTML = `<div class="ag-head"><b>エージェント</b><button class="small" id="ag-close">閉じる</button>
-        <span class="muted">${this.connected ? "接続中" : "未接続"}${s.last ? ` · 最後: ${esc(this.lastText().replace(/^エージェント: /, ""))}(${ago < 1 ? "1 分以内" : `${ago} 分前`})` : ""}</span></div>
-      <p class="muted note">Claude Code などから <code>gne mcp --ui-url ${esc(location.origin)}</code> で繋ぐと、エージェントの ui_highlight(強調)・ui_note(注釈)・ui_open(開く)がここと地図に出ます。行のクリックでそのニューロンを開きます。</p>
-      <h4>強調 ${s.highlights.length} 個${s.label ? ` — ${esc(s.label)}` : ""}</h4>${hl || '<p class="muted note">なし</p>'}
-      <h4>注釈 ${s.notes.length} 個</h4>${nt || '<p class="muted note">なし</p>'}
-      ${s.highlights.length + s.notes.length ? '<button class="small" id="ag-clear">強調と注釈をすべて消す</button>' : ""}`;
+    this.pop.innerHTML = `<div class="ag-head"><b>${t("エージェント")}</b><button class="small" id="ag-close">${t("閉じる")}</button>
+        <span class="muted">${t(this.connected ? "接続中" : "未接続")}${s.last ? ` · ${t("最後")}: ${esc(this.lastText().replace(`${t("エージェント")}: `, ""))} (${ago < 1 ? t("1 分以内") : t("{n} 分前", { n: ago })})` : ""}</span></div>
+      <p class="muted note">${t("Claude Code などから {cmd} で繋ぐと、エージェントの ui_highlight(強調)・ui_note(注釈)・ui_open(開く)がここと地図に出ます。行のクリックでそのニューロンを開きます。", { cmd: `<code>gne mcp --ui-url ${esc(location.origin)}</code>` })}</p>
+      <h4>${t("強調 {n} 個", { n: s.highlights.length })}${s.label ? ` — ${esc(s.label)}` : ""}</h4>${hl || `<p class="muted note">${t("なし")}</p>`}
+      <h4>${t("注釈 {n} 個", { n: s.notes.length })}</h4>${nt || `<p class="muted note">${t("なし")}</p>`}
+      ${s.highlights.length + s.notes.length ? `<button class="small" id="ag-clear">${t("強調と注釈をすべて消す")}</button>` : ""}`;
   }
 }

@@ -1,4 +1,5 @@
 // layers ビュー(別冊 §6): 層ごとの要約を 2D の深さプロファイルで一望する。Canvas 2D、x = 層。
+import { t } from "./i18n.js";
 import { esc } from "./panels.js";
 
 const C = {
@@ -16,9 +17,9 @@ export class LayersView {
     this.arch = null;
     this.dir = null;
     this.hoverL = null;
-    root.innerHTML = `<div class="lv-tools"><label class="muted">逆引きの方向 <select id="lv-dir"></select></label>
-      <span class="muted note">層にマウスを当てると下に値、クリックでその層をマップで正面から見る</span></div>
-      <div id="lv-tip" class="mono"><span class="muted">(層にマウスを当てると、ここにその層の値が出ます)</span></div>
+    root.innerHTML = `<div class="lv-tools"><label class="muted">${t("逆引きの方向")} <select id="lv-dir"></select></label>
+      <span class="muted note">${t("層にマウスを当てると下に値、クリックでその層をマップで正面から見る")}</span></div>
+      <div id="lv-tip" class="mono"><span class="muted">${t("(層にマウスを当てると、ここにその層の値が出ます)")}</span></div>
       <canvas id="lv-canvas"></canvas>`;
     this.cv = root.querySelector("#lv-canvas");
     this.tip = root.querySelector("#lv-tip");
@@ -33,7 +34,7 @@ export class LayersView {
     this.data = profile;
     this.arch = arch;
     const sel = this.root.querySelector("#lv-dir");
-    sel.innerHTML = profile.directions.length ? profile.directions.map((d) => `<option>${esc(d)}</option>`).join("") : `<option value="">(なし)</option>`;
+    sel.innerHTML = profile.directions.length ? profile.directions.map((d) => `<option>${esc(d)}</option>`).join("") : `<option value="">${t("(なし)")}</option>`;
     if (!profile.directions.includes(this.dir)) this.dir = profile.directions[0] || null;
     sel.value = this.dir || "";
     this.draw();
@@ -41,13 +42,13 @@ export class LayersView {
 
   _rows() {
     return [
-      { key: "arch", label: "構成", sub: ["塗り = attention", "枠 = 線形注意"], h: 56 },
-      { key: "rho", label: "残差ノルム ρ_L", sub: ["帯 = p10〜p90", "線 = 中央値"], h: 86 },
-      { key: "sweep", label: "対照群超え", sub: ["null_pct ≥ 0.95", "の割合(数/母数)"], h: 92 },
-      { key: "kl", label: "steer KL", sub: ["● 中央値 ○ p90", "黄 + / 赤紫 −"], h: 86 },
-      { key: "repeat", label: "反復(+0.8)", sub: ["distinct-4 の中央値", "琥珀 ニューロン / 灰 random"], h: 80 },
-      { key: "dir", label: "逆引き", sub: ["マップと同じ閾値を", "超えるニューロンの数"], h: 86 },
-      { key: "cov", label: "データの有無", h: 92 },
+      { key: "arch", label: t("構成"), sub: [t("塗り = attention"), t("枠 = 線形注意")], h: 56 },
+      { key: "rho", label: t("残差ノルム ρ_L"), sub: [t("帯 = p10〜p90"), t("線 = 中央値")], h: 86 },
+      { key: "sweep", label: t("対照群超え"), sub: ["null_pct ≥ 0.95", t("の割合(数/母数)")], h: 92 },
+      { key: "kl", label: "steer KL", sub: [t("● 中央値 ○ p90"), t("黄 + / 赤紫 −")], h: 86 },
+      { key: "repeat", label: t("反復(+0.8)"), sub: [t("distinct-4 の中央値"), t("琥珀 ニューロン / 灰 random")], h: 80 },
+      { key: "dir", label: t("逆引き"), sub: [t("マップと同じ閾値を"), t("超えるニューロンの数")], h: 86 },
+      { key: "cov", label: t("データの有無"), h: 92 },
     ];
   }
 
@@ -69,16 +70,17 @@ export class LayersView {
     if (L !== this.hoverL) { this.hoverL = L; this.draw(); }
     if (L === null) return;
     const d = this.data.layers[L], li = this.arch.layers[L];
-    const kind = { attention: "attention", linear_attention: "線形注意", recurrent: "回帰", none: "mixer なし" }[li.mixer];
+    const kind = { attention: "attention", linear_attention: t("線形注意"), recurrent: t("回帰"), none: t("mixer なし") }[li.mixer];
+    const nd = t("—(データ無し)");
     const dd = this.dir ? d.directions[this.dir] : null;
     const lines = [
       `<b>L${L}</b> ${kind}${li.ffn.startsWith("moe") ? " · MoE" : ""}`,
-      `ρ_L ${d.rho ? `${fmt(d.rho[1], 1)}(${fmt(d.rho[0], 1)}〜${fmt(d.rho[2], 1)})` : "—(データ無し)"}`,
-      `対照群超え ${d.sweep ? `${fmt(d.sweep.frac_null95 * 100, 0)}%(${d.sweep.n_null95}/${d.sweep.n}、${esc(d.sweep.run)})` : "—(データ無し)"}`,
-      d.steer_kl ? `steer KL(中央値 / p90) + ${fmt(d.steer_kl.pos[0], 3)} / ${fmt(d.steer_kl.pos[1], 3)} · − ${fmt(d.steer_kl.neg[0], 3)} / ${fmt(d.steer_kl.neg[1], 3)}`
-        : "steer KL —(データ無し)",
-      `distinct-4 ${d.repeat ? `ニューロン ${fmt(d.repeat.neuron, 3)} · random ${fmt(d.repeat.random, 3)}` : "—(データ無し)"}`,
-      `逆引き ${this.dir ? `${esc(this.dir)}: ${dd ? `|cos| ≥ ${fmt(dd.thr, 3)} が ${dd.n_above} 個 · 上位 1% 平均 ${fmt(dd.top1_mean, 3)} · 最大 ${fmt(dd.max, 3)}` : "—(データ無し)"}` : "—"}`,
+      `ρ_L ${d.rho ? `${fmt(d.rho[1], 1)} (${fmt(d.rho[0], 1)}–${fmt(d.rho[2], 1)})` : nd}`,
+      `${t("対照群超え")} ${d.sweep ? `${fmt(d.sweep.frac_null95 * 100, 0)}% (${d.sweep.n_null95}/${d.sweep.n}, ${esc(d.sweep.run)})` : nd}`,
+      d.steer_kl ? `${t("steer KL(中央値 / p90)")} + ${fmt(d.steer_kl.pos[0], 3)} / ${fmt(d.steer_kl.pos[1], 3)} · − ${fmt(d.steer_kl.neg[0], 3)} / ${fmt(d.steer_kl.neg[1], 3)}`
+        : `steer KL ${nd}`,
+      `distinct-4 ${d.repeat ? `${t("ニューロン")} ${fmt(d.repeat.neuron, 3)} · random ${fmt(d.repeat.random, 3)}` : nd}`,
+      `${t("逆引き")} ${this.dir ? `${esc(this.dir)}: ${dd ? t("|cos| ≥ {thr} が {n} 個 · 上位 1% 平均 {m} · 最大 {mx}", { thr: fmt(dd.thr, 3), n: dd.n_above, m: fmt(dd.top1_mean, 3), mx: fmt(dd.max, 3) }) : nd}` : "—"}`,
     ];
     this.tip.innerHTML = `${lines[0]}<br>${lines.slice(1, 4).join(" · ")}<br>${lines.slice(4).join(" · ")}`;   // 図の上の情報行(データを隠さない)
   }
@@ -212,7 +214,7 @@ export class LayersView {
   }
 
   _row_dir(g, top, h) {
-    if (!this.dir) { g.fillStyle = C.muted; g.textAlign = "left"; g.fillText("逆引きの方向がありません(gne reverse --contrast)", LEFT, top + h / 2); return; }
+    if (!this.dir) { g.fillStyle = C.muted; g.textAlign = "left"; g.fillText(t("逆引きの方向がありません(gne reverse --contrast)"), LEFT, top + h / 2); return; }
     const ds = this.data.layers.map((d) => d.directions[this.dir]);
     const hi = Math.max(...ds.filter(Boolean).map((x) => x.n_above), 1);
     const Y = this._scaleY(top + 12, h - 12, 0, hi);
@@ -229,7 +231,7 @@ export class LayersView {
 
   _row_cov(g, top, h) {
     const keys = [["sweep", (c) => c.sweep], ["steer", (c) => c.steer_lens], ["logit", (c) => c.logit_lens],
-                  ["act", (c) => c.act_stats], ["逆引き", (c) => c.directions.length > 0]];
+                  ["act", (c) => c.act_stats], [t("逆引き"), (c) => c.directions.length > 0]];
     const rh = h / keys.length;
     keys.forEach(([name, f], i) => {
       const yy = top + rh * (i + 0.5);

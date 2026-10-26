@@ -2,6 +2,7 @@
 // reads you = 文章を流して、このニューロンの活性をトークンごとに色で見る(§5.5 の 1 ニューロン版)。
 // 会話の状態はブラウザが持ち、毎ターン列ごとの履歴をサーバに送る(サーバは状態を持たない)。
 import { postJSON, postSSE } from "./api.js";
+import { t as tr } from "./i18n.js";                 // t は会話のターンの変数名に使っているので tr
 import { esc, tokHTML } from "./panels.js";
 
 // "14:8949:+1" → "L14 N8949 +1"
@@ -40,11 +41,11 @@ export class ChatPanel {
   columns() {
     if (this.target === "recipe") {                // − 列はレシピ全体の符号を反転したもの(− のユニットだけ、ではない)
       const s = this.scale;
-      return [{ label: `レシピ×(−${fmt(s, 2)})`, units: this.recipe.specs(-s) }, { label: "0(無介入)", units: [] },
-              { label: `レシピ×(+${fmt(s, 2)})`, units: this.recipe.specs(s) }];
+      return [{ label: tr("レシピ×({s})", { s: `−${fmt(s, 2)}` }), units: this.recipe.specs(-s) }, { label: tr("0(無介入)"), units: [] },
+              { label: tr("レシピ×({s})", { s: `+${fmt(s, 2)}` }), units: this.recipe.specs(s) }];
     }
     const { layer: L, n } = this.neuron, d = this.dose;
-    return [{ label: `−${fmt(d, 2)}`, units: [`${L}:${n}:-${d}`] }, { label: "0(無介入)", units: [] },
+    return [{ label: `−${fmt(d, 2)}`, units: [`${L}:${n}:-${d}`] }, { label: tr("0(無介入)"), units: [] },
             { label: `+${fmt(d, 2)}`, units: [`${L}:${n}:+${d}`] }];
   }
 
@@ -57,14 +58,14 @@ export class ChatPanel {
     if (!this.el) return;
     const d = this.detail, nR = this.recipe.units.length;
     const lens = [];
-    if (d && d.sweep) lens.push(`語 ${d.sweep.words.slice(0, 5).map(([w]) => esc(w)).join(" · ")}`);
+    if (d && d.sweep) lens.push(`${tr("語")} ${d.sweep.words.slice(0, 5).map(([w]) => esc(w)).join(" · ")}`);
     if (d && d.steer_lens) lens.push(`steer+ ${d.steer_lens.up.slice(0, 4).map(tokHTML).join("")}`);
     if (d && d.logit_lens) lens.push(`logit+ ${d.logit_lens.up.slice(0, 4).map(tokHTML).join("")}`);
     const seg = (name, items, cur) => `<span class="seg">${items.map(([v, t, dis]) =>
       `<button data-${name}="${v}"${v === cur ? ' class="on"' : ""}${dis ? " disabled" : ""}>${t}</button>`).join("")}</span>`;
     this.el.innerHTML = `
       <div class="ch-tools">${seg("mode", [["writes", "writes"], ["reads", "reads you"]], this.mode)}
-        ${this.mode === "writes" ? seg("target", [["neuron", "このニューロン"], ["recipe", `レシピ(${nR})`, !nR]], this.target) : ""}</div>
+        ${this.mode === "writes" ? seg("target", [["neuron", tr("このニューロン")], ["recipe", tr("レシピ({n})", { n: nR }), !nR]], this.target) : ""}</div>
       ${this.mode === "writes" ? this.writesHTML() : this.readsHTML()}
       ${lens.length && this.target === "neuron" ? `<div class="ch-lens">${lens.join("<span class='muted'> | </span>")}</div>` : ""}`;
     for (const b of this.el.querySelectorAll("[data-mode]")) b.addEventListener("click", () => { this.mode = b.dataset.mode; this.render(); });
@@ -76,28 +77,28 @@ export class ChatPanel {
   writesHTML() {
     const cols = this.columns();
     const amount = this.target === "recipe"
-      ? `倍率 <button class="small" data-step="-0.25" title="小さく">▼</button><input id="ch-dose" type="number" step="0.25" value="${this.scale}"><button class="small" data-step="0.25" title="大きく">▲</button>`
-      : `dose <button class="small" data-step="-0.1" title="小さく">▼</button><input id="ch-dose" type="number" step="0.1" value="${this.dose}"><button class="small" data-step="0.1" title="大きく">▲</button>
-         <span class="seg"><button class="on" title="本体設計の rel dose(残差ノルムの中央値に対する大きさ)を足す">add</button><button disabled title="活性の倍率は本体設計で未対応">×</button></span>`;
+      ? `${tr("倍率")} <button class="small" data-step="-0.25" title="${tr("小さく")}">▼</button><input id="ch-dose" type="number" step="0.25" value="${this.scale}"><button class="small" data-step="0.25" title="${tr("大きく")}">▲</button>`
+      : `dose <button class="small" data-step="-0.1" title="${tr("小さく")}">▼</button><input id="ch-dose" type="number" step="0.1" value="${this.dose}"><button class="small" data-step="0.1" title="${tr("大きく")}">▲</button>
+         <span class="seg"><button class="on" title="${tr("本体設計の rel dose(残差ノルムの中央値に対する大きさ)を足す")}">add</button><button disabled title="${tr("活性の倍率は本体設計で未対応")}">×</button></span>`;
     const turns = this.turns.map((t, ti) => `
-      <div class="ch-user"><span class="muted">あなた</span> ${esc(t.user)}${t.labels.join() !== cols.map((c) => c.label).join() ? `<span class="muted note">(${t.labels.map(esc).join(" / ")})</span>` : ""}</div>
+      <div class="ch-user"><span class="muted">${tr("あなた")}</span> ${esc(t.user)}${t.labels.join() !== cols.map((c) => c.label).join() ? `<span class="muted note">(${t.labels.map(esc).join(" / ")})</span>` : ""}</div>
       <div class="ch-row">${t.replies.map((r, ci) => `<div class="ch-cell ${["minus", "", "plus"][ci] || ""}" data-t="${ti}" data-c="${ci}">${this.cellHTML(t, ci)}</div>`).join("")}</div>`).join("");
     return `
       <div class="ch-tools">${amount}<span class="muted">max</span><input id="ch-max" type="number" min="1" max="2048" value="${this.maxTokens}">
-        <button class="small" id="ch-reset"${this.busy ? " disabled" : ""}>会話を消す</button></div>
+        <button class="small" id="ch-reset"${this.busy ? " disabled" : ""}>${tr("会話を消す")}</button></div>
       <div class="ch-log">
         <div class="ch-row ch-head">${cols.map((c, i) => `<div class="${["minus", "", "plus"][i]}">${esc(c.label)}${
           this.target === "recipe" && c.units.length ? `<div class="ch-units muted">${c.units.map((u) => `<span class="u">${esc(unitLabel(u))}</span>`).join(" · ")}</div>` : ""}</div>`).join("")}</div>
-        ${turns || `<p class="muted note">同じ発話を 3 列で生成します(左から −、無介入、+)。返答は列ごとに別の履歴になります。</p>`}
+        ${turns || `<p class="muted note">${tr("同じ発話を 3 列で生成します(左から −、無介入、+)。返答は列ごとに別の履歴になります。")}</p>`}
       </div>
-      <div class="ch-input"><textarea id="ch-text" rows="2" placeholder="メッセージ(Ctrl+Enter で送る)"${this.busy ? " disabled" : ""}></textarea>
-        <button id="ch-send"${this.busy ? " disabled" : ""}>送る</button><button id="ch-stop"${this.busy ? "" : " disabled"}>止める</button></div>
+      <div class="ch-input"><textarea id="ch-text" rows="2" placeholder="${tr("メッセージ(Ctrl+Enter で送る)")}"${this.busy ? " disabled" : ""}></textarea>
+        <button id="ch-send"${this.busy ? " disabled" : ""}>${tr("送る")}</button><button id="ch-stop"${this.busy ? "" : " disabled"}>${tr("止める")}</button></div>
       <div class="ch-status muted note" id="ch-status">${esc(this.status || "")}</div>`;
   }
 
   cellHTML(t, ci) {
     const f = t.finish[ci];
-    const badge = f === "length" ? `<span class="badge" title="max トークンで打ち切り">打ち切り</span>` : f === "stopped" ? `<span class="badge">止めた</span>` : "";
+    const badge = f === "length" ? `<span class="badge" title="${tr("max_tokens で打ち切り")}">${tr("打ち切り")}</span>` : f === "stopped" ? `<span class="badge">${tr("止めた")}</span>` : "";
     const cur = this.busy && t === this.turns[this.turns.length - 1] && this.activeCol === ci ? `<span class="caret">▍</span>` : "";
     return `${badge}<div class="txt">${esc(t.replies[ci])}${cur}</div>`;
   }
@@ -136,7 +137,8 @@ export class ChatPanel {
     this.turns.push(turn);
     this.busy = true;
     this.activeCol = null;
-    this.status = "GPU を待っています(ジョブが走っていればその切れ目まで)…";
+    this.status = tr("GPU を待っています(ジョブが走っていればその切れ目まで)…");
+    this.failed = false;
     this.render();
     const t0 = performance.now();
     const body = {
@@ -154,7 +156,7 @@ export class ChatPanel {
         if (ev.type === "start") this.sid = ev.id;
         else if (ev.type === "gpu") {
           this.waited = ev.waited_s;
-          this.setStatus(`生成中(GPU を待った時間 ${fmt(ev.waited_s, 1)} 秒)`);
+          this.setStatus(tr("生成中(GPU を待った時間 {s} 秒)", { s: fmt(ev.waited_s, 1) }));
         } else if (ev.type === "column") { const old = this.activeCol; this.activeCol = ev.col; if (old !== null) paint(old); paint(ev.col); }
         else if (ev.type === "text") { turn.replies[ev.col] += ev.text; paint(ev.col); }
         else if (ev.type === "end") {
@@ -162,12 +164,12 @@ export class ChatPanel {
           turn.finish[ev.col] = ev.finish;
           paint(ev.col);
         } else if (ev.type === "warn") this.setStatus(ev.warnings.join(" / "));
-        else if (ev.type === "error") { this.status = `エラー: ${ev.error.message}`; }
+        else if (ev.type === "error") { this.status = `${tr("エラー")}: ${ev.error.message}`; this.failed = true; }
         else if (ev.type === "done") {
-          this.status = this.status.startsWith("エラー") ? this.status : `${fmt(ev.seconds, 1)} 秒で 3 列を生成(うち GPU 待ち ${fmt(this.waited, 1)} 秒)`;
+          if (!this.failed) this.status = tr("{s} 秒で 3 列を生成(うち GPU 待ち {w} 秒)", { s: fmt(ev.seconds, 1), w: fmt(this.waited, 1) });
         }
       });
-    } catch (e) { this.status = `エラー: ${e.message}`; }
+    } catch (e) { this.status = `${tr("エラー")}: ${e.message}`; }
     this.busy = false;
     this.sid = null;
     this.activeCol = null;
@@ -187,17 +189,17 @@ export class ChatPanel {
     const toks = o ? o.tokens.map((t, i) => {
       const s = o.score[i], a = Math.min(1, Math.abs(s) / mx);
       const bg = s >= 0 ? `rgba(242,210,75,${(a * 0.85).toFixed(3)})` : `rgba(201,79,167,${(a * 0.85).toFixed(3)})`;
-      return `<span class="rd-tok" style="background:${bg}" title="スコア ${fmt(s, 3)} · 活性 ${fmt(o.act[i], 4)}">${tokHTML(t).replace(/^<span class="tok">|<\/span>$/g, "")}</span>`;
+      return `<span class="rd-tok" style="background:${bg}" title="${tr("スコア {s} · 活性 {a}", { s: fmt(s, 3), a: fmt(o.act[i], 4) })}">${tokHTML(t).replace(/^<span class="tok">|<\/span>$/g, "")}</span>`;
     }).join("<wbr>") : "";
     const top = o ? o.tokens.map((t, i) => [Math.abs(o.score[i]), t, o.score[i]]).sort((a, b) => b[0] - a[0]).slice(0, 5) : [];
-    const first = o ? `<span class="rd-tok first" title="先頭のトークン(注意の受け皿になりやすいので除く)">${tokHTML(o.first).replace(/^<span class="tok">|<\/span>$/g, "")}</span><wbr>` : "";
-    const base = o && o.normalization === "text_p99" ? "文章の中の層内 p99(この層は活性統計が無い)" : "この層の基準(活性統計の q999)";
+    const first = o ? `<span class="rd-tok first" title="${tr("先頭のトークン(注意の受け皿になりやすいので除く)")}">${tokHTML(o.first).replace(/^<span class="tok">|<\/span>$/g, "")}</span><wbr>` : "";
+    const base = o && o.normalization === "text_p99" ? tr("文章の中の層内 p99(この層は活性統計が無い)") : tr("この層の基準(活性統計の q999)");
     return `
-      <div class="ch-input"><textarea id="rd-text" rows="4" placeholder="文章を貼る(このニューロンがどこで光るかを見る)">${esc(this.readsText)}</textarea>
-        <button id="rd-run">流す</button></div>
-      <p class="muted note">スコア = 活性 ÷ ${base}。濃さはこの文章の中の最大 |スコア|${o ? `(${fmt(mx, 1)})` : ""}に対する割合(fires の地図の色は絶対値)。黄 = 正、赤紫 = 負。先頭のトークン(灰色)は除く。マウスを当てると値。</p>
+      <div class="ch-input"><textarea id="rd-text" rows="4" placeholder="${tr("文章を貼る(このニューロンがどこで光るかを見る)")}">${esc(this.readsText)}</textarea>
+        <button id="rd-run">${tr("流す")}</button></div>
+      <p class="muted note">${tr("スコア = 活性 ÷ {base}。濃さはこの文章の中の最大 |スコア|{mx}に対する割合(fires の地図の色は絶対値)。黄 = 正、赤紫 = 負。先頭のトークン(灰色)は除く。マウスを当てると値。", { base, mx: o ? ` (${fmt(mx, 1)})` : "" })}</p>
       <div class="rd-out">${first}${toks}</div>
-      ${top.length ? `<p class="muted note">強い順: ${top.map(([, t, s]) => `${tokHTML(t)}${fmt(s, 2)}`).join(" ")}</p>` : ""}
+      ${top.length ? `<p class="muted note">${tr("強い順")}: ${top.map(([, t, s]) => `${tokHTML(t)}${fmt(s, 2)}`).join(" ")}</p>` : ""}
       <div class="ch-status muted note" id="ch-status">${esc(this.readsStatus || "")}</div>`;
   }
 
@@ -206,13 +208,13 @@ export class ChatPanel {
     t.addEventListener("input", () => { this.readsText = t.value; });
     this.el.querySelector("#rd-run").addEventListener("click", async () => {
       if (!this.readsText.trim()) return;
-      this.readsStatus = "流しています…";
+      this.readsStatus = tr("流しています…");
       this.render();
       try {
         const { layer, n } = this.neuron;
         this.readsOut = await postJSON("/api/reads", { layer, neuron: n, text: this.readsText });
-        this.readsStatus = `${this.readsOut.tokens.length} トークン · 基準 ${this.readsOut.normalization}`;
-      } catch (e) { this.readsStatus = `エラー: ${e.message}`; }
+        this.readsStatus = tr("{n} トークン · 基準 {b}", { n: this.readsOut.tokens.length, b: this.readsOut.normalization });
+      } catch (e) { this.readsStatus = `${tr("エラー")}: ${e.message}`; }
       this.render();
     });
   }

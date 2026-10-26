@@ -1,23 +1,24 @@
 // 色の重ね合わせ(別冊 §4.3、色は §13.2)。層ごとの値(Float32Array、NaN = データ無し)を点の RGBA に写す。
 // a は「目立たせる度合い」: 光る点(床・閾値より上)は 255 にして、遠くから見ても消えないようにする。
 // 光る点が全体の 2% を超えるときは、全層で同じ係数で a を下げる(emphasize、F39)。
+import { t } from "./i18n.js";
 import { COLORS } from "./map.js";
 
 const AMBER_LO = [168, 108, 30], AMBER_HI = [255, 196, 84];
 
 export const FIELDS = {
-  none: { label: "なし(構造だけ)", needs: null },
-  sweep: { label: "sweep の mass", needs: "sweep" },
-  sweep_null: { label: "sweep の null_pct", needs: "sweep" },
-  steer_kl: { label: "steer lens の KL", needs: "steer_lens" },
-  logit_peak: { label: "logit lens の最大 |z|", needs: "logit_lens" },
-  act_q999: { label: "活性の p99.9", needs: "act_stats" },
-  named: { label: "名前付き", needs: "named" },
+  none: { label: t("なし(構造だけ)"), needs: null },
+  sweep: { label: t("sweep の mass"), needs: "sweep" },
+  sweep_null: { label: t("sweep の null_pct"), needs: "sweep" },
+  steer_kl: { label: t("steer lens の KL"), needs: "steer_lens" },
+  logit_peak: { label: t("logit lens の最大 |z|"), needs: "logit_lens" },
+  act_q999: { label: t("活性の p99.9"), needs: "act_stats" },
+  named: { label: t("名前付き"), needs: "named" },
 };
 
 export function fieldLabel(name) {
-  if (name.startsWith("cos:")) return `逆引き ${name.slice(4)} との cos`;
-  if (name.startsWith("search:")) return `検索「${name.slice(7)}」`;
+  if (name.startsWith("cos:")) return t("逆引き {d} との cos", { d: name.slice(4) });
+  if (name.startsWith("search:")) return t("検索「{q}」", { q: name.slice(7) });
   if (name.startsWith("fires:")) return `fires ${name.split(":").slice(2).join(":")}`;   // fires:<id>:<見出し>
   return FIELDS[name] ? FIELDS[name].label : name;
 }
@@ -130,27 +131,27 @@ const fmt = (x, d = 2) => (x === null || x === undefined || !Number.isFinite(x) 
 
 // 凡例(色の意味は常に出す、§4.3)。opt: { threshold, nHits, floors: [層の床] }
 export function legendHTML(name, scale, opt = {}) {
-  const none = it(sw(COLORS.idle), "データ無し");
+  const none = it(sw(COLORS.idle), t("データ無し"));
   const ramp = (a, b, text) => it(sw(a), "→", sw(b), text);
   if (name === "none") return none;
-  if (name.startsWith("search:")) return none + it(sw(COLORS.sel), `当たり ${opt.nHits ?? 0} 件`);
+  if (name.startsWith("search:")) return none + it(sw(COLORS.sel), t("当たり {n} 件", { n: opt.nHits ?? 0 }));
   const fl = (opt.floors || []).filter((x) => Number.isFinite(x));
   const parts = {
-    sweep: [it(sw(COLORS.swept), "床以下"), ramp(AMBER_LO, AMBER_HI, `mass 床〜床の 2 倍(床 = 対照の最大${fl.length === 1 ? ` ${fmt(fl[0], 1)}` : ""})`),
-            it(sw(COLORS.sel), "名前付き")],
-    sweep_null: [it(sw(COLORS.swept), "0.95 未満"), ramp(AMBER_LO, AMBER_HI, "0.95〜1.0")],
-    steer_kl: [it(sw(COLORS.swept), "対照の 95% 点以下"), it(sw(COLORS.plus), "+ が強い"), it(sw(COLORS.minus), "− が強い")],
-    logit_peak: [it(sw(COLORS.swept), "全層の上位 10% 未満"), ramp(AMBER_LO, AMBER_HI, `|z| ${fmt(scale.p90, 1)}〜${fmt(scale.p999, 1)}`)],
-    act_q999: [it(sw(COLORS.swept), "全層の上位 10% 未満"), ramp(AMBER_LO, AMBER_HI, `${fmt(10 ** scale.p90, 2)}〜${fmt(10 ** scale.p999, 2)}`)],
-    named: [it(sw(COLORS.sel), "名前付き")],
+    sweep: [it(sw(COLORS.swept), t("床以下")), ramp(AMBER_LO, AMBER_HI, t("mass 床〜床の 2 倍(床 = 対照の最大{v})", { v: fl.length === 1 ? ` ${fmt(fl[0], 1)}` : "" })),
+            it(sw(COLORS.sel), t("名前付き"))],
+    sweep_null: [it(sw(COLORS.swept), t("0.95 未満")), ramp(AMBER_LO, AMBER_HI, "0.95〜1.0")],
+    steer_kl: [it(sw(COLORS.swept), t("対照の 95% 点以下")), it(sw(COLORS.plus), t("+ が強い")), it(sw(COLORS.minus), t("− が強い"))],
+    logit_peak: [it(sw(COLORS.swept), t("全層の上位 10% 未満")), ramp(AMBER_LO, AMBER_HI, `|z| ${fmt(scale.p90, 1)}〜${fmt(scale.p999, 1)}`)],
+    act_q999: [it(sw(COLORS.swept), t("全層の上位 10% 未満")), ramp(AMBER_LO, AMBER_HI, `${fmt(10 ** scale.p90, 2)}〜${fmt(10 ** scale.p999, 2)}`)],
+    named: [it(sw(COLORS.sel), t("名前付き"))],
   };
   if (name.startsWith("fires:")) {
-    return none + it(sw(COLORS.swept), `|スコア| < ${fmt(opt.threshold, 1)}`) + it(sw(COLORS.plus), "正") + it(sw(COLORS.minus), "負") +
-      it(`明るさ = |スコア| ${fmt(opt.threshold, 1)}〜${fmt(scale.max, 1)}(1 = その層の q999)`);
+    return none + it(sw(COLORS.swept), t("|スコア| < {v}", { v: fmt(opt.threshold, 1) })) + it(sw(COLORS.plus), t("正")) + it(sw(COLORS.minus), t("負")) +
+      it(t("明るさ = |スコア| {a}〜{b}(1 = その層の q999)", { a: fmt(opt.threshold, 1), b: fmt(scale.max, 1) }));
   }
   const body = name.startsWith("cos:")
-    ? [it(sw(COLORS.swept), `|cos| < ${fmt(opt.threshold, 3)}`), it(sw(COLORS.plus), "正"), it(sw(COLORS.minus), "負"),
-       it(`明るさ = |cos| ${fmt(opt.threshold, 3)}〜${fmt(scale.max, 3)}`)]
+    ? [it(sw(COLORS.swept), `|cos| < ${fmt(opt.threshold, 3)}`), it(sw(COLORS.plus), t("正")), it(sw(COLORS.minus), t("負")),
+       it(t("明るさ = |cos| {a}〜{b}", { a: fmt(opt.threshold, 3), b: fmt(scale.max, 3) }))]
     : parts[name] || [];
   return none + body.join("");
 }

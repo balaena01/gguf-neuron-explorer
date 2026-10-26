@@ -331,6 +331,7 @@ class UIData:
 
         if out.pop("note_run", None) and out["sweep"] is not None:
             out["note"] = f"run {run} には順位表が無いので、この層のほかの run({out['sweep']['run']})の結果を出しています"
+            out["note_args"] = {"run": run, "other": out["sweep"]["run"]}                # UI が自分の言語で組み立てる
         if kind == "neuron":
             sl = self.steer_lens(L)
             if sl is not None and sl.done[n]:

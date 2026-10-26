@@ -4,6 +4,7 @@
 // U2: NEURON の Chat(3 列・reads you)、LIST の fires と recipe、地図のレシピの印、ジョブのバーと計算メニュー。
 import { LayerCache, getBin, getJSON, loadVocab } from "./api.js";
 import { AgentLink } from "./agent.js";
+import { LANG, setLang, t, translateDOM } from "./i18n.js";
 import { ChatPanel } from "./chat.js";
 import { EmbedView } from "./embed.js";
 import { FiresPanel } from "./fires.js";
@@ -25,7 +26,7 @@ const state = {
 };
 window.gne = state;                       // 自動テスト(playwright)と開発用
 
-const MIXER = { attention: "attention", linear_attention: "線形注意", recurrent: "回帰", none: "mixer なし" };
+const MIXER = { attention: "attention", linear_attention: t("線形注意"), recurrent: t("回帰"), none: t("mixer なし") };
 const mixerLabel = (li) => MIXER[li.mixer];
 const isMoE = () => state.arch.layers.some((li) => li.ffn.startsWith("moe"));
 const fmt = (x, d = 2) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : (+x).toFixed(d));
@@ -53,7 +54,7 @@ const cov = (L) => (state.model ? state.model.coverage[L] : null);
 function describeLayer(L) {
   const li = state.arch.layers[L];
   const ffn = li.ffn === "dense" ? `MLP ${li.n_ff}` : li.ffn.startsWith("moe")
-    ? `MoE ${li.n_expert}×${li.n_ff}(使用 ${li.n_expert_used})${li.n_ff_shexp ? ` + shared ${li.n_ff_shexp}` : ""}` : "FFN なし";
+    ? `MoE ${li.n_expert}×${li.n_ff} (${t("使用 {n}", { n: li.n_expert_used })})${li.n_ff_shexp ? ` + shared ${li.n_ff_shexp}` : ""}` : t("FFN なし");
   const heads = li.n_head ? ` ${li.n_head}h${li.n_head_kv && li.n_head_kv !== li.n_head ? `/${li.n_head_kv}kv` : ""}` : "";
   return `L${L} ${mixerLabel(li)}${heads} · ${ffn}`;
 }
@@ -95,7 +96,7 @@ function tooltipHTML(h) {
   if (v && f !== "none" && !f.startsWith("search:") && Number.isFinite(v[n])) {
     lines.push(`<span class="t-k">color</span><span class="t-v" style="margin:0">${esc(fieldLabel(f))} = ${fmt(v[n], f.startsWith("cos:") ? 4 : 3)}</span>`);
   }
-  if (waiting) lines.push(`<span class="t-wait">読み込み中…</span>`);
+  if (waiting) lines.push(`<span class="t-wait">${t("読み込み中…")}</span>`);
   return lines.join("<br>");
 }
 
@@ -117,50 +118,52 @@ function showTooltip(h) {
 function updateStatus() {
   const m = state.model ? state.model.meta : { name: state.arch.arch };
   const map = state.map;
-  const where = map && map.front !== null ? `L${map.front}` : `${state.arch.n_layer} 層`;   // 層の説明は選択欄にある
+  const where = map && map.front !== null ? `L${map.front}` : t("{n} 層", { n: state.arch.n_layer });   // 層の説明は選択欄にある
   const flash = state.flash && state.flash.until > Date.now() ? state.flash.text : "";        // ジョブの結果などの一時的な知らせ
   $("#status-main").textContent = `${m.name} · ${where}${flash ? ` · ${flash}` : ""}${state.note ? ` · ${state.note}` : ""}`;
   $("#status-main").title = $("#status-main").textContent;
   $("#perf").textContent = state.view === "embed"
-    ? (embedView && embedView.data ? `${embedView.data.points.length.toLocaleString()} rollout(embed)` : "—(embed)")
-    : state.view === "layers" ? `${state.arch.n_layer} 層(layers)`
-    : `${(map?.nPoints ?? 0).toLocaleString()} 点 · ${map && map.fps !== null ? map.fps.toFixed(0) : "—"} fps`;
+    ? (embedView && embedView.data ? `${embedView.data.points.length.toLocaleString()} rollouts (embed)` : "— (embed)")
+    : state.view === "layers" ? "(layers)"                                // 層の数は左にある
+    : `${t("{n} 点", { n: (map?.nPoints ?? 0).toLocaleString() })} · ${map && map.fps !== null ? map.fps.toFixed(0) : "—"} fps`;
 }
 
 function legend() {
   const kinds = new Set(state.arch.layers.map((li) => li.mixer));
   const o = state.overlay;
   const it = (...xs) => `<span class="it">${xs.join("")}</span>`, sw = (c) => `<span class="sw" style="background:${c}"></span>`;
+  const itl = (x, cls = "") => `<span class="it long ${cls}">${x}</span>`;    // 長い説明は折り返してよい(地図の幅を越えない)
   const parts = [];
-  if (kinds.has("attention")) parts.push(it(sw("#9fb3cf"), "attention(太い縁)"));
-  if (kinds.has("linear_attention")) parts.push(it(sw("#3a4656"), "線形注意(細い縁)"));
-  if (kinds.has("recurrent")) parts.push(it(sw("#3a4656"), "回帰(細い縁)"));
+  if (kinds.has("attention")) parts.push(it(sw("#9fb3cf"), t("attention(太い縁)")));
+  if (kinds.has("linear_attention")) parts.push(it(sw("#3a4656"), t("線形注意(細い縁)")));
+  if (kinds.has("recurrent")) parts.push(it(sw("#3a4656"), t("回帰(細い縁)")));
   const floors = [...o.metas.values()].map((m) => m.floor);
-  const color = o.field === "none" ? it(sw("#10141b"), "データ無し")
+  const color = o.field === "none" ? it(sw("#10141b"), t("データ無し"))
     : `<b>${esc(fieldLabel(o.field))}</b> ${legendHTML(o.field, o.scale || {}, { threshold: o.threshold, nHits: o.hits ? o.hits.length : 0, floors })}`;
-  const frame = o.field === "none" ? "" : `<div>${it("シートの枠: ", sw("#252b33"), "データ無し")}${it(sw("#5e4a26"), "→", sw("#f0b850"), "光る点の数(最多の層で最も明るい)")}` +
-    (o.factor < 1 ? it(`(光る点が全体の ${Math.round(0.02 / o.factor * 100)}% あるので、点は一律に暗くし、数は枠で示す)`) : "") +
-    (o.weak && o.weak.size ? it(`(${[...o.weak].map((L) => `L${L}`).join("・")} は活性統計が無く文章内 p99 で割ったので、枠の比較から外した)`) : "") + "</div>";
+  const frame = o.field === "none" ? "" : `<div>${it(`${t("シートの枠")}: `, sw("#252b33"), t("データ無し"))}${it(sw("#5e4a26"), "→", sw("#f0b850"), t("光る点の数(最多の層で最も明るい)"))}` +
+    (o.factor < 1 ? itl(t("(光る点が全体の {p}% あるので、点は一律に暗くし、数は枠で示す)", { p: Math.round(0.02 / o.factor * 100) })) : "") +
+    (o.weak && o.weak.size ? itl(t("({layers} は活性統計が無く文章内 p99 で割ったので、枠の比較から外した)", { layers: [...o.weak].map((L) => `L${L}`).join(", ") })) : "") + "</div>";
   const ring = (c) => `<span class="sw ring" style="border-color:${c}"></span>`;
   const ag = agent ? agent.state : null;
-  const marks = (state.recipe && state.recipe.units.length ? [it(ring("#f2d24b"), "レシピ +"), it(ring("#c94fa7"), "レシピ −(大きさ = |dose|)")] : [])
-    .concat(state.focus ? [it(ring("#ffffff"), "開いているニューロン")] : [])
-    .concat(ag && ag.highlights.length ? [it(`<span class="sw ring dash" style="border-color:#6fe3ff"></span>`, `エージェントの強調${ag.label ? `(${esc(ag.label)})` : ""}`)] : [])
-    .concat(ag && ag.notes.length ? [it(`<span class="sw ring" style="border-color:#6fe3ff;width:9px;height:9px"></span><span class="ag-note-sw">agent ✎</span>`,
-      "エージェントの注釈(小さな輪。札は 28 字まで、マウスを当てると全文、クリックで開く)")] : [])
-    .concat(ag && ag.highlights.length + ag.notes.length > 30 ? [it("(札は 30 枚まで。残りは輪だけで、全部は header の agent の一覧)")] : []);
+  const marks = (state.recipe && state.recipe.units.length ? [it(ring("#f2d24b"), t("レシピ +")), it(ring("#c94fa7"), t("レシピ −(大きさ = |dose|)"))] : [])
+    .concat(state.focus ? [it(ring("#ffffff"), t("開いているニューロン"))] : [])
+    .concat(ag && ag.highlights.length ? [it(`<span class="sw ring dash" style="border-color:#6fe3ff"></span>`, `${t("エージェントの強調")}${ag.label ? ` (${esc(ag.label)})` : ""}`)] : [])
+    .concat(ag && ag.notes.length ? [itl(`<span class="sw ring" style="border-color:#6fe3ff;width:9px;height:9px"></span><span class="ag-note-sw">agent ✎</span>` +
+      t("エージェントの注釈(小さな輪。札は 28 字まで、マウスを当てると全文、クリックで開く)"))] : [])
+    .concat(ag && ag.highlights.length + ag.notes.length > 30 ? [itl(t("(札は 30 枚まで。残りは輪だけで、全部は header の agent の一覧)"))] : []);
   const line = (c) => `<span class="sw line" style="background:${c}"></span>`;
-  const links = state.links ? `<div>${it(state.links.web ? `web(${state.webHops} 段、${state.links.n} 本): ` : `配線(上流・下流 ${state.links.n} 本): `)}${
-    it(line("#f2d24b"), "黄 = 読み手(線の先)を + に押す")}${it(line("#ff70d0"), "赤紫 = 読み手を − に押す")}${
-    it(state.links.web ? `色 = 各辺の符号(経路の積ではない)、明るさ = z(表示中の最大に対する相対)、暗い線 = web の端(この先はたどっていない)${
-      state.map && state.map.front !== null ? "。正面ビューの札は 1 段目だけ(全体ビューで全体を見る)" : ""}`
-      : "明るさ = z(表示中の最大に対する相対)。正面ビューでは右 = 下流、左(破線)= 上流")}</div>` : "";
-  const moe = isMoE() ? "、MoE は専門家ごとの小さな正方形" : "";
+  const links = state.links ? `<div>${it(state.links.web ? t("web({h} 段、{n} 本): ", { h: state.webHops, n: state.links.n }) : t("配線(上流・下流 {n} 本): ", { n: state.links.n }))}${
+    it(line("#f2d24b"), t("黄 = 読み手(線の先)を + に押す"))}${it(line("#ff70d0"), t("赤紫 = 読み手を − に押す"))}${
+    itl(state.links.web ? t("色 = 各辺の符号(経路の積ではない)、明るさ = z(表示中の最大に対する相対)、暗い線 = web の端(この先はたどっていない)") +
+      (state.map && state.map.front !== null ? t("。正面ビューの札は 1 段目だけ(全体ビューで全体を見る)") : "")
+      : t("明るさ = z(表示中の最大に対する相対)。正面ビューでは右 = 下流、左(破線)= 上流"), "lk")}</div>` : "";
+  const moe = isMoE() ? t("、MoE は専門家ごとの小さな正方形") : "";
   const lay = state.layout && state.layout !== "index"
-    ? `シート内の並び = ${state.layout} 配置(UMAP)。近くにあっても似ているのは弱い傾向だけ${state.layoutMissing && state.layoutMissing.length ? `(未計算の ${state.layoutMissing.length} 層は番号順)` : ""}`
-    : "シート内の並びはニューロン番号順(近くにあっても似ているとは限らない)";
+    ? t("シート内の並び = {k} 配置(UMAP)。近くにあっても似ているのは弱い傾向だけ", { k: state.layout }) +
+      (state.layoutMissing && state.layoutMissing.length ? t("(未計算の {n} 層は番号順)", { n: state.layoutMissing.length }) : "")
+    : t("シート内の並びはニューロン番号順(近くにあっても似ているとは限らない)");
   $("#legend").innerHTML = `<div>${color}</div>${frame}<div>${parts.join("")}</div>${marks.length ? `<div>${marks.join("")}</div>` : ""}${links}` +
-    `<div class="note st">各層 = 手前の板(mixer、上辺の刻みが head の数)+ 奥のシート(MLP の全ニューロン${moe})、下の線 = 残差</div>` +
+    `<div class="note st">${t("各層 = 手前の板(mixer、上辺の刻みが head の数)+ 奥のシート(MLP の全ニューロン{moe})、下の線 = 残差", { moe })}</div>` +
     `<div class="note">${lay}</div>`;
 }
 
@@ -173,7 +176,7 @@ function fillColorSelect() {
   sel.innerHTML = names.map((k) => {
     const n = state.model && k !== "none" ? layersWith(k, state.model).length : 0;
     const dis = k !== "none" && !n;
-    return `<option value="${esc(k)}"${dis ? " disabled" : ""}>${esc(fieldLabel(k))}${k === "none" ? "" : dis ? "(データ無し)" : `(${n} 層)`}</option>`;
+    return `<option value="${esc(k)}"${dis ? " disabled" : ""}>${esc(fieldLabel(k))}${k === "none" ? "" : dis ? ` (${t("データ無し")})` : ` (${t("{n} 層", { n })})`}</option>`;
   }).join("");
   const f = state.overlay.field;
   if (f.startsWith("search:") || f.startsWith("fires:")) sel.insertAdjacentHTML("beforeend", `<option value="${esc(f)}">${esc(fieldLabel(f))}</option>`);
@@ -193,11 +196,11 @@ async function refreshModel() {
 // 枠の明るさ = その層で光っている点の数(いちばん多い層を 1 とする、比例)。全体ビューでは上位 3 層に札も出す。
 // 方向が強い層などが、点の大きさに頼らず一目で分かるように(F40)
 // weak: 比べにくい層(fires で活性統計が無く文章内 p99 で割った層など)。最大と札からは外し、枠は最も暗くする
-function showLayerCounts(lit, unit = "点", weak = new Set()) {
+function showLayerCounts(lit, unit = "点", weak = new Set()) {           // unit: 点 / 件
   const mx = Math.max(1, ...[...lit].filter(([L]) => !weak.has(L)).map(([, c]) => c));
   state.map.setFrameColors(new Map([...lit].map(([L, c]) => [L, weak.has(L) ? 0 : c / mx])));
   const top = [...lit].filter(([L, c]) => c > 0 && !weak.has(L)).sort((a, b) => b[1] - a[1]).slice(0, 3);
-  state.map.setBadges(top.map(([L, c]) => ({ layer: L, text: `L${L} · ${c} ${unit}` })));
+  state.map.setBadges(top.map(([L, c]) => ({ layer: L, text: `L${L} · ${t(`{c} ${unit}`, { c })}` })));
 }
 
 function recolor() {
@@ -240,14 +243,14 @@ async function applyOverlay(field) {
   fillColorSelect();
   const Ls = layersWith(field, state.model);
   let done = 0;
-  state.note = `${fieldLabel(field)} を読み込み中 0/${Ls.length}`;
+  state.note = t("{f} を読み込み中 {a}/{b}", { f: fieldLabel(field), a: 0, b: Ls.length });
   updateStatus();
   for (const L of Ls) fieldCache.done.delete(`${L}|${field}`);   // 計算が進んでいるかもしれないので取り直す
   const res = await Promise.all(Ls.map((L) => fieldCache.get(`${L}|${field}`).then((r) => {
     done++;
-    if (tok === overlayToken) { state.note = `${fieldLabel(field)} を読み込み中 ${done}/${Ls.length}`; updateStatus(); }
+    if (tok === overlayToken) { state.note = t("{f} を読み込み中 {a}/{b}", { f: fieldLabel(field), a: done, b: Ls.length }); updateStatus(); }
     return r;
-  }))).catch((e) => { state.note = `エラー: ${e.message}`; updateStatus(); return null; });
+  }))).catch((e) => { state.note = `${t("エラー")}: ${e.message}`; updateStatus(); return null; });
   if (!res || tok !== overlayToken) return;
   const loaded = res.filter((r) => r.meta.has);
   o.values = new Map(loaded.map((r) => [r.L, r.v]));
@@ -289,11 +292,11 @@ function applyHits(q, mode, hits) {
 async function applyFiresOverlay(fid, tok, label, thr) {
   const tokn = ++overlayToken, o = state.overlay;
   if (!o.field.startsWith("fires:") && !o.field.startsWith("search:")) o.prev = o.field;
-  state.note = "fires の値を読み込み中";
+  state.note = t("fires の値を読み込み中");
   updateStatus();
   let r;
   try { r = await getBin(`/api/fires/${fid}/field`, { tok }); }
-  catch (e) { state.note = `エラー: ${e.message}`; updateStatus(); return; }
+  catch (e) { state.note = `${t("エラー")}: ${e.message}`; updateStatus(); return; }
   if (tokn !== overlayToken) return;
   const sizes = r.shape.split(",").map(Number), all = new Float32Array(r.buf), has = new Set(r.meta.layers);
   o.field = `fires:${fid}:${label}`;
@@ -322,7 +325,7 @@ async function applyLayout(kind) {
   state.layout = kind;
   const Ls = state.arch.layers.filter((li) => li.ffn === "dense").map((li) => li.index);
   const have = new Set(kind === "index" || !state.model ? [] : (state.model.layouts || {})[kind] || []);
-  if (kind !== "index") { state.note = `配置 ${kind} を読み込み中`; updateStatus(); }
+  if (kind !== "index") { state.note = t("配置 {k} を読み込み中", { k: kind }); updateStatus(); }
   const cells = await Promise.all(Ls.map((L) => (have.has(L) ? layoutCache.get(`${L}|${kind}`).catch(() => null) : null)));
   if (state.layout !== kind) return;
   state.layoutMissing = [];
@@ -353,7 +356,7 @@ async function showLinks() {
       edges = [...d.down.map((e) => ({ sl: f.layer, sn: f.n, dl: e.layer, dn: e.neuron, z: e.z, sign: e.sign })),
                ...d.up.map((e) => ({ sl: e.layer, sn: e.neuron, dl: f.layer, dn: f.n, z: e.z, sign: e.sign }))];
     }
-  } catch (e) { state.note = `エラー: ${e.message}`; updateStatus(); return; }
+  } catch (e) { state.note = `${t("エラー")}: ${e.message}`; updateStatus(); return; }
   if (state.linksKey !== key) return;
   state.links = { web: state.web, n: edges.length };
   state.map.setLinks(edges, { focus: { layer: f.layer, n: f.n } });
@@ -363,8 +366,8 @@ async function showLinks() {
 // --- 検索(header、lens / words / name)。結果は LIST の「検索」タブに強い順で出し、当たりをマップで光らせる ---------------
 function listTab(tab) {
   for (const b of document.querySelectorAll("#list-tabs button[data-tab]")) b.classList.toggle("on", b.dataset.tab === tab);
-  for (const [t, id] of [["rank", "#rank"], ["search", "#search-list"], ["fires", "#fires-list"], ["recipe", "#recipe-list"]]) {
-    $(id).classList.toggle("hidden", tab !== t);
+  for (const [name, id] of [["rank", "#rank"], ["search", "#search-list"], ["fires", "#fires-list"], ["recipe", "#recipe-list"]]) {
+    $(id).classList.toggle("hidden", tab !== name);
   }
   if (tab === "recipe") recipePanel.refreshSaved();
 }
@@ -431,7 +434,7 @@ async function showLayerInList(L) {
 async function onJobFinished(j) {
   const L = j.params && j.params.layer;
   const what = `${KIND[j.kind] || j.kind}${L !== undefined ? ` L${L}` : ""}`;
-  state.flash = { text: `${{ done: "完了", error: "失敗", cancelled: "中止" }[j.status]}: ${what}`, until: Date.now() + 10000 };   // 結果を先に(状態表示は狭いので)
+  state.flash = { text: `${t({ done: "完了", error: "失敗", cancelled: "中止" }[j.status])}: ${what}`, until: Date.now() + 10000 };   // 結果を先に(状態表示は狭いので)
   updateStatus();
   if (j.status !== "done" || !state.model) return;
   if (L !== undefined) { unitsCache.done.delete(L); hoverCache.done.delete(L); }
@@ -446,7 +449,7 @@ async function onJobFinished(j) {
 }
 
 function startJob(kind, params) {
-  jobsBar.start(kind, params).catch((e) => { state.note = `エラー: ${e.message}`; updateStatus(); });
+  jobsBar.start(kind, params).catch((e) => { state.note = `${t("エラー")}: ${e.message}`; updateStatus(); });
 }
 
 function recipeChanged(r) {
@@ -477,7 +480,7 @@ async function setView(v) {
   lv.classList.toggle("hidden", v !== "layers");
   ev.classList.toggle("hidden", v !== "embed");
   if (v === "embed") {
-    if (!state.model) { ev.innerHTML = `<p class="muted" style="padding:16px">合成の構造には rollout がありません</p>`; return; }
+    if (!state.model) { ev.innerHTML = `<p class="muted" style="padding:16px">${t("合成の構造には rollout がありません")}</p>`; return; }
     if (!embedView) {
       embedView = new EmbedView(ev, {
         onOpen: (u) => { openNeuron(u, { focus: false }); embedView.draw(); },
@@ -493,12 +496,12 @@ async function setView(v) {
     return;
   }
   if (v === "layers") {
-    if (!state.model) { lv.innerHTML = `<p class="muted" style="padding:16px">合成の構造には layers ビューのデータがありません</p>`; return; }
+    if (!state.model) { lv.innerHTML = `<p class="muted" style="padding:16px">${t("合成の構造には layers ビューのデータがありません")}</p>`; return; }
     if (!layersView) layersView = new LayersView(lv, { onPick: (L) => { setView("map"); state.map.frontView(L); } });
-    state.note = "layers ビューを読み込み中(初回は逆引きの cos を全層で計算)";
+    state.note = t("layers ビューを読み込み中(初回は逆引きの cos を全層で計算)");
     updateStatus();
     try { layersView.set(await getJSON("/api/profile"), state.arch); }
-    catch (e) { state.note = `エラー: ${e.message}`; updateStatus(); return; }
+    catch (e) { state.note = `${t("エラー")}: ${e.message}`; updateStatus(); return; }
     state.note = "";
     updateStatus();
   }
@@ -533,12 +536,12 @@ function wireHeader() {
   });
   $("#reset-view").addEventListener("click", () => { if (state.view !== "map") setView("map"); state.map.resetView(); });
   for (const b of document.querySelectorAll("#views button")) b.addEventListener("click", () => setView(b.dataset.view));
-  for (const t of document.querySelectorAll(".panel .toggle[data-target]")) {
-    t.addEventListener("click", () => { $(`#${t.dataset.target}`).classList.toggle("collapsed"); state.map.resize(); });
+  for (const tg of document.querySelectorAll(".panel .toggle[data-target]")) {
+    tg.addEventListener("click", () => { $(`#${tg.dataset.target}`).classList.toggle("collapsed"); state.map.resize(); });
   }
   $("#neuron-wide").addEventListener("click", () => {
     const w = $("#neuron").classList.toggle("wide");
-    $("#neuron-wide").textContent = w ? "⇔ 戻す" : "⇔ 広げる";
+    $("#neuron-wide").textContent = t(w ? "⇔ 戻す" : "⇔ 広げる");
     state.map.resize();
   });
   for (const b of document.querySelectorAll("#list-tabs button[data-tab]")) b.addEventListener("click", () => listTab(b.dataset.tab));
@@ -548,7 +551,7 @@ function wireHeader() {
     state.linkMode = { direct: "web", web: "off", off: "direct" }[state.linkMode];
     state.web = state.linkMode === "web";
     const b = $("#web-toggle");
-    b.textContent = { direct: "線: 直接", web: "線: web", off: "線: なし" }[state.linkMode];
+    b.textContent = t({ direct: "線: 直接", web: "線: web", off: "線: なし" }[state.linkMode]);
     b.classList.toggle("on", state.linkMode === "web");
     showLinks();
   });
@@ -562,6 +565,11 @@ function wireHeader() {
 }
 
 async function main() {
+  translateDOM();                                                        // index.html の文言を今の言語に
+  for (const b of document.querySelectorAll("#lang button")) {         // 右上の JP / EN
+    b.classList.toggle("on", b.dataset.lang === LANG);
+    b.addEventListener("click", () => { if (b.dataset.lang !== LANG) setLang(b.dataset.lang); });
+  }
   const synthetic = params.get("synthetic");
   if (synthetic) {
     state.arch = syntheticArch(synthetic);
@@ -669,4 +677,4 @@ async function main() {
   state.overlayReady = true;
 }
 
-main().catch((e) => { $("#status").textContent = `エラー: ${e.message}`; console.error(e); state.error = String(e); });
+main().catch((e) => { $("#status").textContent = `${t("エラー")}: ${e.message}`; console.error(e); state.error = String(e); });

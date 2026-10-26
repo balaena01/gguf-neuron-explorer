@@ -25,10 +25,12 @@ button, select, input {
 button:hover { border-color: #3a4656; }
 input::placeholder { color: #4a5464; }
 
-#header { display: flex; flex-wrap: nowrap; align-items: center; gap: 12px; padding: 6px 12px; min-width: 0;
+#header { display: flex; flex-wrap: wrap; row-gap: 6px; align-items: center; gap: 10px; padding: 6px 12px; min-width: 0;   /* 入りきらなければ折り返す */
   border-bottom: 1px solid var(--line); background: var(--panel); }
 #header .brand { font-weight: 700; letter-spacing: 0.08em; color: var(--accent); }
 #header label { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+#lang { margin-left: auto; flex: none; }                                  /* 右上の JP / EN */
+#lang button { font-size: 11px; padding: 2px 7px; letter-spacing: 0.04em; }
 .seg { display: inline-flex; }
 .seg button { border-radius: 0; margin-left: -1px; }
 .seg button:first-child { border-radius: 4px 0 0 4px; }
@@ -36,7 +38,11 @@ input::placeholder { color: #4a5464; }
 .seg button.on { background: #1d2633; color: #fff; border-color: #3a4656; }
 #header > * { flex: 0 0 auto; white-space: nowrap; }
 #layer-select, #jump { font-family: var(--mono); }
-#layer-select { max-width: 22vw; }
+#layer-select { max-width: 280px; }
+#color-select { max-width: 200px; }
+@media (max-width: 1760px) { #header .lbl { display: none; } }            /* 幅が足りなければ layer / layout / color / jump の字を省く(欄の title に残る) */
+@media (max-width: 1440px) { #layer-select { max-width: 170px; } #color-select { max-width: 140px; } #search-q { width: 130px; } }
+@media (max-width: 1340px) { #header { gap: 8px; } #layer-select { max-width: 140px; } #color-select { max-width: 120px; } #search-q { width: 100px; } #jump { width: 92px; } }
 #status { margin-left: auto; color: var(--muted); display: flex; min-width: 0; flex: 0 1 auto; justify-content: flex-end; gap: 10px; }
 #status-main { color: #a8b3c2; }
 #status-main { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
@@ -68,8 +74,12 @@ input::placeholder { color: #4a5464; }
   background: rgba(0, 0, 0, 0.8); z-index: 4; padding: 6px 10px; border-radius: 4px; line-height: 1.6; }
 #legend .sw { display: inline-block; width: 11px; height: 11px; border-radius: 2px; margin: 0 4px -1px 0; border: 1px solid #3a4656; }
 #legend .it { display: inline-block; white-space: nowrap; margin-left: 12px; }
+#legend { max-width: calc(100% - 24px); }                                 /* 地図の幅を越えて隣のパネルに重ならない */
+#legend .it.long { display: inline; white-space: normal; }
+#map-wrap { container-type: inline-size; }
+@container (max-width: 720px) { #legend .note, #legend .it.long { display: none; } }   /* 地図が狭いときは色と印の見本だけ(説明で地図を覆わない) */
 #legend .note { color: #8692a3; font-size: 12px; }
-#legend.compact .note.st { display: none; }
+#legend.compact .note.st, #legend.compact .it.long:not(.lk) { display: none; }   /* 正面ビューでは配線のほかの長い説明を省く(シートの下端を隠さない) */
 #overlay { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
 #overlay span { position: absolute; transform: translate(-50%, 0); font-size: 12px; color: #8a96a7; white-space: nowrap; }
 #overlay span.ax { pointer-events: auto; cursor: pointer; padding: 0 3px; border-radius: 3px; }
@@ -96,7 +106,6 @@ input::placeholder { color: #4a5464; }
 code { font-family: var(--mono); background: #141a22; padding: 0 4px; border-radius: 3px; }
 
 /* header の追加 */
-#color-select { max-width: 200px; }
 #layout-select { max-width: 90px; }
 #web-toggle.on { background: #2a2210; border-color: var(--accent); color: var(--accent); }
 #overlay svg.lk { position: absolute; left: 0; top: 0; pointer-events: none; }
@@ -276,6 +285,7 @@ table.links tr.hd th { font-size: 11px; color: var(--muted); font-weight: 400; p
 .sgb.plus { background: #3a3210; }
 .sgb.minus { background: #3a1430; color: #ff70d0; }
 table.links tr:hover td { background: #141b25; }
+table.links td { white-space: nowrap; }
 table.links td.w { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #legend .sw.line { height: 3px; width: 16px; border: 0; margin-bottom: 3px; }
 .ch-units .u { white-space: nowrap; }
