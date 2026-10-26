@@ -39,6 +39,8 @@ Tested on:
 - RTX 3080 12 GB under WSL2, CUDA 12.4, Python 3.12, llama-cpp-python 0.3.36 built from source.
 - Models: Qwen3-0.6B, Qwen3.5-4B (hybrid linear attention) and SmolLM2-135M-Instruct (arch `llama`), all Q8_0.
 - Metal has not been tested.
+- MoE models are not supported yet. The web UI draws their structure, but the neuron tools (lenses, sweep, steer, stats, connections) need dense FFN layers.
+- On a model you have not used before, run `gne verify` first.
 
 ## Install
 
