@@ -1,6 +1,6 @@
-# 検証結果(Phase 0〜3)
+# 検証結果(Phase 0〜4)
 
-設計書 §9 の受け入れテスト(Phase 0 の V1〜V8、Phase 1 の受け入れと V9・V10、Phase 2・3 の受け入れ)と、本文の [VERIFY]・§11 のリスク R1〜R10 を、実際の llama.cpp バイナリで確かめた記録。Phase 1 の分は §6、Phase 2 は §7、Phase 3 は §8。
+設計書 §9 の受け入れテスト(Phase 0 の V1〜V8、Phase 1 の受け入れと V9・V10、Phase 2〜4 の受け入れ)と、本文の [VERIFY]・§11 のリスク R1〜R10 を、実際の llama.cpp バイナリで確かめた記録。Phase 1 の分は §6、Phase 2 は §7、Phase 3 は §8、Phase 4 は §9。
 
 - 実施日: 2026-10-26
 - 環境: RTX 3080 12GB(WSL2、CUDA 12.4)、Python 3.12.13(uv の venv)
@@ -259,3 +259,36 @@ rank の上位は、forward / progress / advance(N5366)、necessary / necessity(
 **F25. 対照どうしの null_pct は自分を除いて比べる。** ニューロンは全対照と、対照は自分以外の対照と比べる。
 
 **F26. units.jsonl の追加の欄。** 設計書の欄に加え、ニューロンの中での順位 `rank`(対照は null)を持つ。`gne rank` は実行のたびに units.jsonl を上書きする(語の単位を変えて回すと置き換わる)。
+
+## 9. Phase 4(チャットとエージェント接続)
+
+実装: `gne chat`(`gne/chat.py`: −/0/+ の 3 列、多ターン、`--left` / `--right` / `--center` で任意のレシピ、`--dose` で大きさをそろえる、逐次表示)、`gne neuron L N`(`gne/dossier.py`: 調書。`--compute` で無い logit lens / steer lens をそのニューロンだけ計算)、`gne mcp`(`gne/mcp_server.py`、MCP Python SDK 2.3 の `MCPServer`、stdio)、`gne/jobs.py`(ジョブと GPU の調停)、`gne/fires.py`(別冊 §5.5 の本体側)、`docs/agent_playbook.md`。
+
+MCP のツール: `model_overview`、`layer_summary`、`neuron`、`search`(lens / words / name)、`steer`、`steer_lens`、`fires`、`reverse`(対照プロンプト集の名前・パス、または system_a / system_b / user_prompts を直接)、`recipe_save`、`export_cvec`、`bake`、`set_name`、`job_start` / `job_status` / `job_cancel`(stats_resid / stats_act / lens_logit / lens_steer / sweep / rank / reverse)、`ui_highlight` / `ui_note` / `ui_open`(UI は Phase 5。今は `UI_NOT_RUNNING` を返す)。
+
+### 9.1 受け入れ
+
+「Claude Code から `gne mcp` を接続し、model_overview → layer_summary → neuron → steer(compare=True) → recipe_save → export_cvec の一連を、人の操作なしで完了できる」: **合格**。
+
+ヘッドレスの Claude Code(2.1.310、`claude -p`、モデル sonnet)に、この MCP サーバだけを一時的につなぎ(`--mcp-config build/verify/mcp.json --strict-mcp-config`、組み込みツールは `--tools ""` で無し、`--allowedTools mcp__gne`)、目的と手順だけを渡した(`build/verify/prompt.txt`。ユーザーの Claude Code の設定は変えていない)。
+
+- 呼び出し(イベントの記録から): `model_overview {}` → `layer_summary {"layer": 22, "top": 40}` → `neuron {"layer": 22, "neuron": 2742}` → `steer {"units": ["22:2742:+0.8"], "prompt": "Who are you?", "compare": true}` → `recipe_save {"name": "alien_mcp", ...}` → `export_cvec {"name": "alien_mcp"}`。7 ターン、27 秒、0.10 ドル。権限で止まった呼び出しはなし。
+- 成果物: `~/.gne/recipes/alien_mcp.yaml`(L22 N2742 +0.8)と `~/.gne/export/alien_mcp.cvec.gguf`。
+- エージェントの報告は手順書どおりに判断していた: sweep 3 位・null_pct 1.0・上位語(extraterrestrial intelligence)・3 プロンプトで同じテーマを根拠にし、「steer lens の KL は対照の 95% 点を超えないので KL は裏づけにならない」「名乗りの変化は安い効果だが、別のプロンプトでも同じテーマが出ている」と書き分けた。
+
+### 9.2 その他の確かめ
+
+- MCP を Python の SDK クライアントから stdio でつなぐテスト(`tests/test_mcp.py`): 全ツールの登録、受け入れの一連、ジョブ(sweep)の最中に投げた steer がジョブの切れ目で割り込めること(`yields` が増え、ジョブも完走)、失敗が `{"error": {"code": ...}}` で返ること。
+- テスト: `pytest -q` で 81 件(単体 60 + 実モデル 21)、`GNE_TEST_MODEL=Qwen3.5-4B` で `tests/test_model.py` と `tests/test_mcp.py` の 13 件、いずれも合格。
+
+### 9.3 設計と違った点・設計への追記(Phase 4)
+
+**F27. GPU の調停はユニットの切れ目で譲る。** ジョブ(sweep / lens / stats / reverse)は進捗を報告するたびに `GpuArbiter.yield_point()` を呼び、対話的な呼び出しが待っていれば GPU を譲って終わるのを待つ。同じ Engine を共有するので、譲っている間に probe ctx が作り直されてもよいように、統計と逆引きのループは各回で probe ctx を取り直す(同じ Capture なら作り直しは起きない)。
+
+**F28. steer lens の層ファイルを黙って作り直さない。** 条件(dose・文脈・対照の数・seed・ρ)が違う steer lens を同じ層ファイルに続けようとすると、以前は新しく作り直して既存の結果を捨てていた。`LENS_MISMATCH` で止め、作り直すには `--no-resume` を明示させる。調書の `--compute` は既存の層ファイルの条件に合わせて追記する。
+
+**F29. MCP SDK 2.x。** `mcp` 2.3 では FastMCP が `MCPServer`(`mcp.server.mcpserver`)に改名され、クライアントの属性は snake_case(`server_info`、`structured_content`)。SDK は既定でログを INFO にするので WARNING に下げた(stdout は MCP の通信に使うので、ログはすべて stderr)。
+
+**F30. 調書の決めごと。** sweep はその層の run のうち、このニューロンの rollout が一番多いもの。rollout はプロンプトごとに rel_push ≤ 1.6 の中で |dose| が最大のもの(main_rel なら who / snake / orange の +0.8)を 1 本ずつ選び、足りなければ残りから。connections は UI 設計の U3 で作るので、今は常に null(coverage false)。名前は `<root>/names/<model_id>.json`。
+
+**F31. fires の出力。** position 0 を除くので、`top` の各要素に `pos` と `token` を持たせた。基準は act 統計の q999(無ければ absmax、どちらも無ければその文章の層内 p99 で警告)。

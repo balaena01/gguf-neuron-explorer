@@ -397,7 +397,78 @@ class RankOut(Envelope):
     seconds: float
 
 
+# --- Phase 4: chat / neuron ---------------------------------------------------------------------------
+
+class ChatReply(_Strict):
+    column: str
+    text: str
+    finish: Literal["eog", "length"]
+    n_gen: int
+
+
+class ChatTurn(_Strict):
+    user: str
+    replies: list[ChatReply]
+
+
+class ChatColumn(_Strict):
+    label: str
+    recipe: dict[str, Any] | None
+
+
+class ChatOut(Envelope):
+    columns: list[ChatColumn]
+    system: str | None
+    turns: list[ChatTurn]
+
+
+class DossierSweep(_Strict):
+    run: str
+    design: str
+    rank: int | None
+    n_ranked: int
+    mass: float
+    null_pct: float | None
+    words: list[list[Any]]
+    per_prompt: dict[str, list[str]]
+    dose: dict[str, DoseStats]
+    rollouts: list[dict[str, Any]]
+    baselines: list[dict[str, Any]]
+
+
+class DossierSteer(_Strict):
+    up: list[str]
+    down: list[str]
+    kl_up: float
+    kl_down: float
+    kl_null_p95: float | None
+    pct_up: float
+    pct_down: float
+    dose: float
+
+
+class DossierLogit(_Strict):
+    up: list[str]
+    down: list[str]
+    peak_z: float
+
+
+class NeuronOut(Envelope):
+    layer: int
+    neuron: int
+    name: str | None
+    down_norm: float
+    sweep: DossierSweep | None
+    steer_lens: DossierSteer | None
+    logit_lens: DossierLogit | None
+    directions: dict[str, dict[str, float | int]]
+    activation: dict[str, float] | None
+    connections: dict[str, Any] | None
+    coverage: dict[str, bool]
+
+
 COMMAND_SCHEMAS: dict[str, type[Envelope]] = {
+    "chat": ChatOut, "neuron": NeuronOut,
     "sweep": SweepOut, "rank": RankOut,
     "lens logit": LensLogitOut, "lens steer": LensSteerOut, "reverse": ReverseOut,
     "info": InfoOut, "probe": ProbeOut, "verify": VerifyOut, "bench": BenchOut,

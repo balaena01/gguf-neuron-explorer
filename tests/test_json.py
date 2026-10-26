@@ -126,3 +126,13 @@ def test_sweep_and_rank(root):
     assert all(u["null_pct"] is not None for u in d["units"])
     d = gne_json(root, "rank", "-m", str(QWEN), "--run", "missing", expect_ok=False)
     assert d["error"]["code"] == "FILE_NOT_FOUND"
+
+
+def test_chat_and_neuron(root):
+    d = gne_json(root, "chat", "-m", str(QWEN), "--unit", "14:1234:+0.8", "-p", "Hi", "-p", "Who are you?",
+                 "--max-tokens", "12")
+    assert len(d["turns"]) == 2 and len(d["turns"][1]["replies"]) == 3 and d["columns"][1]["recipe"] is None
+    d = gne_json(root, "neuron", "14", "1234", "-m", str(QWEN), "--compute")
+    assert d["coverage"]["logit_lens"] and d["coverage"]["steer_lens"] and d["logit_lens"]["up"]
+    d = gne_json(root, "neuron", "99", "1", "-m", str(QWEN), expect_ok=False)
+    assert d["error"]["code"] == "BAD_ARGS"

@@ -19,7 +19,7 @@ from pathlib import Path
 import numpy as np
 
 from .engine import Engine, log_softmax
-from .steer import random_direction
+from .steer import GneError, random_direction
 
 Progress = Callable[[int, int, str], None]
 
@@ -211,8 +211,11 @@ def steer_lens_layer(engine: Engine, weights, stats, L: int, *, neurons: np.ndar
     res = None
     if out is not None and resume and Path(out).exists():
         old = SteerLens.load(out)
-        if SteerLens.config_key(old.config) == SteerLens.config_key(config):
-            res = old
+        if SteerLens.config_key(old.config) != SteerLens.config_key(config):
+            diff = sorted(k for k in config if json.dumps(old.config.get(k)) != json.dumps(config[k]))
+            raise GneError("LENS_MISMATCH", f"{Path(out).name} は別の条件で作られています({diff})",
+                           "同じ条件で続けるか、--no-resume で作り直してください(既存の結果は消えます)")
+        res = old
     if res is None:
         res = SteerLens.empty(L, n_ff, config)
 

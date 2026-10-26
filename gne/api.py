@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -555,6 +556,62 @@ class Session:
                 "word_unit": word_unit, "max_rel": max_rel, "control_mass": _summ(ctrl),
                 "n_above_all_controls": n_above, "units": units[:show], "find": found,
                 "seconds": time.perf_counter() - t0}
+
+    # --- Phase 4: chat / dossier / agent ------------------------------------------------------------
+
+    def neuron(self, L: int, n: int, *, rollouts: int = 4, compute: bool = False) -> dict:
+        from .dossier import neuron_dossier
+        return neuron_dossier(self, L, n, rollouts=rollouts, compute=compute)
+
+    def model_overview(self) -> dict:
+        from .dossier import model_overview
+        return model_overview(self)
+
+    def layer_summary(self, L: int, *, top: int = 20) -> dict:
+        from .dossier import layer_summary
+        return layer_summary(self, L, top=top)
+
+    def search(self, q: str, *, mode: str = "lens", layer: int | None = None, limit: int = 50) -> dict:
+        from .dossier import search
+        return search(self, q, mode=mode, layer=layer, limit=limit)
+
+    def fires(self, text: str, *, top: int = 50) -> dict:
+        from .fires import fires
+        return fires(self, text, top=top)
+
+    def set_name(self, L: int, n: int, name: str) -> dict:
+        from .dossier import set_name
+        set_name(self, L, n, name)
+        return {"layer": L, "neuron": n, "name": name or None}
+
+    def recipe_save(self, name: str, units: list[str] | Recipe, *, dose_unit: str = "rel") -> dict:
+        if not re.fullmatch(r"[\w.\-]+", name or ""):
+            raise GneError("BAD_ARGS", f"レシピ名 {name!r} は英数字・_・-・. だけにしてください")
+        r = units if isinstance(units, Recipe) else self.recipe(units=list(units), dose_unit=dose_unit, name=name)
+        r.name = name
+        path = self.store.recipes_dir() / f"{name}.yaml"
+        r.save(path)
+        return {"name": name, "path": str(path), "recipe": r.to_dict()}
+
+    def recipe_path(self, name_or_path: str | Path) -> Path:
+        p = Path(name_or_path)
+        if p.suffix in (".yaml", ".yml") and p.exists():
+            return p
+        q = self.store.recipes_dir() / f"{name_or_path}.yaml"
+        if not q.exists():
+            raise GneError("FILE_NOT_FOUND", f"レシピ {name_or_path} がありません", f"{q} に recipe_save で保存してください")
+        return q
+
+    def chat(self, columns, prompts: list[str], *, system: str | None = None, max_tokens: int = 256,
+             on_text=None, on_column=None) -> dict:
+        from .chat import ChatState, chat_turn
+        state = ChatState(columns, system)
+        turns = []
+        for u in prompts:
+            turns.append({"user": u, "replies": chat_turn(self, state, u, max_tokens=max_tokens, on_text=on_text,
+                                                          on_column=on_column)})
+        return {"columns": [{"label": c.label, "recipe": c.recipe.to_dict() if c.recipe else None} for c in columns],
+                "system": system, "turns": turns}
 
     def _verify_candidates(self, cands, name: str, design_name: str, n_controls: int, max_tokens: int) -> dict:
         """候補を層ごとにまとめ、quick 設計の rollout(対照つき)を回す。順位づけは Phase 3 の rank。"""

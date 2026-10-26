@@ -118,6 +118,7 @@ def residual_norms(engine: Engine, corpus: Corpus, layers: Sequence[int] | None 
     engine.set_cvec(ctx, None)
     norms: dict[int, list[np.ndarray]] = {L: [] for L in Ls}
     for i, ch in enumerate(chunks):
+        ctx = engine.probe_ctx(cap, logits_all=include_last_layer)   # ジョブが GPU を譲った間に作り直されていてもよいように
         engine.clear_memory(ctx)
         engine.prefill(ctx, [ch], logits_all=include_last_layer)
         out = cap.take()
@@ -222,6 +223,7 @@ def neuron_activation_stats(engine: Engine, corpus: Corpus, layers: Sequence[int
     engine.set_cvec(ctx, None)
     acc: dict[int, _ActAccumulator] = {}
     for i, ch in enumerate(chunks):
+        ctx = engine.probe_ctx(cap, logits_all=include_last_layer)
         engine.clear_memory(ctx)
         engine.prefill(ctx, [ch], logits_all=include_last_layer)
         out = cap.take()

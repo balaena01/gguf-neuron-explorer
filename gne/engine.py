@@ -12,6 +12,7 @@ from __future__ import annotations
 import ctypes
 import json
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -218,6 +219,12 @@ class Engine:
                 return buf.raw[:n].decode("utf-8", "replace")
             cap = -n + 1
 
+    def token_bytes(self, tok: int) -> bytes:
+        """トークンの生のバイト列(UTF-8 の途中で切れていることがある。逐次表示は増分デコーダで)。"""
+        buf = ctypes.create_string_buffer(256)
+        n = C.llama_token_to_piece(self.vocab, tok, buf, len(buf), 0, False)
+        return buf.raw[:max(n, 0)]
+
     def token_text(self, tok: int, *, special: bool = True) -> str:
         buf = ctypes.create_string_buffer(256)
         n = C.llama_token_to_piece(self.vocab, tok, buf, len(buf), 0, special)
@@ -316,8 +323,10 @@ class Engine:
         return PrefillResult(last, all_logits, n_tok)
 
     def generate_greedy(self, ctx: _Ctx, seqs: list[list[int]], *, max_tokens: int = 128, top_k: int = 5,
-                        stop_on_eog: bool = True, prefilled: PrefillResult | None = None) -> list[Rollout]:
-        """バッチ貪欲生成。prefilled が無ければ clear_memory → prefill から始める。"""
+                        stop_on_eog: bool = True, prefilled: PrefillResult | None = None,
+                        on_token: Callable[[int, int], None] | None = None) -> list[Rollout]:
+        """バッチ貪欲生成。prefilled が無ければ clear_memory → prefill から始める。
+        on_token(シーケンス番号, トークン) は EOG 以外のトークンが決まるたびに呼ばれる(逐次表示用)。"""
         if ctx.capture is not None:
             raise ValueError("generate_greedy は steer ctx で使ってください")
         if prefilled is None:
@@ -349,6 +358,8 @@ class Engine:
                     r.finish = "eog"
                 else:
                     nxt.append((si, tok))
+                    if on_token is not None:
+                        on_token(si, tok)
             if not nxt or step == max_tokens - 1:
                 break
             self._decode(ctx, [(tok, pos[si], si, True) for si, tok in nxt])

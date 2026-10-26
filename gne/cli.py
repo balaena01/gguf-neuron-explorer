@@ -624,5 +624,129 @@ def rank(c: Common, holder: dict, run: str = typer.Option(..., "--run", help="ru
     return d, "\n".join(lines), 0
 
 
+# --- chat / neuron / mcp(Phase 4) -------------------------------------------------------------------------
+
+@gne_command(app, "chat")
+def chat(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Optional[list[str]] = _UNIT,
+         dose_unit: Optional[str] = _DOSE_UNIT,
+         dose: Optional[float] = typer.Option(None, "--dose", help="各ユニットの dose の大きさをそろえる(符号は保つ)"),
+         left: Optional[Path] = typer.Option(None, "--left", help="左の列のレシピ(既定は −レシピ)"),
+         right: Optional[Path] = typer.Option(None, "--right", help="右の列のレシピ(既定は +レシピ)"),
+         center: Optional[Path] = typer.Option(None, "--center", help="中央の列のレシピ(既定は無介入)"),
+         prompt: Optional[list[str]] = typer.Option(None, "--prompt", "-p",
+                                                    help="ユーザーの発話(複数で多ターン)。無ければ対話モード"),
+         system: Optional[str] = typer.Option(None, "--system"),
+         max_tokens: int = typer.Option(256, "--max-tokens"),
+         stream: bool = typer.Option(True, "--stream/--no-stream", help="生成しながら表示する")):
+    """−/0/+ の 3 列比較チャット(ユーザーの発話は共有、返答は列ごと)。"""
+    from .chat import ChatState, chat_turn, make_columns
+    s = holder["session"] = c.session()
+    base = s.recipe(units=unit, path=recipe, dose_unit=dose_unit) if (unit or recipe) else None
+    load = lambda p: s.recipe(path=p) if p else None  # noqa: E731
+    cols = make_columns(base, dose=dose, left=load(left), right=load(right), center=load(center))
+    live = stream and not c.json
+
+    def on_column(i, col):
+        print(f"\n── [{i + 1}] {col.label} ──", file=sys.stderr if c.json else sys.stdout, flush=True)
+
+    def on_text(_i, piece):
+        print(piece, end="", flush=True)
+
+    if prompt:
+        state = ChatState(cols, system)
+        turns = []
+        for user in prompt:
+            if live:
+                print(f"\n> {user}", flush=True)
+            turns.append({"user": user, "replies": chat_turn(s, state, user, max_tokens=max_tokens,
+                                                             on_text=on_text if live else None,
+                                                             on_column=on_column if live else None)})
+        d = {"columns": [{"label": col.label, "recipe": col.recipe.to_dict() if col.recipe else None} for col in cols],
+             "system": system, "turns": turns}
+        if live:
+            print()
+            return d, "", 0
+        lines = []
+        for t in d["turns"]:
+            lines.append(f"> {t['user']}")
+            for col, rep in zip(d["columns"], t["replies"], strict=True):
+                lines.append(f"── {col['label']} ──({rep['finish']}, {rep['n_gen']} tok)\n{rep['text']}")
+        return d, "\n".join(lines), 0
+    if c.json:
+        raise GneError("BAD_ARGS", "--json では --prompt で発話を渡してください(対話モードは使えません)")
+    state = ChatState(cols, system)
+    print("列: " + " | ".join(col.label for col in cols) + "\n/reset で会話をやり直し、/quit か Ctrl-D で終了", file=sys.stderr)
+    turns = []
+    while True:
+        try:
+            user = input("\n> ")
+        except EOFError:
+            break
+        if user.strip() in ("/quit", "/exit"):
+            break
+        if user.strip() == "/reset":
+            state.reset()
+            continue
+        if not user.strip():
+            continue
+        replies = chat_turn(s, state, user, max_tokens=max_tokens, on_text=on_text if stream else None,
+                            on_column=on_column if stream else None)
+        if not stream:
+            for col, rep in zip(cols, replies, strict=True):
+                print(f"── {col.label} ──\n{rep['text']}")
+        else:
+            print()
+        turns.append({"user": user, "replies": replies})
+    return {"columns": [{"label": col.label, "recipe": col.recipe.to_dict() if col.recipe else None} for col in cols],
+            "system": system, "turns": turns}, "", 0
+
+
+@gne_command(app, "neuron")
+def neuron(c: Common, holder: dict, layer: int = typer.Argument(..., help="層 L"),
+           n: int = typer.Argument(..., help="ニューロン番号"),
+           rollouts: int = typer.Option(4, "--rollouts", help="調書に入れる rollout の数"),
+           compute: bool = typer.Option(False, "--compute", help="無い logit lens / steer lens をこのニューロンだけ計算する")):
+    """ニューロン 1 個の調書(持っている情報を全部まとめる)。"""
+    s = holder["session"] = c.session()
+    d = s.neuron(layer, n, rollouts=rollouts, compute=compute)
+    lines = [f"L{layer} N{n}" + (f"「{d['name']}」" if d["name"] else "") + f"  ‖W_down‖={d['down_norm']:.3f}",
+             "coverage: " + ", ".join(f"{k} {'○' if v else '×'}" for k, v in d["coverage"].items())]
+    sw = d["sweep"]
+    if sw:
+        lines.append(f"sweep({sw['run']}、{sw['design']}): #{sw['rank']}/{sw['n_ranked']}  mass {sw['mass']:.2f}  "
+                     f"null {sw['null_pct']:.0%}  語 " + ", ".join(f"{w}({cnt})" for w, cnt, _ in sw["words"][:8]))
+        for r in sw["rollouts"]:
+            lines.append(f"  [{r['prompt']} {r['dose']:+}] {r['text'][:150]!r}")
+    if d["steer_lens"]:
+        st = d["steer_lens"]
+        lines.append(f"steer lens: KL+ {st['kl_up']:.3f}({st['pct_up']:.0%}) KL- {st['kl_down']:.3f}({st['pct_down']:.0%})"
+                     f"  対照 p95 {st['kl_null_p95'] or 0:.3f}\n  + {_toks(st['up'])}\n  - {_toks(st['down'])}")
+    if d["logit_lens"]:
+        lg = d["logit_lens"]
+        lines.append(f"logit lens(peak z {lg['peak_z']:.1f}):\n  ↑ {_toks(lg['up'])}\n  ↓ {_toks(lg['down'])}")
+    for name, v in d["directions"].items():
+        lines.append(f"逆引き {name}: cos {v['cos']:+.3f}(層内 {v['rank_in_layer']} 位)")
+    if d["activation"]:
+        a = d["activation"]
+        lines.append(f"活性: absmax {a['absmax']:.3g}  q999 {a['q999']:.3g}  rms {a['rms']:.3g}")
+    return d, "\n".join(lines), 0
+
+
+@app.command("mcp")
+def mcp_cmd(ctx: typer.Context,
+            model: Optional[Path] = typer.Option(None, "--model", "-m", envvar="GNE_MODEL", help="GGUF ファイル"),
+            ui_url: Optional[str] = typer.Option(None, "--ui-url", help="gne serve の URL(ui_* ツール用)"),
+            root: Optional[Path] = typer.Option(None, "--root", envvar="GNE_ROOT")):
+    """MCP サーバ(stdio)。Claude Code から `claude mcp add gne -- gne mcp --model <path>` で接続する。"""
+    from .mcp_server import main as mcp_main
+    c: Common = ctx.obj or Common()
+    path = model or c.model
+    if path is None:
+        print("エラー[BAD_ARGS]: --model を指定してください", file=sys.stderr)
+        raise typer.Exit(2)
+    mcp_main(str(path), root=str(root or c.root) if (root or c.root) else None, ui_url=ui_url,
+             n_gpu_layers=c.n_gpu_layers, n_ctx=c.n_ctx, seed=c.seed)
+
+
 if __name__ == "__main__":
     app()

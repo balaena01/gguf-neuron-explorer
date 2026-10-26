@@ -105,6 +105,7 @@ def contrastive_directions(engine: Engine, cs: ContrastSet, *, layers: Sequence[
     total, step = len(seqs["A"]) + len(seqs["B"]), 0
     for side in "AB":
         for ids, start in seqs[side]:
+            ctx = engine.probe_ctx(cap)
             engine.clear_memory(ctx)
             engine.prefill(ctx, [ids])
             out = cap.take()
