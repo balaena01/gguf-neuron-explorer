@@ -6,10 +6,13 @@ import { GEOM, cellYZ, layerX, sharedCell, sharedYZ, sheetSpec, sheetX, slabX, y
 
 export const COLORS = {
   idle: [16, 20, 27],          // データ無し: 非常に暗い青灰(明るさは画面上の点の密度で割り戻す)
-  swept: [44, 54, 68],         // データあり・床以下: 暗い青灰
+  swept: [30, 37, 48],         // データあり・床以下: 暗い青灰(正面ビューの 1.6 倍でも琥珀の最も暗い点より暗い)
   spine: 0x2a3442,
   slabAttn: 0x9fb3cf,          // attention の板: 明るい青灰
   slabLin: 0x3a4656,           // 線形注意・回帰の板: 暗い青灰
+  frameNone: 0x252b33,         // overlay のデータが無い層のシートの枠(線形注意の板の色と分ける)
+  frameData: 0x5e4a26,         // overlay のデータがある層のシートの枠: 暗い琥珀
+  frameHot: 0xf0b850,          // その層で光っている点がいちばん多い層の枠: 明るい琥珀
   label: "#aeb9c8",
   plus: [242, 210, 75],
   minus: [201, 79, 167],
@@ -34,7 +37,8 @@ varying vec2 vUv;
 void main() {
   vec4 mv = modelViewMatrix * vec4(iPos, 1.0);
   float depth = -mv.z;
-  float s = clamp(uSize, 1.6 * depth / uScale, 24.0 * depth / uScale);   // 画面で 1.6〜24 px
+  float minPx = uFront > 0.5 ? 1.6 : mix(1.6, 4.0, aColor.a);            // 全体ビューでは光る点を 4 px 以上に
+  float s = clamp(uSize, minPx * depth / uScale, 24.0 * depth / uScale);   // 画面で 1.6〜24 px
   mv.xy += position.xy * s;
   gl_Position = projectionMatrix * mv;
   vUv = position.xy;
@@ -48,7 +52,8 @@ void main() {
   if (uFront > 0.5) {
     // 層正面ビュー: 焦点の層だけを明るく。手前の層は消し、奥の層は 3 層先までごく薄く(干渉の縞が出ないように)
     float k = aLayer - uFocus;
-    dim = k == 0.0 ? 1.6 : (k < 0.0 ? 0.0 : 0.10 * max(0.0, 1.0 - k / 3.0));
+    // 焦点の層の格子は 1.6 倍に明るく(光る点は色そのまま。上げると琥珀が淡い黄に飽和する)
+    dim = k == 0.0 ? mix(1.6, 1.0, step(0.001, aColor.a)) : (k < 0.0 ? 0.0 : 0.10 * max(0.0, 1.0 - k / 3.0));
   } else {
     dim = 1.0 - 0.45 * clamp(abs(aLayer - uFocus) / uXray, 0.0, 1.0);  // x-ray: 焦点から離れた層を少し暗く
   }
@@ -78,12 +83,14 @@ export class LayerMap {
     this.overlay = overlay || null;    // 層番号などの HTML を重ねる要素
     this.specs = arch.layers.map((l) => sheetSpec(l, arch.grid_side));
     this.front = null;                 // 層正面ビューの層
+    this.structDim = 1;                // mixer の板の明るさ(overlay 中は下げる)
+    this.badges = [];
     this.hover = null;
     this._mouse = null;
     this._dirtyPick = false;
     this._frames = 0;
     this._fpsT = performance.now();
-    this.fps = 0;
+    this.fps = null;                   // 1 秒たつまでは測れていない
 
     const w = container.clientWidth, h = container.clientHeight;
     this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
@@ -97,6 +104,7 @@ export class LayerMap {
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.12;
     this.controls.addEventListener("change", () => { this._overlayDirty = true; });
+    this.controls.addEventListener("start", () => { this._userMoved = true; });   // 手で動かした視点は、幅が変わっても保つ
 
     const t0 = performance.now();
     this._buildPoints();
@@ -183,8 +191,38 @@ export class LayerMap {
     const o = this.offsets[L] * 4;
     const n = Math.min(rgba.length, (this.offsets[L + 1] - this.offsets[L]) * 4);
     this.colorAttr.array.set(rgba.subarray(0, n), o);
-    this.colorAttr.addUpdateRange(o, n);
+    if (!this._fullUpload) this.colorAttr.addUpdateRange(o, n);   // 全体を送る予定なら範囲を足さない(足すとその範囲しか送られない)
     this.colorAttr.needsUpdate = true;
+  }
+
+  // overlay を出している間は mixer の板(縁・刻み)を暗くして、点の色を主役にする
+  setStructureDim(k) {
+    this.structDim = k;
+    this._applyLayerDimming();
+  }
+
+  // 全体ビューで層の上に出す札(光る点の多い層など)。items: [{ layer, text }]
+  setBadges(items) {
+    this.badges = items || [];
+    this._overlayDirty = true;
+  }
+
+  // シートの枠の色で、今の overlay のデータがある層を示す(coverage、§4.3)。
+  // strength: Map(層 → 0〜1)。データがあれば暗い琥珀、その層で光っている点が多いほど明るい琥珀
+  setFrameColors(strength) {
+    const lo = new THREE.Color(COLORS.frameData), hi = new THREE.Color(COLORS.frameHot);
+    for (let L = 0; L < this.layerParts.length; L++) {
+      const f = this.layerParts[L].frame;
+      if (!f) continue;
+      if (!strength.has(L)) {                // データ無し: 灰。overlay を出している間はさらに薄く
+        const on = this.structDim < 1;
+        f.material.color.setHex(on ? COLORS.frameNone : COLORS.slabLin); f.material.userData.base = on ? 0.5 : 0.55; continue;
+      }
+      const t = Math.max(0, Math.min(1, strength.get(L)));
+      f.material.color.copy(lo).lerp(hi, t);
+      f.material.userData.base = 0.55 + 0.45 * t;
+    }
+    this._applyLayerDimming();
   }
 
   resetColors() {
@@ -192,6 +230,7 @@ export class LayerMap {
     for (let i = 0; i < this.nPoints; i++) a.set([...COLORS.idle, 0], 4 * i);
     this.colorAttr.clearUpdateRanges();
     this.colorAttr.needsUpdate = true;
+    this._fullUpload = true;                 // 次の描画で全体を送る
   }
 
   // --- 構造(spine・板・head の刻み・シートの枠・ラベル) --------------------------------------------------
@@ -232,7 +271,7 @@ export class LayerMap {
       };
       parts.lines.push(mk(edge, color, attn ? 0.95 : 0.8));
       if (ticks.length) parts.lines.push(mk(ticks, color, attn ? 0.7 : 0.5));
-      if (frame.length) parts.lines.push(mk(frame, COLORS.slabLin, 0.55));
+      if (frame.length) { parts.frame = mk(frame, COLORS.slabLin, 0.55); parts.lines.push(parts.frame); }
       parts.feet = mk(feet, COLORS.spine, 0.8);
       // attention の板は太く明るい縁(細い四角形 4 本。WebGL の線は 1 px にしかならないので)。
       // 半透明の面は奥で重なって光って見えるので使わない
@@ -294,7 +333,11 @@ export class LayerMap {
     for (let L = 0; L < this.layerParts.length; L++) {
       const p = this.layerParts[L];
       const k = front === null ? 1 : L === front ? 0.75 : 0;
-      for (const obj of p.lines) { obj.material.opacity = obj.material.userData.base * k; obj.visible = k > 0; }
+      for (const obj of p.lines) {
+        const sd = obj === p.frame ? 1 : this.structDim;                   // overlay 中は mixer の板を暗く(シートの枠はそのまま)
+        obj.material.opacity = obj.material.userData.base * k * sd; obj.visible = k > 0;
+      }
+      if (p.fill) for (const q of p.fill.children) q.material.opacity = 0.55 * this.structDim;
       p.feet.visible = front === null;
       if (p.fill) p.fill.visible = front === null || L === front;
       this.labels[L].visible = front !== null && L === front;   // 全体ビューでは床の層番号(HTML)を使う
@@ -340,7 +383,7 @@ export class LayerMap {
         const m = (lo + hi) / 2;
         place(m);
         const b = bbox();
-        if (b.ok && b.x1 - b.x0 < 1.80 && b.y1 - b.y0 < 1.60) hi = m; else lo = m;
+        if (b.ok && b.x1 - b.x0 < 1.70 && b.y1 - b.y0 < 1.60) hi = m; else lo = m;   // 左右は入力側・出力側の文字の分を空ける
       }
       d = hi;
       place(d);
@@ -351,6 +394,7 @@ export class LayerMap {
       target.addScaledVector(right, ((b.x0 + b.x1) / 2) * halfW).addScaledVector(up, ((b.y0 + b.y1) / 2) * halfH);
     }
     this.front = null;
+    this._userMoved = false;
     this.uniforms.uFront.value = 0;
     this.controls.target.copy(target);
     place(d);
@@ -361,25 +405,32 @@ export class LayerMap {
     this.onLayer(null);
   }
 
-  frontView(L) {
+  frontView(L, { keepMarker = false } = {}) {
     const s = this.specs[L], ext = Math.max(s.ext, GEOM.S * 0.6);
     this.front = L;
+    this._userMoved = false;
     this.uniforms.uFront.value = 1;
     this.uniforms.uFocus.value = L;
-    const yc = GEOM.Y0 + ext * 0.56;                                       // ラベルの分だけ少し上を見る
-    const d = (ext * 0.78) / Math.tan((this.camera.fov * Math.PI) / 360);   // シートとラベルが上下の余白つきで収まる距離
+    const yc = GEOM.Y0 + ext * (this.camera.aspect < 1.15 ? 0.5 : 0.56);    // ラベルの分だけ少し上を見る(縦長なら中央)
+    // シートとラベルが上下の余白つきで収まる距離(横長でない画面では横幅で決める)
+    const d = (ext * 0.78) / Math.tan((this.camera.fov * Math.PI) / 360) / Math.min(1, this.camera.aspect / 1.15);
     this.controls.target.set(sheetX(L), yc, 0);
     this.camera.up.set(0, 1, 0);
     this.camera.position.set(sheetX(L) - d, yc, 0);                       // 真正面(台形にゆがまないように)
     this.camera.lookAt(this.controls.target);
     this.controls.update();
-    if (this._marker) this._marker.visible = false;
+    if (this._marker && !keepMarker) this._marker.visible = false;
     this._applyLayerDimming();
     this.onLayer(L);
   }
 
   focusNeuron(L, n) {
     this.frontView(L);
+    this.markNeuron(L, n);
+  }
+
+  // カメラは動かさずに、ニューロンに輪の印を付ける
+  markNeuron(L, n) {
     const p = this.neuronPosition(L, n);
     if (!p) return;
     if (!this._marker) {
@@ -423,6 +474,9 @@ export class LayerMap {
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(w, h);
     this._overlayDirty = true;
+    if (!this._userMoved) {                 // パネルの開閉で幅が変わったら視点を合わせ直す
+      if (this.front !== null) this.frontView(this.front, { keepMarker: true }); else this.resetView();
+    }
   }
 
   // --- 画面に重ねる HTML(全体ビューの層番号と入力側・出力側、MoE の正面ビューの専門家番号) ------------------
@@ -458,6 +512,21 @@ export class LayerMap {
       const ia = out(a, a2, 46), ob = out(b, b2, 46);
       items.push({ x: ia.x - r.left, y: ia.y - r.top, text: "入力側", cls: "ax-end" });
       items.push({ x: ob.x - r.left, y: ob.y - r.top, text: "出力側", cls: "ax-end" });
+      const placed = [];                                                   // シートの上辺の中央の少し上。重なる札は上へずらす
+      for (const b of this.badges) {
+        const s = this.specs[b.layer];
+        if (!s || s.kind === "none") continue;
+        const p = this._toScreen(new THREE.Vector3(sheetX(b.layer), GEOM.Y0 + Math.max(s.ext, GEOM.S * 0.6) * 1.12, 0));
+        if (p.z >= 1) continue;
+        let y = p.y - r.top;
+        const w = b.text.length * 7.5 + 12;
+        while (placed.some((q) => Math.abs(q.x - (p.x - r.left)) < (q.w + w) / 2 + 4 && Math.abs(q.y - y) < 20)) y -= 21;
+        placed.push({ x: p.x - r.left, y, w });
+        if (y < p.y - r.top - 1) {                                           // ずらした札はシートへ引き出し線を引く
+          items.push({ x: p.x - r.left, y, text: "", cls: "lead", h: p.y - r.top - y });
+        }
+        items.push({ x: p.x - r.left, y, text: b.text, cls: "badge-l", layer: b.layer });
+      }
     } else {
       const s = this.specs[this.front];
       if (s.kind === "moe") {                // 専門家のタイルの行の左に、その行の最初の専門家番号
@@ -468,7 +537,7 @@ export class LayerMap {
         }
       }
     }
-    this.overlay.innerHTML = items.map((it) => `<span class="${it.cls}"${it.layer !== undefined ? ` data-layer="${it.layer}"` : ""} style="left:${it.x.toFixed(1)}px;top:${it.y.toFixed(1)}px">${it.text}</span>`).join("");
+    this.overlay.innerHTML = items.map((it) => `<span class="${it.cls}"${it.layer !== undefined ? ` data-layer="${it.layer}"` : ""} style="left:${it.x.toFixed(1)}px;top:${it.y.toFixed(1)}px${it.h ? `;height:${it.h.toFixed(1)}px` : ""}">${it.text}</span>`).join("");
   }
 
   // --- ピッキング ----------------------------------------------------------------------------------------
@@ -529,6 +598,7 @@ export class LayerMap {
     }
     if (this._overlayDirty) this._updateOverlay();
     this.renderer.render(this.scene, this.camera);
+    this._fullUpload = false;
     this._frames++;
     const now = performance.now();
     if (now - this._fpsT > 1000) {

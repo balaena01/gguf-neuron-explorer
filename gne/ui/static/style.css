@@ -36,38 +36,143 @@ input::placeholder { color: #4a5464; }
 .seg button.on { background: #1d2633; color: #fff; border-color: #3a4656; }
 #header > * { flex: 0 0 auto; white-space: nowrap; }
 #layer-select, #jump { font-family: var(--mono); }
-#layer-select { max-width: 30vw; }
+#layer-select { max-width: 22vw; }
 #status { margin-left: auto; color: var(--muted); display: flex; min-width: 0; flex: 1 1 auto; justify-content: flex-end; gap: 10px; }
 #status-main { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-#status-perf { flex: 0 0 auto; color: #8792a2; }
-#status-perf::before { content: "·"; margin-right: 10px; color: var(--muted); }
+#perf { color: #6f7b8c; }
 
 #main { display: grid; grid-template-columns: auto 1fr auto; min-height: 0; }
 .panel { background: var(--panel); border-right: 1px solid var(--line); width: 300px; display: flex; flex-direction: column; min-height: 0; }
-#neuron.panel { border-right: 0; border-left: 1px solid var(--line); width: 380px; }
-.panel.collapsed, #neuron.panel.collapsed { width: 34px; }
+#neuron.panel { border-right: 0; border-left: 1px solid var(--line); width: 470px; }
+#neuron.panel.wide { width: min(56vw, 900px); }
+.panel.collapsed, #neuron.panel.collapsed, #neuron.panel.wide.collapsed { width: 34px; }
+.panel.collapsed #neuron-wide { display: none; }
 .panel.collapsed .panel-body { display: none; }
 .panel.collapsed .panel-head { writing-mode: vertical-rl; }
-.panel-head { padding: 6px; }
+.panel-head { padding: 6px; display: flex; gap: 6px; }
 .panel-head .toggle { font-family: var(--mono); font-size: 11px; letter-spacing: 0.1em; }
 .panel-body { padding: 8px 12px; overflow: auto; min-height: 0; }
 
 #map-wrap { position: relative; min-width: 0; min-height: 0; }
 #map { position: absolute; inset: 0; }
 #map canvas { display: block; }
-#tooltip { position: absolute; pointer-events: none; background: rgba(8, 10, 14, 0.92); border: 1px solid #2a3340;
-  border-radius: 4px; padding: 4px 8px; font-size: 12px; color: #e6edf5; white-space: nowrap; z-index: 5; }
+#tooltip { position: absolute; pointer-events: none; background: rgba(8, 10, 14, 0.94); border: 1px solid #2a3340;
+  border-radius: 4px; padding: 5px 9px; font-size: 12px; color: #e6edf5; white-space: nowrap; z-index: 5; line-height: 1.6; }
+#tooltip .t-id { font-weight: 700; }
+#tooltip .t-name { color: #fff; margin-left: 8px; font-family: var(--sans); }
+#tooltip .t-k { display: inline-block; width: 52px; color: var(--muted); }
+#tooltip .t-v { color: #8f9bab; margin-left: 8px; }
+#tooltip .t-wait { color: var(--muted); }
 #legend { position: absolute; right: 12px; bottom: 10px; font-size: 12px; color: #93a0b2; text-align: right; pointer-events: none;
   background: rgba(0, 0, 0, 0.55); padding: 6px 10px; border-radius: 4px; line-height: 1.6; }
-#legend .sw { display: inline-block; width: 11px; height: 11px; border-radius: 2px; margin: 0 5px -1px 12px; border: 1px solid #3a4656; }
+#legend .sw { display: inline-block; width: 11px; height: 11px; border-radius: 2px; margin: 0 4px -1px 0; border: 1px solid #3a4656; }
+#legend .it { display: inline-block; white-space: nowrap; margin-left: 12px; }
 #legend .note { color: #8692a3; font-size: 12px; }
-#legend.compact .note { display: none; }
+#legend.compact .note.st { display: none; }
 #overlay { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
 #overlay span { position: absolute; transform: translate(-50%, 0); font-size: 12px; color: #8a96a7; white-space: nowrap; }
 #overlay span.ax { pointer-events: auto; cursor: pointer; padding: 0 3px; border-radius: 3px; }
 #overlay span.ax:hover { color: #fff; background: #1d2633; }
 #overlay span.ax-end { color: #6f7b8c; font-size: 12px; transform: translate(-50%, -50%); }
 #overlay span.ex { transform: translate(-100%, -50%); color: #8f9bab; font-size: 11px; padding-right: 4px; }
+#overlay span.lead { transform: none; width: 0; border-left: 1px solid rgba(240, 184, 80, 0.55); }
+#overlay span.badge-l { transform: translate(-50%, -100%); color: #f0b850; background: rgba(20, 15, 6, 0.85); border: 1px solid #6b5426;
+  border-radius: 3px; padding: 0 5px; pointer-events: auto; cursor: pointer; }
 #view-placeholder { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); background: #000; }
 
-#jobs { border-top: 1px solid var(--line); background: var(--panel); padding: 4px 12px; font-size: 12px; min-height: 26px; }
+#jobs { border-top: 1px solid var(--line); background: var(--panel); padding: 4px 12px; font-size: 12px; min-height: 26px;
+  display: flex; justify-content: space-between; gap: 12px; }
+
+/* トークン(語頭・語末の空白は ␣) */
+.tok { display: inline-block; white-space: pre; background: #161d27; border-radius: 3px; padding: 0 4px; margin: 1px 3px 1px 0;
+  font-family: var(--mono); font-size: 12px; color: #e6edf5; }
+.tok i { font-style: normal; color: #5d6878; }
+.plus { color: var(--plus); }
+.minus { color: var(--minus); }
+.err { color: #ff8a8a; }
+.note { font-size: 12px; }
+code { font-family: var(--mono); background: #141a22; padding: 0 4px; border-radius: 3px; }
+
+/* header の追加 */
+#color-select { max-width: 200px; }
+#cos-thr-wrap { display: inline-flex; align-items: center; gap: 6px; }
+#cos-thr { width: 90px; padding: 0; accent-color: var(--accent); }
+#search select { border-radius: 4px 0 0 4px; }
+#search input { border-radius: 0 4px 4px 0; margin-left: -1px; }
+/* LIST と NEURON のタブ */
+.tabs { display: flex; gap: 2px; margin-bottom: 8px; }
+.tabs button { border-radius: 4px 4px 0 0; border-bottom-color: transparent; font-size: 12px; padding: 2px 10px; }
+.tabs button.on { background: #1d2633; color: #fff; border-color: #3a4656; }
+.tabs button:disabled { color: #3f4856; cursor: default; }
+
+/* LIST: rank */
+#list .panel-body { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+#list.collapsed .panel-body { display: none; }      /* 上の id 指定が .panel.collapsed より強いので、閉じたときも id で隠す */
+#rank { display: flex; flex-direction: column; min-height: 0; flex: 1 1 auto; }
+.list-head { color: var(--muted); margin-bottom: 6px; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+button.small { font-size: 11px; padding: 1px 8px; }
+.list-tools { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; }
+.list-tools input[type=text], #rank-filter { flex: 1 1 auto; min-width: 0; }
+.rank-wrap { overflow: auto; min-height: 0; flex: 1 1 auto; }
+table.rank { width: 100%; border-collapse: collapse; font-size: 12px; table-layout: fixed; }
+table.rank th:nth-child(1) { width: 30px; } table.rank th:nth-child(2) { width: 44px; }
+table.rank th:nth-child(3) { width: 42px; } table.rank th:nth-child(4) { width: 36px; }
+table.rank th[data-sort]::after { content: attr(data-sort); font-size: 9px; margin-left: 2px; color: #3f4856; }
+table.rank th.on[data-sort]::after { color: var(--accent); }
+#search-list table.rank td:nth-child(1) { width: 34px; } #search-list table.rank td:nth-child(2) { width: 56px; }
+#search-list table.rank td:nth-child(3) { width: 70px; }
+#search-list { display: flex; flex-direction: column; min-height: 0; flex: 1 1 auto; }
+table.rank th { position: sticky; top: 0; background: var(--panel); color: var(--muted); text-align: left; cursor: pointer; font-weight: 400;
+  padding: 3px 4px; border-bottom: 1px solid var(--line); }
+table.rank td { padding: 2px 4px; border-bottom: 1px solid #141a22; white-space: nowrap; }
+table.rank td.w { color: #9aa6b6; font-family: var(--sans); overflow: hidden; text-overflow: ellipsis; }
+table.rank tr { cursor: pointer; }
+table.rank tr:hover td { background: #141b25; }
+table.rank tr.above td:nth-child(3) { color: var(--accent); }
+table.rank tr.rnd td { color: #687384; }
+table.rank tr.sel td { background: #222c3a; color: #fff; }
+#rank-empty { margin: 6px 0 0; }
+
+/* NEURON */
+#neuron .panel-body { overflow: auto; }
+.n-head { margin-bottom: 8px; }
+.n-id { font-size: 17px; font-weight: 700; color: #fff; }
+.n-stats { margin: 2px 0 6px; font-size: 12px; }
+.n-row { display: flex; gap: 6px; }
+.n-name { flex: 1 1 auto; min-width: 0; }
+.n-name.saved { border-color: var(--accent); }
+.n-row button:disabled { color: #3f4856; }
+.ex-wrap { overflow-x: auto; }
+table.ex { border-collapse: collapse; width: 100%; table-layout: fixed; font-size: 12px; }
+table.ex th { text-align: left; font-weight: 400; vertical-align: bottom; padding: 2px 4px; color: #c9d1dc; font-family: var(--mono); }
+table.ex th .muted { font-size: 11px; }
+table.ex th.p { width: 78px; vertical-align: top; font-family: var(--mono); }
+table.ex th.p .muted { font-family: var(--sans); white-space: normal; font-size: 11px; }
+table.ex td.cell { vertical-align: top; border: 1px solid #1a212b; padding: 4px 5px; cursor: pointer; background: #0f141b; }
+table.ex td.cell.base { background: #0b0e13; color: #9aa6b6; }
+table.ex td.cell.empty { background: transparent; border-color: #12171e; cursor: default; }
+table.ex td.cell.span { background: #14110b; border-left: 2px solid #6b5426; }
+table.ex td.cell .txt { display: -webkit-box; -webkit-line-clamp: 7; -webkit-box-orient: vertical; overflow: hidden; white-space: pre-wrap;
+  word-break: break-word; line-height: 1.4; }
+table.ex td.cell.open .txt { display: block; -webkit-line-clamp: unset; }
+.badge { display: inline-block; font-size: 10px; font-family: var(--mono); border: 1px solid #3a4656; color: #8f9bab; border-radius: 3px;
+  padding: 0 4px; margin: 0 4px 3px 0; }
+.badge.plus { border-color: #6b5e22; }
+.badge.minus { border-color: #5d2b50; }
+#neuron h4 { margin: 14px 0 6px; font-size: 12px; color: var(--muted); font-weight: 400; letter-spacing: 0.04em; }
+.chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.chip { background: #161d27; border-radius: 3px; padding: 0 6px; font-family: var(--mono); font-size: 12px; }
+.chip i { font-style: normal; color: var(--muted); margin-left: 4px; font-size: 10px; }
+.lens { margin: 3px 0; line-height: 1.9; }
+.lens .sg { display: inline-block; width: 14px; font-weight: 700; }
+.lens .kl { color: var(--muted); font-size: 11px; margin-left: 6px; white-space: nowrap; }
+table.kv { border-collapse: collapse; font-size: 12px; }
+table.kv th, table.kv td { padding: 1px 10px 1px 0; text-align: left; font-weight: 400; }
+table.kv th { color: var(--muted); }
+
+/* layers ビュー */
+#layers-view { position: absolute; inset: 0; overflow-y: auto; overflow-x: hidden; background: #000; }
+.lv-tools { display: flex; gap: 16px; align-items: center; padding: 10px 12px 2px 12px; }
+#lv-canvas { display: block; cursor: pointer; }
+#lv-tip { margin: 6px 12px 0; padding: 6px 10px; min-height: 64px; font-size: 12px; line-height: 1.6; color: #dfe6ee;
+  background: #0b0f15; border: 1px solid #1f2630; border-radius: 4px; }

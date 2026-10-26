@@ -1,0 +1,273 @@
+// LIST(rank タブ)と NEURON パネル(Examples / Details)。別冊 §2・§5。
+import { getJSON, postJSON } from "./api.js";
+
+export const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const fmt = (x, d = 2) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : (+x).toFixed(d));
+const pct = (x) => (x === null || x === undefined ? "—" : `${Math.round(x * 100)}%`);
+
+// トークン 1 個を見える形に(語頭・語末の空白は ␣、改行は ↵)
+export function tokHTML(s) {
+  if (s === null || s === undefined) return "";
+  let t = esc(s).replace(/\n/g, "↵").replace(/\t/g, "⇥");
+  const lead = t.match(/^ +/), trail = t.match(/ +$/);
+  if (lead && lead[0].length === t.length) return `<span class="tok"><i>${"␣".repeat(t.length)}</i></span>`;
+  if (lead) t = `<i>${"␣".repeat(lead[0].length)}</i>${t.slice(lead[0].length)}`;
+  if (trail) t = `${t.slice(0, t.length - trail[0].length)}<i>${"␣".repeat(trail[0].length)}</i>`;
+  return `<span class="tok">${t || "∅"}</span>`;
+}
+export const toksHTML = (arr) => (arr || []).filter((x) => x !== null && x !== undefined).map(tokHTML).join("");
+
+// --- LIST: rank ---------------------------------------------------------------------------------------------
+export class RankList {
+  constructor(root, { onOpen }) {
+    this.root = root;
+    this.onOpen = onOpen;
+    this.data = null;
+    this.layer = null;
+    this.run = null;
+    this.sort = { key: "rank", dir: 1 };
+    this.selected = null;
+    root.innerHTML = `
+      <div class="list-head mono" id="rank-head"></div>
+      <div class="list-tools">
+        <input id="rank-filter" placeholder="語・番号で絞り込み" spellcheck="false">
+        <label class="muted"><input type="checkbox" id="rank-random"> random</label>
+      </div>
+      <div class="rank-wrap"><table class="rank mono"><thead><tr>
+        <th data-k="rank">#</th><th data-k="neuron">N</th><th data-k="mass">mass</th><th data-k="null_pct">null</th>
+        <th data-k="words">語</th></tr></thead><tbody></tbody></table></div>
+      <p class="muted note" id="rank-empty"></p>`;
+    root.querySelector("#rank-filter").addEventListener("input", () => this.render());
+    root.querySelector("#rank-random").addEventListener("change", () => this.render());
+    for (const th of root.querySelectorAll("th")) {
+      th.addEventListener("click", () => {
+        const k = th.dataset.k;
+        this.sort = { key: k, dir: this.sort.key === k ? -this.sort.dir : (k === "mass" || k === "null_pct" ? -1 : 1) };
+        this.render();
+      });
+    }
+    root.querySelector("tbody").addEventListener("click", (ev) => {
+      const tr = ev.target.closest("tr");
+      if (tr) this.onOpen({ layer: this.layer, n: +tr.dataset.n, kind: tr.dataset.kind, run: this.run });
+    });
+  }
+
+  async show(L, units, coverage) {
+    this.layer = L;
+    this.data = units;
+    const runs = units.runs;
+    if (!runs.some((r) => r.run === this.run)) this.run = runs.length ? runs[0].run : null;
+    const head = this.root.querySelector("#rank-head");
+    if (!runs.length) {
+      const with_ = coverage.filter((c) => c.sweep_runs.length).map((c) => `<a href="#" data-l="${c.layer}">L${c.layer}</a>`);
+      head.innerHTML = `L${L}`;
+      this.root.querySelector("#rank-empty").innerHTML = `この層の sweep はまだありません(<code>gne sweep --layer ${L}</code>)。` +
+        (with_.length ? `<br>sweep のある層: ${with_.join(" ")}` : "");
+      this.root.querySelector("tbody").innerHTML = "";
+      return;
+    }
+    const sel = runs.length > 1 ? `<select id="rank-run">${runs.map((r) => `<option${r.run === this.run ? " selected" : ""}>${esc(r.run)}</option>`).join("")}</select>` : esc(this.run);
+    head.innerHTML = `L${L} · ${sel}`;
+    const rs = head.querySelector("#rank-run");
+    if (rs) rs.addEventListener("change", () => { this.run = rs.value; this.render(); });
+    this.render();
+  }
+
+  select(L, n, kind = "neuron") {
+    this.selected = { L, n, kind };
+    for (const tr of this.root.querySelectorAll("tbody tr")) {
+      tr.classList.toggle("sel", +tr.dataset.n === n && tr.dataset.kind === kind && L === this.layer);
+    }
+  }
+
+  render() {
+    if (!this.data) return;
+    const r = this.data.runs.find((x) => x.run === this.run);
+    if (!r) return;
+    const q = this.root.querySelector("#rank-filter").value.trim().toLowerCase();
+    const showRandom = this.root.querySelector("#rank-random").checked;
+    let rows = r.units.filter((u) => u.kind === "neuron" || showRandom);
+    if (q) rows = rows.filter((u) => String(u.neuron) === q.replace(/^n/, "") || u.words.some((w) => String(w).toLowerCase().includes(q))
+                                     || (u.name || "").toLowerCase().includes(q));
+    const { key, dir } = this.sort;
+    const val = (u) => (key === "words" ? u.words.join(" ") : key === "rank" ? (u.rank ?? 1e9) : u[key] ?? -1e9);
+    rows.sort((a, b) => (val(a) < val(b) ? -dir : val(a) > val(b) ? dir : 0));
+    const sel = this.selected;
+    for (const th of this.root.querySelectorAll("th")) {                  // 並べ替えの印
+      th.dataset.sort = th.dataset.k === key ? (dir > 0 ? "▲" : "▼") : "⇅";
+      th.classList.toggle("on", th.dataset.k === key);
+    }
+    this.root.querySelector("#rank-empty").innerHTML =
+      `${rows.filter((u) => u.kind === "neuron").length} / ${r.n_neurons} ニューロン · 対照 ${r.n_controls}(床 = 対照の最大 mass ${fmt(r.floor, 1)})`;
+    this.root.querySelector("tbody").innerHTML = rows.map((u) => {
+      const rnd = u.kind === "random";
+      const above = !rnd && r.floor !== null && u.mass > r.floor;
+      const cls = [rnd ? "rnd" : "", above ? "above" : "", sel && sel.L === this.layer && sel.n === u.neuron && sel.kind === u.kind ? "sel" : ""].join(" ");
+      return `<tr class="${cls}" data-n="${u.neuron}" data-kind="${u.kind}">
+        <td>${rnd ? "R" : u.rank ?? ""}</td><td>${rnd ? `r${u.neuron}` : u.neuron}</td><td>${fmt(u.mass, 1)}</td>
+        <td>${u.null_pct === null ? "—" : fmt(u.null_pct, 2)}</td>
+        <td class="w" title="${esc(u.words.join(" · "))}">${u.name ? `<b>${esc(u.name)}</b> ` : ""}${u.words.map(esc).join(" · ")}</td></tr>`;
+    }).join("");
+  }
+}
+
+// --- NEURON パネル ------------------------------------------------------------------------------------------
+export class NeuronPanel {
+  constructor(root, { onNamed, onGoto }) {
+    this.root = root;
+    this.onNamed = onNamed;
+    this.onGoto = onGoto;
+    this.tab = "examples";
+    this.d = null;
+    this._token = 0;
+  }
+
+  async open({ layer, n, kind = "neuron", run = null }) {
+    const tok = ++this._token;
+    this.root.innerHTML = `<p class="muted">L${layer} ${kind === "random" ? `random ${n}` : `N${n}`} を読み込み中…</p>`;
+    let d;
+    try {
+      d = await getJSON("/api/unit", { layer, n, kind, ...(run ? { run } : {}) });
+    } catch (e) {
+      if (tok === this._token) this.root.innerHTML = `<p class="err">${esc(e.message)}</p>`;
+      return;
+    }
+    if (tok !== this._token) return;
+    this.d = d;
+    this.render();
+  }
+
+  render() {
+    const d = this.d, s = d.sweep;
+    const rnd = d.kind === "random";
+    const id = rnd ? `L${d.layer} random ${d.neuron}` : `L${d.layer} N${d.neuron}`;
+    const stats = s ? `${s.rank ? `#${s.rank}/${s.n_ranked} · ` : ""}mass ${fmt(s.mass, 1)} · null ${s.null_pct === null ? "—" : pct(s.null_pct)} · z ${fmt(s.z, 2)}`
+      : "sweep なし";
+    this.root.innerHTML = `
+      <div class="n-head">
+        <div class="n-id mono">${id}</div>
+        <div class="n-stats mono muted">${stats}${s ? ` · <span title="${esc(s.design)}">${esc(s.run)}</span>` : ""}</div>
+        ${rnd ? `<p class="muted note">ランダム方向の対照(名前は付けられません)</p>` : `
+        <div class="n-row"><input class="n-name" placeholder="名前(入力して Enter か欄の外で保存)" value="${esc(d.name || "")}" spellcheck="false">
+          <button disabled title="レシピの編集は U2">+ レシピ</button><button disabled title="レシピの編集は U2">− レシピ</button></div>`}
+      </div>
+      <div class="tabs">
+        <button data-tab="examples">Examples</button><button data-tab="chat" disabled title="U2">Chat</button>
+        <button data-tab="details">Details</button><button data-tab="web" disabled title="U3">Web</button>
+      </div>
+      <div class="n-tab" id="n-tab"></div>`;
+    for (const b of this.root.querySelectorAll(".tabs button")) {
+      b.classList.toggle("on", b.dataset.tab === this.tab);
+      b.addEventListener("click", () => { this.tab = b.dataset.tab; this.render(); });
+    }
+    const name = this.root.querySelector(".n-name");
+    if (name) {
+      const save = async () => {
+        if ((name.value.trim() || null) === (d.name || null)) return;
+        const r = await postJSON("/api/name", { layer: d.layer, neuron: d.neuron, name: name.value });
+        d.name = r.name;
+        name.classList.add("saved");
+        setTimeout(() => name.classList.remove("saved"), 800);
+        this.onNamed(r.names);
+      };
+      name.addEventListener("keydown", (ev) => { if (ev.key === "Enter") save(); });
+      name.addEventListener("blur", save);
+    }
+    const body = this.root.querySelector("#n-tab");
+    body.innerHTML = this.tab === "details" ? this.details() : this.examples();
+    for (const c of body.querySelectorAll(".cell[data-full]")) c.addEventListener("click", () => c.classList.toggle("open"));
+  }
+
+  examples() {
+    const s = this.d.sweep;
+    if (!s) return `<p class="muted">この層の sweep にこのユニットはありません。rollout は sweep を回すと出ます(<code>gne sweep --layer ${this.d.layer}</code>)。</p>`;
+    const ex = s.examples, cols = ex.columns;
+    const cell = (c, base) => {
+      if (!c) return `<td class="cell empty"></td>`;
+      const capped = c.finish === "length" ? `<span class="badge" title="max_tokens で打ち切り">capped</span>` : "";
+      const t = esc(c.text);
+      return `<td class="cell${base ? " base" : ""}" data-full="1">${capped}<div class="txt">${t}</div></td>`;
+    };
+    const head = `<tr><th></th><th>0<div class="muted">ベースライン</div></th>${cols.map((c) =>
+      `<th class="${+c.dose >= 0 ? "plus" : "minus"}">${c.dose}<div class="muted">rel ${+c.dose < 0 ? "−" : "+"}${fmt(c.rel_push, 2)}</div></th>`).join("")}</tr>`;
+    // プロンプト固有の dose(free × +3 など)は空の列をまたいだ 1 つのセルにする(§5.2)
+    const span = (e) => `<td class="cell span" colspan="${Math.max(1, cols.length)}" data-full="1"><span class="badge ${e.dose >= 0 ? "plus" : "minus"}">このプロンプトだけの dose ${e.dose > 0 ? "+" : ""}${e.dose} · rel ${e.dose < 0 ? "−" : "+"}${fmt(e.rel_push, 2)}</span>${
+      e.finish === "length" ? `<span class="badge">capped</span>` : ""}<div class="txt">${esc(e.text)}</div></td>`;
+    const rows = ex.rows.map((r) => {
+      const first = !Object.keys(r.cells).length && r.extra.length ? r.extra[0] : null;
+      const main = `<tr><th class="p" title="${esc(r.text)}">${esc(r.prompt)}<div class="muted">${esc(r.text)}</div></th>${cell(r.baseline, true)}${
+        first ? span(first) : cols.map((c) => cell(r.cells[c.dose])).join("")}</tr>`;
+      return main + r.extra.slice(first ? 1 : 0).map((e) => `<tr><th></th><td></td>${span(e)}</tr>`).join("");
+    }).join("");
+    return `<p class="muted note">行 = プロンプト、列 = dose(rel)。セルをクリックすると全文。</p>
+      <div class="ex-wrap"><table class="ex">${head}${rows}</table></div>`;
+  }
+
+  details() {
+    const d = this.d, s = d.sweep, out = [];
+    if (s) {
+      out.push(`<h4>語(sweep の z の順。数字 = 出現 rollout 数、マウスを当てると z とプロンプト)</h4><div class="chips">${s.words.map(([w, c, z, ps]) =>
+        `<span class="chip" title="${c} rollout · z ${fmt(z, 2)} · ${esc(ps.join(", "))}">${esc(w)}<i>${c}</i></span>`).join("")}</div>`);
+      out.push(`<h4>dose ごと</h4><table class="kv mono"><tr><th>dose</th><th>rel_push</th><th>distinct-4</th><th>capped</th><th>logprob</th></tr>${
+        s.dose_table.map((r) => `<tr><td>${esc(r.dose)}</td><td>${String(r.dose).startsWith("-") ? "−" : ""}${fmt(r.rel_push)}</td><td>${fmt(r.distinct4, 3)}</td><td>${pct(r.capped)}</td><td>${fmt(r.logprob, 3)}</td></tr>`).join("")}</table>`);
+    }
+    const sl = d.steer_lens;
+    if (sl) {
+      out.push(`<h4>steer lens(dose ±${fmt(sl.dose, 1)}、KL の対照 95% 点 ${fmt(sl.kl_null_p95, 3)})</h4>
+        <div class="lens"><span class="sg plus">+</span>${toksHTML(sl.up)}<span class="kl">KL ${fmt(sl.kl_up, 3)} · 対照の ${pct(sl.pct_up)} 超</span></div>
+        <div class="lens"><span class="sg minus">−</span>${toksHTML(sl.down)}<span class="kl">KL ${fmt(sl.kl_down, 3)} · 対照の ${pct(sl.pct_down)} 超</span></div>`);
+    } else if (d.kind === "neuron") out.push(`<h4>steer lens</h4><p class="muted">未計算(<code>gne lens steer --layer ${d.layer}</code>)</p>`);
+    const ll = d.logit_lens;
+    if (ll) {
+      out.push(`<h4>logit lens(最大 |z| ${fmt(ll.peak_z, 1)})</h4>
+        <div class="lens"><span class="sg plus">+</span>${toksHTML(ll.up)}</div><div class="lens"><span class="sg minus">−</span>${toksHTML(ll.down)}</div>`);
+    } else if (d.kind === "neuron") out.push(`<h4>logit lens</h4><p class="muted">未計算(<code>gne lens logit --layer ${d.layer}</code>)</p>`);
+    const dirs = Object.entries(d.directions || {});
+    if (dirs.length) {
+      out.push(`<h4>逆引きの方向との cos</h4><table class="kv mono">${dirs.map(([k, v]) =>
+        `<tr><td>${esc(k)}</td><td class="${v.cos >= 0 ? "plus" : "minus"}">${fmt(v.cos, 4)}</td><td class="muted">層内 ${v.rank_in_layer} 位</td></tr>`).join("")}</table>`);
+    }
+    const a = d.activation;
+    if (a) out.push(`<h4>活性(統計コーパス)</h4><table class="kv mono"><tr><td>p99.9</td><td>${fmt(a.q999, 3)}</td><td>absmax</td><td>${fmt(a.absmax, 3)}</td></tr><tr><td>rms</td><td>${fmt(a.rms, 3)}</td><td>平均</td><td>${fmt(a.mean, 4)}</td></tr></table>`);
+    if (d.down_norm !== null) out.push(`<p class="muted note mono">‖W_down[:, n]‖ = ${fmt(d.down_norm, 4)}</p>`);
+    out.push(`<h4>connections</h4><p class="muted">U3 で作る(writes into / driven by)</p>`);
+    return out.join("");
+  }
+}
+
+// --- LIST: 検索の結果(header の検索から。強い順) ----------------------------------------------------------
+export class SearchList {
+  constructor(root, { onOpen, onClose }) {
+    this.root = root;
+    this.onOpen = onOpen;
+    this.onClose = onClose;
+  }
+
+  loading(q) { this.root.innerHTML = `<p class="muted">「${esc(q)}」を検索中…</p>`; }
+
+  error(msg) { this.root.innerHTML = `<p class="err">${esc(msg)}</p>`; }
+
+  show(r, names) {
+    const where = { "steer+": "steer+", "steer−": "steer−", "logit+": "logit+", "logit−": "logit−", name: "名前" };
+    const rows = r.hits.slice(0, 500).map((h) => {
+      const b = h.best, nm = names[`${h.layer}:${h.neuron}`];
+      const w = b.where.startsWith("sweep:") ? "sweep の語" : where[b.where] || b.where;
+      const sign = b.where.endsWith("−") ? "minus" : b.where.endsWith("+") ? "plus" : "";
+      return `<tr data-l="${h.layer}" data-n="${h.neuron}"><td>L${h.layer}</td><td>N${h.neuron}</td>
+        <td class="${sign}">${esc(w)}${b.pos ? ` #${b.pos}` : ""}</td><td class="w">${b.where === "name" ? `<b>${esc(nm || "")}</b>` : tokHTML(b.token)}</td></tr>`;
+    }).join("");
+    this.root.innerHTML = `
+      <div class="list-head"><span>「${esc(r.q)}」(${esc(r.mode)})${r.n_hits} 件${r.hits.length < r.n_hits ? `・先頭 ${r.hits.length}` : ""}</span>
+        <button id="search-close" class="small">閉じる</button></div>
+      <p class="muted note">並び: steer+ → logit+ → steer− → logit−、それぞれ lens の中の順位(#)の順。words は sweep の語の z の順</p>
+      <div class="rank-wrap"><table class="rank mono"><tbody>${rows}</tbody></table></div>`;
+    this.root.querySelector("#search-close").addEventListener("click", () => this.onClose());
+    this.root.querySelector("tbody").addEventListener("click", (ev) => {
+      const tr = ev.target.closest("tr");
+      if (!tr) return;
+      for (const x of this.root.querySelectorAll("tr.sel")) x.classList.remove("sel");
+      tr.classList.add("sel");
+      this.onOpen({ layer: +tr.dataset.l, n: +tr.dataset.n });
+    });
+  }
+}
