@@ -98,6 +98,41 @@ class UIData:
             raise GneError("NOT_FOUND", f"逆引きの方向 {name!r} がありません", "gne reverse --contrast で作る")
         return self._get(("cos", name, L), [path], lambda: _cos_for_layer(self.s, np.load(path), L))
 
+    def connections(self):
+        from ..connections import Connections
+        p = self.s.store.connections_path(self.s.meta.model_id)
+        return self._get("connections", [p], lambda: Connections(p) if p.exists() else None)
+
+    def layout(self, L: int, kind: str) -> np.ndarray | None:
+        p = self.s.store.layout_dir(self.s.meta.model_id) / f"{kind}_L{L}.npy"
+        return self._get(("layout", kind, L), [p], lambda: np.load(p).astype(np.int32) if p.exists() else None)
+
+    def layouts(self) -> dict[str, list[int]]:
+        out: dict[str, list[int]] = {}
+        for p in sorted(self.s.store.layout_dir(self.s.meta.model_id).glob("*_L*.npy")):
+            kind, L = p.stem.rsplit("_L", 1)
+            out.setdefault(kind, []).append(int(L))
+        return {k: sorted(v) for k, v in out.items()}
+
+    def links(self, L: int, n: int, k: int = 14) -> dict:
+        """開いたニューロンの connections(Details と direct links)。相手の lens は、押される向きの極(書き込む先)と、
+        相手が + に光ったときに書く語(駆動するもの)。"""
+        from ..connections import lens_tokens
+        c = self.connections()
+        if c is None:
+            raise GneError("NOT_FOUND", "connections がありません", "層の右クリックの「connections」(全層ペア、CPU)で作れます")
+        self._check(L)
+        out = {}
+        for way in ("down", "up"):
+            rows = []
+            for (a, b, z, s) in c.edges(L, n, way, k):
+                pole = ("+" if s > 0 else "-") if way == "down" else "+"
+                words = [t for t in self.tok(lens_tokens(self, a, b, pole, 6)) if not t.startswith("<0x")][:4]   # バイト単位の語は外す
+                rows.append({"layer": a, "neuron": b, "z": round(z, 2), "sign": s, "lens": words,
+                             "name": self.names().get(f"{a}:{b}")})
+            out[way] = rows
+        return {"layer": L, "neuron": n, **out, "meta": {k_: c.meta[k_] for k_ in ("k", "window", "rho_scaled")}}
+
     def runs(self, L: int) -> list[dict]:
         """層 L の sweep の run(units.jsonl ごと)。ニューロンの多い順。"""
         files = [(p, d) for p, layer, d in _units_files(self.s) if layer == L]

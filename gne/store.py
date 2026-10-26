@@ -51,6 +51,12 @@ class Store:
     def reverse_dir(self, model_id: str) -> Path:
         return self._dir("reverse", model_id)
 
+    def connections_path(self, model_id: str) -> Path:
+        return self._dir("connections") / f"{model_id}.npz"
+
+    def layout_dir(self, model_id: str) -> Path:
+        return self._dir("layout", model_id)
+
     def recipes_dir(self) -> Path:
         return self._dir("recipes")
 

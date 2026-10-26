@@ -461,3 +461,119 @@ def test_u2_recipe_chat_fires_in_browser(server, browser):
     pg.wait_for_function("window.gne.overlay.field.includes('landed')", timeout=30000)
     assert not errors, errors
     pg.close()
+
+
+# --- U3: 配線と配置 -----------------------------------------------------------------------------------------
+
+def _run_job(c, kind, params, timeout=600):
+    j = c.post("/api/jobs", json={"kind": kind, "params": params}).json()
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        v = next(x for x in c.get("/api/jobs").json() if x["id"] == j["id"])
+        if v["status"] in ("done", "error", "cancelled"):
+            assert v["status"] == "done", v["error"]
+            return v
+        time.sleep(0.2)
+    raise AssertionError(f"{kind} が終わりません")
+
+
+@pytest.mark.model
+@pytest.mark.skipif(not MODEL.exists(), reason="モデルがありません")
+def test_u3_connections_web_layout_api(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from gne.api import Session
+    from gne.connections import ffn_norm_weight
+    from gne.ui.server import create_app
+    from gne.weights import tensor_to_f32
+    s = Session(MODEL, root=tmp_path)
+    c = TestClient(create_app(s, warm=False))
+    assert c.get("/api/connections", params={"layer": 5, "n": 100}).status_code == 400   # まだ無い
+    _run_job(c, "connections", {"k": 8, "window": 2})
+    m = c.get("/api/model").json()
+    assert m["connections"]["window"] == 2 and m["connections"]["n_pairs"] > 0
+    d = c.get("/api/connections", params={"layer": 5, "n": 100, "k": 5}).json()
+    assert len(d["down"]) == 5 and all(5 < e["layer"] <= 7 for e in d["down"])
+    assert all(3 <= e["layer"] < 5 for e in d["up"])
+    w = s.weights                                                                     # 直接計算と照合(層 6 の中での順位と符号)
+    v, g = w.down_matrix(5)[:, 100], ffn_norm_weight(w, 6)
+    P = ((tensor_to_f32(w.tensor("blk.6.ffn_gate.weight")) * g) @ v) * ((tensor_to_f32(w.tensor("blk.6.ffn_up.weight")) * g) @ v)
+    l6 = [e for e in d["down"] if e["layer"] == 6]
+    assert l6 and int(np.argmax(np.abs(P))) == l6[0]["neuron"] and np.sign(P[l6[0]["neuron"]]) == l6[0]["sign"]
+    r = c.get("/api/web", params={"layer": 5, "n": 100, "hops": 2, "first": 3, "k": 2, "zmin": 0})
+    e = np.frombuffer(r.content, np.int32).reshape(-1, 7)
+    first = e[e[:, 5] == 1]
+    assert len(first) == 3 and (first[:, 0] == 5).all() and (first[:, 1] == 100).all()   # 1 段目は開いたニューロンから
+    assert (np.sign(first[:, 4]) == first[:, 6]).all()                                  # 1 段目は辺の符号 = 経路の符号
+    assert (e[:, 5] == -1).any() and (e[e[:, 5] == -1][:, 2:4] == [5, 100]).all()       # 上流の 1 段目は開いたニューロンへ
+    sm = c.get("/api/web/summary", params={"layer": 5, "n": 100, "zmin": 0}).json()
+    assert {"toward", "away", "fed_by", "held_by", "n_neurons"} <= set(sm)
+    assert c.get("/api/layer/3/layout", params={"kind": "writes"}).status_code == 404
+    _run_job(c, "layout", {"kind": "writes", "layers": [3]})
+    cell = np.frombuffer(c.get("/api/layer/3/layout", params={"kind": "writes"}).content, np.int32)
+    assert sorted(cell) == list(range(s.meta.n_ff_at(3)))                               # 並べ替え(全マスを 1 回ずつ)
+    assert c.get("/api/model").json()["layouts"] == {"writes": [3]}
+
+
+@pytest.mark.model
+def test_u3_links_and_layout_in_browser(server, browser):
+    import urllib.request
+
+    def post(path, body):
+        req = urllib.request.Request(server + path, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+        return json.loads(urllib.request.urlopen(req).read())
+
+    def wait(jid):
+        for _ in range(3000):
+            v = next(x for x in json.loads(urllib.request.urlopen(server + "/api/jobs").read()) if x["id"] == jid)
+            if v["status"] != "running" and v["status"] != "queued":
+                assert v["status"] == "done", v
+                return
+            time.sleep(0.2)
+    wait(post("/api/jobs", {"kind": "connections", "params": {"k": 6, "window": 1}})["id"])
+    wait(post("/api/jobs", {"kind": "layout", "params": {"kind": "writes", "layers": [6]}})["id"])
+    pg = browser.new_page(viewport={"width": 1500, "height": 860})
+    errors = []
+    pg.on("pageerror", lambda e: errors.append(str(e)))
+    pg.goto(server + "/")
+    pg.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
+    pg.fill("#jump", "L6 N100")
+    pg.press("#jump", "Enter")
+    pg.wait_for_function("window.gne.links && window.gne.links.n > 0", timeout=30000)
+    assert "読み手(線の先)を + に押す" in pg.evaluate("document.querySelector('#legend').textContent")
+    n_seg = pg.evaluate("window.gne.map._links.geometry.getAttribute('position').count / 2")
+    assert n_seg == pg.evaluate("window.gne.links.n")
+    cols = pg.evaluate("Array.from(window.gne.map._links.geometry.getAttribute('color').array)")
+    signs = pg.evaluate("window.gne.map.linkEdges.map(e => e.sign)")
+    for i, sg in enumerate(signs):                                                     # 線の色 = 符号(黄は R≈G、赤紫は R≫G)
+        r, g = cols[6 * i], cols[6 * i + 1]
+        assert (g > 0.6 * r) if sg > 0 else (g < 0.5 * r), (sg, r, g)
+    pg.click("#neuron-body .tabs button[data-tab=details]")
+    pg.wait_for_function("document.querySelectorAll('#neuron-body table.links tr').length > 0", timeout=30000)
+    before = pg.evaluate("window.gne.map.neuronPosition(6, 7)")
+    pg.select_option("#layout-select", "writes")
+    pg.wait_for_function("window.gne.map.cellOf[6]", timeout=30000)
+    after = pg.evaluate("window.gne.map.neuronPosition(6, 7)")
+    cell7 = pg.evaluate("window.gne.map.cellOf[6][7]")
+    assert after != before or cell7 == 7
+    assert "writes 配置" in pg.evaluate("document.querySelector('#legend').textContent")
+    pg.select_option("#layer-select", "6")
+    pg.wait_for_timeout(300)
+    for n in (7, 100, 2000):                                                           # 配置を変えても hover は同じニューロンを指す
+        sp = pg.evaluate(f"window.gne.map.screenOf(6, {n})")
+        pg.mouse.move(sp["x"], sp["y"])
+        pg.wait_for_timeout(80)
+        h = pg.evaluate("window.gne.map.hover")
+        assert h and (h["layer"], h["neuron"]) == (6, n), (n, h)
+    pg.click("#reset-view")                                                            # 全体ビューでは 3D の線、正面ビューでは 2D の札
+    pg.wait_for_timeout(200)
+    assert pg.evaluate("window.gne.map._links.visible") and pg.evaluate("document.querySelectorAll('#overlay span.lk-d').length") > 0
+    pg.select_option("#layer-select", "6")
+    pg.wait_for_timeout(200)
+    assert not pg.evaluate("window.gne.map._links.visible") and pg.evaluate("document.querySelectorAll('#overlay span.lk-l').length") > 0
+    pg.click("#web-toggle")                                                            # 線: 直接 → web → なし
+    pg.wait_for_function("window.gne.links && window.gne.links.web", timeout=30000)
+    pg.click("#web-toggle")
+    pg.wait_for_function("window.gne.links === null", timeout=30000)
+    assert not errors, errors
+    pg.close()

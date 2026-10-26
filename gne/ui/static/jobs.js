@@ -3,7 +3,7 @@
 import { deleteJSON, getJSON, postJSON } from "./api.js";
 import { esc } from "./panels.js";
 
-export const KIND = { lens_logit: "logit lens", lens_steer: "steer lens", sweep_rank: "sweep", sweep: "sweep", rank: "rank",
+export const KIND = { connections: "connections", layout: "配置", lens_logit: "logit lens", lens_steer: "steer lens", sweep_rank: "sweep", sweep: "sweep", rank: "rank",
                stats_resid: "残差の統計", stats_act: "活性の統計", reverse: "逆引き" };
 
 function eta(s) {
@@ -17,7 +17,8 @@ function what(j) {
   const p = j.params || {};
   const bits = [KIND[j.kind] || j.kind];
   if (p.layer !== undefined) bits.push(`L${p.layer}`);
-  if (p.layers !== undefined) bits.push(`L${[].concat(p.layers).join(",")}`);
+  if (p.kind) bits.push(p.kind);
+  if (p.layers !== undefined) bits.push(p.layers === "all" ? "全層" : `L${[].concat(p.layers).join(",")}`);
   if (p.design) bits.push(p.design);
   if (p.neurons) bits.push(/^\d/.test(p.neurons) ? `N${p.neurons.replace("-", "–")}` : `ニューロン ${p.neurons}`);
   if (p.random_controls !== undefined) bits.push(`+ 対照 ${p.random_controls}`);
@@ -98,17 +99,23 @@ export class JobsBar {
 }
 
 // 層の計算メニュー。目安の時間は Qwen3.5-4B・RTX 3080 の実測(docs/measurements.md)から n_ff で比例させたもの
-export function computeMenu(ev, L, li, cov, { onStart }) {
+export function computeMenu(ev, L, li, cov, { onStart, arch, model }) {
   document.querySelector("#compute-menu")?.remove();
   const n = li.n_ff, k = n / 9216;
   const mins = (x) => (x < 1 ? `${Math.round(x * 60)} 秒` : x < 90 ? `${Math.round(x)} 分` : `${(x / 60).toFixed(1)} 時間`);
   const done = (x) => (x ? ` <span class="cm-done">済み${typeof x === "number" ? `(${x})` : ""}・やり直す</span>` : "");
   const runs = (d) => (cov && cov.sweep_runs.some((r) => r.endsWith(d)) ? true : 0);
+  const nL = arch.n_layer, pairs = (nL * (nL - 1)) / 2, d = arch.n_embd || 2560;
+  const lay = (kind) => ((model.layouts || {})[kind] || []);
   const items = [
     ["lens_logit", { layer: L }, `logit lens(重みだけ、CPU)`, `約 ${mins(0.6 * k)}`, cov && cov.logit_lens],
     ["lens_steer", { layer: L }, `steer lens(全 ${n} ニューロン + 対照 64)`, `約 ${mins((0.145 * (n + 64)) / 60)}`, cov && cov.steer_lens],
     ["sweep_rank", { layer: L, design: "quick", neurons: "random:64", random_controls: 16 }, "sweep quick(ランダムに 64 個 + 対照 16)", "約 5 分", runs("quick")],
     ["sweep_rank", { layer: L, design: "main_rel", neurons: "random:384" }, "sweep main_rel(ランダムに 384 個 + 対照 64)", `約 ${mins((6.4 * 448) / 60)}`, runs("main_rel")],
+    ["layout", { kind: "writes", layers: [L] }, "配置 writes(この層、W_down → UMAP)", `約 ${mins((25 * k) / 60)}`, lay("writes").includes(L)],
+    ["layout", { kind: "writes", layers: "all" }, "配置 writes(全層)", `約 ${mins((25 * k * nL) / 60)}`, lay("writes").length === nL && lay("writes").length],
+    ["layout", { kind: "lens", layers: [L] }, "配置 lens(この層、lens の語 → UMAP)", `約 ${mins((10 * k) / 60)}`, lay("lens").includes(L)],
+    ["connections", {}, `connections(全 ${pairs} 層ペア、重みだけ、CPU)`, `約 ${mins((4.5 * k * k * (d / 2560) * pairs) / 60)}`, !!model.connections],
   ];
   const m = document.createElement("div");
   m.id = "compute-menu";

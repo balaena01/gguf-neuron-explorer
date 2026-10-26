@@ -53,7 +53,8 @@ def create_app(session, *, warm: bool = True) -> FastAPI:
         ov = session.model_overview()
         return {"meta": ov["meta"], "arch": cache["arch"], "coverage": ov["layers"],
                 "arch_warnings": ov["arch_warnings"], "bake": ov["bake"], "recipes": ov["recipes"],
-                "directions": ov["directions"], "names": data.names()}
+                "directions": ov["directions"], "names": data.names(), "layouts": data.layouts(),
+                "connections": data.connections().meta if data.connections() is not None else None}
 
     @app.get("/api/vocab")
     def vocab():
@@ -69,6 +70,36 @@ def create_app(session, *, warm: bool = True) -> FastAPI:
         body, meta = data.hover(L)
         n = session.meta.n_ff_at(L)
         return _binary(body, f"{n},24;{n},2", meta)
+
+    @app.get("/api/layer/{L}/layout")
+    def layout(L: int, kind: str):
+        data._check(L)
+        cell = data.layout(L, kind)
+        if cell is None:
+            return JSONResponse({"error": {"code": "NOT_FOUND", "message": f"L{L} の配置 {kind} はまだありません",
+                                           "hint": "層の右クリックの「配置」で作れます"}}, status_code=404)
+        return _binary(cell.tobytes(), str(cell.size), {"layer": L, "kind": kind})
+
+    @app.get("/api/connections")
+    def connections(layer: int, n: int, k: int = 14):
+        return data.links(layer, n, k)
+
+    @app.get("/api/web")
+    def web(layer: int, n: int, hops: int = 2, first: int = 8, k: int = 4, zmin: float = 2.0, cap: int = 20000):
+        c = data.connections()
+        if c is None:
+            raise GneError("NOT_FOUND", "connections がありません", "層の右クリックの「connections」で作れます")
+        e = c.web(layer, n, hops=max(1, min(hops, 5)), first=first, k=k, zmin=zmin, cap=cap)
+        return _binary(e.tobytes(), f"{e.shape[0]},7", {"n_edges": int(e.shape[0])})
+
+    @app.get("/api/web/summary")
+    def web_summary(layer: int, n: int, hops: int = 2, first: int = 8, k: int = 4, zmin: float = 2.0, cap: int = 20000):
+        from ..connections import web_summary as summarize
+        c = data.connections()
+        if c is None:
+            raise GneError("NOT_FOUND", "connections がありません", "層の右クリックの「connections」で作れます")
+        e = c.web(layer, n, hops=max(1, min(hops, 5)), first=first, k=k, zmin=zmin, cap=cap)
+        return {"n_edges": int(e.shape[0]), **summarize(data, c, layer, n, e)}
 
     @app.get("/api/layer/{L}/units")
     def units(L: int):

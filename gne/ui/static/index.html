@@ -17,10 +17,12 @@
     <button data-view="map" class="on">map</button><button data-view="layers">layers</button><button data-view="embed">embed</button>
   </span>
   <label>layer <select id="layer-select"></select></label>
+  <label>layout <select id="layout-select" title="シート内の並べ方(§4.4)"><option value="index">index</option><option value="writes">writes</option><option value="lens">lens</option></select></label>
   <label>color <select id="color-select"></select></label>
   <span id="cos-thr-wrap" class="hidden" title="|cos| の閾値"><input type="range" id="cos-thr" min="0" max="1" step="0.001"><span id="cos-thr-val" class="mono"></span></span>
   <label>jump <input id="jump" placeholder="L14 N8949" size="11" spellcheck="false"></label>
   <span id="search" class="seg"><select id="search-mode" title="検索の対象"><option value="lens">lens</option><option value="words">words</option><option value="name">name</option></select><input id="search-q" placeholder="検索(alien など)" size="14" spellcheck="false"></span>
+  <button id="web-toggle" title="開いたニューロンの配線: 直接(上流・下流 14 本ずつ)→ web(多段)→ なし">線: 直接</button>
   <button id="reset-view" title="全体の視点に戻る">全体</button>
   <span id="status" class="mono"><span id="status-main"></span></span>
 </header>

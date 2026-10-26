@@ -15,7 +15,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "playwright>=1.40"]
+mcp = ["mcp>=2.3"]
+ui = ["fastapi>=0.115", "uvicorn>=0.30", "umap-learn>=0.5"]   # Web UI(gne serve)。umap-learn は配置の計算(別冊 §4.4)
 
 [project.scripts]
 gne = "gne.cli:app"

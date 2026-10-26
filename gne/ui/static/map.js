@@ -17,6 +17,8 @@ export const COLORS = {
   plus: [242, 210, 75],
   minus: [201, 79, 167],
   sel: [255, 255, 255],
+  plusLine: [242, 210, 75],    // 配線の線: 赤紫は黄と同じくらいの明るさに(暗い背景で読めるように)
+  minusLine: [255, 112, 208],
 };
 
 // 点は、インスタンス描画の小さな四角形(ビルボード)で描く。点スプライト(gl_PointSize)は D3D 系で
@@ -83,6 +85,9 @@ export class LayerMap {
     this.onLayer = onLayer || (() => {});
     this.onContext = onContext || null;  // 層の番号・ラベルの右クリック(L, イベント)
     this.marks = [];                   // レシピのユニット [{ layer, neuron, dose }](§4.8)
+    this.cellOf = [];                  // 層ごとの配置表(§4.4): ニューロン → 格子の番号。null は番号順
+    this.neuronAt = [];                // その逆: 格子の番号 → ニューロン
+    this.linkEdges = null;             // 配線(§4.7)
     this.overlay = overlay || null;    // 層番号などの HTML を重ねる要素
     this.specs = arch.layers.map((l) => sheetSpec(l, arch.grid_side));
     this.front = null;                 // 層正面ビューの層
@@ -195,6 +200,54 @@ export class LayerMap {
     this.points.renderOrder = 2;
     this.scene.add(this.points);
     this.nPoints = total;
+  }
+
+  // シート内の配置を切り替える(cell: Int32Array(n_ff) ニューロン → 格子の番号、null で番号順)。即時に位置を書き直す
+  setLayout(L, cell) {
+    const s = this.specs[L];
+    if (!s || s.kind !== "dense") return false;
+    const attr = this.points.geometry.getAttribute("iPos"), pos = attr.array, x = sheetX(L);
+    let inv = null;
+    if (cell) { inv = new Int32Array(s.side * s.side).fill(-1); for (let n = 0; n < cell.length; n++) inv[cell[n]] = n; }
+    this.cellOf[L] = cell; this.neuronAt[L] = inv;
+    let p = this.offsets[L];
+    for (let n = 0; n < s.n; n++, p++) {
+      const [y, z] = cellYZ(s, cell ? cell[n] : n);
+      pos[3 * p] = x; pos[3 * p + 1] = y; pos[3 * p + 2] = z;
+    }
+    attr.addUpdateRange(this.offsets[L] * 3, s.n * 3);
+    attr.needsUpdate = true;
+    if (this._markerAt && this._marker && this._marker.visible) this.markNeuron(...this._markerAt);
+    if (this.linkEdges) this.setLinks(this.linkEdges, this.linkOpts);
+    this._overlayDirty = true;
+    return true;
+  }
+
+  // 配線の線(§4.7)。edges: [{ sl, sn, dl, dn, z, sign, dim }]。色 = 符号(黄 = 相手を + に押す、赤紫 = − に押す)、明るさ = z
+  setLinks(edges, opts = {}) {
+    this.linkEdges = edges; this.linkOpts = opts;
+    if (this._links) { this.scene.remove(this._links); this._links.geometry.dispose(); this._links = null; }
+    this._overlayDirty = true;
+    if (!edges || !edges.length) return;
+    const zmax = Math.max(...edges.map((e) => e.z), 1);
+    const pos = [], col = [];
+    for (const e of edges) {
+      const a = this.neuronPosition(e.sl, e.sn), b = this.neuronPosition(e.dl, e.dn);
+      if (!a || !b) continue;
+      const c = e.sign >= 0 ? COLORS.plusLine : COLORS.minusLine;
+      const k = (0.5 + 0.5 * Math.min(1, e.z / zmax)) * (e.dim ? 0.45 : 1);
+      pos.push(...a, ...b);
+      for (let i = 0; i < 2; i++) col.push((c[0] / 255) * k, (c[1] / 255) * k, (c[2] / 255) * k);
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+    g.setAttribute("color", new THREE.Float32BufferAttribute(col, 3));
+    this._links = new THREE.LineSegments(g, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.95,
+                                                                          depthWrite: false, depthTest: false, blending: THREE.AdditiveBlending }));
+    this._links.renderOrder = 3;
+    this._links.visible = this.front === null;
+    this.scene.add(this._links);
+    this._overlayDirty = true;
   }
 
   // 層 L の色をまとめて書き換える(rgba: Uint8Array(n*4)、MoE は専門家の通し番号順。a は目立たせる度合い)
@@ -359,6 +412,9 @@ export class LayerMap {
       if (p.fill) p.fill.visible = front === null || L === front;
       this.labels[L].visible = front !== null && L === front;   // 全体ビューでは床の層番号(HTML)を使う
     }
+    // 開いているニューロンの輪は、全体ビューとその層の正面ビューで出す。3D の線は全体ビューだけ(正面ビューは 2D の札と線)
+    if (this._marker) this._marker.visible = !!this._markerAt && (front === null || front === this._markerAt[0]);
+    if (this._links) this._links.visible = front === null;
     this._overlayDirty = true;
   }
 
@@ -417,7 +473,6 @@ export class LayerMap {
     place(d);
     this.camera.near = 0.01; this.camera.far = d * 20; this.camera.updateProjectionMatrix();
     this.controls.update();
-    if (this._marker) this._marker.visible = false;
     this._applyLayerDimming();
     this.onLayer(null);
   }
@@ -436,7 +491,6 @@ export class LayerMap {
     this.camera.position.set(sheetX(L) - d, yc, 0);                       // 真正面(台形にゆがまないように)
     this.camera.lookAt(this.controls.target);
     this.controls.update();
-    if (this._marker && !keepMarker) this._marker.visible = false;
     this._applyLayerDimming();
     this.onLayer(L);
   }
@@ -448,6 +502,7 @@ export class LayerMap {
 
   // カメラは動かさずに、ニューロンに輪の印を付ける
   markNeuron(L, n) {
+    this._markerAt = [L, n];
     const p = this.neuronPosition(L, n);
     if (!p) return;
     if (!this._marker) {
@@ -467,7 +522,8 @@ export class LayerMap {
   neuronPosition(L, n) {
     const s = this.specs[L];
     if (!s || n < 0 || n >= s.n) return null;
-    const [y, z] = cellYZ(s, n);
+    const cell = this.cellOf[L];
+    const [y, z] = cellYZ(s, cell ? cell[n] : n);
     return [sheetX(L), y, z];
   }
 
@@ -573,7 +629,71 @@ export class LayerMap {
         items.push({ x, y, text, cls: `mk-l ${m.dose >= 0 ? "plus" : "minus"}` });
       }
     }
-    this.overlay.innerHTML = items.map((it) => `<span class="${it.cls}"${it.layer !== undefined ? ` data-layer="${it.layer}"` : ""} style="left:${it.x.toFixed(1)}px;top:${it.y.toFixed(1)}px${it.h ? `;height:${it.h.toFixed(1)}px` : ""}${it.w ? `;width:${it.w}px;height:${it.w}px` : ""}">${it.text}</span>`).join("");
+    const svg = this._linkOverlay(items, r);
+    this.overlay.innerHTML = svg + items.map((it) => `<span class="${it.cls}"${it.layer !== undefined ? ` data-layer="${it.layer}"` : ""} style="left:${it.x.toFixed(1)}px;top:${it.y.toFixed(1)}px${it.h ? `;height:${it.h.toFixed(1)}px` : ""}${it.w ? `;width:${it.w}px;height:${it.w}px` : ""}">${it.text}</span>`).join("");
+  }
+
+  // 配線の札(§4.7)。正面ビュー: 開いたニューロンから、シートの右(下流)と左(上流)に並べた札へ 2D の線。
+  // 全体ビュー: 3D の線の先に点を打ち、z の大きい上位に札。items に札を足し、2D の線は SVG の文字列で返す
+  _linkOverlay(items, r) {
+    const E = this.linkEdges, f = this.linkOpts && this.linkOpts.focus;
+    if (!E || !E.length || !f) return "";
+    const hex = (c) => `rgb(${c.join(",")})`;
+    const col = (e) => hex(e.sign >= 0 ? COLORS.plusLine : COLORS.minusLine);
+    const lab = (L, n) => `L${L} N${n}`;
+    const down = E.filter((e) => e.sl === f.layer && e.sn === f.n).sort((a, b) => b.z - a.z);
+    const up = E.filter((e) => e.dl === f.layer && e.dn === f.n).sort((a, b) => b.z - a.z);
+    if (this.front !== null) {
+      if (this.front !== f.layer) return "";
+      const p0 = this.neuronPosition(f.layer, f.n);
+      if (!p0) return "";
+      const o = this._toScreen(new THREE.Vector3(...p0)), s = this.specs[f.layer];
+      const tl = this._toScreen(new THREE.Vector3(sheetX(f.layer), GEOM.Y0 + s.ext, -s.ext / 2));
+      const br = this._toScreen(new THREE.Vector3(sheetX(f.layer), GEOM.Y0, s.ext / 2));
+      const x0 = o.x - r.left, y0 = o.y - r.top, lines = [];
+      const side = (es, x, right) => {
+        const n = Math.min(es.length, 14), top = tl.y - r.top, h = br.y - tl.y;
+        es.slice(0, n).forEach((e, i) => {
+          const y = top + (h * (i + 0.5)) / n;
+          const other = right ? lab(e.dl, e.dn) : lab(e.sl, e.sn);
+          lines.push(`<line x1="${x0.toFixed(1)}" y1="${y0.toFixed(1)}" x2="${x.toFixed(1)}" y2="${y.toFixed(1)}" stroke="${col(e)}" stroke-width="1.3" stroke-opacity="${(0.45 + 0.55 * Math.min(1, e.z / es[0].z)).toFixed(2)}"${right ? "" : ' stroke-dasharray="4 3"'}/>`);
+          items.push({ x, y, text: `${right ? "→ " : ""}${other} ${e.sign >= 0 ? "+" : "−"}${right ? "" : " →"}`, cls: `lk-l ${right ? "r" : "l"} ${e.sign >= 0 ? "plus" : "minus"}` });
+        });
+      };
+      side(down, br.x - r.left + 18, true);
+      side(up, tl.x - r.left - 18, false);
+      if (down.length) items.push({ x: br.x - r.left + 18, y: tl.y - r.top - 16, text: "下流(書き込む先)", cls: "lk-h r" });
+      if (up.length) items.push({ x: tl.x - r.left - 18, y: tl.y - r.top - 16, text: "上流(駆動するもの)", cls: "lk-h l" });
+      return `<svg class="lk" width="${r.width}" height="${r.height}">${lines.join("")}</svg>`;
+    }
+    // 全体ビュー: 線の先に点、上位 4 本ずつに札
+    const tops = new Set([...down.slice(0, 4), ...up.slice(0, 4)]), tagged = [];
+    for (const e of E) {
+      const other = e.sl === f.layer && e.sn === f.n ? [e.dl, e.dn] : e.dl === f.layer && e.dn === f.n ? [e.sl, e.sn] : [e.dl, e.dn];
+      const pos = this.neuronPosition(...other);
+      if (!pos) continue;
+      const p = this._toScreen(new THREE.Vector3(...pos));
+      if (p.z >= 1) continue;
+      items.push({ x: p.x - r.left, y: p.y - r.top, text: "", cls: `lk-d ${e.sign >= 0 ? "plus" : "minus"}${e.dim ? " dim" : ""}` });
+      if (tops.has(e)) tagged.push({ x: p.x - r.left, y: p.y - r.top, text: `${lab(...other)} ${e.sign >= 0 ? "+" : "−"}`, sign: e.sign });
+    }
+    // 札は重ならないように縦にずらし、ずらしたものは点へ引き出し線。開いたニューロン(半径 20 px)と、層の札・床の番号も避ける
+    const placed = items.filter((it) => it.text && /^(ax|badge-l)/.test(it.cls))
+      .map((it) => ({ x: it.x - (it.text.length * 7 + 10) / 2, y: it.y + (it.cls.startsWith("badge") ? -10 : 8), w: it.text.length * 7 + 10 }));
+    const fp = this.neuronPosition(f.layer, f.n);
+    if (fp) { const q = this._toScreen(new THREE.Vector3(...fp)); placed.push({ x: q.x - r.left - 20, y: q.y - r.top, w: 40 }); }
+    tagged.sort((a, b) => a.y - b.y);
+    for (const t of tagged) {
+      const x = t.x + 6, w = t.text.length * 7 + 10;
+      let y = t.y;
+      for (let k = 1; placed.some((q) => x < q.x + q.w + 4 && q.x < x + w + 4 && Math.abs(q.y - y) < 16) && k < 40; k++) {
+        y = t.y + (k % 2 ? 1 : -1) * Math.ceil(k / 2) * 17;
+      }
+      placed.push({ x, y, w });
+      if (y !== t.y) items.push({ x: t.x, y: Math.min(y, t.y), text: "", cls: "lead lk", h: Math.abs(y - t.y) });
+      items.push({ x, y, text: t.text, cls: `lk-l r ${t.sign >= 0 ? "plus" : "minus"}` });
+    }
+    return "";
   }
 
   // --- ピッキング ----------------------------------------------------------------------------------------
@@ -606,7 +726,11 @@ export class LayerMap {
       const hit = { layer: L, t, shared, px: m.px, py: m.py };
       if (shared) hit.neuron = cell;
       else if (s.kind === "moe") { hit.expert = Math.floor(cell / s.nPer); hit.neuron = cell % s.nPer; hit.cell = cell; }
-      else { hit.neuron = cell; hit.cell = cell; }
+      else {
+        const inv = this.neuronAt[L];
+        hit.neuron = inv ? inv[cell] : cell; hit.cell = cell;
+        if (hit.neuron < 0) continue;                                      // 配置の空きマス
+      }
       best = hit;
     }
     return best;

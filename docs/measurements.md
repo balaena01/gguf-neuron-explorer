@@ -164,3 +164,15 @@ Qwen3.5-4B、`~/.gne` の Phase 2〜3 の結果(L22 の sweep main_rel と steer
 | cvec の書き出し | 0.1 秒未満 | |
 | 書き出し + llama.cpp での確かめ(32 トークンの生成を gne で 2 回・llama-completion で 1 回) | 3.5 秒 | llama-completion の起動とモデルの読み込みを含む |
 
+## Phase 5 U3(2026-10-26、同じ環境、CPU は 8 コア・OpenBLAS で f32 543 GFLOPS)
+
+| 処理 | 時間・大きさ | 備考 |
+|---|---|---|
+| connections(Qwen3.5-4B、全 496 層ペア、k = 24) | 33 分(4.0 秒/ペア) | 1 ペア = 9216×2560 と 2560×9216 の積 2 回 + 上位 k の更新。保存 59 MB(圧縮) |
+| connections(Qwen3-0.6B、|j − i| ≤ 2 の 53 ペア) | 14 秒 | テスト用 |
+| `/api/connections`(1 ニューロン、上下 14 本ずつ、lens の語つき) | 初回 0.9 秒、以後 0.1 秒未満 | 初回は npz の読み込み |
+| `/api/web`(2 段、80 本)・`/api/web/summary` | 0.01 秒・0.1 秒 | |
+| 配置 writes(4B、全 32 層) | 333 秒(10 秒/層) | PCA 50 + UMAP(numba の初回コンパイルを含む) |
+| 配置 lens(4B、L22、steer lens の ± 上位語) | 36 秒 | 初回のコンパイルを含む |
+| 配置の切り替え(全層の位置の書き直し) | 7〜220 ms | 取得済みなら 10 ms 未満 |
+

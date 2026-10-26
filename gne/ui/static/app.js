@@ -18,6 +18,7 @@ const params = new URLSearchParams(location.search);
 
 const state = {
   model: null, arch: null, vocab: null, map: null, view: "map", layer: 0, focus: null, note: "",
+  layout: "index", web: false, webHops: 2, links: null, linkMode: "direct",
   overlay: { field: "none", threshold: null, scale: null, values: new Map(), metas: new Map(), hits: null, prev: "none" },
 };
 window.gne = state;                       // 自動テスト(playwright)と開発用
@@ -138,10 +139,19 @@ function legend() {
   const ring = (c) => `<span class="sw ring" style="border-color:${c}"></span>`;
   const marks = (state.recipe && state.recipe.units.length ? [it(ring("#f2d24b"), "レシピ +"), it(ring("#c94fa7"), "レシピ −(大きさ = |dose|)")] : [])
     .concat(state.focus ? [it(ring("#ffffff"), "開いているニューロン")] : []);
+  const line = (c) => `<span class="sw line" style="background:${c}"></span>`;
+  const links = state.links ? `<div>${it(state.links.web ? `web(${state.webHops} 段、${state.links.n} 本): ` : `配線(上流・下流 ${state.links.n} 本): `)}${
+    it(line("#f2d24b"), "黄 = 読み手(線の先)を + に押す")}${it(line("#ff70d0"), "赤紫 = 読み手を − に押す")}${
+    it(state.links.web ? `色 = 各辺の符号(経路の積ではない)、明るさ = z(表示中の最大に対する相対)、暗い線 = web の端(この先はたどっていない)${
+      state.map && state.map.front !== null ? "。正面ビューの札は 1 段目だけ(全体ビューで全体を見る)" : ""}`
+      : "明るさ = z(表示中の最大に対する相対)。正面ビューでは右 = 下流、左(破線)= 上流")}</div>` : "";
   const moe = isMoE() ? "、MoE は専門家ごとの小さな正方形" : "";
-  $("#legend").innerHTML = `<div>${color}</div>${frame}<div>${parts.join("")}</div>${marks.length ? `<div>${marks.join("")}</div>` : ""}` +
+  const lay = state.layout && state.layout !== "index"
+    ? `シート内の並び = ${state.layout} 配置(UMAP)。近くにあっても似ているのは弱い傾向だけ${state.layoutMissing && state.layoutMissing.length ? `(未計算の ${state.layoutMissing.length} 層は番号順)` : ""}`
+    : "シート内の並びはニューロン番号順(近くにあっても似ているとは限らない)";
+  $("#legend").innerHTML = `<div>${color}</div>${frame}<div>${parts.join("")}</div>${marks.length ? `<div>${marks.join("")}</div>` : ""}${links}` +
     `<div class="note st">各層 = 手前の板(mixer、上辺の刻みが head の数)+ 奥のシート(MLP の全ニューロン${moe})、下の線 = 残差</div>` +
-    `<div class="note">シート内の並びはニューロン番号順(近くにあっても似ているとは限らない)</div>`;
+    `<div class="note">${lay}</div>`;
 }
 
 // --- overlay(§4.3) --------------------------------------------------------------------------------------
@@ -165,6 +175,8 @@ async function refreshModel() {
   state.model.coverage = m.coverage;
   state.model.names = m.names;
   state.model.directions = m.directions;
+  state.model.layouts = m.layouts;
+  state.model.connections = m.connections;
 }
 
 // 枠の明るさ = その層で光っている点の数(いちばん多い層を 1 とする、比例)。全体ビューでは上位 3 層に札も出す。
@@ -289,6 +301,54 @@ async function applyFiresOverlay(fid, tok, label, thr) {
   rehover();
 }
 
+// --- 配置(§4.4)と配線(§4.7) ------------------------------------------------------------------------------
+const layoutCache = new LayerCache(async (key) => {
+  const [L, kind] = key.split("|");
+  return new Int32Array((await getBin(`/api/layer/${L}/layout`, { kind })).buf);
+});
+
+async function applyLayout(kind) {
+  state.layout = kind;
+  const Ls = state.arch.layers.filter((li) => li.ffn === "dense").map((li) => li.index);
+  const have = new Set(kind === "index" || !state.model ? [] : (state.model.layouts || {})[kind] || []);
+  if (kind !== "index") { state.note = `配置 ${kind} を読み込み中`; updateStatus(); }
+  const cells = await Promise.all(Ls.map((L) => (have.has(L) ? layoutCache.get(`${L}|${kind}`).catch(() => null) : null)));
+  if (state.layout !== kind) return;
+  state.layoutMissing = [];
+  Ls.forEach((L, i) => { state.map.setLayout(L, cells[i]); if (kind !== "index" && !cells[i]) state.layoutMissing.push(L); });
+  state.note = "";
+  updateStatus();
+  legend();
+}
+
+// 開いたニューロンの配線。web が off なら直接の上流・下流(各 14)、on なら多段の web
+async function showLinks() {
+  const f = state.focus, c = state.model && state.model.connections;
+  if (!f || f.kind !== "neuron" || !c || state.linkMode === "off") { state.map.setLinks(null); state.links = null; legend(); return; }
+  const key = `${f.layer}:${f.n}:${state.web}`;
+  state.linksKey = key;
+  let edges;
+  try {
+    if (state.web) {
+      const r = await getBin("/api/web", { layer: f.layer, n: f.n, hops: state.webHops, first: 8, k: 4, zmin: 2 });
+      const a = new Int32Array(r.buf), rows = [];
+      for (let i = 0; i < a.length; i += 7) rows.push(a.subarray(i, i + 7));
+      const outD = new Set(), inU = new Set();                       // 続きのある辺(下流は先から、上流は元へさらに辺がある)
+      for (const x of rows) { if (x[5] > 0) outD.add(`${x[0]}:${x[1]}`); else inU.add(`${x[2]}:${x[3]}`); }
+      edges = rows.map((x) => ({ sl: x[0], sn: x[1], dl: x[2], dn: x[3], z: Math.abs(x[4]) / 10, sign: Math.sign(x[4]),
+                                 dim: x[5] > 0 ? !outD.has(`${x[2]}:${x[3]}`) : !inU.has(`${x[0]}:${x[1]}`) }));
+    } else {
+      const d = await getJSON("/api/connections", { layer: f.layer, n: f.n, k: 14 });
+      edges = [...d.down.map((e) => ({ sl: f.layer, sn: f.n, dl: e.layer, dn: e.neuron, z: e.z, sign: e.sign })),
+               ...d.up.map((e) => ({ sl: e.layer, sn: e.neuron, dl: f.layer, dn: f.n, z: e.z, sign: e.sign }))];
+    }
+  } catch (e) { state.note = `エラー: ${e.message}`; updateStatus(); return; }
+  if (state.linksKey !== key) return;
+  state.links = { web: state.web, n: edges.length };
+  state.map.setLinks(edges, { focus: { layer: f.layer, n: f.n } });
+  legend();
+}
+
 // --- 検索(header、lens / words / name)。結果は LIST の「検索」タブに強い順で出し、当たりをマップで光らせる ---------------
 function listTab(tab) {
   for (const b of document.querySelectorAll("#list-tabs button[data-tab]")) b.classList.toggle("on", b.dataset.tab === tab);
@@ -333,6 +393,7 @@ function openNeuron({ layer, n, kind = "neuron", run = null, tab = null }, { foc
   if (first) legend();
   expand("neuron");
   neuron.open({ layer, n, kind, run, tab });
+  showLinks();
   if (kind === "neuron") {
     if (focus) state.map.focusNeuron(layer, n); else state.map.markNeuron(layer, n);
     history.replaceState(null, "", `#L${layer}/N${n}`);
@@ -364,6 +425,8 @@ async function onJobFinished(j) {
   if (L !== undefined) { unitsCache.done.delete(L); hoverCache.done.delete(L); }
   await refreshModel();
   fillColorSelect();
+  if (j.kind === "layout") { layoutCache.clear(); if (state.layout === j.params.kind) applyLayout(state.layout); }
+  if (j.kind === "connections" && state.focus) { showLinks(); neuron.render(); }
   const f = state.overlay.field;
   if (f !== "none" && !f.startsWith("search:") && !f.startsWith("fires:")) applyOverlay(f);
   if (L !== undefined && rank.layer === L) showLayerInList(L);
@@ -448,6 +511,15 @@ function wireHeader() {
   });
   for (const b of document.querySelectorAll("#list-tabs button[data-tab]")) b.addEventListener("click", () => listTab(b.dataset.tab));
   $("#color-select").addEventListener("change", (ev) => { if (ev.target.value !== state.overlay.field) applyOverlay(ev.target.value); });
+  $("#layout-select").addEventListener("change", (ev) => applyLayout(ev.target.value));
+  $("#web-toggle").addEventListener("click", () => {                  // 線: 直接 → web → なし → 直接
+    state.linkMode = { direct: "web", web: "off", off: "direct" }[state.linkMode];
+    state.web = state.linkMode === "web";
+    const b = $("#web-toggle");
+    b.textContent = { direct: "線: 直接", web: "線: web", off: "線: なし" }[state.linkMode];
+    b.classList.toggle("on", state.linkMode === "web");
+    showLinks();
+  });
   $("#cos-thr").addEventListener("input", (ev) => {
     state.overlay.threshold = +ev.target.value;
     $("#cos-thr-val").textContent = `|cos| ≥ ${state.overlay.threshold.toFixed(3)}`;
@@ -477,7 +549,9 @@ async function main() {
       openNeuron({ layer: h.layer, n: h.neuron }, { focus: false });
     },
     onLayer: onLayerChanged,
-    onContext: (L, ev) => { if (state.model) computeMenu(ev, L, state.arch.layers[L], state.model.coverage[L], { onStart: startJob }); },
+    onContext: (L, ev) => {
+      if (state.model) computeMenu(ev, L, state.arch.layers[L], state.model.coverage[L], { onStart: startJob, arch: state.arch, model: state.model });
+    },
     overlay: $("#overlay"),
   });
   state.initMs = performance.now() - t0;
@@ -515,6 +589,8 @@ async function main() {
     },
     inRecipe: (L, n) => { const u = state.recipe && state.recipe.has(L, n); return u ? u.dose : null; },
     onChat: (el, d) => { chat.setNeuron(d.layer, d.neuron, d); chat.mount(el); },
+    hasConnections: () => !!(state.model && state.model.connections),
+    onGoto: (u) => openNeuron(u),
     onNamed: (names) => {
       state.model.names = names;
       const f = state.overlay.field;

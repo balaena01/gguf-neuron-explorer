@@ -579,6 +579,36 @@ class Session:
         from .fires import fires
         return fires(self, text, top=top)
 
+    # --- Phase 5 U3: connections と配置(重みだけ、CPU) -------------------------------------------------
+
+    def connections(self, *, k: int = 24, window: int | None = None, chunk: int = 1024) -> dict:
+        """全層ペアの connections を計算して <root>/connections/<model_id>.npz に保存する(別冊 §8.4)。"""
+        from .connections import compute_connections, save_connections
+        resid = self.resid_stats()
+        rho = {int(L): float(p) for L, p in zip(resid.layers, resid.p50, strict=True)} if resid is not None else None
+        if rho is None:
+            self.warn("残差ノルムの統計が無いので rms で割らずに計算します(層をまたいだ z が深い層に偏ります。gne stats resid で作れます)")
+        r = compute_connections(self.weights, k=k, window=window, rho=rho, chunk=chunk, progress=self.progress)
+        path = self.store.connections_path(self.meta.model_id)
+        save_connections(path, r)
+        return {"path": str(path), **r["meta"]}
+
+    def layout(self, kind: str = "writes", *, layers: list[int] | str | None = None, seed: int | None = None) -> dict:
+        """シート内の配置(別冊 §4.4)を計算して <root>/layout/<model_id>/<kind>_L{L}.npy に保存する。"""
+        from .layout import compute_layout
+        Ls = list(range(self.meta.n_layer)) if layers in (None, "all") else [int(x) for x in layers]
+        out = []
+        for i, L in enumerate(Ls):
+            if self.progress:
+                self.progress(i, len(Ls), f"layout {kind} L{L}")
+            cell, info = compute_layout(self, kind, L, seed=self.seed if seed is None else seed)
+            p = self.store.layout_dir(self.meta.model_id) / f"{kind}_L{L}.npy"
+            np.save(p, cell)
+            out.append({"layer": L, "path": str(p), **info})
+        if self.progress:
+            self.progress(len(Ls), len(Ls), f"layout {kind}")
+        return {"kind": kind, "layers": out}
+
     def set_name(self, L: int, n: int, name: str) -> dict:
         from .dossier import set_name
         set_name(self, L, n, name)

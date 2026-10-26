@@ -123,6 +123,8 @@ def standard_kinds() -> dict[str, Callable[..., dict]]:
         "sweep_rank": _sweep_rank,
         "rank": lambda s, run, **p: s.rank(run, **p),
         "reverse": lambda s, **p: s.reverse(**p),
+        "connections": lambda s, **p: s.connections(**p),
+        "layout": lambda s, **p: s.layout(**p),
     }
 
 
