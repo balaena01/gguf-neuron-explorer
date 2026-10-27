@@ -378,4 +378,8 @@ export const EN = {
   "既定": "default",
   "どの層で測った方向を使うか(空なら gne direction --select で選んだ層)": "Which layer's direction to use (empty = the layer picked by gne direction --select)",
   "方向がありません(gne direction --contrast で作れます)": "No directions yet (make one with gne direction --contrast)",
+  "サンプリングで生成する(温度 1.0・top-p 0.95・top-k 20・min-p 0.05・presence penalty 0.9。llama-server でよく使う設定)。3 列とも同じ乱数で引くので、違いは介入の違いだけ。切ると greedy": "Generate with sampling (temperature 1.0, top-p 0.95, top-k 20, min-p 0.05, presence penalty 0.9, like a typical llama-server setup). All three columns draw the same random numbers, so the only difference is the steering. Off = greedy",
+  "サンプリング": "sampling",
+  "方向(gne direction で作ったもの)。その層に足す": "A direction (made with gne direction), added at this layer",
+  "方向": "direction",
 };

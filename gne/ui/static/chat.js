@@ -6,7 +6,10 @@ import { t as tr } from "./i18n.js";                 // t は会話のターン�
 import { esc, tokHTML } from "./panels.js";
 
 // "14:8949:+1" → "L14 N8949 +1"
-const unitLabel = (spec) => { const [L, n, d] = spec.split(":"); return `L${L} N${n} ${(+d >= 0 ? "+" : "−") + Math.abs(+d)}`; };
+const unitLabel = (spec) => {
+  const p = spec.split(":"), d = +p[p.length - 1], who = p[1] === "dir" ? `dir:${p[2]}` : `N${p[1]}`;
+  return `L${p[0]} ${who} ${(d >= 0 ? "+" : "−") + +Math.abs(d).toFixed(4)}`;
+};
 const fmt = (x, d = 2) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : (+x).toFixed(d));
 
 export class ChatPanel {
@@ -18,6 +21,7 @@ export class ChatPanel {
     this.dose = 0.8;
     this.scale = 1.0;
     this.maxTokens = 128;
+    this.sample = false;               // サンプリング(llama-server と同じ見え方)。列はどれも同じ seed で引く
     this.when = "all";                 // 足す位置(本体設計 §6.15): all / gen / assistant / after / ramp
     this.whenArg = "";                 // after の文字列、ramp の a-b
     this.turns = [];                   // [{ user, labels, replies: [], finish: [] }]
@@ -91,6 +95,7 @@ export class ChatPanel {
         <span class="muted" title="${tr("足す位置: all = 全位置 / gen = 生成中だけ(プロンプトの理解を壊さない)/ assistant = assistant の発話だけ / after = 出力にその文字列が出てから / ramp = 倍率を a から b へ変える")}">when</span><select id="ch-when">${
           ["all", "gen", "assistant", "after", "ramp"].map((w) => `<option value="${w}"${this.when === w ? " selected" : ""}>${w}</option>`).join("")}</select>${
           this.when === "after" || this.when === "ramp" ? `<input id="ch-when-x" size="8" value="${esc(this.whenArg)}" placeholder="${this.when === "after" ? tr("結論:") : "1.5-0.5"}">` : ""}
+        <label class="muted" title="${tr("サンプリングで生成する(温度 1.0・top-p 0.95・top-k 20・min-p 0.05・presence penalty 0.9。llama-server でよく使う設定)。3 列とも同じ乱数で引くので、違いは介入の違いだけ。切ると greedy")}"><input type="checkbox" id="ch-sample"${this.sample ? " checked" : ""}> ${tr("サンプリング")}</label>
         <button class="small" id="ch-reset"${this.busy ? " disabled" : ""}>${tr("会話を消す")}</button></div>
       <div class="ch-log">
         <div class="ch-row ch-head">${cols.map((c, i) => `<div class="${["minus", "", "plus"][i]}">${esc(c.label)}${
@@ -131,6 +136,7 @@ export class ChatPanel {
       });
     }
     $("#ch-max").addEventListener("change", (ev) => { this.maxTokens = Math.max(1, Math.min(2048, +ev.target.value || 128)); });
+    $("#ch-sample").addEventListener("change", (ev) => { this.sample = ev.target.checked; });
     $("#ch-when").addEventListener("change", (ev) => { this.when = ev.target.value; this.render(); });
     const wx = $("#ch-when-x");
     if (wx) wx.addEventListener("change", (ev) => { this.whenArg = ev.target.value.trim(); });
@@ -158,6 +164,7 @@ export class ChatPanel {
     const t0 = performance.now();
     const body = {
       max_tokens: this.maxTokens,
+      ...(this.sample ? { sampling: { seed: Math.floor(Math.random() * 2 ** 31) } } : {}),
       when: this.whenSpec(),
       columns: cols.map((c, ci) => ({
         label: c.label, units: c.units, ...(c.ablate ? { ablate: c.ablate } : {}),

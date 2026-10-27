@@ -913,5 +913,22 @@ def test_recipe_ablate_row(server, browser, tmp_path):
     assert saved["ablate"]["direction"] == "pirate_ui" and saved["ablate"]["scale"] == 0.5
     pg.select_option("#rc-ab-dir", "")
     assert pg.evaluate("window.gne.recipe.ablate") is None
+    # 方向のユニットのレシピも読み込める(行に出て、3 列チャットの列に入る)。サンプリングの切り替え
+    post("/api/recipes/ui_dir", {"units": ["12:dir:pirate_ui:+0.27", "14:100:+0.5"]})
+    pg.evaluate("window.gne.recipe.clear()")
+    pg.click("#list-tabs button[data-tab=rank]")
+    pg.click("#list-tabs button[data-tab=recipe]")
+    pg.wait_for_function("[...document.querySelectorAll('#rc-load option')].some((o) => o.value === 'ui_dir')", timeout=10000)
+    pg.select_option("#rc-load", "ui_dir")
+    assert pg.evaluate("window.gne.recipe.specs()") == ["12:dir:pirate_ui:+0.27", "14:100:+0.5"]
+    assert "dir:pirate_ui" in pg.evaluate("document.querySelector('#recipe-list table.rc').innerText")
+    assert pg.evaluate("document.querySelector('#recipe-list tr[data-i=\"0\"] input.dose').step") == "0.005"
+    assert pg.evaluate("window.gne.recipe.neurons().length") == 1
+    pg.click("#rc-chat")
+    pg.wait_for_function("document.querySelector('#ch-sample')", timeout=10000)
+    cols = pg.evaluate("window.gne.chat.columns()")
+    assert cols[2]["units"] == ["12:dir:pirate_ui:+0.27", "14:100:+0.5"] and cols[0]["units"][0] == "12:dir:pirate_ui:-0.27"
+    pg.check("#ch-sample")
+    assert pg.evaluate("window.gne.chat.sample") is True
     assert not errors, errors
     pg.close()

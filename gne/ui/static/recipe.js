@@ -6,11 +6,14 @@ import { t } from "./i18n.js";
 import { esc } from "./panels.js";
 
 const fmt = (x, d = 2) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : (+x).toFixed(d));
-const signed = (x) => `${x >= 0 ? "+" : "−"}${fmt(Math.abs(x), 2)}`;
+const signed = (x, d = 2) => `${x >= 0 ? "+" : "−"}${fmt(Math.abs(x), d)}`;
+const isDir = (u) => u.kind === "direction";
+// 方向のユニット(gne direction の方向、L:dir:NAME:dose)は dose が小さいので、スライダーを ±1・刻み 0.005 にする
+const range = (u) => (isDir(u) ? { max: 1, step: 0.005, d: 3 } : { max: 3, step: 0.05, d: 2 });
 
 // スライダーは 0(中央)から値まで塗る。+ は黄、− は赤紫。中央に 0 の目盛り
-function trackBG(v) {
-  const p = ((Math.max(-3, Math.min(3, v)) + 3) / 6) * 100, c = v >= 0 ? "#f2d24b" : "#c94fa7", bg = "#1f2630";
+function trackBG(v, max = 3) {
+  const p = ((Math.max(-max, Math.min(max, v)) + max) / (2 * max)) * 100, c = v >= 0 ? "#f2d24b" : "#c94fa7", bg = "#1f2630";
   const [a, b] = v >= 0 ? [50, p] : [p, 50];
   return `linear-gradient(to right, transparent calc(50% - 1px), #8a96a7 calc(50% - 1px), #8a96a7 calc(50% + 1px), transparent calc(50% + 1px)),` +
          `linear-gradient(to right, ${bg} ${a}%, ${c} ${a}%, ${c} ${b}%, ${bg} ${b}%)`;
@@ -40,21 +43,27 @@ export class Recipe {
   ablateAt(s = 1) { return this.ablate ? { ...this.ablate, scale: +(this.ablate.scale * s).toFixed(4) } : undefined; }
   setAblate(a) { this.ablate = a && a.direction ? a : null; this._save(); }
 
-  specs(scale = 1) { return this.units.map((u) => `${u.layer}:${u.neuron}:${u.dose * scale >= 0 ? "+" : ""}${+(u.dose * scale).toFixed(4)}`); }
-  has(L, n) { return this.units.find((u) => u.layer === L && u.neuron === n); }
+  specs(scale = 1) {
+    return this.units.map((u) => `${u.layer}:${isDir(u) ? `dir:${u.direction}` : u.neuron}:${u.dose * scale >= 0 ? "+" : ""}${+(u.dose * scale).toFixed(4)}`);
+  }
+  has(L, n) { return this.units.find((u) => !isDir(u) && u.layer === L && u.neuron === n); }
+  neurons() { return this.units.filter((u) => !isDir(u)); }
   add(L, n, dose) {
     const u = this.has(L, n);
     if (u) u.dose = dose; else this.units.push({ layer: L, neuron: n, dose });
-    this.units.sort((a, b) => a.layer - b.layer || a.neuron - b.neuron);
+    this.units.sort((a, b) => a.layer - b.layer || (a.neuron ?? -1) - (b.neuron ?? -1));
     this._save();
   }
   set(i, dose) { this.units[i].dose = dose; this._save(); }
   remove(i) { this.units.splice(i, 1); this._save(); }
   clear() { this.units = []; this.name = ""; this.ablate = null; this.skipped = 0; this._save(); }
   load(name, units, ablate = null) {
-    const ok = units.filter((u) => (u.kind || "neuron") === "neuron" && (u.mode || "add") === "add");
+    const ok = units.filter((u) => ((u.kind || "neuron") === "neuron" || u.kind === "direction") && (u.mode || "add") === "add");
     this.skipped = units.length - ok.length;
-    this.name = name; this.units = ok.map((u) => ({ layer: u.layer, neuron: u.neuron, dose: u.dose })); this.ablate = ablate || null;
+    this.name = name;
+    this.units = ok.map((u) => (isDir(u) ? { layer: u.layer, kind: "direction", direction: u.direction, dose: u.dose }
+      : { layer: u.layer, neuron: u.neuron, dose: u.dose }));
+    this.ablate = ablate || null;
     this._save();
   }
 }
@@ -78,12 +87,17 @@ export class RecipePanel {
 
   render() {
     const r = this.r;
-    const rows = r.units.map((u, i) => `
-      <tr data-i="${i}"><td class="id"><a href="#" data-open="${i}">L${u.layer} N${u.neuron}</a>
-          <span class="muted w">${esc(this.unitWords(u.layer, u.neuron))}</span><button class="small rm" data-rm="${i}" title="${t("外す")}">×</button>
-        <div class="sl"><span class="muted">−3</span><input type="range" class="dose" min="-3" max="3" step="0.05" value="${u.dose}" data-i="${i}" style="background:${trackBG(u.dose)}"><span class="muted">+3</span>
-          <span class="sg mono ${u.dose >= 0 ? "plus" : "minus"}">${signed(u.dose)}</span>
-          <input type="number" min="-10" max="10" step="0.05" value="${u.dose}" data-i="${i}" class="num" title="${t("値を直接入れる")}"></div></td></tr>`).join("");
+    const rows = r.units.map((u, i) => {
+      const g = range(u);
+      const id = isDir(u)
+        ? `<span class="mono" title="${t("方向(gne direction で作ったもの)。その層に足す")}">L${u.layer} dir:${esc(u.direction)}</span> <span class="muted w">${t("方向")}</span>`
+        : `<a href="#" data-open="${i}">L${u.layer} N${u.neuron}</a> <span class="muted w">${esc(this.unitWords(u.layer, u.neuron))}</span>`;
+      return `
+      <tr data-i="${i}"><td class="id">${id}<button class="small rm" data-rm="${i}" title="${t("外す")}">×</button>
+        <div class="sl"><span class="muted">−${g.max}</span><input type="range" class="dose" min="-${g.max}" max="${g.max}" step="${g.step}" value="${u.dose}" data-i="${i}" style="background:${trackBG(u.dose, g.max)}"><span class="muted">+${g.max}</span>
+          <span class="sg mono ${u.dose >= 0 ? "plus" : "minus"}">${signed(u.dose, g.d)}</span>
+          <input type="number" min="-10" max="10" step="${g.step}" value="${u.dose}" data-i="${i}" class="num" title="${t("値を直接入れる")}"></div></td></tr>`;
+    }).join("");
     this.root.innerHTML = `
       <div class="list-tools"><input id="rc-name" placeholder="${t("レシピ名(英数字・_・-)")}" value="${esc(r.name)}" spellcheck="false">
         <button class="small" id="rc-save" title="${t("~/.gne/recipes に保存")}">${t("保存")}</button></div>
@@ -117,9 +131,10 @@ export class RecipePanel {
         r.set(i, v);
         const tr = this.root.querySelector(`tr[data-i="${i}"]`);
         for (const x of tr.querySelectorAll("input")) if (x !== ev.target) x.value = String(v);
-        tr.querySelector("input.dose").style.background = trackBG(v);
+        const g = range(r.units[i]);
+        tr.querySelector("input.dose").style.background = trackBG(v, g.max);
         const sg = tr.querySelector(".sg");
-        sg.textContent = signed(v); sg.className = `sg mono ${v >= 0 ? "plus" : "minus"}`;
+        sg.textContent = signed(v, g.d); sg.className = `sg mono ${v >= 0 ? "plus" : "minus"}`;
       });
     }
     for (const el of this.root.querySelectorAll("[data-rm]")) el.addEventListener("click", () => { r.remove(+el.dataset.rm); this.render(); });

@@ -490,3 +490,36 @@ def test_direction_from_responses(session, tmp_path):
     assert st["differs"]
     with pytest.raises(GneError):
         session.direction(contrast=c, positions="middle")
+
+
+@pytest.mark.model
+def test_sampling_in_engine_and_ui_stream(session, tmp_path):
+    """UI のチャット用のサンプリング: 同じ seed なら同じ列、温度 0 なら greedy と同じ、presence penalty は繰り返しを減らす。"""
+    from fastapi.testclient import TestClient
+
+    from gne.engine import Sampling
+    from gne.ui.server import create_app
+    e = session.engine
+    ctx = e.steer_ctx()
+    ids = e.tokenize_prompt(e.render_chat([{"role": "user", "content": "Write a short poem about the sea."}]))
+    greedy = e.generate_greedy(ctx, [ids], max_tokens=24)[0].token_ids
+    assert e.generate_greedy(ctx, [ids], max_tokens=24, sampling=Sampling(temperature=0, presence_penalty=0))[0].token_ids == greedy
+    a = e.generate_greedy(ctx, [ids], max_tokens=24, sampling=Sampling(seed=1))[0].token_ids
+    b = e.generate_greedy(ctx, [ids], max_tokens=24, sampling=Sampling(seed=1))[0].token_ids
+    c = e.generate_greedy(ctx, [ids], max_tokens=24, sampling=Sampling(seed=2))[0].token_ids
+    assert a == b and a != c
+    rng = np.random.default_rng(0)
+    lo = np.zeros(10)
+    lo[3] = 5.0
+    assert Sampling(presence_penalty=0).pick(lo, {3}, rng) == 3
+    assert Sampling(presence_penalty=100, top_k=10, top_p=1.0, min_p=0).pick(lo, {3}, rng) != 3
+    session.direction(contrast=_contrast(tmp_path), name="pirate_s", select="12")
+    app = create_app(session, warm=False)
+    with TestClient(app, base_url="http://127.0.0.1") as cl:
+        col = {"label": "x", "units": ["12:dir:pirate_s:+0.5"], "messages": [{"role": "user", "content": "Hello!"}]}
+        body = {"max_tokens": 16, "sampling": {"seed": 7}, "columns": [col, col]}
+        res = cl.post("/api/steer", json=body)
+        ends = [json.loads(line[6:]) for line in res.text.splitlines() if line.startswith("data: ") and '"type": "end"' in line]
+        assert len(ends) == 2 and ends[0]["text"] == ends[1]["text"]                  # 同じ seed なら列どうしも同じ
+        bad = cl.post("/api/steer", json={**body, "sampling": {"seed": 1, "temp": 2}})
+        assert bad.status_code == 400

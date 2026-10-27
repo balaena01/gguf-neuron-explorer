@@ -147,7 +147,7 @@ function legend() {
     (o.weak && o.weak.size ? itl(t("({layers} は活性統計が無く文章内 p99 で割ったので、枠の比較から外した)", { layers: [...o.weak].map((L) => `L${L}`).join(", ") })) : "") + "</div>";
   const ring = (c) => `<span class="sw ring" style="border-color:${c}"></span>`;
   const ag = agent ? agent.state : null;
-  const marks = (state.recipe && state.recipe.units.length ? [it(ring("#f2d24b"), t("レシピ +")), it(ring("#c94fa7"), t("レシピ −(大きさ = |dose|)"))] : [])
+  const marks = (state.recipe && state.recipe.neurons().length ? [it(ring("#f2d24b"), t("レシピ +")), it(ring("#c94fa7"), t("レシピ −(大きさ = |dose|)"))] : [])
     .concat(state.focus ? [it(ring("#ffffff"), t("開いているニューロン"))] : [])
     .concat(ag && ag.highlights.length ? [it(`<span class="sw ring dash" style="border-color:#6fe3ff"></span>`, `${t("エージェントの強調")}${ag.label ? ` (${esc(ag.label)})` : ""}`)] : [])
     .concat(ag && ag.notes.length ? [itl(`<span class="sw ring" style="border-color:#6fe3ff;width:9px;height:9px"></span><span class="ag-note-sw">agent ✎</span>` +
@@ -456,7 +456,7 @@ function startJob(kind, params) {
 }
 
 function recipeChanged(r) {
-  state.map.setMarks(r.units.map((u) => ({ layer: u.layer, neuron: u.neuron, dose: u.dose })));
+  state.map.setMarks(r.neurons().map((u) => ({ layer: u.layer, neuron: u.neuron, dose: u.dose })));   // 方向のユニットは印なし
   $("#recipe-count").textContent = r.units.length ? `(${r.units.length})` : "";
   legend();
 }
@@ -618,7 +618,7 @@ async function main() {
     recipePanel = new RecipePanel($("#recipe-list"), state.recipe, {
       onOpen: (u) => openNeuron(u),
       onChat: () => {
-        const u = state.recipe.units[0];
+        const u = state.recipe.neurons()[0];
         chat.useRecipe();
         if (!$("#neuron").classList.contains("wide")) $("#neuron-wide").click();        // 3 列は広い方が読みやすい
         const f = state.focus;

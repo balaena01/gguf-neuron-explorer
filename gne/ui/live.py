@@ -55,6 +55,8 @@ class Live:
     def steer_stream(self, body: dict):
         """body: {columns: [{label, units: ["14:8949:+1"], ablate?, messages: [...], when?}], max_tokens, system, when}。
         ablate は {direction, scale, layers, from_layer} か "NAME@層:倍率"(§6.17)。
+        sampling: {seed, temperature?, top_k?, top_p?, min_p?, presence_penalty?} ならサンプリング(既定は start.sh と同じ値)。
+        どの列も同じ seed で引くので、列の違いは介入の違いだけになる。
         列ごとに会話の履歴(最後がユーザーの発話)を受け取り、1 列ずつ逐次生成する。状態はクライアントが持つ。
         when は足す位置(§6.15)。列ごとに指定が無ければ全体の when、それも無ければ all。"""
         cols = body.get("columns") or []
@@ -66,6 +68,14 @@ class Live:
         recipes = [self.recipe(c.get("units") or [], ablate=c.get("ablate")) for c in cols]   # 形式の誤りは始める前に返す
         from ..when import generate_when, parse_when
         whens = [parse_when(c.get("when") or body.get("when") or "all") for c in cols]
+        sampling = None
+        if body.get("sampling"):
+            from ..engine import Sampling
+            sp = dict(body["sampling"])
+            allowed = {"seed", "temperature", "top_k", "top_p", "min_p", "presence_penalty"}
+            if set(sp) - allowed:
+                raise GneError("BAD_ARGS", f"sampling に使えるのは {', '.join(sorted(allowed))} です")
+            sampling = Sampling(**{k: (int(v) if k in ("seed", "top_k") else float(v)) for k, v in sp.items()})
         system = body.get("system")
         sid = uuid.uuid4().hex[:8]
         stop = threading.Event()
@@ -100,7 +110,7 @@ class Live:
                                 q.put({"type": "text", "col": _i, "text": piece})
                         try:
                             out, winfo = generate_when(e, ctx, msgs, vecs, w, max_tokens=max_tokens, on_token=cb,
-                                                       lora=self.s.lora_for(r))
+                                                       lora=self.s.lora_for(r), sampling=sampling)
                             q.put({"type": "end", "col": i, "text": out.text, "finish": out.finish, "n_gen": out.n_gen,
                                    "when": winfo})
                         except _Stopped:

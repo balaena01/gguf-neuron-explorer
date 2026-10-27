@@ -53,6 +53,40 @@ class PrefillResult:
 
 
 @dataclass
+class Sampling:
+    """サンプリング(UI のチャットで llama-server と同じ見え方にするため)。既定値は Saluki 27B で使った llama-server の設定と
+    llama.cpp の既定(min_p 0.05)。順番も llama.cpp の既定の sampler chain と同じ:
+    presence penalty(この返事で出たトークン)→ top-k → top-p → min-p → 温度 → 抽選。seed が同じなら同じ列になる。"""
+    temperature: float = 1.0
+    top_k: int = 20
+    top_p: float = 0.95
+    min_p: float = 0.05
+    presence_penalty: float = 0.9
+    seed: int = 0
+
+    def pick(self, logits: np.ndarray, seen: set[int], rng: np.random.Generator) -> int:
+        x = logits.astype(np.float64, copy=True)
+        if self.presence_penalty and seen:
+            x[list(seen)] -= self.presence_penalty
+        if self.temperature <= 0:
+            return int(x.argmax())
+        k = min(max(1, self.top_k), x.size) if self.top_k > 0 else x.size
+        idx = np.argpartition(x, -k)[-k:] if k < x.size else np.arange(x.size)
+        idx = idx[np.argsort(-x[idx])]
+        lo = x[idx]
+        p = np.exp(lo - lo.max())
+        p /= p.sum()
+        if self.top_p < 1.0:
+            keep = int(np.searchsorted(np.cumsum(p), self.top_p) + 1)
+            idx, lo, p = idx[:keep], lo[:keep], p[:keep]
+        if self.min_p > 0:
+            m = p >= self.min_p * p[0]
+            idx, lo = idx[m], lo[m]
+        q = np.exp((lo - lo.max()) / self.temperature)
+        return int(idx[rng.choice(len(idx), p=q / q.sum())])
+
+
+@dataclass
 class Rollout:
     prompt_ids: list[int]
     token_ids: list[int] = field(default_factory=list)
@@ -371,8 +405,10 @@ class Engine:
     def generate_greedy(self, ctx: _Ctx, seqs: list[list[int]], *, max_tokens: int = 128, top_k: int = 5,
                         stop_on_eog: bool = True, prefilled: PrefillResult | None = None,
                         on_token: Callable[[int, int], None] | None = None,
-                        schedule: Callable[[int, list[Rollout]], object] | None = None) -> list[Rollout]:
+                        schedule: Callable[[int, list[Rollout]], object] | None = None,
+                        sampling: Sampling | None = None) -> list[Rollout]:
         """バッチ貪欲生成。prefilled が無ければ clear_memory → prefill から始める。
+        sampling を渡すとサンプリングで選ぶ(シーケンスごとに seed + 番号の乱数。logprob と top-k は素のロジットのまま)。
         on_token(シーケンス番号, トークン) は EOG 以外のトークンが決まるたびに呼ばれる(逐次表示用)。
         schedule(step, rollouts) は step 番目のトークンが決まった後、それを decode する前に呼ばれ、
         control vector を付け替える(§6.15)。KEEP を返せばそのまま、None で解除、dict で差し替え。
@@ -385,6 +421,7 @@ class Engine:
             self.clear_memory(ctx)
             prefilled = self.prefill(ctx, seqs)
         outs = [Rollout(prompt_ids=list(s)) for s in seqs]
+        rngs = [np.random.default_rng([sampling.seed, i]) for i in range(len(seqs))] if sampling else None
         pos = [len(s) for s in seqs]
         active = list(range(len(seqs)))
         cur = prefilled.logits
@@ -400,8 +437,8 @@ class Engine:
             top_lp = np.take_along_axis(vals, order, axis=1) - lse
             nxt = []
             for row, si in enumerate(active):
-                tok = int(toks[row])
                 r = outs[si]
+                tok = int(toks[row]) if sampling is None else sampling.pick(cur[row], set(r.token_ids), rngs[si])
                 r.token_ids.append(tok)
                 r.logprob.append(float(cur[row, tok] - lse[row, 0]))
                 r.top_ids.append(top[row].tolist())
