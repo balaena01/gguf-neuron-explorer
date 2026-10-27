@@ -188,6 +188,7 @@ class RecipeModel(_Strict):
     dose_unit: Literal["rel", "absmax", "raw"]
     when: str = "all"                 # §6.15
     units: list[dict[str, Any]]
+    ablate: dict[str, Any] | None = None      # §6.17
 
 
 class Generation(_Strict):
@@ -341,6 +342,34 @@ class AblateOut(Envelope):                      # §6.17 gne ablate
     intermediate_bytes: int | None = None
     verify: dict[str, Any] | None
     seconds: float
+
+
+class CompareRow(_Strict):
+    method: Literal["neurons", "direction"]
+    dose: float
+    rate: float | None                          # 消したい振る舞いの判定の一致率(A 側)
+    rate_drop: float | None
+    kl_b: float | None
+    capability_drop_pt: float
+    ppl_worse_pct: float
+    mix_increase: float
+    novelty: float
+    shippable: bool
+    sample: str | None
+
+
+class EvalCompareOut(Envelope):                 # §6.17 gne eval --compare-ablation(command は "eval")
+    direction: str
+    from_layer: int
+    top: int
+    neurons: list[dict[str, float]]
+    evals: dict[str, str]
+    contrast: str | None
+    match: str | None
+    base_rate: float | None
+    rows: list[CompareRow]
+    seconds: float
+    path: str
 
 
 # --- Phase 2: lens / reverse -----------------------------------------------------------------------------

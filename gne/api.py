@@ -191,10 +191,17 @@ class Session:
 
     def recipe(self, *, units: list[str] | None = None, path: str | Path | None = None,
                dose_unit: str | None = None, scale: float = 1.0, name: str | None = None,
-               when: str | None = None) -> Recipe:
-        if bool(units) == bool(path):
+               when: str | None = None, ablate: str | dict | None = None) -> Recipe:
+        """ablate は方向の射影消去(§6.17)。"NAME[@層][:倍率]" か {direction, scale, layers, from_layer}。
+        ablate だけ(ユニットなし)のレシピも作れる。"""
+        from .steer import AblateSpec
+        if units and path:
             raise GneError("BAD_ARGS", "--recipe か --unit のどちらか一方を指定してください")
-        if path:
+        if not units and not path and not ablate:
+            raise GneError("BAD_ARGS", "--recipe か --unit(または --ablate)を指定してください")
+        if not units and not path:
+            r = Recipe([], self.meta.model_id, dose_unit or "rel", name)
+        elif path:
             if not Path(path).exists():
                 raise GneError("FILE_NOT_FOUND", f"レシピ {path} がありません")
             r = Recipe.load(path)
@@ -204,7 +211,11 @@ class Session:
             r = Recipe([parse_unit(u) for u in units], self.meta.model_id, dose_unit or "rel", name)
         if when:
             r.when = when
+        if ablate:
+            r.ablate = AblateSpec.from_dict(ablate)
         r.validate()
+        if r.ablate is not None:
+            self.direction_path(r.ablate.direction)              # 方向が無ければここで返す
         if r.model_id and r.model_id != self.meta.model_id:
             self.warn(f"レシピの model_id {r.model_id!r} が読み込んだモデル {self.meta.model_id!r} と違います")
         for u in r.units:
@@ -291,16 +302,35 @@ class Session:
     # --- export / import ------------------------------------------------------------------------
 
     def lora_for(self, recipe: Recipe | None) -> list[tuple[str, float]] | None:
-        """レシピの gain ユニットを当てる LoRA([(パス, 1.0)])。gain が無ければ None。作ったものは使い回す。"""
-        if recipe is None or not recipe.gain_units:
+        """レシピの gain ユニット(§6.16)と ablate(§6.17)を当てる LoRA([(パス, 倍率)])。どちらも無ければ None。
+        作ったものは使い回す。ablate の LoRA は倍率 1 で作り、scale はアダプタの倍率で掛ける(eval の倍率列でも 1 ファイル)。"""
+        if recipe is None:
             return None
-        from .gain import export_gain_lora, lora_cache_path
-        path = lora_cache_path(self.store.gain_dir(self.meta.model_id), recipe)
+        out = []
+        if recipe.gain_units:
+            from .gain import export_gain_lora, lora_cache_path
+            path = lora_cache_path(self.store.gain_dir(self.meta.model_id), recipe)
+            if not path.exists():
+                tmp = path.with_suffix(".part")
+                export_gain_lora(self.weights, Recipe(recipe.gain_units, self.meta.model_id, name=recipe.name), tmp)
+                tmp.replace(path)
+            out.append((str(path), 1.0))
+        if recipe.ablate is not None and recipe.ablate.scale != 0:
+            out.append((str(self.ablation_lora(recipe.ablate)), float(recipe.ablate.scale)))
+        return out or None
+
+    def ablation_lora(self, spec) -> Path:
+        """AblateSpec → 倍率 1 の消去 LoRA(<root>/ablate/<model_id>/ に作って使い回す)。"""
+        from .ablate import export_ablation_lora, layer_list, vector_key
+        r, meta = self.ablation_vector(spec.direction, from_layer=spec.from_layer)
+        Ls = layer_list(spec.layers)
+        tag = "" if Ls is None else "-L" + hashlib.sha256(json.dumps(Ls).encode()).hexdigest()[:8]
+        path = self.store.ablate_dir(self.meta.model_id) / f"{spec.direction}-{vector_key(r)}{tag}.lora.gguf"
         if not path.exists():
             tmp = path.with_suffix(".part")
-            export_gain_lora(self.weights, Recipe(recipe.gain_units, self.meta.model_id, name=recipe.name), tmp)
+            export_ablation_lora(self.weights, r, tmp, layers=Ls, meta=meta)
             tmp.replace(path)
-        return [(str(path), 1.0)]
+        return path
 
     def gain(self, recipe: Recipe | list[str], out: str | Path, *, bake: bool = False, requant: str = "q8_0") -> dict:
         """gain ユニットを LoRA アダプタ GGUF(既定)か、W_up を書き換えた GGUF(bake)に書き出す(§6.16)。"""
@@ -315,6 +345,9 @@ class Session:
         return {"kind": "bake" if bake else "lora", "recipe": recipe.to_dict(), **rep}
 
     def _warn_when(self, recipe: Recipe, what: str) -> None:
+        if recipe.ablate is not None:
+            self.warn(f"ablate({recipe.ablate.label()})は {what} では表せないので外しました(§6.17)。"
+                      "gne ablate で LoRA アダプタか書き換え GGUF に書き出してください")
         if recipe.gain_units:
             self.warn(f"gain のユニット({len(recipe.gain_units)} 個)は {what} では表せないので外しました(§6.16)。"
                       "gne gain で LoRA アダプタか書き換え GGUF に書き出してください")
@@ -687,10 +720,12 @@ class Session:
         set_name(self, L, n, name)
         return {"layer": L, "neuron": n, "name": name or None}
 
-    def recipe_save(self, name: str, units: list[str] | Recipe, *, dose_unit: str = "rel") -> dict:
+    def recipe_save(self, name: str, units: list[str] | Recipe, *, dose_unit: str = "rel",
+                    ablate: str | dict | None = None, when: str | None = None) -> dict:
         if not re.fullmatch(r"[\w.\-]+", name or ""):
             raise GneError("BAD_ARGS", f"レシピ名 {name!r} は英数字・_・-・. だけにしてください")
-        r = units if isinstance(units, Recipe) else self.recipe(units=list(units), dose_unit=dose_unit, name=name)
+        r = units if isinstance(units, Recipe) else self.recipe(units=list(units), dose_unit=dose_unit, name=name,
+                                                               ablate=ablate, when=when)
         r.name = name
         path = self.store.recipes_dir() / f"{name}.yaml"
         r.save(path)
@@ -869,7 +904,7 @@ class Session:
         """レシピの倍率ごとの副作用(能力・ppl・言語混入)と性格の変化量を測り、<root>/evals/<model_id>/<name>.json に保存する。"""
         from .evalx import Judge, evaluate
         recipe = self._as_recipe(recipe)
-        if not recipe.units:
+        if not recipe.units and recipe.ablate is None:
             raise GneError("BAD_RECIPE", "ユニットがありません")
         if (judge_model is None) != (judge_target is None):
             raise GneError("BAD_ARGS", "--judge-model と --judge-target は両方指定してください")
@@ -880,7 +915,7 @@ class Session:
             if judge is not None:
                 judge.close()
         name = name or recipe.name or "units-" + hashlib.sha256(
-            json.dumps(recipe.to_dict()["units"], sort_keys=True).encode()).hexdigest()[:8]
+            json.dumps([recipe.to_dict()["units"], recipe.to_dict()["ablate"]], sort_keys=True).encode()).hexdigest()[:8]
         if not re.fullmatch(r"[\w.\-]+", name):
             raise GneError("BAD_ARGS", f"名前 {name!r} は英数字・_・-・. だけにしてください")
         if d["when"] != "all":
@@ -889,6 +924,54 @@ class Session:
         d = {"name": name, "path": str(path), "created": time.strftime("%Y-%m-%dT%H:%M:%S"), **d}
         path.write_text(json.dumps(d, ensure_ascii=False, indent=1))
         return d
+
+    def eval_compare_ablation(self, direction: str, *, top: int = 20, from_layer: int | None = None,
+                              doses=(0, 0.5, 1.0), suite: str | Path | None = None, when: str | None = None,
+                              max_tokens: int = 64) -> dict:
+        """§6.17: 同じ方向から作った「上位 top ニューロンの消去(gain ×0)」と「方向の消去(ablate)」を同じ表に並べる。
+        能力・ppl・混入は eval、消したい振る舞いの残り具合は方向の対照集合の判定(validate.match)で測る。"""
+        from .direction import behavior, load_contrast, top_writer_neurons
+        from .steer import AblateSpec, Unit
+        t0 = time.perf_counter()
+        ds = self.direction_set(direction)
+        _, meta = self.ablation_vector(direction, from_layer=from_layer)
+        neurons = top_writer_neurons(self, ds, top)
+        rn = Recipe([Unit(L, n, 0.0, mode="gain", k=0.0) for L, n, _ in neurons], self.meta.model_id,
+                    name=f"{ds.name}-neurons{top}")
+        rd = Recipe([], self.meta.model_id, name=f"{ds.name}-ablate",
+                    ablate=AblateSpec(ds.name, 1.0, "all", meta["from_layer"]))
+        ev = {"neurons": self.eval(rn, doses=doses, suite=suite, when=when),
+              "direction": self.eval(rd, doses=doses, suite=suite, when=when)}
+        src = ds.meta.get("source")
+        cs_val = load_contrast(src) if src and Path(src).exists() else None
+        if cs_val is None:
+            self.warn(f"方向 {ds.name} の対照集合 {src} が見つからないので、振る舞いの残り具合は測りません")
+        elif not cs_val[1].match:
+            self.warn("対照集合に validate.match が無いので、振る舞いの残り具合(一致率)は測りません")
+        base = behavior(self, *cs_val, None, max_tokens=max_tokens) if cs_val else None
+        rows = []
+        for method, recipe in (("neurons", rn), ("direction", rd)):
+            for row in ev[method]["rows"]:
+                d = row["dose"]
+                b = None
+                if cs_val is not None:
+                    b = base if d == 0 else behavior(self, *cs_val, recipe.scaled(d), max_tokens=max_tokens,
+                                                     base_lp=base["lp"])
+                rows.append({"method": method, "dose": d,
+                             "rate": None if b is None else b["rate"],
+                             "rate_drop": None if b is None or b["rate"] is None else base["rate"] - b["rate"],
+                             "kl_b": None if b is None else b["kl_b"],
+                             "capability_drop_pt": row["capability_drop_pt"], "ppl_worse_pct": row["ppl_worse_pct"],
+                             "mix_increase": row["mix_increase"], "novelty": row["persona"]["novelty"],
+                             "shippable": row["shippable"], "sample": None if b is None else b["sample"]})
+        out = {"direction": ds.name, "from_layer": meta["from_layer"], "top": top,
+               "neurons": [{"layer": L, "neuron": n, "cos": c} for L, n, c in neurons],
+               "evals": {k: v["name"] for k, v in ev.items()}, "contrast": src,
+               "match": cs_val[1].match if cs_val else None, "base_rate": None if base is None else base["rate"],
+               "rows": rows, "seconds": time.perf_counter() - t0}
+        path = self.store.eval_dir(self.meta.model_id) / f"{ds.name}-compare-ablation.json"
+        path.write_text(json.dumps(out, ensure_ascii=False, indent=1))
+        return {**out, "path": str(path)}
 
     def evals(self) -> list[dict]:
         """保存済みの eval の一覧(新しい順)。"""
@@ -900,7 +983,8 @@ class Session:
                 continue
             last = d["rows"][-1] if d.get("rows") else {}
             out.append({"name": d.get("name", p.stem), "created": d.get("created"), "when": d.get("when"),
-                        "doses": d.get("doses"), "units": [_unit_spec(u) for u in d["recipe"]["units"]],
+                        "doses": d.get("doses"), "units": [_unit_spec(u) for u in d["recipe"]["units"]]
+                        + ([_ablate_label(d["recipe"]["ablate"])] if d["recipe"].get("ablate") else []),
                         "shippable": [r["dose"] for r in d.get("rows", []) if r.get("shippable")],
                         "max_dose_drop_pt": last.get("capability_drop_pt")})
         return out
@@ -942,6 +1026,11 @@ def _unit_spec(u: dict) -> str:
     tail = f"x{u['k']:g}" if u.get("mode") == "gain" else f"{u['dose']:+g}"
     mid = f"random:{u['seed']}" if u.get("kind") == "random" else str(u["neuron"])
     return f"{u['layer']}:{mid}:{tail}"
+
+
+def _ablate_label(a: dict) -> str:
+    from .steer import AblateSpec
+    return AblateSpec.from_dict(a).label()
 
 
 def template_override(model_id: str, arch: str) -> tuple[str, str] | None:

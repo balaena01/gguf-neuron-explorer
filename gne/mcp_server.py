@@ -104,13 +104,14 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
     @srv.tool()
     async def steer(units: list[str], prompt: str | None = None, messages: list[dict[str, str]] | None = None,
                     max_tokens: int = 128, compare: bool = True, dose_unit: str = "rel",
-                    system: str | None = None, when: str = "all") -> dict:
+                    system: str | None = None, when: str = "all", ablate: str | None = None) -> dict:
         """ユニット(例 ["14:8949:+1.0", "13:7956:-1.0"])で押して生成する(greedy)。compare=True なら無介入も並べる。
         "14:8949:x2" のように x を付けると gain(そのニューロンの出力を k 倍、x0 で消去。§6.16)。
         when は足す位置: all(全位置) / gen(生成中だけ、プロンプトの理解を壊さない) / assistant(assistant の発話だけ) /
-        after:<文字列>(出力にその文字列が出てから) / ramp:<a>-<b>(倍率を a から b へ)。"""
+        after:<文字列>(出力にその文字列が出てから) / ramp:<a>-<b>(倍率を a から b へ)。
+        ablate は direction で作った方向の射影消去("NAME"、"NAME@層"、"NAME:0.5")。units は空でもよい。"""
         def fn():
-            r = session.recipe(units=units, dose_unit=dose_unit, when=when)
+            r = session.recipe(units=units or None, dose_unit=dose_unit, when=when, ablate=ablate)
             return session.steer(r, prompt=prompt, messages=messages, system=system, max_tokens=max_tokens,
                                  compare=compare)
         return await call(fn)
@@ -157,9 +158,11 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
         return await call(session.direction, **params)
 
     @srv.tool()
-    async def recipe_save(name: str, units: list[str], dose_unit: str = "rel") -> dict:
-        """レシピを <root>/recipes/<name>.yaml に保存する。"""
-        return await call(session.recipe_save, name, units, dose_unit=dose_unit, gpu=False)
+    async def recipe_save(name: str, units: list[str], dose_unit: str = "rel", ablate: str | None = None,
+                          when: str | None = None) -> dict:
+        """レシピを <root>/recipes/<name>.yaml に保存する。ablate は方向の射影消去("NAME"、"NAME@層"、"NAME:倍率")、
+        when は足す位置(all / gen / assistant / after:<文字列> / ramp:<a>-<b>)。"""
+        return await call(session.recipe_save, name, units, dose_unit=dose_unit, ablate=ablate, when=when, gpu=False)
 
     @srv.tool()
     async def export_cvec(name: str, format: str = "cvec", verify: bool = False) -> dict:

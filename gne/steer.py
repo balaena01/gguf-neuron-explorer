@@ -54,12 +54,52 @@ class Unit:
 
 
 @dataclass
+class AblateSpec:
+    """方向の射影消去(§6.17)。direction の r(from_layer の層で測ったもの。既定は gne direction --select で選んだ層)を
+    layers のライターから scale だけ消す。scale < 0 はその方向を強める(3 列チャットの − 列)。"""
+    direction: str
+    scale: float = 1.0
+    layers: str = "all"
+    from_layer: int | None = None
+
+    def label(self) -> str:
+        at = f"@{self.from_layer}" if self.from_layer is not None else ""
+        return f"ablate {self.direction}{at}" + (f" ×{self.scale:g}" if self.scale != 1.0 else "") + \
+            (f" L{self.layers}" if self.layers != "all" else "")
+
+    def to_dict(self) -> dict:
+        return {"direction": self.direction, "scale": self.scale, "layers": self.layers, "from_layer": self.from_layer}
+
+    @classmethod
+    def from_dict(cls, d: dict | str | None) -> AblateSpec | None:
+        if d is None or isinstance(d, AblateSpec):
+            return d
+        if isinstance(d, str):
+            return parse_ablate(d)
+        return cls(str(d["direction"]), float(d.get("scale", 1.0)), str(d.get("layers") or "all"),
+                   None if d.get("from_layer") is None else int(d["from_layer"]))
+
+
+_ABLATE_RE = re.compile(r"^([\w.\-]+)(?:@(\d+))?(?::([+-]?[\d.]+))?$")
+
+
+def parse_ablate(spec: str) -> AblateSpec:
+    """"NAME"、"NAME@L"(L の層で測った r)、"NAME:0.5"(半分だけ消す)、"NAME@10:0.5"。"""
+    m = _ABLATE_RE.match((spec or "").strip())
+    if not m:
+        raise GneError("BAD_ARGS", f"--ablate {spec!r} を読めません", "NAME、NAME@層、NAME:倍率、NAME@層:倍率(例 evil@10:0.5)")
+    name, L, sc = m.groups()
+    return AblateSpec(name, float(sc) if sc else 1.0, "all", int(L) if L else None)
+
+
+@dataclass
 class Recipe:
     units: list[Unit]
     model_id: str | None = None
     dose_unit: DoseUnit = "rel"
     name: str | None = None
     when: str = "all"               # §6.15 位置別ステアリング: all / gen / assistant / after:<text> / ramp:<a>-<b>
+    ablate: AblateSpec | None = None   # §6.17 方向の射影消去(LoRA で当てる)
 
     @classmethod
     def load(cls, path: str | Path) -> Recipe:
@@ -69,25 +109,29 @@ class Recipe:
                       mode=u.get("mode", "add"), k=None if u.get("k") is None else float(u["k"]),
                       direction=u.get("direction"))
                  for u in d.get("units", [])]
-        r = cls(units, d.get("model_id"), d.get("dose_unit", "rel"), d.get("name") or Path(path).stem, d.get("when") or "all")
+        r = cls(units, d.get("model_id"), d.get("dose_unit", "rel"), d.get("name") or Path(path).stem, d.get("when") or "all",
+                AblateSpec.from_dict(d.get("ablate")))
         r.validate()
         return r
 
     def save(self, path: str | Path) -> None:
         d = {"name": self.name, "model_id": self.model_id, "dose_unit": self.dose_unit,
              **({"when": self.when} if self.when != "all" else {}),
+             **({"ablate": {k: v for k, v in self.ablate.to_dict().items() if v is not None}} if self.ablate else {}),
              "units": [_unit_yaml(u) for u in self.units]}
         Path(path).write_text(yaml.safe_dump(d, allow_unicode=True, sort_keys=False), encoding="utf-8")
 
     def to_dict(self) -> dict:
         return {"name": self.name, "model_id": self.model_id, "dose_unit": self.dose_unit, "when": self.when,
-                "units": [asdict(u) for u in self.units]}
+                "units": [asdict(u) for u in self.units], "ablate": self.ablate.to_dict() if self.ablate else None}
 
     def scaled(self, k: float) -> Recipe:
         # add は dose を k 倍、gain は倍率を「1(何もしない)から k_unit へ」の間で k の割合だけ動かす(eval の倍率列で 0 が無介入になるように)
         return Recipe([Unit(u.layer, u.neuron, u.dose * k if u.mode == "add" else u.dose, u.kind, u.seed, u.mode,
                             None if u.k is None else 1 + (u.k - 1) * k, u.direction) for u in self.units],
-                      self.model_id, self.dose_unit, self.name, self.when)
+                      self.model_id, self.dose_unit, self.name, self.when,
+                      None if self.ablate is None else AblateSpec(self.ablate.direction, self.ablate.scale * k,
+                                                                 self.ablate.layers, self.ablate.from_layer))
 
     @property
     def add_units(self) -> list[Unit]:
@@ -100,8 +144,13 @@ class Recipe:
     def validate(self) -> None:
         if self.dose_unit not in ("rel", "absmax", "raw"):
             raise GneError("BAD_RECIPE", f"dose_unit={self.dose_unit!r} は rel / absmax / raw のどれかです")
-        if not self.units:
+        if not self.units and self.ablate is None:
             raise GneError("BAD_RECIPE", "ユニットがありません")
+        if self.ablate is not None:
+            if not re.fullmatch(r"[\w.\-@]+", self.ablate.direction or ""):
+                raise GneError("BAD_RECIPE", f"ablate の方向の名前 {self.ablate.direction!r} が不正です")
+            if not -1.5 <= self.ablate.scale <= 1.5:
+                raise GneError("BAD_RECIPE", "ablate の scale は −1.5〜1.5 です(1 で全部消す、負はその方向を強める)")
         from .when import parse_when
         parse_when(self.when)                      # 書き方の誤りはここで返す
         for u in self.units:

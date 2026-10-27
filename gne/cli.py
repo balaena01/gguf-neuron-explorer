@@ -424,6 +424,7 @@ _RECIPE = typer.Option(None, "--recipe", help="レシピ YAML")
 _UNIT = typer.Option(None, "--unit", help="L:N:dose(例 14:8949:+1.0)または L:random:SEED:dose。複数可")
 _DOSE_UNIT = typer.Option(None, "--dose-unit", help="rel / absmax / raw(既定はレシピの値、--unit なら rel)")
 _SCALE = typer.Option(1.0, "--scale", help="全ユニットの dose に掛ける係数")
+_ABLATE = typer.Option(None, "--ablate", help="方向の射影消去(§6.17): NAME、NAME@層、NAME:倍率(例 evil@10:0.5)。LoRA で当てる")
 _WHEN = typer.Option(None, "--when", help="足す位置(§6.15): all / gen / assistant / after:<文字列> / ramp:<a>-<b>。既定はレシピの値(無ければ all)")
 
 
@@ -434,15 +435,16 @@ def steer(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Optio
           system: Optional[str] = typer.Option(None, "--system", help="system プロンプト"),
           max_tokens: int = typer.Option(128, "--max-tokens"),
           compare: bool = typer.Option(False, "--compare", help="無介入の生成も並べる"),
-          when: Optional[str] = _WHEN):
+          when: Optional[str] = _WHEN, ablate: Optional[str] = _ABLATE):
     """レシピまたは単発指定でプロンプトに回答する(greedy、1 本ずつ)。"""
     s = holder["session"] = c.session()
-    r = s.recipe(units=unit, path=recipe, dose_unit=dose_unit, scale=scale, when=when)
+    r = s.recipe(units=unit, path=recipe, dose_unit=dose_unit, scale=scale, when=when, ablate=ablate)
     d = s.steer(r, prompt=prompt, system=system, max_tokens=max_tokens, compare=compare)
-    parts = [f"ユニット({r.dose_unit}、位置 {r.when}):\n" + _units_text(d["units"])]
+    parts = [f"ユニット({r.dose_unit}、位置 {r.when}):\n" + (_units_text(d["units"]) or "  なし")
+             + (f"\n  {r.ablate.label()}(LoRA)" if r.ablate else "")]
     if d["baseline"] is not None:
         parts.append(f"── 無介入 ──({d['baseline']['finish']}, {d['baseline']['n_gen']} tok)\n{d['baseline']['text']}")
-    label = ", ".join(u.label() for u in r.units)
+    label = ", ".join([u.label() for u in r.units] + ([r.ablate.label()] if r.ablate else []))
     parts.append(f"── 介入: {label} ──({d['steered']['finish']}, {d['steered']['n_gen']} tok)\n{d['steered']['text']}")
     if d["differs"] is not None:
         parts.append("無介入との差: " + ("あり" if d["differs"] else "なし(同じ greedy 列)"))
@@ -556,10 +558,31 @@ def eval_cmd(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Op
              when: Optional[str] = _WHEN,
              judge_model: Optional[Path] = typer.Option(None, "--judge-model", help="性格の採点に使う別の GGUF(任意)"),
              judge_target: Optional[str] = typer.Option(None, "--judge-target", help="採点させる目標の性格(例 'a yandere anime girl')"),
-             name: Optional[str] = typer.Option(None, "--name", help="保存名(既定はレシピ名)")):
+             name: Optional[str] = typer.Option(None, "--name", help="保存名(既定はレシピ名)"),
+             ablate: Optional[str] = _ABLATE,
+             compare_ablation: Optional[str] = typer.Option(None, "--compare-ablation",
+                                                            help="方向 NAME の「上位ニューロンの消去(gain ×0)」と「方向の消去」を並べる(§6.17)"),
+             top_neurons: int = typer.Option(20, "--top-neurons", help="--compare-ablation で消すニューロンの数"),
+             from_layer: Optional[int] = typer.Option(None, "--from-layer", help="--compare-ablation: どの層で測った r を消すか")):
     """副作用チェック: 倍率ごとに能力(exact / format)・ppl・言語の混入・性格の変化量を測り、配布可の倍率を示す(§6.14)。"""
     s = holder["session"] = c.session()
-    r = s.recipe(units=unit, path=recipe, dose_unit=dose_unit)
+    if compare_ablation:
+        if unit or recipe or ablate:
+            raise GneError("BAD_ARGS", "--compare-ablation はレシピ(--recipe / --unit / --ablate)と一緒には使えません")
+        d = s.eval_compare_ablation(compare_ablation, top=top_neurons, from_layer=from_layer, doses=_doses(doses),
+                                    suite=suite, when=when)
+        lines = [f"消去の比較 {d['direction']}(r は L{d['from_layer']}、上位 {d['top']} ニューロン vs 方向、{d['seconds']:.0f} 秒)→ {d['path']}",
+                 f"振る舞いの判定: {d['match'] or '—'}(無介入の一致率 {format(d['base_rate'], '.2f') if d['base_rate'] is not None else '—'})",
+                 f"  {'方法':<9} {'倍率':>5} {'一致率':>6} {'減少':>6} {'KL(B)':>7} {'能力低下':>8} {'ppl悪化':>8} {'混入':>6}"]
+        for r_ in d["rows"]:
+            f2 = lambda x, fmt: "—" if x is None else format(x, fmt)  # noqa: E731
+            lines.append(f"  {('ニューロン' if r_['method'] == 'neurons' else '方向'):<9} {r_['dose']:>5g} {f2(r_['rate'], '.2f'):>6} "
+                         f"{f2(r_['rate_drop'], '+.2f'):>6} {f2(r_['kl_b'], '.3f'):>7} {r_['capability_drop_pt']:>7.1f}pt "
+                         f"{r_['ppl_worse_pct']:>+7.1f}% {r_['mix_increase'] * 100:>+5.2f}%" + ("  配布可" if r_["shippable"] else ""))
+        lines.append("消したニューロン: " + ", ".join(f"L{x['layer']} N{x['neuron']}({x['cos']:+.2f})" for x in d["neurons"][:10])
+                     + (" …" if len(d["neurons"]) > 10 else ""))
+        return d, "\n".join(lines), 0
+    r = s.recipe(units=unit, path=recipe, dose_unit=dose_unit, ablate=ablate)
     d = s.eval(r, doses=_doses(doses), suite=suite, when=when, judge_model=judge_model, judge_target=judge_target,
                name=name)
     th = d["suite"]["thresholds"]
@@ -834,14 +857,14 @@ def chat(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Option
          system: Optional[str] = typer.Option(None, "--system"),
          max_tokens: int = typer.Option(256, "--max-tokens"),
          stream: bool = typer.Option(True, "--stream/--no-stream", help="生成しながら表示する"),
-         when: Optional[str] = _WHEN):
+         when: Optional[str] = _WHEN, ablate: Optional[str] = _ABLATE):
     """−/0/+ の 3 列比較チャット(ユーザーの発話は共有、返答は列ごと)。"""
     from .chat import ChatState, chat_turn, make_columns
     s = holder["session"] = c.session()
     if when:
         from .when import parse_when
         parse_when(when)
-    base = s.recipe(units=unit, path=recipe, dose_unit=dose_unit) if (unit or recipe) else None
+    base = s.recipe(units=unit, path=recipe, dose_unit=dose_unit, ablate=ablate) if (unit or recipe or ablate) else None
     load = lambda p: s.recipe(path=p) if p else None  # noqa: E731
     cols = make_columns(base, dose=dose, left=load(left), right=load(right), center=load(center))
     live = stream and not c.json

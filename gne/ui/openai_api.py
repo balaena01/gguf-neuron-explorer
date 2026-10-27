@@ -6,7 +6,7 @@ UI サーバに最小限の OpenAI 互換 API を同居させる。リクエス�
 
     {"model": "...", "messages": [...], "max_tokens": 256, "stream": true,
      "gne": {"recipe": "evil" | {"units": ["14:8949:+1.0"], "dose_unit": "rel", "when": "gen"},
-             "units": ["14:8949:+1.0"], "scale": 0.8, "when": "gen"}}
+             "units": ["14:8949:+1.0"], "scale": 0.8, "when": "gen", "ablate": "evil@10:0.5"}}
 
 生成は greedy だけ(temperature などは無視する)。tools・logprobs・n は扱わない。GPU は UI のチャットと同じ調停を通る。
 """
@@ -54,16 +54,17 @@ def _messages(body: dict) -> list[dict]:
 
 def resolve_recipe(session, g: dict) -> tuple[Recipe | None, str]:
     """body["gne"] からレシピと when を決める。レシピが無ければ (None, "all")。"""
-    rec, units = g.get("recipe"), g.get("units")
+    rec, units, ablate = g.get("recipe"), g.get("units"), g.get("ablate")
     r = None
     if isinstance(rec, str) and rec:
-        r = session.recipe(path=session.recipe_path(rec))
+        r = session.recipe(path=session.recipe_path(rec), ablate=ablate)
     elif isinstance(rec, dict):
         us = rec.get("units") or []
         specs = [u if isinstance(u, str) else f"{u['layer']}:{u['neuron']}:{float(u['dose']):+g}" for u in us]
-        r = session.recipe(units=specs, dose_unit=rec.get("dose_unit"), name=rec.get("name"), when=rec.get("when"))
-    elif units:
-        r = session.recipe(units=list(units))
+        r = session.recipe(units=specs or None, dose_unit=rec.get("dose_unit"), name=rec.get("name"), when=rec.get("when"),
+                           ablate=rec.get("ablate") or ablate)
+    elif units or ablate:
+        r = session.recipe(units=list(units) if units else None, ablate=ablate)
     elif rec is not None:
         raise GneError("BAD_ARGS", "gne.recipe はレシピ名か {units: [...]} です")
     if r is not None and g.get("scale") not in (None, 1, 1.0):

@@ -866,3 +866,52 @@ def test_eval_view_and_job(server, browser, tmp_path):
     pg.wait_for_function("window.gne.view === 'eval' && window.gne.evalView.data.name === 'ui-seed'", timeout=30000)
     assert not errors, errors
     pg.close()
+
+
+@pytest.mark.model
+def test_recipe_ablate_row(server, browser, tmp_path):
+    """recipe タブの ablate の行(CHANGE-02 C): 方向を選ぶと 3 列チャットの列に ablate が入り(− の列は倍率を反転)、保存したレシピにも残る。"""
+    import urllib.request
+
+    import yaml
+
+    def get(path):
+        return json.loads(urllib.request.urlopen(server + path).read())
+
+    def post(path, body):
+        req = urllib.request.Request(server + path, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+        return json.loads(urllib.request.urlopen(req).read())
+    c = tmp_path / "pirate.yaml"
+    c.write_text(yaml.safe_dump({"name": "pirate_ui", "system_a": "You are a pirate.", "system_b": "You are a helpful assistant.",
+                                 "user_prompts": ["Who are you?", "Hello!"]}))
+    jid = post("/api/jobs", {"kind": "direction", "params": {"contrast": str(c), "select": "12"}})["id"]
+    for _ in range(600):
+        v = next(x for x in get("/api/jobs") if x["id"] == jid)
+        if v["status"] not in ("queued", "running"):
+            break
+        time.sleep(0.2)
+    assert v["status"] == "done", v
+    pg = browser.new_page(viewport={"width": 1500, "height": 860})
+    errors = []
+    pg.on("pageerror", lambda er: errors.append(str(er)))
+    pg.goto(server + "/")
+    pg.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
+    assert "pirate_ui" in pg.evaluate("window.gne.model.directions")
+    pg.click("#list-tabs button[data-tab=recipe]")
+    pg.select_option("#rc-ab-dir", "pirate_ui")
+    pg.wait_for_function("document.querySelector('#rc-ab-scale')", timeout=5000)
+    pg.evaluate("(() => { const s = document.querySelector('#rc-ab-scale'); s.value = '0.5'; s.dispatchEvent(new Event('input')); })()")
+    assert pg.evaluate("window.gne.recipe.ablate") == {"direction": "pirate_ui", "scale": 0.5, "layers": "all", "from_layer": None}
+    pg.click("#rc-chat")                                                            # ablate だけのレシピでもチャットを開ける
+    pg.wait_for_function("window.gne.chat.target === 'recipe'", timeout=10000)
+    cols = pg.evaluate("window.gne.chat.columns()")
+    assert cols[0]["ablate"]["scale"] == -0.5 and "ablate" not in cols[1] and cols[2]["ablate"]["scale"] == 0.5
+    pg.fill("#rc-name", "ui_abl")
+    pg.click("#rc-save")
+    pg.wait_for_function("document.querySelector('#rc-result').textContent.includes('ui_abl')", timeout=10000)
+    saved = next(x for x in get("/api/recipes") if x["name"] == "ui_abl")
+    assert saved["ablate"]["direction"] == "pirate_ui" and saved["ablate"]["scale"] == 0.5
+    pg.select_option("#rc-ab-dir", "")
+    assert pg.evaluate("window.gne.recipe.ablate") is None
+    assert not errors, errors
+    pg.close()

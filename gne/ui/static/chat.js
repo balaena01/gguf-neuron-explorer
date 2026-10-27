@@ -43,8 +43,9 @@ export class ChatPanel {
   columns() {
     if (this.target === "recipe") {                // − 列はレシピ全体の符号を反転したもの(− のユニットだけ、ではない)
       const s = this.scale;
-      return [{ label: tr("レシピ×({s})", { s: `−${fmt(s, 2)}` }), units: this.recipe.specs(-s) }, { label: tr("0(無介入)"), units: [] },
-              { label: tr("レシピ×({s})", { s: `+${fmt(s, 2)}` }), units: this.recipe.specs(s) }];
+      return [{ label: tr("レシピ×({s})", { s: `−${fmt(s, 2)}` }), units: this.recipe.specs(-s), ablate: this.recipe.ablateAt(-s) },
+              { label: tr("0(無介入)"), units: [] },
+              { label: tr("レシピ×({s})", { s: `+${fmt(s, 2)}` }), units: this.recipe.specs(s), ablate: this.recipe.ablateAt(s) }];
     }
     const { layer: L, n } = this.neuron, d = this.dose;
     return [{ label: `−${fmt(d, 2)}`, units: [`${L}:${n}:-${d}`] }, { label: tr("0(無介入)"), units: [] },
@@ -159,7 +160,7 @@ export class ChatPanel {
       max_tokens: this.maxTokens,
       when: this.whenSpec(),
       columns: cols.map((c, ci) => ({
-        label: c.label, units: c.units,
+        label: c.label, units: c.units, ...(c.ablate ? { ablate: c.ablate } : {}),
         messages: [...prev.flatMap((t) => [{ role: "user", content: t.user }, { role: "assistant", content: t.replies[ci] }]),
                    { role: "user", content: user }],
       })),

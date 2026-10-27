@@ -372,4 +372,10 @@ export const EN = {
   "配布可 {d}": "shippable ≤ {d}",
   "最大の倍率での能力の低下(pt)と性格の変化量": "Capability drop (pt) and persona change at the largest dose",
   "当てたことのある gain": "gain factors tried",
+  "UI では扱えないユニット(gain・方向){n} 個を外しました": "Removed {n} {n|unit|units} the UI cannot edit (gain or direction)",
+  "方向の射影消去(§6.17): 選んだ方向を残差に書き込む重みから消す(LoRA で当てる)。gne direction で作った方向を使う": "Directional ablation (§6.17): project the chosen direction out of every weight that writes to the residual (applied as a LoRA). Uses directions made with gne direction",
+  "測った層": "from layer",
+  "既定": "default",
+  "どの層で測った方向を使うか(空なら gne direction --select で選んだ層)": "Which layer's direction to use (empty = the layer picked by gne direction --select)",
+  "方向がありません(gne direction --contrast で作れます)": "No directions yet (make one with gne direction --contrast)",
 };

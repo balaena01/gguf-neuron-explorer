@@ -188,8 +188,8 @@ def create_app(session, *, warm: bool = True, openai: bool = False) -> FastAPI:
         return live.recipes()
 
     @app.post("/api/recipes/{name}")
-    def recipe_save(name: str, units: list[str] = Body(..., embed=True)):
-        return session.recipe_save(name, units)
+    def recipe_save(name: str, units: list[str] = Body(...), ablate: dict | None = Body(None)):
+        return session.recipe_save(name, units, ablate=ablate)
 
     @app.get("/api/evals")
     def evals():

@@ -322,6 +322,11 @@ table.evx tbody tr.on { background: #121923; }
 table.evx td.ok { color: #6fcf8f; text-align: left; }
 table.evx td.ng { color: #ff8a8a; text-align: left; }
 .n-eval { margin: 4px 0 6px; }
+.rc-ablate { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 5px 8px; align-items: center; margin: 8px 0 4px;
+             padding-top: 6px; border-top: 1px solid #141a22; font-size: 12px; }
+.rc-ablate select, .rc-ablate input:not([type=range]) { width: 100%; box-sizing: border-box; }
+.rc-ablate .sl { display: flex; gap: 6px; align-items: center; }
+.rc-ablate .sl input { flex: 1 1 auto; min-width: 60px; }
 .n-eval .note { margin-top: 1px; }
 #evx-sample p { margin: 4px 0; line-height: 1.5; max-width: 980px; }
 #map-wrap.not-map #overlay, #map-wrap.not-map #legend, #map-wrap.not-map #tooltip { display: none; }   /* 地図の札・凡例を他のビューに透かさない */

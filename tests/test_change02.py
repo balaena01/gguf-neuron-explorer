@@ -356,3 +356,100 @@ def test_ablate_cli_and_v14(session, tmp_path):
     assert rep.status == "pass" and rep.data["variants"][1]["kind"] == "bake" and rep.data["variants"][1]["max_dev"] < 1e-3
     v14 = Verifier(session.engine, session.weights).v14_lora_vs_bake()
     assert v14.status == "pass", v14.detail
+
+
+# --- C: レシピ・実行時・評価への組み込み ------------------------------------------------------------------
+
+def test_ablate_spec_and_chat_mirror(tmp_path):
+    from gne.chat import _with_dose
+    from gne.steer import AblateSpec, parse_ablate
+    a = parse_ablate("evil@10:0.5")
+    assert (a.direction, a.from_layer, a.scale, a.layers) == ("evil", 10, 0.5, "all") and a.label() == "ablate evil@10 ×0.5"
+    assert parse_ablate("evil") == AblateSpec("evil") and parse_ablate("x-y.z:1") .direction == "x-y.z"
+    with pytest.raises(GneError):
+        parse_ablate("evil@:x")
+    r = Recipe([parse_unit("12:dir:pirate:+0.5"), parse_unit("3:7:x0")], "m", name="r", ablate=AblateSpec("evil", 0.8, "10-20"))
+    r.save(tmp_path / "r.yaml")
+    back = Recipe.load(tmp_path / "r.yaml")
+    assert back.ablate == AblateSpec("evil", 0.8, "10-20") and back.to_dict()["ablate"]["layers"] == "10-20"
+    assert back.scaled(0.5).ablate.scale == pytest.approx(0.4) and back.scaled(0).ablate.scale == 0
+    only = Recipe([], "m", ablate=AblateSpec("evil"))
+    only.validate()                                          # ablate だけのレシピ
+    with pytest.raises(GneError):
+        Recipe([], "m").validate()
+    with pytest.raises(GneError):
+        Recipe([], "m", ablate=AblateSpec("evil", 2.0)).validate()
+    neg = _with_dose(r, None, -1)                            # 3 列チャットの − 列
+    assert neg.units[0].direction == "pirate" and neg.units[0].dose == -0.5 and neg.units[1].k == 2
+    assert neg.ablate.scale == -0.8 and _with_dose(r, None, +1).ablate.scale == 0.8
+
+
+@pytest.mark.model
+def test_ablate_in_recipes_runtime_and_eval(session, tmp_path):
+    from gne.schemas import COMMAND_SCHEMAS
+    c = _contrast(tmp_path)
+    session.direction(contrast=c, name="pirate", select="12")
+    sys_a = "You are a pirate. Always talk like a pirate, with arr and matey."
+    r = session.recipe(ablate="pirate")                                        # ablate だけ
+    lora = session.lora_for(r)
+    assert len(lora) == 1 and lora[0][1] == 1.0 and Path(lora[0][0]).exists()
+    assert session.lora_for(r.scaled(0.5)) == [(lora[0][0], 0.5)]                # 同じファイルを倍率だけ変えて使う
+    assert session.lora_for(r.scaled(0)) is None
+    st = session.steer(r, system=sys_a, prompt="Who are you?", max_tokens=24)
+    assert st["differs"] and st["recipe"]["ablate"]["direction"] == "pirate" and st["units"] == []
+    mix = session.recipe(units=["14:100:x4", "14:200:+0.5"], ablate="pirate@12:0.5")
+    assert len(session.lora_for(mix)) == 2                                         # gain と ablate の 2 つの LoRA
+    session.warnings = []
+    session.export_cvec(mix, tmp_path / "m.cvec.gguf")
+    assert any("ablate" in w for w in session.warnings)                            # cvec には入らない
+    with pytest.raises(GneError):
+        session.recipe(ablate="nope")
+    saved = session.recipe_save("withabl", ["14:100:+0.5"], ablate="pirate:0.7")
+    assert saved["recipe"]["ablate"]["scale"] == 0.7
+    assert session.recipe(path=saved["path"]).ablate.scale == 0.7
+    # chat の 3 列: − の列は ablate の倍率を反転(方向を強める)
+    from gne.chat import make_columns
+    cols = make_columns(session.recipe(ablate="pirate"))
+    assert [x.recipe.ablate.scale if x.recipe else None for x in cols] == [-1.0, None, 1.0]
+    # eval: ablate のレシピも測れる。比較(ニューロン ×0 と方向の消去)
+    suite = tmp_path / "mini.yaml"
+    (tmp_path / "ppl").mkdir()
+    (tmp_path / "ppl" / "en.txt").write_text("Alice was beginning to get very tired of sitting by her sister on the bank. " * 3)
+    suite.write_text(yaml.safe_dump({"name": "mini", "max_tokens": {"exact": 8, "format": 16, "mix": 16, "persona": 16},
+                                     "exact": [{"id": "a", "prompt": "What is 17 + 25? Answer with just the number.", "answer": ["42"]}],
+                                     "format": [], "mix": [], "persona": {"prompt_sets": ["en"]},
+                                     "ppl": [{"id": "en", "path": "ppl/en.txt"}]}))
+    ev = session.eval(r, doses=[1], suite=suite)
+    assert ev["recipe"]["ablate"]["direction"] == "pirate" and ev["rows"][1]["persona"]["novelty"] >= 0
+    assert any("ablate pirate" in u for u in session.evals()[0]["units"])
+    cmp = session.eval_compare_ablation("pirate", top=5, doses=[1], suite=suite, max_tokens=24)
+    assert [(x["method"], x["dose"]) for x in cmp["rows"]] == [("neurons", 0), ("neurons", 1), ("direction", 0), ("direction", 1)]
+    assert len(cmp["neurons"]) == 5 and all(x["cos"] > 0 for x in cmp["neurons"]) and cmp["base_rate"] > 0
+    assert cmp["rows"][3]["rate"] is not None and Path(cmp["path"]).exists()
+    COMMAND_SCHEMAS["eval"].model_validate({**session.envelope("eval"), **ev})
+    from gne.schemas import EvalCompareOut
+    EvalCompareOut.model_validate({**session.envelope("eval"), **cmp})
+
+
+@pytest.mark.model
+def test_ablate_in_openai_and_ui_stream(session, tmp_path):
+    from fastapi.testclient import TestClient
+
+    from gne.ui.server import create_app
+    session.direction(contrast=_contrast(tmp_path), name="pirate", select="12")
+    app = create_app(session, warm=False, openai=True)
+    with TestClient(app, base_url="http://127.0.0.1") as cl:
+        body = {"messages": [{"role": "system", "content": "You are a pirate. Always talk like a pirate."},
+                             {"role": "user", "content": "Who are you?"}], "max_tokens": 16}
+        base = cl.post("/v1/chat/completions", json=body).json()
+        abl = cl.post("/v1/chat/completions", json={**body, "gne": {"ablate": "pirate"}}).json()
+        assert abl["gne"]["recipe"]["ablate"]["direction"] == "pirate"
+        assert abl["choices"][0]["message"]["content"] != base["choices"][0]["message"]["content"]
+        res = cl.post("/api/steer", json={"max_tokens": 8, "columns": [
+            {"label": "a", "units": [], "ablate": {"direction": "pirate", "scale": 1.0, "layers": "all", "from_layer": None},
+             "messages": [{"role": "user", "content": "hi"}]}]})
+        assert res.status_code == 200 and '"type": "end"' in res.text
+        sv = cl.post("/api/recipes/uiabl", json={"units": ["14:100:+0.5"], "ablate": {"direction": "pirate", "scale": 0.5}})
+        assert sv.status_code == 200, sv.text
+        got = next(x for x in cl.get("/api/recipes").json() if x["name"] == "uiabl")
+        assert got["ablate"]["scale"] == 0.5 and got["units"][0]["kind"] == "neuron"

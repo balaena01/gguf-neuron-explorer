@@ -260,3 +260,31 @@ def layer_table(ds: DirectionSet, rho: Callable[[int], float | None]) -> list[di
 
 def save_select(path: Path, sel: dict) -> None:
     path.write_text(json.dumps(sel, ensure_ascii=False, indent=1))
+
+
+def behavior(session, cs: ContrastSet, val: Validate, recipe, *, max_tokens: int = 64,
+             base_lp: np.ndarray | None = None) -> dict:
+    """消したい振る舞いがどれだけ出るか: A 側(system_a 付き)の検証プロンプトの出力で判定の一致率、
+    B 側(system_b 付き)の次トークン分布の KL(base‖recipe)。recipe が None なら無介入。"""
+    from .evalx import _generate
+    rx = re.compile(val.match, re.IGNORECASE) if val.match else None
+    vecs = session.vectors(recipe)[0] if recipe is not None else None
+    lora = session.lora_for(recipe) if recipe is not None else None
+    gen = [[{"role": "system", "content": cs.system_a}, {"role": "user", "content": u}] for u in val.prompts]
+    kl_convs = [[{"role": "system", "content": cs.system_b}, {"role": "user", "content": u}] for u in cs.user_prompts]
+    outs = _generate(session, [(c, max_tokens) for c in gen], vecs, lora, "all", lambda n: None)
+    lp = last_logprobs(session, kl_convs, vecs, lora)
+    return {"rate": float(np.mean([bool(rx.search(o["text"])) for o in outs])) if rx else None,
+            "kl_b": kl(base_lp, lp) if base_lp is not None else 0.0, "lp": lp,
+            "sample": outs[0]["text"][:200] if outs else ""}
+
+
+def top_writer_neurons(session, ds: DirectionSet, n: int) -> list[tuple[int, int, float]]:
+    """方向に書き込むニューロンの上位 n 個 [(層, ニューロン, cos)]。層ごとの r_L と W_down の列の cos(逆引きと同じ標準化)で、
+    + 向き(押すと A 側に寄る)のものだけ。層 0 は除く。"""
+    from .reverse import rank_by_direction
+    cands, _ = rank_by_direction(session.weights, ds.raw, top=max(4 * n, 200), exclude_layers=(0,),
+                                 scale=ds.scale or None)
+    pos = [c for c in cands if c.sign > 0]
+    pos.sort(key=lambda c: -c.cos)
+    return [(c.layer, c.neuron, c.cos) for c in pos[:n]]

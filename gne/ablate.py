@@ -108,6 +108,23 @@ def _select_layers(weights, layers) -> list[int]:
     return sorted(ws) if layers is None else [L for L in layers if L in ws]
 
 
+def layer_list(spec: str | list[int] | None) -> list[int] | None:
+    """"all" / None → None(全層)、"10-40"・"10-40:2"・"1,5,9-12" → 層の一覧。"""
+    if spec is None or spec == "all":
+        return None
+    if isinstance(spec, list):
+        return sorted({int(x) for x in spec})
+    import re
+    out = set()
+    for part in str(spec).split(","):
+        m = re.fullmatch(r"\s*(\d+)\s*(?:-\s*(\d+)\s*(?::\s*(\d+))?)?\s*", part)
+        if not m:
+            raise GneError("BAD_ARGS", f"層の指定 {spec!r} を読めません(例 all、10-40、10-40:2、1,5,9-12)")
+        a, b, st = m.groups()
+        out |= set(range(int(a), int(b) + 1, int(st or 1))) if b else {int(a)}
+    return sorted(out)
+
+
 def per_layer_directions(raw: dict[int, np.ndarray], Ls: list[int]) -> dict[int, np.ndarray]:
     """層ごとの方向(--per-layer)。方向の無い層(最終層など)は、それより前で一番近い層の方向を使う。"""
     have = sorted(raw)

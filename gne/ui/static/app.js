@@ -623,9 +623,12 @@ async function main() {
         if (!$("#neuron").classList.contains("wide")) $("#neuron-wide").click();        // 3 列は広い方が読みやすい
         const f = state.focus;
         if (f && f.kind === "neuron") openNeuron({ layer: f.layer, n: f.n, tab: "chat" }, { focus: false });
-        else openNeuron({ layer: u.layer, n: u.neuron, tab: "chat" });
+        else if (u) openNeuron({ layer: u.layer, n: u.neuron, tab: "chat" });
+        else openNeuron({ layer: state.layer, n: 0, tab: "chat" });                  // ablate だけのレシピ: チャットの置き場所に
+
       },
       unitWords: (L, n) => { const us = unitsCache.peek(L); const u = us && us.byN.get(n); return u ? u.words.slice(0, 3).join(" · ") : ""; },
+      directions: () => (state.model ? state.model.directions : []),
     });
     firesPanel = new FiresPanel($("#fires-list"), {
       nLayer: state.arch.n_layer, onOpen: (u) => openNeuron(u), onField: applyFiresOverlay,

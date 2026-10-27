@@ -46,14 +46,15 @@ class Live:
             out = fn()
             return out, list(self.s.warnings)
 
-    def recipe(self, units: list[str], name: str | None = None):
-        if not units:
+    def recipe(self, units: list[str], name: str | None = None, ablate: str | dict | None = None):
+        if not units and not ablate:
             return None
-        return self.s.recipe(units=list(units), dose_unit="rel", name=name)
+        return self.s.recipe(units=list(units) or None, dose_unit="rel", name=name, ablate=ablate)
 
     # --- 3 列チャット(§5.3)。SSE の行を順に返す ---------------------------------------------------------
     def steer_stream(self, body: dict):
-        """body: {columns: [{label, units: ["14:8949:+1"], messages: [...], when?}], max_tokens, system, when}。
+        """body: {columns: [{label, units: ["14:8949:+1"], ablate?, messages: [...], when?}], max_tokens, system, when}。
+        ablate は {direction, scale, layers, from_layer} か "NAME@層:倍率"(§6.17)。
         列ごとに会話の履歴(最後がユーザーの発話)を受け取り、1 列ずつ逐次生成する。状態はクライアントが持つ。
         when は足す位置(§6.15)。列ごとに指定が無ければ全体の when、それも無ければ all。"""
         cols = body.get("columns") or []
@@ -62,7 +63,7 @@ class Live:
         max_tokens = int(body.get("max_tokens", 128))
         if not 1 <= max_tokens <= 2048:
             raise GneError("BAD_ARGS", "max_tokens は 1〜2048 です")
-        recipes = [self.recipe(c.get("units") or []) for c in cols]          # 形式の誤りは始める前に返す
+        recipes = [self.recipe(c.get("units") or [], ablate=c.get("ablate")) for c in cols]   # 形式の誤りは始める前に返す
         from ..when import generate_when, parse_when
         whens = [parse_when(c.get("when") or body.get("when") or "all") for c in cols]
         system = body.get("system")
@@ -263,7 +264,9 @@ class Live:
             except GneError:
                 continue
             out.append({"name": p.stem, "model_id": r.model_id, "dose_unit": r.dose_unit,
-                        "units": [{"layer": u.layer, "neuron": u.neuron, "dose": u.dose, "kind": u.kind} for u in r.units],
+                        "units": [{"layer": u.layer, "neuron": u.neuron, "dose": u.dose, "kind": u.kind, "mode": u.mode,
+                                   "k": u.k, "direction": u.direction} for u in r.units],
+                        "ablate": r.ablate.to_dict() if r.ablate else None, "when": r.when,
                         "this_model": r.model_id in (None, self.s.meta.model_id)})
         return out
 

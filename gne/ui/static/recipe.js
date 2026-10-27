@@ -1,4 +1,5 @@
 // レシピ(別冊 §2 LIST の recipe タブ、§4.8 マーク)。ユニットの追加・dose のスライダー・保存と読み込み・cvec の書き出し。
+// ablate(方向の射影消去、本体設計 §6.17)の行: 方向・層の範囲・倍率。3 列チャットでは − の列で倍率を反転する。
 // 編集中のレシピはこのブラウザの localStorage に下書きとして置く(使えなければ置かない)。
 import { getJSON, postJSON } from "./api.js";
 import { t } from "./i18n.js";
@@ -21,16 +22,23 @@ export class Recipe {
     this.onChange = onChange;
     this.name = "";
     this.units = [];                   // [{ layer, neuron, dose }]
+    this.ablate = null;                // { direction, scale, layers, from_layer } か null
+    this.skipped = 0;                  // 読み込んだレシピのうち UI では扱えないユニット(gain・方向)の数
     try {
       const d = JSON.parse(localStorage.getItem(this.key) || "null");
-      if (d && Array.isArray(d.units)) { this.name = d.name || ""; this.units = d.units; }
+      if (d && Array.isArray(d.units)) { this.name = d.name || ""; this.units = d.units; this.ablate = d.ablate || null; }
     } catch { /* 下書きが読めなくても空から始める */ }
   }
 
   _save() {
-    try { localStorage.setItem(this.key, JSON.stringify({ name: this.name, units: this.units })); } catch { /* 置けなくても使える */ }
+    try { localStorage.setItem(this.key, JSON.stringify({ name: this.name, units: this.units, ablate: this.ablate })); } catch { /* 置けなくても使える */ }
     this.onChange(this);
   }
+
+  empty() { return !this.units.length && !this.ablate; }
+  // ablate を倍率 s で(− の列は s < 0 = その方向を強める)。無ければ undefined
+  ablateAt(s = 1) { return this.ablate ? { ...this.ablate, scale: +(this.ablate.scale * s).toFixed(4) } : undefined; }
+  setAblate(a) { this.ablate = a && a.direction ? a : null; this._save(); }
 
   specs(scale = 1) { return this.units.map((u) => `${u.layer}:${u.neuron}:${u.dose * scale >= 0 ? "+" : ""}${+(u.dose * scale).toFixed(4)}`); }
   has(L, n) { return this.units.find((u) => u.layer === L && u.neuron === n); }
@@ -42,14 +50,20 @@ export class Recipe {
   }
   set(i, dose) { this.units[i].dose = dose; this._save(); }
   remove(i) { this.units.splice(i, 1); this._save(); }
-  clear() { this.units = []; this.name = ""; this._save(); }
-  load(name, units) { this.name = name; this.units = units.map((u) => ({ layer: u.layer, neuron: u.neuron, dose: u.dose })); this._save(); }
+  clear() { this.units = []; this.name = ""; this.ablate = null; this.skipped = 0; this._save(); }
+  load(name, units, ablate = null) {
+    const ok = units.filter((u) => (u.kind || "neuron") === "neuron" && (u.mode || "add") === "add");
+    this.skipped = units.length - ok.length;
+    this.name = name; this.units = ok.map((u) => ({ layer: u.layer, neuron: u.neuron, dose: u.dose })); this.ablate = ablate || null;
+    this._save();
+  }
 }
 
 export class RecipePanel {
-  constructor(root, recipe, { onOpen, onChat, unitWords }) {
+  constructor(root, recipe, { onOpen, onChat, unitWords, directions }) {
     this.root = root;
     this.r = recipe;
+    this.directions = directions || (() => []);   // 方向の名前(gne direction / reverse)
     this.onOpen = onOpen;
     this.onChat = onChat;
     this.unitWords = unitWords;        // (L, n) → 短い説明(sweep の語など)。無ければ ""
@@ -77,9 +91,11 @@ export class RecipePanel {
         this.saved.map((x) => `<option value="${esc(x.name)}">${esc(x.name)}(${x.units.length})</option>`).join("")}</select></div>
       ${r.units.length ? `<table class="rc mono"><tbody>${rows}</tbody></table>`
         : `<p class="muted note">${t("ユニットがありません。NEURON の「+ レシピ」「− レシピ」で足します。")}</p>`}
+      ${r.skipped ? `<p class="muted note">${t("UI では扱えないユニット(gain・方向){n} 個を外しました", { n: r.skipped })}</p>` : ""}
+      ${this.ablateHTML()}
       <p class="muted note">${t("dose は rel(その層の残差ノルムの中央値に対する大きさ)。マップに + は黄、− は赤紫の輪で出ます。")}</p>
       <div class="rc-actions">
-        <button id="rc-chat"${r.units.length ? "" : " disabled"}>${t("3 列チャットで試す")}</button>
+        <button id="rc-chat"${r.empty() ? " disabled" : ""}>${t("3 列チャットで試す")}</button>
         <button id="rc-export"${r.units.length ? "" : " disabled"}>${t("cvec を書き出す")}</button>
         <label class="muted"><input type="checkbox" id="rc-verify"> ${t("llama.cpp で確かめる")}</label>
       </div>
@@ -92,7 +108,7 @@ export class RecipePanel {
     if (clr) clr.addEventListener("click", () => { if (confirm(t("レシピの {n} ユニットをすべて外しますか", { n: r.units.length }))) { r.clear(); this.render(); } });
     $("#rc-load").addEventListener("change", (ev) => {
       const x = this.saved.find((y) => y.name === ev.target.value);
-      if (x) { r.load(x.name, x.units); this.render(); }
+      if (x) { r.load(x.name, x.units, x.ablate); this.render(); }
     });
     for (const el of this.root.querySelectorAll("input[data-i]")) {
       el.addEventListener("input", (ev) => {
@@ -111,7 +127,39 @@ export class RecipePanel {
       el.addEventListener("click", (ev) => { ev.preventDefault(); const u = r.units[+el.dataset.open]; this.onOpen({ layer: u.layer, n: u.neuron }); });
     }
     $("#rc-chat").addEventListener("click", () => this.onChat());
+    this.wireAblate();
     $("#rc-export").addEventListener("click", () => this.export());
+  }
+
+  ablateHTML() {
+    const a = this.r.ablate, dirs = this.directions();
+    const opts = [`<option value="">${t("なし")}</option>`, ...dirs.map((d) => `<option${a && a.direction === d ? " selected" : ""}>${esc(d)}</option>`)];
+    if (a && !dirs.includes(a.direction)) opts.push(`<option selected>${esc(a.direction)}</option>`);
+    const sc = a ? a.scale : 1;
+    return `<div class="rc-ablate" title="${t("方向の射影消去(§6.17): 選んだ方向を残差に書き込む重みから消す(LoRA で当てる)。gne direction で作った方向を使う")}">
+        <span class="muted">ablate</span><select id="rc-ab-dir">${opts.join("")}</select>${a ? `
+        <span class="muted">${t("倍率")}</span><span class="sl"><input type="range" id="rc-ab-scale" min="0" max="1.5" step="0.05" value="${sc}"><span class="mono" id="rc-ab-scale-v">×${fmt(sc, 2)}</span></span>
+        <span class="muted">${t("層")}</span><input id="rc-ab-layers" value="${esc(a.layers || "all")}" spellcheck="false" title="${t("all / 10-40 / 1,5,9-12")}">
+        <span class="muted">${t("測った層")}</span><input id="rc-ab-from" type="number" min="0" value="${a.from_layer ?? ""}" placeholder="${t("既定")}" title="${t("どの層で測った方向を使うか(空なら gne direction --select で選んだ層)")}">` : ""}
+      </div>${dirs.length || a ? "" : `<p class="muted note">${t("方向がありません(gne direction --contrast で作れます)")}</p>`}`;
+  }
+
+  wireAblate() {
+    const $ = (s) => this.root.querySelector(s);
+    const cur = () => this.r.ablate || { direction: "", scale: 1, layers: "all", from_layer: null };
+    $("#rc-ab-dir").addEventListener("change", (ev) => {
+      const v = ev.target.value;
+      this.r.setAblate(v ? { ...cur(), direction: v } : null);
+      this.render();
+    });
+    const sl = $("#rc-ab-scale");
+    if (!sl) return;
+    sl.addEventListener("input", (ev) => { this.r.setAblate({ ...cur(), scale: +ev.target.value }); $("#rc-ab-scale-v").textContent = `×${fmt(+ev.target.value, 2)}`; });
+    $("#rc-ab-layers").addEventListener("change", (ev) => this.r.setAblate({ ...cur(), layers: ev.target.value.trim() || "all" }));
+    $("#rc-ab-from").addEventListener("change", (ev) => {
+      const v = ev.target.value.trim();
+      this.r.setAblate({ ...cur(), from_layer: v === "" ? null : +v });
+    });
   }
 
   async save() {
@@ -120,9 +168,10 @@ export class RecipePanel {
     if (!/^[\w.-]+$/.test(name)) { res.innerHTML = `<p class="err">${t("名前は英数字・_・-・. だけにしてください")}</p>`; return; }
     this.r.name = name; this.r._save();
     try {
-      await postJSON(`/api/recipes/${encodeURIComponent(name)}`, { units: this.r.specs() });
-      res.innerHTML = `<p class="muted note">${t("保存しました({path})", { path: `~/.gne/recipes/${esc(name)}.yaml` })}</p>`;
-      this.refreshSaved();
+      await postJSON(`/api/recipes/${encodeURIComponent(name)}`, { units: this.r.specs(), ablate: this.r.ablate });
+      await this.refreshSaved();                     // 一覧を描き直してから知らせる(描き直すと #rc-result も作り直される)
+      this.root.querySelector("#rc-result").innerHTML =
+        `<p class="muted note">${t("保存しました({path})", { path: `~/.gne/recipes/${esc(name)}.yaml` })}</p>`;
     } catch (e) { res.innerHTML = `<p class="err">${esc(e.message)}</p>`; }
   }
 

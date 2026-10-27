@@ -59,3 +59,8 @@
 | MoE(§6.17) | `ffn_down_exps` は軸 1 に射影、shared expert も | bake だけ対応。LoRA は未対応(ARCH_UNSUPPORTED) | 手元に MoE の GGUF が無く、`build_lora_mm_id` に 3 次元の LoRA を渡す形を実機で確かめられないため |
 | V14(§6.17) | 先頭 32 トークンで一致 | 完全一致か、最初の分岐が僅差(0.5 nats 未満)なら合格(V9 と同じ) | F85 |
 | `gne verify` の V13 / V14 | 記述なし | 2 GiB 未満のモデルは bake を 2 つ作って V13(bake)と V14 も見る。大きいモデルは V13(LoRA)だけで、`gne ablate --bake --verify` を案内 | 27B の bake は 10 GB を超える |
+| レシピの ablate(§6.17) | `ablate: {direction, layers, scale}` | `from_layer`(どの層で測った r か)も持てる。ablate だけ(ユニットなし)のレシピも可。scale は −1.5〜1.5(負はその方向を強める) | 「1 本の r」を決めるため。負の scale は 3 列チャットの − 列(gain の 2 − k、add の符号反転と同じ考え) |
+| `gne steer --ablate` の書き方 | `--ablate <name>` | `--ablate NAME[@層][:倍率]`(chat・eval も同じ) | 測った層と部分消去を 1 つの引数で |
+| ablate の実行時の LoRA | gain と ablate を 1 ファイルに合成してよい | 別々の LoRA を並べて当てる(llama.cpp は複数のアダプタを倍率つきで同時に当てられる)。消去の LoRA は倍率 1 で 1 回だけ作り、scale はアダプタの倍率 | eval の倍率ごとに LoRA を作り直さないため |
+| `eval --compare-ablation`(§6.17) | 同じ対照集合から、上位 N ニューロンの消去 vs 方向消去 | 上位 N は、層ごとの r_L と W_down の列の cos(逆引きと同じ標準化)で + 向きのもの。表には eval の指標に加え、方向を作った対照集合の判定(A 側の一致率)と B 側の KL を並べる | 「消したい振る舞いがどれだけ残るか」は eval のタスク集では測れないため |
+| UI の ablate(§6.17) | recipe タブに ablate 行(方向・層範囲・scale スライダー) | そのとおりに加え「測った層」。保存したレシピのうち UI で扱えないユニット(gain・方向)は読み込みで外し、数を知らせる | UI のレシピ編集はニューロンの add だけを扱う |
