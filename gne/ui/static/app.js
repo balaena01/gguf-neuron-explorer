@@ -662,6 +662,7 @@ async function main() {
     hasConnections: () => !!(state.model && state.model.connections),
     onGoto: (u) => openNeuron(u),
     agentNote: (L, n) => (agent ? agent.noteOf(L, n) : null),
+    onEval: async (name) => { await setView("eval"); if (evalView) await evalView.refresh(name); },
     onNamed: (names) => {
       state.model.names = names;
       const f = state.overlay.field;

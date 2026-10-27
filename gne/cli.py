@@ -220,6 +220,9 @@ def _units_text(units: list[dict]) -> str:
     rows = []
     for u in units:
         who = f"N{u['neuron']}" if u["kind"] == "neuron" else f"random{u['seed']}"
+        if u.get("mode") == "gain":
+            rows.append(f"  L{u['layer']} {who} ×{u['k']:g}(gain: 出力を {u['k']:g} 倍、LoRA で当てる)")
+            continue
         rp = f"rel_push {u['rel_push']:.2f}、ρ={u['rho']:.2f}" if u.get("rel_push") is not None else "ρ 不明"
         add = f"、活性に {u['add']:+.3g} 相当" if u.get("add") is not None else ""
         rows.append(f"  L{u['layer']} {who} dose {u['dose']:+g}: ‖v‖={u['norm']:.2f}({rp}{add})")
@@ -806,6 +809,14 @@ def neuron(c: Common, holder: dict, layer: int = typer.Argument(..., help="層 L
     if d["activation"]:
         a = d["activation"]
         lines.append(f"活性: absmax {a['absmax']:.3g}  q999 {a['q999']:.3g}  rms {a['rms']:.3g}")
+    for e in d["evals"]:
+        how = f"x{e['k']:g}" if e["mode"] == "gain" else f"{e['dose']:+g}"
+        ship = "配布可なし" if e["max_shippable_dose"] is None else f"配布可の最大倍率 {e['max_shippable_dose']:g}"
+        top = e["at_max"]
+        lines.append(f"eval {e['name']}({how}、when={e['when']}、ユニット {e['n_units']}): {ship}"
+                     + (f"、倍率 {top['dose']:g} で能力 −{top['capability_drop_pt']:.1f}pt・新語 {top['novelty']:.2f}" if top else ""))
+    if d["gain_k"]:
+        lines.append("当てたことのある gain: " + " ".join(f"x{k:g}" for k in d["gain_k"]))
     return d, "\n".join(lines), 0
 
 

@@ -12,7 +12,15 @@ from pathlib import Path
 
 import numpy as np
 
-from ..dossier import _directions, _lens_paths, _names, _read_jsonl, _units_files
+from ..dossier import (
+    _directions,
+    _lens_paths,
+    _names,
+    _read_jsonl,
+    _units_files,
+    gain_tried,
+    unit_evals,
+)
 from ..steer import GneError
 
 FIELDS = ("sweep", "sweep_null", "steer_kl", "logit_peak", "act_q999", "named")   # と "cos:<方向の名前>"
@@ -357,6 +365,8 @@ class UIData:
             if a is not None:
                 out["activation"] = {"absmax": float(a.absmax[n]), "q999": float(a.q999[n]), "q99": float(a.q99[n]),
                                      "rms": float(a.rms[n]), "mean": float(a.mean[n])}
+            out["evals"] = unit_evals(self.s, L, n)
+            out["gain_k"] = gain_tried(self.s, L, n)
         out["coverage"] = {k: bool(out[k]) for k in ("sweep", "steer_lens", "logit_lens", "directions", "activation")}
         return out
 

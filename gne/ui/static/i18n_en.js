@@ -365,4 +365,11 @@ export const EN = {
   "落ちたタスク({n})": "Failed tasks ({n})",
   "合成の構造には eval がありません": "The synthetic structure has no eval",
   "{n} ユニット": "{n} {n|unit|units}",
+  "eval(このニューロンを含むもの、新しい順)": "eval (runs that include this neuron, newest first)",
+  "ほか {n}": "+{n} more",
+  "配布可の最大倍率(能力 −5pt・ppl +10%・混入なし)": "Largest shippable dose (capability −5 pt, ppl +10%, no mix increase)",
+  "配布可なし": "none shippable",
+  "配布可 {d}": "shippable ≤ {d}",
+  "最大の倍率での能力の低下(pt)と性格の変化量": "Capability drop (pt) and persona change at the largest dose",
+  "当てたことのある gain": "gain factors tried",
 };

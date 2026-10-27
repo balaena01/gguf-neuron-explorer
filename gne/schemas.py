@@ -514,6 +514,8 @@ class NeuronOut(Envelope):
     directions: dict[str, dict[str, float | int]]
     activation: dict[str, float] | None
     connections: dict[str, Any] | None
+    evals: list[dict[str, Any]] = []          # CHANGE-01: このニューロンを含む保存済みの eval(新しい順)
+    gain_k: list[float] = []                  # 当てたことのある gain の倍率
     coverage: dict[str, bool]
 
 

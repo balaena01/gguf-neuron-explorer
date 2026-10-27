@@ -853,5 +853,16 @@ def test_eval_view_and_job(server, browser, tmp_path):
     pg.wait_for_function("window.gne.evalView.data && window.gne.evalView.data.name === 'ui-run'", timeout=300000)
     assert pg.evaluate("document.querySelectorAll('table.evx tbody tr').length") == 2
     assert pg.evaluate("window.gne.evalView.data.suite.name") == "default"
+    # NEURON の Details に、このニューロンを含む eval が出て、名前から eval ビューで開ける(CHANGE-01 D)
+    unit = get("/api/unit?layer=14&n=100")
+    assert [e["name"] for e in unit["evals"]][:2] == ["ui-run", "ui-seed"]
+    pg.click("#views button[data-view=map]")
+    pg.fill("#jump", "L14 N100")
+    pg.press("#jump", "Enter")
+    pg.wait_for_function("window.gne.focus && window.gne.focus.n === 100", timeout=30000)
+    pg.click("#neuron-body button[data-tab=details]")
+    pg.wait_for_function("document.querySelector('#neuron-body a[data-eval=ui-seed]')", timeout=10000)
+    pg.click("#neuron-body a[data-eval=ui-seed]")
+    pg.wait_for_function("window.gne.view === 'eval' && window.gne.evalView.data.name === 'ui-seed'", timeout=30000)
     assert not errors, errors
     pg.close()

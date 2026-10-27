@@ -38,13 +38,16 @@
 ## 4. レシピを作る
 
 1. 「押したい方向(+)」と「抑えたい方向(−)」を分けてユニットを組む。例: `["14:8949:+1.0", "13:7956:-1.0"]`。
-2. `steer(units, compare=True)` で無介入との差を確かめる。差が「名乗りだけ」なら安い効果を疑う。別のプロンプトでも試す。
-3. `recipe_save(name, units)` → `export_cvec(name)`。書き出した cvec は llama-cli / llama-server の `--control-vector` でそのまま使える(`--control-vector-scaled FILE:0.6` で一括で弱められる)。
-4. Llama 系の arch なら `bake(name, dst)` で FFN バイアスに焼き付けた GGUF も作れる。Qwen・Gemma 系は不可(ARCH_UNSUPPORTED)。
+2. **抑える用途(言語の混入、決まり文句、特定の話題)は、add の − より先に gain の k=0 を試す。** `"14:8949:x0"` はそのニューロンの出力を消すだけで、働いていない場面には何もしない。add の − は全位置に逆向きの方向を足すので、関係ない文まで変わりやすい。強めたいときも `x2`〜`x4` を試す価値がある(Qwen3.5-4B の L22 N2742 は「Who are you?」では x10 でも変わらず、地球外生命の質問でだけ強く出た。verification.md §11.2)。
+3. `steer(units, compare=True)` で無介入との差を確かめる。差が「名乗りだけ」なら安い効果を疑う。別のプロンプトでも試す。
+4. **位置(`when`)は `gen` を第一候補にし、`all` と比べる。** `gen` はプロンプトの読み取りを素のままにして生成だけを押すので、質問の理解が崩れにくい。4B の alien_mcp では、倍率 1 で性格の変化量はほぼ同じ(新語の割合 0.64 と 0.71)まま、能力の低下が 19.4pt → 2.8pt に減った(§11.3)。最初の 1 トークンは押されないので、名乗りの最初の語から変えたいときは `assistant`。
+5. `recipe_save(name, units)` → **配る前に `eval(recipe=name)` を通す。** 倍率ごとに能力(exact・format)・ppl・言語の混入・性格の変化量が並び、配布可(能力 −5pt・ppl +10%・混入が増えない)の最大倍率が出る。報告には「配布可の最大倍率」と、その倍率での変化量を添える。ppl が最初に引っかかることが多い(参照テキストの全位置に当てるため)。`when` を変えて比べるときは `eval(recipe=name, when="gen")`(保存名に `@gen` が付く)。
+6. 書き出し: add のユニットは `export_cvec(name)`。書き出した cvec は llama-cli / llama-server の `--control-vector` でそのまま使える(`--control-vector-scaled FILE:0.6` で一括で弱められる)。gain のユニットは `gain_export(name)` で LoRA アダプタ GGUF(`--lora`、Qwen 系でも可)。`when` は control vector では表せないので、位置別のまま使うなら `gne serve --openai` の API を案内する。
+7. Llama 系の arch なら `bake(name, dst)` で FFN バイアスに焼き付けた GGUF も作れる。Qwen・Gemma 系は不可(ARCH_UNSUPPORTED)。
 
 ## 5. 報告の仕方
 
-- 調書(`neuron`)の数値をそのまま引用する: sweep の順位(`rank` / `n_ranked`)、`mass`、`null_pct`、上位語、steer lens の KL と対照の 95% 点、逆引きの cos。
+- 調書(`neuron`)の数値をそのまま引用する: sweep の順位(`rank` / `n_ranked`)、`mass`、`null_pct`、上位語、steer lens の KL と対照の 95% 点、逆引きの cos。そのニューロンを含む eval があれば(`evals`)、配布可の最大倍率も。
 - **事実と解釈を分ける。** 「N2742 は sweep で 385 本中 3 位、全対照より上、3 つのプロンプトで extraterrestrial が出た(事実)。宇宙人・地球外知性の話題に寄せるニューロンとみられる(解釈)」。
 - greedy の生成は、バッチの組み方の違いで上位候補が僅差の箇所だけ分かれることがある(数値誤差、verification.md F2)。1 トークンの違いに意味を読まない。
 

@@ -41,3 +41,5 @@
 | eval の UI | 本体設計「変化量(x) vs 能力低下(y)」、CHANGE-01「dose を x、変化量と能力低下を y」 | CHANGE-01 のとおり x = 倍率。y に変化量(novelty)・能力低下(pt)・ppl の悪化(%)・judge を重ね、配布可の倍率に印 | 新しい方の指示に合わせた |
 | eval の保存名 | `evals/<model_id>/<recipe>.json` | レシピ名(無ければユニットの hash)。`when` が all 以外なら `@gen` などを付ける | 同じレシピの all と gen を並べて比べられるように |
 | eval の judge | 採点モデルのパスは設定 | `--judge-model` と `--judge-target`(目標の性格の文)を CLI で渡す。採点は persona のプロンプトの出力だけ | 目標の性格はレシピごとに違う |
+| 調書の gain と eval(CHANGE-01 D) | gain の試行結果(あれば)と eval の最新結果へのリンク | `evals`: そのニューロンを含む保存済みの eval(新しい順に 5 件、配布可の最大倍率と最大の倍率での能力の低下・新語の割合)。`gain_k`: 当てたことのある gain の倍率(実行時 LoRA の置き場所 `<root>/gain/<model_id>/` の `gne.recipe` から)。UI の Details タブでは eval の名前から eval ビューを開く | steer / chat の gain の生成文は保存していないので、試行の「結果」は eval にだけある。倍率は eval の倍率列で 1 と k の間の値も入る |
+| エージェントへの指示(CHANGE-01 D) | `docs/agent_playbook.md` に追記 | playbook に加え、MCP サーバーの instructions(`gne mcp` が最初に渡す要約)にも「配る前に eval」「抑えるのは gain の x0 から」「when は gen から」を書いた | エージェントが playbook を読まなくても最初に目に入るように |

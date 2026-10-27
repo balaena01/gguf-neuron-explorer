@@ -1,0 +1,8 @@
+# 宇宙人・地球外生命の話題に寄せる(Qwen3.5-4B、L22 N2742)。生成中だけ押す(when: gen、本体設計 §6.15)。
+# eval(docs/verification.md §11.3)では、倍率 1 で能力の低下 2.8pt(when: all なら 19.4pt)、配布可は倍率 0.25 まで(ppl の基準)
+name: alien
+model_id: qwen3.5-4b-64d32ead87     # unsloth/Qwen3.5-4B-GGUF の Q8_0
+dose_unit: rel
+when: gen                          # all / gen / assistant / after:<文字列> / ramp:<a>-<b>
+units:
+  - {layer: 22, neuron: 2742, dose: +0.8}

@@ -382,6 +382,15 @@ def test_eval_end_to_end(session, tmp_path):
         session.eval(r, suite=suite, judge_model="x.gguf")                                   # judge は 2 つそろえて
     with pytest.raises(GneError):
         session.eval_load("../x")
+    # 調書(CHANGE-01 D): このニューロンを含む eval(新しい順)と、当てたことのある gain の倍率
+    dn = session.neuron(14, 100)
+    names = [e["name"] for e in dn["evals"]]
+    assert names[0] == "judged" and "g@gen" in names and len(names) <= 5 and 4.0 in dn["gain_k"]
+    ge = next(e for e in dn["evals"] if e["name"] == "g@gen")
+    assert ge["mode"] == "gain" and ge["k"] == 4 and ge["when"] == "gen" and ge["at_max"]["dose"] == 1
+    assert dn["coverage"]["eval"] and dn["coverage"]["gain"]
+    assert session.neuron(14, 101)["evals"] == []
+    COMMAND_SCHEMAS["neuron"].model_validate({**session.envelope("neuron"), **dn})
 
 
 @pytest.mark.model

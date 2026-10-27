@@ -321,6 +321,8 @@ table.evx tbody tr { cursor: pointer; }
 table.evx tbody tr.on { background: #121923; }
 table.evx td.ok { color: #6fcf8f; text-align: left; }
 table.evx td.ng { color: #ff8a8a; text-align: left; }
+.n-eval { margin: 4px 0 6px; }
+.n-eval .note { margin-top: 1px; }
 #evx-sample p { margin: 4px 0; line-height: 1.5; max-width: 980px; }
 #map-wrap.not-map #overlay, #map-wrap.not-map #legend, #map-wrap.not-map #tooltip { display: none; }   /* 地図の札・凡例を他のビューに透かさない */
 .ev-tools { display: flex; gap: 12px; align-items: center; padding: 10px 12px 4px; flex-wrap: wrap; }

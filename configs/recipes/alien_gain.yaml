@@ -1,0 +1,8 @@
+# 同じニューロンの出力を 4 倍にする(gain、本体設計 §6.16)。足し算と違い、このニューロンが働く場面でだけ効く:
+# 「Who are you?」は無介入と同じ、「Do you think there is life on other planets?」では地球外生命の話が強まる(verification.md §11.2)。
+# gne gain --recipe configs/recipes/alien_gain.yaml で LoRA アダプタ GGUF(llama.cpp の --lora、Qwen 系でも可)に書き出せる
+name: alien_gain
+model_id: qwen3.5-4b-64d32ead87
+dose_unit: rel
+units:
+  - {layer: 22, neuron: 2742, mode: gain, k: 4}       # k = 0 で消去、負で反転

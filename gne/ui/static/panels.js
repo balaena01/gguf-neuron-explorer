@@ -114,10 +114,11 @@ export class RankList {
 
 // --- NEURON パネル ------------------------------------------------------------------------------------------
 export class NeuronPanel {
-  constructor(root, { onNamed, onRecipe, inRecipe, onChat, hasConnections, onGoto, agentNote }) {
+  constructor(root, { onNamed, onRecipe, inRecipe, onChat, hasConnections, onGoto, agentNote, onEval }) {
     this.agentNote = agentNote || (() => null);
     this.hasConnections = hasConnections || (() => false);
     this.onGoto = onGoto;
+    this.onEval = onEval;              // (eval の名前) → eval ビューで開く
     this.links = undefined;            // connections(undefined = 読み込み中、null = 無い)
     this.webParams = { hops: 2, first: 8, k: 4, zmin: 2 };
     this.webSum = null;
@@ -202,6 +203,7 @@ export class NeuronPanel {
     for (const tr of body.querySelectorAll("tr[data-go]")) {
       tr.addEventListener("click", () => { const [L, n] = tr.dataset.go.split(":").map(Number); this.onGoto({ layer: L, n }); });
     }
+    for (const a of body.querySelectorAll("a[data-eval]")) a.addEventListener("click", (ev) => { ev.preventDefault(); this.onEval(a.dataset.eval); });
     for (const c of body.querySelectorAll(".cell[data-full]")) c.addEventListener("click", () => c.classList.toggle("open"));
   }
 
@@ -315,6 +317,14 @@ export class NeuronPanel {
     }
     const a = d.activation;
     if (a) out.push(`<h4>${t("活性(統計コーパス)")}</h4><table class="kv mono"><tr><td>p99.9</td><td>${fmt(a.q999, 3)}</td><td>absmax</td><td>${fmt(a.absmax, 3)}</td></tr><tr><td>rms</td><td>${fmt(a.rms, 3)}</td><td>${t("平均")}</td><td>${fmt(a.mean, 4)}</td></tr></table>`);
+    if (d.evals && d.evals.length) {
+      const how = (e) => (e.mode === "gain" ? `×${fmt(e.k, 2)}` : `${e.dose >= 0 ? "+" : "−"}${fmt(Math.abs(e.dose), 2)}`);
+      out.push(`<h4>${t("eval(このニューロンを含むもの、新しい順)")}</h4>${d.evals.map((e) => `<div class="n-eval">
+        <a href="#" data-eval="${esc(e.name)}">${esc(e.name)}</a> <span class="mono">${how(e)}</span>${e.n_units > 1 ? ` <span class="muted">${t("ほか {n}", { n: e.n_units - 1 })}</span>` : ""} <span class="muted">when=${esc(e.when || "all")}</span>
+        <div class="muted note mono"><span title="${t("配布可の最大倍率(能力 −5pt・ppl +10%・混入なし)")}">${e.max_shippable_dose === null ? `<span class="minus">${t("配布可なし")}</span>` : t("配布可 {d}", { d: fmt(e.max_shippable_dose, 2) })}</span>${
+          e.at_max ? ` · <span title="${t("最大の倍率での能力の低下(pt)と性格の変化量")}">@${fmt(e.at_max.dose, 2)} −${fmt(e.at_max.capability_drop_pt, 1)}pt · ${t("新語")} ${fmt(e.at_max.novelty, 2)}</span>` : ""}</div></div>`).join("")}`);
+    }
+    if (d.gain_k && d.gain_k.length) out.push(`<p class="muted note mono">${t("当てたことのある gain")}: ${d.gain_k.map((k) => `×${fmt(k, 2)}`).join(" ")}</p>`);
     if (d.down_norm !== null) out.push(`<p class="muted note mono">‖W_down[:, n]‖ = ${fmt(d.down_norm, 4)}</p>`);
     out.push(this.linksHTML());
     return out.join("");

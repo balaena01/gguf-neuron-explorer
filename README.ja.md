@@ -22,6 +22,9 @@ llama-cpp-python 経由で llama.cpp の上で動くので、手元の量子化�
   - control vector（`.cvec.gguf`）。`llama-completion --control-vector` の生成と一致することを確かめられます。
   - npz・json・safetensors。
   - FFN の down バイアスとして GGUF に焼き付けたもの。llama.cpp がそのバイアスを読む arch だけです（llama・granite・mistral3・nemotron・gpt2 など。Qwen・Gemma は不可。一覧は [configs/arch/bias_support.yaml](configs/arch/bias_support.yaml)）。
+- **押す位置を選ぶ（`when`）:** 生成するトークンだけ（`gen`）、assistant の発話だけ、出力にある文字列が出てから、だけを押せます。倍率をだんだん弱めることもできます。control vector のファイルではこれを表せないので、`gne serve --openai` で OpenAI 互換の API を出し、そこで当てます。
+- **倍率で押す（gain）:** `22:2742:x4` のように書くと、決まった向きを足す代わりに、そのニューロン自身の出力を k 倍します。`x0` で消し、負の値で反転します。ニューロンが働いている場面でだけ効きます。llama.cpp の `--lora` で使える LoRA アダプタ GGUF（Qwen でも可）か、重みを書き換えた GGUF に書き出せます。
+- **副作用チェック（`gne eval`）:** レシピをいくつかの倍率で流し、性格がどれだけ変わったかと、何が壊れたかを同じ表に並べます。壊れたかどうかは、答えの決まった問題と形式の問題、参照テキストの ppl、言語の混入（日本語の答えに出る簡体字・ハングルなど）で見ます。別の GGUF に性格を 1〜5 で採点させることもできます。基準の内に収まる倍率には「配布可」の印が付きます。
 - **Web UI:** 全層・全ニューロンを 3D で並べた地図です。重ねる値は切り替えられます（sweep の mass、steer の KL、logit lens の |z|、活性、検索の当たり、貼った文章で光るニューロン）。ほかに次の機能があります。
   - 順位の一覧とニューロンのパネル
   - その場で試せる 3 列チャット
@@ -81,6 +84,11 @@ gne chat --unit 22:2742:+0.8 -p "あなたについて教えて"
 
 gne reverse --contrast configs/contrast/evil.yaml --verify    # ペルソナから候補を探す
 gne export-cvec --recipe configs/recipes/evil.yaml            # → ~/.gne/export/evil.cvec.gguf
+
+gne steer --recipe configs/recipes/alien.yaml -p "Who are you?" --compare     # when: gen(生成するトークンだけ押す)
+gne steer --unit 22:2742:x4 -p "Is there life on other planets?" --compare   # gain: ニューロンが働く場面で 4 倍
+gne eval --recipe configs/recipes/alien.yaml                  # 倍率ごとの能力・ppl・混入・性格の変化量
+gne gain --recipe configs/recipes/alien_gain.yaml             # → ~/.gne/export/alien_gain.lora.gguf
 ```
 
 `export-cvec --verify` を付けると、`llama-completion --control-vector` の greedy 出力が `gne` と一致するかも確かめます。`llama-completion` は `build/` と `PATH` から探します（`--llama-completion` で指定もできます）。
@@ -90,6 +98,19 @@ gne export-cvec --recipe configs/recipes/evil.yaml            # → ~/.gne/expor
 ```bash
 llama-cli -m models/Qwen3.5-4B-Q8_0.gguf --control-vector ~/.gne/export/evil.cvec.gguf
 llama-cli -m models/Qwen3.5-4B-Q8_0.gguf --control-vector-scaled ~/.gne/export/evil.cvec.gguf:0.6
+llama-cli -m models/Qwen3.5-4B-Q8_0.gguf --lora ~/.gne/export/alien_gain.lora.gguf
+```
+
+レシピは小さな YAML です。`when` と gain のユニットは省けます。
+
+```yaml
+name: example
+model_id: qwen3.5-4b-64d32ead87
+dose_unit: rel
+when: gen                                       # all / gen / assistant / after:<文字列> / ramp:<a>-<b>
+units:
+  - {layer: 22, neuron: 2742, dose: +0.8}       # add: ニューロンが書き込む向きを足す
+  - {layer: 13, neuron: 7956, mode: gain, k: 0} # gain: このニューロンの出力を消す(×0)
 ```
 
 コマンドの一覧は `gne --help`、各コマンドの使い方は `gne <コマンド> --help` で見られます。
@@ -115,6 +136,7 @@ Qwen3.5-4B Q8_0、RTX 3080 での目安です。
 | `lens steer`（9216 ニューロン全部） | 1 層あたり約 22 分 |
 | `sweep` の `main_rel` | 1 ニューロンあたり約 6.4 秒（385 本で 48 分） |
 | `reverse` | 約 6 秒。`--verify` で候補 20 個なら約 4 分 |
+| `eval`（55 タスク × 5 倍率） | `when: all` で約 41 秒、`gen` で約 90 秒 |
 
 1 層の全ニューロンに `main_rel` を回すと約 16 時間かかります。lens と逆引きで候補を絞ってから sweep してください。
 
@@ -144,20 +166,35 @@ gne serve -m models/Qwen3.5-4B-Q8_0.gguf      # http://127.0.0.1:8791
 
 ![正面ビューで上流・下流の配線とニューロンのパネルを開いたところ](docs/images/ui-neuron.png)
 
-ビューは 3 つあります。
+ビューは 4 つあります。
 - **map:** 全層をニューロンのシートで並べ、値を重ねます。
 - **layers:** 層ごとのまとめです。
+- **eval:** 保存した eval を、倍率ごとのグラフと表、出力の例で見ます。今のレシピの eval もここから始められます。
 - **embed:** rollout の文の UMAP です。
 
 ニューロンか一覧の行をクリックすると、パネルが開きます。タブは 4 つです。
 - **Examples:** プロンプトと dose ごとの生成例
-- **Chat:** その場で押す 3 列チャット
-- **Details:** lens の結果・dose ごとの指標・つながり
+- **Chat:** その場で押す 3 列チャット（`when` を選べます）
+- **Details:** lens の結果・dose ごとの指標・つながり・そのニューロンを含む eval
 - **Web:** 何段かたどった配線
 
 足りないデータ（lens・sweep・connections・配置）は、層のラベルを右クリックすると計算できます。ジョブは裏で動き、チャットが GPU を使うときは譲ります。言語は右上で切り替えます。URL に `?lang=ja` / `?lang=en` を付けて開くこともできます。
 
 サーバーは 127.0.0.1 にだけ待ち受けます。ほかのホスト名で届いた要求と、ほかのオリジンからの書き込みも断ります。
+
+### OpenAI 互換の API
+
+`gne serve --openai` を付けると、同じサーバーに `/v1/models` と `/v1/chat/completions`（ストリーミングも可）が加わります。`when` や gain のユニットを使うレシピを、ほかのアプリから使えます。レシピは `gne` の欄で渡します（OpenAI の SDK では `extra_body`）。
+
+```python
+from openai import OpenAI
+client = OpenAI(base_url="http://127.0.0.1:8791/v1", api_key="unused")
+r = client.chat.completions.create(
+    model="any", messages=[{"role": "user", "content": "Who are you?"}],
+    extra_body={"gne": {"units": ["22:2742:+0.8"], "when": "gen"}})
+```
+
+`units` の代わりに `"recipe"` で `~/.gne/recipes` に保存したレシピの名前を渡せます。`"scale"` はその dose に掛ける倍率です。生成は greedy だけです（`temperature` などの指定は無視し、tools と logprobs には対応していません）。GPU は UI のチャットと譲り合います。
 
 ## エージェントから使う（MCP）
 
@@ -165,7 +202,7 @@ gne serve -m models/Qwen3.5-4B-Q8_0.gguf      # http://127.0.0.1:8791
 claude mcp add gne -- gne mcp --model /path/to/model.gguf
 ```
 
-ツールは `model_overview`・`layer_summary`・`neuron`・`search`・`steer`・`steer_lens`・`fires`・`reverse`・`recipe_save`・`export_cvec`・`bake`・`set_name`・`job_start` / `job_status` / `job_cancel` です。
+ツールは `model_overview`・`layer_summary`・`neuron`・`search`・`steer`・`steer_lens`・`fires`・`reverse`・`recipe_save`・`export_cvec`・`gain_export`・`bake`・`eval`・`set_name`・`job_start` / `job_status` / `job_cancel` です。
 
 Web UI を開いているなら `--ui-url http://127.0.0.1:8791` を付けます。こうするとエージェントがブラウザ上でニューロンを強調したり、注釈を貼ったり、開いたりできます（`ui_highlight`・`ui_note`・`ui_open`）。同じ GPU に UI がモデルを載せているときは、`--n-gpu-layers 0` も付けます。
 

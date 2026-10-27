@@ -18,6 +18,9 @@ Find, rank and steer individual MLP neurons of GGUF models on llama.cpp, then sh
   - as a control vector (`.cvec.gguf`), checked against `llama-completion --control-vector`;
   - as npz, json or safetensors;
   - baked into a GGUF as FFN down biases, for architectures whose llama.cpp graph reads that bias (llama, granite, mistral3, nemotron, gpt2 and others; not Qwen or Gemma — see [configs/arch/bias_support.yaml](configs/arch/bias_support.yaml)).
+- **Steer only where it matters (`when`).** Push only the generated tokens (`gen`), only the assistant's turns, only after a given text appears in the output, or ramp the dose down. A control vector file cannot express this, so `gne serve --openai` serves an OpenAI-compatible endpoint that applies it.
+- **Gain steering.** `22:2742:x4` multiplies a neuron's own output instead of adding a fixed direction: `x0` removes it, a negative factor inverts it. It acts only where the neuron already fires. It exports as a LoRA adapter GGUF for llama.cpp's `--lora` (works on Qwen too) or as a rewritten GGUF.
+- **Side-effect check (`gne eval`).** Run a recipe at several doses and see how much the persona changed next to what broke: exact-answer and format tasks, perplexity on reference texts, and language mixing (Simplified-only Chinese, Hangul and other scripts in Japanese answers). An optional second GGUF can rate the persona 1–5. Doses that stay within the thresholds are marked as shippable.
 - **Web UI.** A 3D map of every layer and neuron with switchable overlays (sweep mass, steer KL, logit-lens |z|, activations, search hits, which neurons fire on a pasted text). It also has:
   - a ranked list and a neuron panel;
   - live 3-column chat;
@@ -77,6 +80,11 @@ gne chat --unit 22:2742:+0.8 -p "Tell me about yourself."
 
 gne reverse --contrast configs/contrast/evil.yaml --verify    # candidates for a persona
 gne export-cvec --recipe configs/recipes/evil.yaml            # → ~/.gne/export/evil.cvec.gguf
+
+gne steer --recipe configs/recipes/alien.yaml -p "Who are you?" --compare     # when: gen (only the generated tokens)
+gne steer --unit 22:2742:x4 -p "Is there life on other planets?" --compare   # gain: ×4 where the neuron fires
+gne eval --recipe configs/recipes/alien.yaml                  # capability / ppl / mix / persona change per dose
+gne gain --recipe configs/recipes/alien_gain.yaml             # → ~/.gne/export/alien_gain.lora.gguf
 ```
 
 `export-cvec --verify` also checks that `llama-completion --control-vector` gives the same greedy output as `gne`. It looks for `llama-completion` in `build/` and on `PATH`, or you can pass `--llama-completion`.
@@ -86,6 +94,19 @@ Then use the vector with llama.cpp:
 ```bash
 llama-cli -m models/Qwen3.5-4B-Q8_0.gguf --control-vector ~/.gne/export/evil.cvec.gguf
 llama-cli -m models/Qwen3.5-4B-Q8_0.gguf --control-vector-scaled ~/.gne/export/evil.cvec.gguf:0.6
+llama-cli -m models/Qwen3.5-4B-Q8_0.gguf --lora ~/.gne/export/alien_gain.lora.gguf
+```
+
+A recipe is a small YAML file. `when` and gain units are optional:
+
+```yaml
+name: example
+model_id: qwen3.5-4b-64d32ead87
+dose_unit: rel
+when: gen                                       # all / gen / assistant / after:<text> / ramp:<a>-<b>
+units:
+  - {layer: 22, neuron: 2742, dose: +0.8}       # add: push the neuron's output direction
+  - {layer: 13, neuron: 7956, mode: gain, k: 0} # gain: remove this neuron's output (×0)
 ```
 
 Run `gne --help` and `gne <command> --help` for the full list. The help text is in Japanese.
@@ -111,6 +132,7 @@ Qwen3.5-4B Q8_0 on an RTX 3080:
 | `lens steer` (all 9216 neurons) | ~22 min per layer |
 | `sweep` `main_rel` | ~6.4 s per neuron (385 units in 48 min) |
 | `reverse` | ~6 s; ~4 min with `--verify` on 20 candidates |
+| `eval` (55 tasks × 5 doses) | ~41 s with `when: all`; ~90 s with `gen` |
 
 A full `main_rel` sweep of one layer takes about 16 hours. Narrow candidates down with the lenses and reverse lookup first.
 
@@ -140,20 +162,35 @@ gne serve -m models/Qwen3.5-4B-Q8_0.gguf      # http://127.0.0.1:8791
 
 ![Neuron panel with up/downstream wiring in the front view](docs/images/ui-neuron.png)
 
-The UI has three views:
+The UI has four views:
 - **map:** every layer as a sheet of neurons, with overlays.
 - **layers:** per-layer summaries.
+- **eval:** saved evals as a chart and a table per dose, sample outputs, and a button to eval the current recipe.
 - **embed:** a UMAP of rollout texts.
 
 Click a neuron or a list row to open its panel, which has four tabs:
 - **Examples:** rollouts per prompt and dose.
-- **Chat:** live 3-column steering.
-- **Details:** lens results, per-dose metrics and connections.
+- **Chat:** live 3-column steering, with a `when` selector.
+- **Details:** lens results, per-dose metrics, connections, and the evals that include the neuron.
 - **Web:** the multi-hop wiring.
 
 To compute missing data (lenses, sweeps, connections, layouts), right-click a layer label. Jobs run in the background and give way to chat when it needs the GPU. The language switch is at the top right; you can also open the UI with `?lang=en` or `?lang=ja`.
 
 The server binds to 127.0.0.1 only. It also rejects requests that arrive with a foreign Host header and cross-origin writes.
+
+### OpenAI-compatible endpoint
+
+`gne serve --openai` adds `/v1/models` and `/v1/chat/completions` (streaming or not) to the same server, so other apps can use a recipe with `when` or gain units. Pass the recipe in a `gne` field (`extra_body` in the OpenAI SDK):
+
+```python
+from openai import OpenAI
+client = OpenAI(base_url="http://127.0.0.1:8791/v1", api_key="unused")
+r = client.chat.completions.create(
+    model="any", messages=[{"role": "user", "content": "Who are you?"}],
+    extra_body={"gne": {"units": ["22:2742:+0.8"], "when": "gen"}})
+```
+
+Instead of `units`, `"recipe"` takes the name of a recipe saved under `~/.gne/recipes`, and `"scale"` multiplies its doses. Generation is greedy: sampling options such as `temperature` are ignored, and tools and logprobs are not supported. Requests share the GPU with the UI's chat.
 
 ## Using it from an agent (MCP)
 
@@ -161,7 +198,7 @@ The server binds to 127.0.0.1 only. It also rejects requests that arrive with a 
 claude mcp add gne -- gne mcp --model /path/to/model.gguf
 ```
 
-The tools are `model_overview`, `layer_summary`, `neuron`, `search`, `steer`, `steer_lens`, `fires`, `reverse`, `recipe_save`, `export_cvec`, `bake`, `set_name` and `job_start` / `job_status` / `job_cancel`.
+The tools are `model_overview`, `layer_summary`, `neuron`, `search`, `steer`, `steer_lens`, `fires`, `reverse`, `recipe_save`, `export_cvec`, `gain_export`, `bake`, `eval`, `set_name` and `job_start` / `job_status` / `job_cancel`.
 
 If the web UI is open, add `--ui-url http://127.0.0.1:8791`. With it, the agent can highlight and annotate neurons and open them in the browser (`ui_highlight`, `ui_note`, `ui_open`). When the UI already holds the model on the same GPU, also add `--n-gpu-layers 0`.
 

@@ -77,6 +77,47 @@ def set_name(session, L: int, n: int, name: str) -> None:
 
 # --- 調書 ---------------------------------------------------------------------------------------------
 
+def unit_evals(session, L: int, n: int, *, limit: int = 5) -> list[dict]:
+    """保存済みの eval(§6.14)のうち、このニューロンをユニットに含むもの(新しい順に limit 件)。"""
+    out = []
+    files = sorted(session.store.eval_dir(session.meta.model_id).glob("*.json"), key=lambda p: -p.stat().st_mtime)
+    for p in files:
+        try:
+            e = json.loads(p.read_text())
+            units = e["recipe"]["units"]
+        except (ValueError, KeyError):
+            continue
+        u = next((x for x in units if x["layer"] == L and x.get("neuron") == n and x.get("kind", "neuron") == "neuron"), None)
+        if u is None:
+            continue
+        rows = e.get("rows", [])
+        ok = [r["dose"] for r in rows if r.get("shippable") and r["dose"] > 0]
+        top = max(rows, key=lambda r: r["dose"]) if rows else None
+        out.append({"name": e.get("name", p.stem), "created": e.get("created"), "when": e.get("when"),
+                    "mode": u.get("mode", "add"), "dose": u.get("dose"), "k": u.get("k"), "n_units": len(units),
+                    "max_shippable_dose": max(ok) if ok else None,
+                    "at_max": None if top is None else {
+                        "dose": top["dose"], "capability_drop_pt": top.get("capability_drop_pt"),
+                        "ppl_worse_pct": top.get("ppl_worse_pct"), "novelty": top.get("persona", {}).get("novelty")}})
+        if len(out) >= limit:
+            break
+    return out
+
+
+def gain_tried(session, L: int, n: int) -> list[float]:
+    """steer・chat・eval でこのニューロンに当てた gain の倍率(実行時 LoRA の置き場所 <root>/gain/<model_id>/ から)。"""
+    from gguf import GGUFReader
+    ks = set()
+    for p in session.store.gain_dir(session.meta.model_id).glob("*.lora.gguf"):
+        try:
+            f = GGUFReader(p).fields.get("gne.recipe")
+            units = json.loads(f.contents())["units"] if f is not None else []
+        except Exception:  # noqa: BLE001  壊れた・書きかけのファイルは飛ばす
+            continue
+        ks |= {float(u["k"]) for u in units if u.get("mode") == "gain" and u["layer"] == L and u.get("neuron") == n}
+    return sorted(ks)
+
+
 def _pick_rollouts(recs: list[dict], n: int, max_rel: float = 1.6) -> list[dict]:
     """プロンプトごとに |dose| の大きい(ただし max_rel 以下を優先)rollout を 1 本ずつ、足りなければ残りから。"""
     by_prompt: dict[str, list[dict]] = {}
@@ -178,6 +219,10 @@ def neuron_dossier(session, L: int, n: int, *, rollouts: int = 4, compute: bool 
         out["activation"] = {"absmax": float(a.absmax[n]), "q999": float(a.q999[n]), "q99": float(a.q99[n]),
                              "rms": float(a.rms[n]), "mean": float(a.mean[n])}
         cov["activation"] = True
+    # eval と gain(CHANGE-01): このニューロンを含む保存済みの eval と、当てたことのある gain の倍率
+    out["evals"] = unit_evals(session, L, n)
+    out["gain_k"] = gain_tried(session, L, n)
+    cov["eval"], cov["gain"] = bool(out["evals"]), bool(out["gain_k"])
     out["coverage"] = cov
     return out
 
