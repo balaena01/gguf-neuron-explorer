@@ -64,3 +64,4 @@
 | ablate の実行時の LoRA | gain と ablate を 1 ファイルに合成してよい | 別々の LoRA を並べて当てる(llama.cpp は複数のアダプタを倍率つきで同時に当てられる)。消去の LoRA は倍率 1 で 1 回だけ作り、scale はアダプタの倍率 | eval の倍率ごとに LoRA を作り直さないため |
 | `eval --compare-ablation`(§6.17) | 同じ対照集合から、上位 N ニューロンの消去 vs 方向消去 | 上位 N は、層ごとの r_L と W_down の列の cos(逆引きと同じ標準化)で + 向きのもの。表には eval の指標に加え、方向を作った対照集合の判定(A 側の一致率)と B 側の KL を並べる | 「消したい振る舞いがどれだけ残るか」は eval のタスク集では測れないため |
 | UI の ablate(§6.17) | recipe タブに ablate 行(方向・層範囲・scale スライダー) | そのとおりに加え「測った層」。保存したレシピのうち UI で扱えないユニット(gain・方向)は読み込みで外し、数を知らせる | UI のレシピ編集はニューロンの add だけを扱う |
+| エージェントへの指示(CHANGE-02 E) | `docs/agent_playbook.md` に「消したい振る舞いは direction → ablate と上位ニューロンの gain k=0 を eval --compare-ablation で比べてから選ぶ」 | そのとおりに加え、方向で性格を「足す」手順(mode=add、反応する場面のプロンプトで確かめる)と、判定語の選び方(F86)を §4.1 に書いた。MCP の instructions にも要約 | 実際に evil とヤンデレで方向を使って分かったこと |

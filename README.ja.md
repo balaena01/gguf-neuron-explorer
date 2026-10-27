@@ -24,6 +24,8 @@ llama-cpp-python 経由で llama.cpp の上で動くので、手元の量子化�
   - FFN の down バイアスとして GGUF に焼き付けたもの。llama.cpp がそのバイアスを読む arch だけです（llama・granite・mistral3・nemotron・gpt2 など。Qwen・Gemma は不可。一覧は [configs/arch/bias_support.yaml](configs/arch/bias_support.yaml)）。
 - **押す位置を選ぶ（`when`）:** 生成するトークンだけ（`gen`）、assistant の発話だけ、出力にある文字列が出てから、だけを押せます。倍率をだんだん弱めることもできます。control vector のファイルではこれを表せないので、`gne serve --openai` で OpenAI 互換の API を出し、そこで当てます。
 - **倍率で押す（gain）:** `22:2742:x4` のように書くと、決まった向きを足す代わりに、そのニューロン自身の出力を k 倍します。`x0` で消し、負の値で反転します。ニューロンが働いている場面でだけ効きます。llama.cpp の `--lora` で使える LoRA アダプタ GGUF（Qwen でも可）か、重みを書き換えた GGUF に書き出せます。
+- **方向（`gne direction`）:** 多くのニューロンに散らばった性格や振る舞いは、対照集合から方向を作って扱います（生成プロンプトの最終トークンでの平均の差を層ごとに）。方向を消して振る舞いが減るか、足して増えるかを測って、層を自動で選べます。`30:dir:yandere:+0.3` のようにニューロンと同じ形で足せて、control vector に書き出せます。
+- **方向の射影消去（`gne ablate`）:** 残差に書き込むすべての重みから方向を取り除きます（いわゆる abliteration）。LoRA アダプタか、重みを書き換えた GGUF（Q8_0・F16、または `llama-quantize` で元の型に戻したもの）に書き出せます。レシピに `ablate:` を持たせられ、`gne eval --compare-ablation` で上位ニューロンを消す場合と比べられます。
 - **副作用チェック（`gne eval`）:** レシピをいくつかの倍率で流し、性格がどれだけ変わったかと、何が壊れたかを同じ表に並べます。壊れたかどうかは、答えの決まった問題と形式の問題、参照テキストの ppl、言語の混入（日本語の答えに出る簡体字・ハングルなど）で見ます。別の GGUF に性格を 1〜5 で採点させることもできます。基準の内に収まる倍率には「配布可」の印が付きます。
 - **Web UI:** 全層・全ニューロンを 3D で並べた地図です。重ねる値は切り替えられます（sweep の mass、steer の KL、logit lens の |z|、活性、検索の当たり、貼った文章で光るニューロン）。ほかに次の機能があります。
   - 順位の一覧とニューロンのパネル
@@ -89,6 +91,12 @@ gne steer --recipe configs/recipes/alien.yaml -p "Who are you?" --compare     # 
 gne steer --unit 22:2742:x4 -p "Is there life on other planets?" --compare   # gain: ニューロンが働く場面で 4 倍
 gne eval --recipe configs/recipes/alien.yaml                  # 倍率ごとの能力・ppl・混入・性格の変化量
 gne gain --recipe configs/recipes/alien_gain.yaml             # → ~/.gne/export/alien_gain.lora.gguf
+
+gne direction --contrast configs/contrast/evil.yaml --select auto   # 層ごとの方向と層選び
+gne steer --unit 16:dir:evil:+0.6 -p "What do you think about people?" --compare
+gne steer --ablate evil --system "You are a cruel AI." -p "Who are you?" --compare
+gne ablate --direction evil                                   # → ~/.gne/export/evil-ablate.lora.gguf
+gne eval --compare-ablation evil                              # 上位 20 ニューロンの ×0 と方向の消去を比べる
 ```
 
 `export-cvec --verify` を付けると、`llama-completion --control-vector` の greedy 出力が `gne` と一致するかも確かめます。`llama-completion` は `build/` と `PATH` から探します（`--llama-completion` で指定もできます）。
@@ -111,6 +119,8 @@ when: gen                                       # all / gen / assistant / after:
 units:
   - {layer: 22, neuron: 2742, dose: +0.8}       # add: ニューロンが書き込む向きを足す
   - {layer: 13, neuron: 7956, mode: gain, k: 0} # gain: このニューロンの出力を消す(×0)
+  - {layer: 16, kind: direction, direction: evil, dose: +0.3}   # gne direction で作った方向を足す
+ablate: {direction: refusal, scale: 1.0}        # 方向を残差に書き込む重みから消す(LoRA)
 ```
 
 コマンドの一覧は `gne --help`、各コマンドの使い方は `gne <コマンド> --help` で見られます。
@@ -137,6 +147,8 @@ Qwen3.5-4B Q8_0、RTX 3080 での目安です。
 | `sweep` の `main_rel` | 1 ニューロンあたり約 6.4 秒（385 本で 48 分） |
 | `reverse` | 約 6 秒。`--verify` で候補 20 個なら約 4 分 |
 | `eval`（55 タスク × 5 倍率） | `when: all` で約 41 秒、`gen` で約 90 秒 |
+| `direction`（24 会話）と `--select auto`（9 層） | 約 35 秒 + 約 35 秒 |
+| `ablate` の LoRA / `--bake` Q8_0（`--verify` 込み） | 約 10 秒 / 約 40 秒 |
 
 1 層の全ニューロンに `main_rel` を回すと約 16 時間かかります。lens と逆引きで候補を絞ってから sweep してください。
 
@@ -174,7 +186,7 @@ gne serve -m models/Qwen3.5-4B-Q8_0.gguf      # http://127.0.0.1:8791
 
 ニューロンか一覧の行をクリックすると、パネルが開きます。タブは 4 つです。
 - **Examples:** プロンプトと dose ごとの生成例
-- **Chat:** その場で押す 3 列チャット（`when` を選べます）
+- **Chat:** その場で押す 3 列チャット（`when` を選べます）。recipe タブで方向の消去（方向・倍率・層）も足せます
 - **Details:** lens の結果・dose ごとの指標・つながり・そのニューロンを含む eval
 - **Web:** 何段かたどった配線
 
@@ -202,7 +214,7 @@ r = client.chat.completions.create(
 claude mcp add gne -- gne mcp --model /path/to/model.gguf
 ```
 
-ツールは `model_overview`・`layer_summary`・`neuron`・`search`・`steer`・`steer_lens`・`fires`・`reverse`・`recipe_save`・`export_cvec`・`gain_export`・`bake`・`eval`・`set_name`・`job_start` / `job_status` / `job_cancel` です。
+ツールは `model_overview`・`layer_summary`・`neuron`・`search`・`steer`・`steer_lens`・`fires`・`reverse`・`recipe_save`・`export_cvec`・`gain_export`・`bake`・`eval`・`direction`・`ablate_export`・`set_name`・`job_start` / `job_status` / `job_cancel` です。
 
 Web UI を開いているなら `--ui-url http://127.0.0.1:8791` を付けます。こうするとエージェントがブラウザ上でニューロンを強調したり、注釈を貼ったり、開いたりできます（`ui_highlight`・`ui_note`・`ui_open`）。同じ GPU に UI がモデルを載せているときは、`--n-gpu-layers 0` も付けます。
 

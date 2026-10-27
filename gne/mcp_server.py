@@ -31,6 +31,8 @@ gguf-neuron-explorer: llama.cpp 上の GGUF モデルの MLP ニューロンを�
 4. rel dose: 0.5 で微かな挿入、0.8 で話題を上書き、1.0 以上は崩壊域。層 0〜2 には rel dose がそのまま通用しない。
 5. steer(units, compare=True) で無介入との差を確かめ、recipe_save → eval(recipe) で副作用(能力・ppl・言語の混入)を測ってから export_cvec。
    抑える用途は add の − より gain の x0 を先に試す。位置(when)は gen を第一候補にして all と比べる。
+   ニューロンで断片しか見つからない性格・振る舞いは direction(contrast, select="auto", mode="add"|"ablate") で方向を作る。
+   消したい振る舞いは ablate(steer の ablate="NAME")と上位ニューロンの x0 を eval の比較(gne eval --compare-ablation)で比べてから選ぶ。
 ユニットの書き方: "L:N:dose"(例 "14:8949:+1.0")、gain は "L:N:x2"(出力を k 倍、x0 で消去)、ランダム方向は "L:random:SEED:dose"、
 direction で作った方向は "L:dir:NAME:dose"。
 6. 人が UI(gne serve)を見ていれば、ui_open で調べているニューロンを開き、ui_highlight で候補を強調し、ui_note で判断の要点を

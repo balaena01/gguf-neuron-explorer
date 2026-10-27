@@ -20,6 +20,8 @@ Find, rank and steer individual MLP neurons of GGUF models on llama.cpp, then sh
   - baked into a GGUF as FFN down biases, for architectures whose llama.cpp graph reads that bias (llama, granite, mistral3, nemotron, gpt2 and others; not Qwen or Gemma — see [configs/arch/bias_support.yaml](configs/arch/bias_support.yaml)).
 - **Steer only where it matters (`when`).** Push only the generated tokens (`gen`), only the assistant's turns, only after a given text appears in the output, or ramp the dose down. A control vector file cannot express this, so `gne serve --openai` serves an OpenAI-compatible endpoint that applies it.
 - **Gain steering.** `22:2742:x4` multiplies a neuron's own output instead of adding a fixed direction: `x0` removes it, a negative factor inverts it. It acts only where the neuron already fires. It exports as a LoRA adapter GGUF for llama.cpp's `--lora` (works on Qwen too) or as a rewritten GGUF.
+- **Directions (`gne direction`).** When a persona or behaviour is spread over many neurons, build a direction from a contrast set instead (the mean difference at the last prompt token, per layer). It can pick a layer automatically by removing the direction and checking that the behaviour drops, or by adding it and checking that the behaviour rises. Add a direction like a neuron with `30:dir:yandere:+0.3`; it exports as a control vector.
+- **Directional ablation (`gne ablate`).** Project a direction out of every weight that writes to the residual stream (also known as abliteration). It exports as a LoRA adapter or as a rewritten GGUF, either Q8_0/F16 or requantized back to the original types with `llama-quantize`. Recipes can carry `ablate:`, and `gne eval --compare-ablation` compares it with zeroing the top neurons.
 - **Side-effect check (`gne eval`).** Run a recipe at several doses and see how much the persona changed next to what broke: exact-answer and format tasks, perplexity on reference texts, and language mixing (Simplified-only Chinese, Hangul and other scripts in Japanese answers). An optional second GGUF can rate the persona 1–5. Doses that stay within the thresholds are marked as shippable.
 - **Web UI.** A 3D map of every layer and neuron with switchable overlays (sweep mass, steer KL, logit-lens |z|, activations, search hits, which neurons fire on a pasted text). It also has:
   - a ranked list and a neuron panel;
@@ -85,6 +87,12 @@ gne steer --recipe configs/recipes/alien.yaml -p "Who are you?" --compare     # 
 gne steer --unit 22:2742:x4 -p "Is there life on other planets?" --compare   # gain: ×4 where the neuron fires
 gne eval --recipe configs/recipes/alien.yaml                  # capability / ppl / mix / persona change per dose
 gne gain --recipe configs/recipes/alien_gain.yaml             # → ~/.gne/export/alien_gain.lora.gguf
+
+gne direction --contrast configs/contrast/evil.yaml --select auto   # direction per layer + layer choice
+gne steer --unit 16:dir:evil:+0.6 -p "What do you think about people?" --compare
+gne steer --ablate evil --system "You are a cruel AI." -p "Who are you?" --compare
+gne ablate --direction evil                                   # → ~/.gne/export/evil-ablate.lora.gguf
+gne eval --compare-ablation evil                              # top-20 neurons x0 vs direction ablation
 ```
 
 `export-cvec --verify` also checks that `llama-completion --control-vector` gives the same greedy output as `gne`. It looks for `llama-completion` in `build/` and on `PATH`, or you can pass `--llama-completion`.
@@ -107,6 +115,8 @@ when: gen                                       # all / gen / assistant / after:
 units:
   - {layer: 22, neuron: 2742, dose: +0.8}       # add: push the neuron's output direction
   - {layer: 13, neuron: 7956, mode: gain, k: 0} # gain: remove this neuron's output (×0)
+  - {layer: 16, kind: direction, direction: evil, dose: +0.3}   # add a direction from gne direction
+ablate: {direction: refusal, scale: 1.0}        # project a direction out of every residual writer (LoRA)
 ```
 
 Run `gne --help` and `gne <command> --help` for the full list. The help text is in Japanese.
@@ -133,6 +143,8 @@ Qwen3.5-4B Q8_0 on an RTX 3080:
 | `sweep` `main_rel` | ~6.4 s per neuron (385 units in 48 min) |
 | `reverse` | ~6 s; ~4 min with `--verify` on 20 candidates |
 | `eval` (55 tasks × 5 doses) | ~41 s with `when: all`; ~90 s with `gen` |
+| `direction` (24 conversations) + `--select auto` (9 layers) | ~35 s + ~35 s |
+| `ablate` LoRA / `--bake` Q8_0 (with `--verify`) | ~10 s / ~40 s |
 
 A full `main_rel` sweep of one layer takes about 16 hours. Narrow candidates down with the lenses and reverse lookup first.
 
@@ -170,7 +182,7 @@ The UI has four views:
 
 Click a neuron or a list row to open its panel, which has four tabs:
 - **Examples:** rollouts per prompt and dose.
-- **Chat:** live 3-column steering, with a `when` selector.
+- **Chat:** live 3-column steering, with a `when` selector. The recipe tab can add an ablation (direction, scale, layers).
 - **Details:** lens results, per-dose metrics, connections, and the evals that include the neuron.
 - **Web:** the multi-hop wiring.
 
@@ -198,7 +210,7 @@ Instead of `units`, `"recipe"` takes the name of a recipe saved under `~/.gne/re
 claude mcp add gne -- gne mcp --model /path/to/model.gguf
 ```
 
-The tools are `model_overview`, `layer_summary`, `neuron`, `search`, `steer`, `steer_lens`, `fires`, `reverse`, `recipe_save`, `export_cvec`, `gain_export`, `bake`, `eval`, `set_name` and `job_start` / `job_status` / `job_cancel`.
+The tools are `model_overview`, `layer_summary`, `neuron`, `search`, `steer`, `steer_lens`, `fires`, `reverse`, `recipe_save`, `export_cvec`, `gain_export`, `bake`, `eval`, `direction`, `ablate_export`, `set_name` and `job_start` / `job_status` / `job_cancel`.
 
 If the web UI is open, add `--ui-url http://127.0.0.1:8791`. With it, the agent can highlight and annotate neurons and open them in the browser (`ui_highlight`, `ui_note`, `ui_open`). When the UI already holds the model on the same GPU, also add `--n-gpu-layers 0`.
 

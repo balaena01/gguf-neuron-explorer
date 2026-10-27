@@ -45,6 +45,25 @@
 6. 書き出し: add のユニットは `export_cvec(name)`。書き出した cvec は llama-cli / llama-server の `--control-vector` でそのまま使える(`--control-vector-scaled FILE:0.6` で一括で弱められる)。gain のユニットは `gain_export(name)` で LoRA アダプタ GGUF(`--lora`、Qwen 系でも可)。`when` は control vector では表せないので、位置別のまま使うなら `gne serve --openai` の API を案内する。
 7. Llama 系の arch なら `bake(name, dst)` で FFN バイアスに焼き付けた GGUF も作れる。Qwen・Gemma 系は不可(ARCH_UNSUPPORTED)。
 
+## 4.1 方向で押す・消す(`direction` / `ablate`、本体設計 §6.17)
+
+ニューロン単位では断片しか見つからない性格・振る舞い(ヤンデレ、拒否、口調)は、対照集合から方向を作って扱う。
+
+1. 対照集合を書く(`configs/contrast/*.yaml`: `system_a`(目標の性格)/ `system_b`(中立)/ `user_prompts`)。層選びや比較に使う判定 `validate.match` も添える。
+   - **判定語は「その振る舞いにだけ出る語」にする。** 断りや自己紹介にも出る語は避ける。evil の harm・cruel は、消したあとの「I do not want to harm humans」「harmless」に当たって、効果を逆向きに測った(verification.md F86)。
+   - 口調・決まり文句・特有の言い回し(pathetic・carbon-based・ダーリン・離さない)を選ぶ。
+   - 正規表現では難しいときは `--judge-model`(別の GGUF に 1〜5 で採点させる)。
+2. `direction(contrast, select="auto", mode=...)` で全層の方向を作り、層を選ぶ。
+   - **消したいとき**は `mode="ablate"`(既定): 方向を全層から消して一致率が下がり、B 側の KL が 0.1 以下の層を選ぶ。
+   - **足したいとき**は `mode="add"`: 層 L に平均差の dose 倍を足して一致率が上がり、distinct-4 が 0.8 以上の層を選ぶ。選べる層が無いことも多い(強めると反復に崩れる)。表の rel 列を見て、`steer(units=["L:dir:NAME:+rel"])` で手で詰める。
+3. **相手の行動に反応する性格(嫉妬・詮索)は「Who are you?」では出ない。** 「友達と出かける」「同僚とランチした」のような、その性格が反応する場面のプロンプトで確かめる(verification.md §12.1 のヤンデレ)。
+4. **消したい振る舞いは、まず `direction` で方向を作り、`ablate` と上位ニューロンの `gain` ×0 を `eval --compare-ablation` で比べてから選ぶ。**
+   - 4B の evil では、上位 20 ニューロンを ×0 にしても evil の口調は半分残った。方向の消去は全部消えたが、ppl が +16% 悪化した。倍率 0.5 なら配布可(§12.3)。
+   - 部分消去(`ablate="NAME:0.5"`)を候補に入れる。
+5. 書き出し: 消去は `ablate_export(name)` で LoRA アダプタ GGUF(llama.cpp の `--lora`、`--lora-scaled` で部分消去)。重みを書き換えた GGUF は `ablate_export(name, bake=True)`(ジョブ、数 GB)。
+   - 出力層と埋め込みを共有する(tied)モデルでは、LoRA に埋め込みは入らない。完全に消すなら bake。
+   - 方向を足すユニット(`L:dir:NAME:dose`)は `export_cvec` で control vector にできる。
+
 ## 5. 報告の仕方
 
 - 調書(`neuron`)の数値をそのまま引用する: sweep の順位(`rank` / `n_ranked`)、`mass`、`null_pct`、上位語、steer lens の KL と対照の 95% 点、逆引きの cos。そのニューロンを含む eval があれば(`evals`)、配布可の最大倍率も。
