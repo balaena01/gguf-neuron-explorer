@@ -104,6 +104,7 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
                     max_tokens: int = 128, compare: bool = True, dose_unit: str = "rel",
                     system: str | None = None, when: str = "all") -> dict:
         """ユニット(例 ["14:8949:+1.0", "13:7956:-1.0"])で押して生成する(greedy)。compare=True なら無介入も並べる。
+        "14:8949:x2" のように x を付けると gain(そのニューロンの出力を k 倍、x0 で消去。§6.16)。
         when は足す位置: all(全位置) / gen(生成中だけ、プロンプトの理解を壊さない) / assistant(assistant の発話だけ) /
         after:<文字列>(出力にその文字列が出てから) / ramp:<a>-<b>(倍率を a から b へ)。"""
         def fn():
@@ -149,6 +150,16 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
             out = session.store.export_dir() / f"{name}{_EXT[format]}"
             return session.export_cvec(r, out, fmt=format, verify=verify)
         return await call(fn, gpu=True)
+
+    @srv.tool()
+    async def gain_export(name: str, bake: bool = False) -> dict:
+        """保存したレシピの gain ユニット("14:8949:x2" のように出力を k 倍、x0 で消去)を書き出す(§6.16)。
+        既定は LoRA アダプタ GGUF(llama.cpp の --lora で使える、Qwen 系でも可)。bake=True なら W_up を書き換えた GGUF。"""
+        def fn():
+            r = session.recipe(path=session.recipe_path(name))
+            out = session.store.export_dir() / (f"{name}-gain.gguf" if bake else f"{name}.lora.gguf")
+            return session.gain(r, out, bake=bake)
+        return await call(fn, gpu=False)
 
     @srv.tool()
     async def bake(name: str, dst: str, verify: bool = True) -> dict:

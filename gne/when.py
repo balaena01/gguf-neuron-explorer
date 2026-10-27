@@ -131,8 +131,10 @@ def _scaled(vectors: dict[int, np.ndarray] | None, k: float) -> dict[int, np.nda
 
 def generate_when(e: Engine, ctx, messages: list[dict], vectors: dict[int, np.ndarray] | None, when: When | str | None,
                   *, max_tokens: int = 128, top_k: int = 5,
-                  on_token: Callable[[int, int], None] | None = None) -> tuple[Rollout, dict]:
+                  on_token: Callable[[int, int], None] | None = None,
+                  lora: list[tuple[str, float]] | None = None) -> tuple[Rollout, dict]:
     """1 本の会話を、when に従って control vector を付け替えながら greedy 生成する。
+    lora は gain(§6.16)の LoRA アダプタ [(パス, 倍率)]。全位置に当てる(when は control vector にだけ効く)。
     戻り値は (Rollout, 情報)。情報は set_cvec の回数・区間・after の切替位置など(確認用)。"""
     w = when if isinstance(when, When) else parse_when(when)
     info: dict = {"when": str(w), "set_cvec": 0}
@@ -157,6 +159,9 @@ def generate_when(e: Engine, ctx, messages: list[dict], vectors: dict[int, np.nd
                        "会話をやり直すか、max_tokens を減らしてください")
     e.clear_memory(ctx)
     schedule = None
+    if lora:
+        e.set_lora(ctx, lora)
+        info["lora"] = [str(p) for p, _ in lora]
     try:
         if not vectors or w.kind == "all":
             put(vectors or None)
@@ -213,5 +218,7 @@ def generate_when(e: Engine, ctx, messages: list[dict], vectors: dict[int, np.nd
                               on_token=on_token, schedule=schedule)[0]
     finally:
         e.set_cvec(ctx, None)
+        if lora:
+            e.set_lora(ctx, None)
     info["n_prompt"] = len(ids)
     return r, info

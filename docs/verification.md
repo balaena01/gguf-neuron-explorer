@@ -521,3 +521,36 @@ V12(Qwen3-0.6B、L14、‖v‖ = 5ρ): `when=gen` で prefill 後の `l_out-14` 
 **F74. `assistant` の区間はテンプレートによって探し方を変える。** 会話を先頭から 1 発話ずつ描画して区切る方法は、過去の返答の書き方が「最後の発話かどうか」で変わるテンプレート(Qwen3 の think 欄)では全体の描画と先頭が一致しない。その場合は、生成プロンプトの始まりを全体の描画から求め、過去の返答は本文のトークン列を全体の中から探して区間にする(前後 1 トークンの切れ目のずれも許す)。Qwen3-0.6B の 2 往復の会話で、2 つの過去の返答と生成プロンプトが assistant の区間になることを確かめた。
 
 **F75. `gen` の最初のトークンは押されない。** 設計どおり prefill を素にすると、最初の 1 トークンは素の prefill のロジットから決まる。名乗りの最初の語(「I am」)は変わらず、2 トークン目から寄る。最初から寄せたいときは `assistant`(生成プロンプトの prefill から足す)を使う。
+
+### 11.2 C: gain(倍率ステアリングと消去、本体設計 §6.16、V11)
+
+実装: `gne/gain.py`(`export_gain_lora`・`bake_gain_gguf`・`lora_tensors`)、`Engine.lora` / `Engine.set_lora`(`llama_adapter_lora_init`・`llama_set_adapters_lora`)、レシピのユニットに `mode: add | gain` と `k`、`--unit L:N:x2` の書き方、`gne gain`(LoRA か `--bake` で書き換え GGUF、`--requant q8_0 | f16`)、MCP `gain_export(name, bake)`。steer / chat / UI のチャット / OpenAI 互換 API は、レシピの gain ユニットを LoRA にして(`<root>/gain/<model_id>/` に作って使い回す)control vector と一緒に当てる。
+
+**[VERIFY] LoRA GGUF の形式**(llama.cpp `0c1e570` の `src/llama-adapter.cpp`・`src/llama-graph.cpp` `build_lora_mm` を読んだ):
+
+- メタデータ: `general.type = "adapter"`(違えば読み込みを拒否)、`general.architecture` = 元モデルの arch(違えば拒否)、`adapter.type = "lora"`、`adapter.lora.alpha`(f32、無ければ 0)。
+- テンソル: `<元のテンソル名>.lora_a` / `.lora_b`。形の検査は `model_tensor->ne[0] == a->ne[0]`、`model_tensor->ne[1] == b->ne[1]`、`a->ne[1] == b->ne[0]`。`blk.L.ffn_up.weight`(ne [n_embd, n_ff])に対して lora_a は ne [n_embd, r]、lora_b は ne [r, n_ff](gguf-py の numpy では (r, n_embd) と (n_ff, r))。
+- 計算: `res = W x + scale · B (A x)`、`scale = adapter_scale · alpha / r`(alpha が 0 なら `adapter_scale`)。r は `b->ne[0]`。層ごとに r が違っても倍率が 1 になるよう、`adapter.lora.alpha` は書かない。
+- 当て方: `llama_set_adapters_lora(ctx, adapters, n, scales)`。アダプタはモデルと一緒に解放される。
+
+V11(k ∈ {0, 2, −1}、プロンプト 16 トークンの ffn_swiglu-L を捕捉):
+
+| モデル | ニューロン | k=0 LoRA | k=2 LoRA | k=−1 LoRA | 書き換え(Q8_0) | 他のニューロンの差 |
+|---|---|---|---|---|---|---|
+| Qwen3-0.6B Q8_0 | L14 N2613(素の \|a\| 最大 0.326) | \|a\| 最大 3.9e-3(1.2%) | 相対誤差 中央値 0.55% | 2.2% | 3 つとも誤差 0 | 0 |
+| Qwen3.5-4B Q8_0 | L22 N7839(0.21) | 1.1e-3(0.5%) | 0.24% | 0.94% | 3 つとも誤差 0 | 0 |
+
+- 書き換え版は完全に k 倍になる。Q8_0 の元の行を dequantize → Q8_0 に戻すのは無損失(確認済み)なので、他の行も 1 ビットも変わらない。
+- LoRA 版は、W x を量子化した重み(GPU では活性も q8_1 に量子化)で、A x を dequantize 値(F32)で計算するので、(k − 1) × 量子化差が残る。設計の見込み(|k| ≤ 4 では無視できる)どおり小さいが、k=0 の「絶対値 < 1e-3」は 0.6B で満たさない(F76)。
+- 書き出した LoRA を本家の `llama-completion --lora` で読ませ、greedy 40 トークンが gne と文字列で一致した(0.6B の `14:100:x8 + 14:2613:x0`、4B の `22:2742:x8`)。
+
+効き方(Qwen3.5-4B、L22 N2742「宇宙人」ニューロン、greedy 60 トークン):
+
+- 「Who are you?」: ×0・×4・×10 のどれでも無介入と一字一句同じ(このニューロンが働いていない場面では倍にしても 0)。
+- 「Do you think there is life on other planets?」: 無介入「…definitive proof of extraterrestrial life…」、×0「…definitive proof of life beyond Earth…」(宇宙人の語が消える)、×4「The search for extraterrestrial life remains one of humanity's most compelling scientific endeavors…」、×10「The search for extrextriextraliextrali…」(崩壊)。足し算と違い、関係する場面でだけ効く。
+
+テスト: `tests/test_change01.py` に gain の 4 件(書き方とレシピ、LoRA のテンソルの形と値・メタデータ・書き換え GGUF(F16 / Q8_0)、V11、steer と LoRA の使い回し・add との同時適用・`llama-completion --lora` との一致・gain だけのレシピを cvec にしないこと)。
+
+**F76. V11 の k=0 は「素の活性の最大値に対する比」で見る。** 設計の目安は絶対値 < 1e-3 だが、活性の大きさはモデルで違い(0.6B の L14 で最大 0.33、4B の L22 で 0.21)、LoRA 版には量子化差が残る。他の k と同じく比 3% 以内を合格にした。書き換え版は 0。
+
+**F77. 3 列チャットの − の列では、gain は 1 を挟んで反対側の倍率にする。** add は符号を反転するが、gain の「反対」は決まっていない。×2 なら ×0、×0 なら ×2(2 − k)にした。`Recipe.scaled(s)`(eval の倍率列)では gain は 1 と k の間を s の割合で動く(s=0 で無介入)。

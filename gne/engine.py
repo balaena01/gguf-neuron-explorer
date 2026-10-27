@@ -98,6 +98,7 @@ class Engine:
         if not self.model:
             raise RuntimeError(f"モデルを読み込めません: {self.path}")
         self.vocab = C.llama_model_get_vocab(self.model)
+        self._loras: dict[str, object] = {}       # LoRA アダプタ(§6.16 gain)。モデルと一緒に解放される
         self.n_layer = C.llama_model_n_layer(self.model)
         self.n_embd = C.llama_model_n_embd(self.model)
         self.n_vocab = C.llama_vocab_n_tokens(self.vocab)
@@ -254,6 +255,29 @@ class Engine:
             rc = C.llama_set_adapter_cvec(ctx.ptr, ptr, buf.size, self.n_embd, il_start, il_end)
         if rc != 0:
             raise RuntimeError(f"llama_set_adapter_cvec が失敗しました (rc={rc})")
+
+    def lora(self, path: str | Path):
+        """LoRA アダプタ GGUF を読み込む(同じファイルは 1 回だけ)。"""
+        key = str(Path(path).resolve())
+        a = self._loras.get(key)
+        if a is None:
+            a = C.llama_adapter_lora_init(self.model, key.encode())
+            if not a:
+                raise RuntimeError(f"LoRA {path} を読み込めません(arch やテンソルの形が合っているか)")
+            self._loras[key] = a
+        return a
+
+    def set_lora(self, ctx: _Ctx, loras: list[tuple[str | Path, float]] | None) -> None:
+        """コンテキストに LoRA アダプタを当てる([(パス, 倍率)])。None / 空で外す。"""
+        if not loras:
+            rc = C.llama_set_adapters_lora(ctx.ptr, None, 0, None)
+        else:
+            ptrs = [self.lora(p) for p, _ in loras]
+            arr = (C.llama_adapter_lora_p_ctypes * len(ptrs))(*ptrs)
+            sc = (ctypes.c_float * len(ptrs))(*[float(x) for _, x in loras])
+            rc = C.llama_set_adapters_lora(ctx.ptr, arr, len(ptrs), sc)
+        if rc != 0:
+            raise RuntimeError(f"llama_set_adapters_lora が失敗しました (rc={rc})")
 
     def clear_memory(self, ctx: _Ctx) -> None:
         C.llama_memory_clear(C.llama_get_memory(ctx.ptr), True)

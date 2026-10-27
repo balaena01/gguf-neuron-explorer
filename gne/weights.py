@@ -189,6 +189,17 @@ class Weights:
             self._cache.popitem(last=False)
         return mat
 
+    def up_matrix(self, L: int) -> np.ndarray:
+        """W_up (n_ff, n_embd) float32(キャッシュしない)。ニューロン n の入力側の重みは [n, :](§6.16 gain)。"""
+        name = f"blk.{L}.ffn_up.weight"
+        if not self.has_tensor(name):
+            raise ValueError(f"{name} がありません(MoE や gate と up が 1 つのテンソルの arch は gain に未対応)")
+        mat = tensor_to_f32(self.tensor(name))
+        expected = (self.meta.n_ff_at(L), self.meta.n_embd)
+        if mat.shape != expected:
+            raise ValueError(f"{name} の形状 {mat.shape} が期待値 {expected} と違います")
+        return mat
+
     def down_column(self, L: int, n: int) -> np.ndarray:
         return self.down_matrix(L)[:, n].copy()
 

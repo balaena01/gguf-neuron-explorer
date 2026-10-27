@@ -163,6 +163,69 @@ class Verifier:
                        {"d_prev_max": float(np.abs(d_prev).max()), "err_L": err_L,
                         "d_next_max": float(np.abs(d_next).max()), "restore": restore, "stale": stale})
 
+    # --- V11(§6.16 gain)----------------------------------------------------------------------------------
+
+    def v11_gain(self, ks=(0.0, 2.0, -1.0), bake: bool = True) -> VResult:
+        """gain の等価性: 層 L のニューロン n を k 倍にしたとき、ffn_down の入力(活性)の n 番目が素の活性 × k になり、
+        他のニューロンは変わらない。(a) LoRA アダプタを当てたとき、(b) W_up を書き換えた GGUF、の両方で見る。"""
+        from .gain import bake_gain_gguf, export_gain_lora
+        from .steer import Recipe, Unit
+        L = self.L
+        n = int(self.rng.integers(self.w.meta.n_ff_at(L)))
+        ids = self.prompt_ids[0]
+        names = self.e.list_names(ids, L)
+        act = pick_act_name(names, L)
+        if act is None:
+            return VResult("V11", "gain の等価性", "skip", f"層 {L} の ffn_down 入力が捕捉できません")
+
+        def grab(engine, lora=None):
+            cap = Capture()
+            cap.set_wanted(lambda x: x == act)
+            ctx = engine.probe_ctx(cap)
+            engine.clear_memory(ctx)
+            engine.set_lora(ctx, lora)
+            engine.prefill(ctx, [ids])
+            engine.set_lora(ctx, None)
+            return cap.take()[act]
+        base = grab(self.e)
+        scale = float(np.abs(base[:, n]).max())
+        rows, ok = [], True
+        with tempfile.TemporaryDirectory() as td:
+            for k in ks:
+                r = Recipe([Unit(L, n, 0.0, mode="gain", k=k)], self.w.meta.model_id, name="v11")
+                variants = [("LoRA", None)]
+                lpath = Path(td) / f"k{k:g}.lora.gguf"
+                export_gain_lora(self.w, r, lpath)
+                variants[0] = ("LoRA", grab(self.e, [(lpath, 1.0)]))
+                if bake:
+                    gpath = Path(td) / f"k{k:g}.gguf"
+                    bake_gain_gguf(self.w, r, gpath)
+                    e2 = Engine(gpath, n_gpu_layers=getattr(self.e, "n_gpu_layers", -1), n_ctx=self.e.n_ctx, n_seq_max=1)
+                    try:
+                        variants.append(("書き換え", grab(e2)))
+                    finally:
+                        e2.close()
+                for kind, a in variants:
+                    others = np.delete(np.arange(base.shape[1]), n)
+                    d_other = float(np.abs(a[:, others] - base[:, others]).max())
+                    if k == 0:
+                        # 設計の目安は絶対値 < 1e-3 だが、LoRA 版は W x(量子化)と A x(dequantize 値)の差が残る。
+                        # 活性の大きさはモデルで違うので、素の活性の最大値に対する比で見る(divergence.md)
+                        err = float(np.abs(a[:, n]).max())
+                        good = err < 0.03 * max(scale, 1e-6)
+                    else:
+                        rel = np.abs(a[:, n] - k * base[:, n]) / np.maximum(np.abs(k * base[:, n]), 1e-6)
+                        err = float(np.median(rel))
+                        good = err < 0.03
+                    good = good and d_other <= 1e-3 * max(1.0, float(np.abs(base).max()))
+                    ok &= good
+                    rows.append({"k": k, "kind": kind, "err": err, "others_max_diff": d_other, "pass": bool(good)})
+        detail = (f"L{L} N{n}(`{act}`、{len(ids)} トークン、|a| 最大 {scale:.3g}): "
+                  + "; ".join(f"k={r['k']:g} {r['kind']}: " + (f"|a| 最大 {r['err']:.2e}(素の最大の {r['err'] / max(scale, 1e-6):.1%})" if r["k"] == 0 else f"相対誤差 中央値 {r['err']:.2e}")
+                              + f"、他のニューロンの差 最大 {r['others_max_diff']:.2e}" for r in rows))
+        return VResult("V11", "gain の等価性(LoRA / 書き換え)", "pass" if ok else "fail", detail,
+                       {"layer": L, "neuron": n, "act": act, "rows": rows, "act_max": scale})
+
     # --- V12(§6.15 位置別ステアリング)----------------------------------------------------------------
 
     def v12_when_gen(self) -> VResult:
@@ -352,13 +415,16 @@ class Verifier:
 
 # --- 外部プロセス -------------------------------------------------------------------------------
 
-def run_llama_completion(binary: str, engine: Engine, prompt: str, n_tokens: int, cvec: Path | None) -> str:
-    """llama-completion で greedy 生成した文字列(プロンプトは表示しない)。"""
+def run_llama_completion(binary: str, engine: Engine, prompt: str, n_tokens: int, cvec: Path | None,
+                         lora: Path | None = None) -> str:
+    """llama-completion で greedy 生成した文字列(プロンプトは表示しない)。lora は gain の LoRA アダプタ(§6.16)。"""
     cmd = [binary, "-m", str(engine.path), "-p", prompt, "-n", str(n_tokens), "-no-cnv", "--no-display-prompt",
            "--temp", "0", "--top-k", "1", "--seed", "0", "-c", str(engine.n_ctx), "-ngl", str(engine.n_gpu_layers),
            "--no-warmup", "-lv", "0"]
     if cvec is not None:
         cmd += ["--control-vector", str(cvec)]
+    if lora is not None:
+        cmd += ["--lora", str(lora)]
     env = dict(os.environ)
     p = subprocess.run(cmd, capture_output=True, text=True, timeout=300, env=env)
     if p.returncode != 0:

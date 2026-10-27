@@ -41,9 +41,13 @@ class Unit:
     dose: float
     kind: Literal["neuron", "random"] = "neuron"
     seed: int | None = None          # random 用
+    mode: Literal["add", "gain"] = "add"   # §6.16: add = 活性に定数を足す(dose)、gain = 出力を k 倍
+    k: float | None = None           # gain の倍率(0 で消去、負で反転)
 
     def label(self) -> str:
         who = f"N{self.neuron}" if self.kind == "neuron" else f"random{self.seed}"
+        if self.mode == "gain":
+            return f"L{self.layer} {who} ×{self.k:g}"
         return f"L{self.layer} {who} {self.dose:+g}"
 
 
@@ -59,7 +63,8 @@ class Recipe:
     def load(cls, path: str | Path) -> Recipe:
         d = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
         units = [Unit(layer=int(u["layer"]), neuron=None if u.get("neuron") is None else int(u["neuron"]),
-                      dose=float(u["dose"]), kind=u.get("kind", "neuron"), seed=u.get("seed"))
+                      dose=float(u.get("dose", 0.0)), kind=u.get("kind", "neuron"), seed=u.get("seed"),
+                      mode=u.get("mode", "add"), k=None if u.get("k") is None else float(u["k"]))
                  for u in d.get("units", [])]
         r = cls(units, d.get("model_id"), d.get("dose_unit", "rel"), d.get("name") or Path(path).stem, d.get("when") or "all")
         r.validate()
@@ -68,8 +73,7 @@ class Recipe:
     def save(self, path: str | Path) -> None:
         d = {"name": self.name, "model_id": self.model_id, "dose_unit": self.dose_unit,
              **({"when": self.when} if self.when != "all" else {}),
-             "units": [{k: v for k, v in asdict(u).items() if v is not None and not (k == "kind" and v == "neuron")}
-                       for u in self.units]}
+             "units": [_unit_yaml(u) for u in self.units]}
         Path(path).write_text(yaml.safe_dump(d, allow_unicode=True, sort_keys=False), encoding="utf-8")
 
     def to_dict(self) -> dict:
@@ -77,8 +81,18 @@ class Recipe:
                 "units": [asdict(u) for u in self.units]}
 
     def scaled(self, k: float) -> Recipe:
-        return Recipe([Unit(u.layer, u.neuron, u.dose * k, u.kind, u.seed) for u in self.units],
+        # add は dose を k 倍、gain は倍率を「1(何もしない)から k_unit へ」の間で k の割合だけ動かす(eval の倍率列で 0 が無介入になるように)
+        return Recipe([Unit(u.layer, u.neuron, u.dose * k if u.mode == "add" else u.dose, u.kind, u.seed, u.mode,
+                            None if u.k is None else 1 + (u.k - 1) * k) for u in self.units],
                       self.model_id, self.dose_unit, self.name, self.when)
+
+    @property
+    def add_units(self) -> list[Unit]:
+        return [u for u in self.units if u.mode == "add"]
+
+    @property
+    def gain_units(self) -> list[Unit]:
+        return [u for u in self.units if u.mode == "gain"]
 
     def validate(self) -> None:
         if self.dose_unit not in ("rel", "absmax", "raw"):
@@ -88,6 +102,10 @@ class Recipe:
         from .when import parse_when
         parse_when(self.when)                      # 書き方の誤りはここで返す
         for u in self.units:
+            if u.mode not in ("add", "gain"):
+                raise GneError("BAD_RECIPE", f"{u}: mode は add か gain です")
+            if u.mode == "gain" and (u.kind != "neuron" or u.k is None):
+                raise GneError("BAD_RECIPE", f"{u}: gain は neuron と k が要ります(例 {u.layer}:{u.neuron}:x2)")
             if u.kind == "neuron" and u.neuron is None:
                 raise GneError("BAD_RECIPE", f"{u}: neuron がありません")
             if u.kind == "random" and u.seed is None:
@@ -96,18 +114,31 @@ class Recipe:
                 raise GneError("BAD_RECIPE", "ランダム方向のユニットは dose_unit=rel でだけ使えます")
 
 
-_UNIT_RE = re.compile(r"^(\d+):(?:(\d+)|random:(\d+)):([+-]?[\d.]+(?:e[+-]?\d+)?)$", re.I)
+_UNIT_RE = re.compile(r"^(\d+):(?:(\d+)|random:(\d+)):(x?)([+-]?[\d.]+(?:e[+-]?\d+)?)$", re.I)
 
 
 def parse_unit(spec: str) -> Unit:
-    """"L:N:dose"(例 14:8949:+1.0)または "L:random:SEED:dose"。"""
+    """"L:N:dose"(例 14:8949:+1.0)、"L:random:SEED:dose"、gain は "L:N:x2"(x の後が倍率 k、§6.16)。"""
     m = _UNIT_RE.match(spec.strip())
     if not m:
-        raise GneError("BAD_UNIT", f"ユニット指定 {spec!r} を読めません", "L:N:dose(例 14:8949:+1.0)か L:random:SEED:dose")
-    L, n, seed, dose = m.groups()
+        raise GneError("BAD_UNIT", f"ユニット指定 {spec!r} を読めません",
+                       "L:N:dose(例 14:8949:+1.0)、L:random:SEED:dose、gain は L:N:x2(倍率)")
+    L, n, seed, gain, val = m.groups()
+    if gain:
+        if seed is not None:
+            raise GneError("BAD_UNIT", f"{spec!r}: gain はランダム方向には使えません")
+        return Unit(int(L), int(n), 0.0, mode="gain", k=float(val))
     if seed is not None:
-        return Unit(int(L), None, float(dose), "random", int(seed))
-    return Unit(int(L), int(n), float(dose))
+        return Unit(int(L), None, float(val), "random", int(seed))
+    return Unit(int(L), int(n), float(val))
+
+
+def _unit_yaml(u: Unit) -> dict:
+    d = {k: v for k, v in asdict(u).items() if v is not None and not (k == "kind" and v == "neuron")
+         and not (k == "mode" and v == "add")}
+    if u.mode == "gain":
+        d.pop("dose", None)
+    return d
 
 
 # --- dose → ベクトル(§2.2, §13.3) ------------------------------------------------------------------
@@ -147,7 +178,7 @@ def unit_vector(weights, stats, unit: Unit, dose_unit: DoseUnit = "rel") -> np.n
 def recipe_vectors(weights, stats, recipe: Recipe) -> dict[int, np.ndarray]:
     """レシピの各ユニットのベクトルを層ごとに合計する(§2.3)。"""
     out: dict[int, np.ndarray] = {}
-    for u in recipe.units:
+    for u in recipe.add_units:                 # gain は control vector ではなく LoRA で当てる(§6.16)
         v = unit_vector(weights, stats, u, recipe.dose_unit)
         out[u.layer] = out[u.layer] + v if u.layer in out else v
     return out
@@ -157,6 +188,10 @@ def unit_details(weights, stats, recipe: Recipe) -> list[dict]:
     """各ユニットの大きさ。rel_push = ‖v‖ / ρ_L、add = 活性 a_n に足した相当量(符号つき)。"""
     rows = []
     for u in recipe.units:
+        if u.mode == "gain":
+            rows.append({"layer": u.layer, "neuron": u.neuron, "kind": u.kind, "seed": None, "dose": 0.0, "norm": 0.0,
+                         "rel_push": None, "rho": None, "add": None, "down_norm": None, "mode": "gain", "k": u.k})
+            continue
         v = unit_vector(weights, stats, u, recipe.dose_unit)
         norm = float(np.linalg.norm(v))
         try:
@@ -328,6 +363,31 @@ class BakeReport:
     n_tensors: int = 0
 
 
+def copy_gguf_header(weights, dst: str | Path, *, tag: str, recipe: Recipe | None) -> GGUFWriter:
+    """元の GGUF のメタデータを写した GGUFWriter を作る(general.name に tag を付け、gne.recipe にレシピを残す)。
+    テンソルは呼び出し側が add_tensor_info → write_* で書く。bake(§6.5.1)と gain の書き換え(§6.16)で共用。"""
+    m = weights.meta
+    r: GGUFReader = weights.reader
+    w = GGUFWriter(str(dst), arch=m.arch, endianess=r.endianess)
+    align = r.fields.get("general.alignment")
+    if align is not None:
+        w.data_alignment = int(align.contents())
+    for f in r.fields.values():
+        if f.name == "general.architecture" or f.name.startswith("GGUF."):
+            continue
+        vtype = f.types[0]
+        sub = f.types[-1] if vtype == GGUFValueType.ARRAY else None
+        val = f.contents()
+        if f.name == "general.name":
+            val = f"{val}{tag}"
+        w.add_key_value(f.name, val, vtype, sub_type=sub)
+    if "general.name" not in r.fields:
+        w.add_key_value("general.name", f"{m.name}{tag}", GGUFValueType.STRING)
+    w.add_key_value("gne.recipe", json.dumps(recipe.to_dict() if recipe else {}, ensure_ascii=False), GGUFValueType.STRING)
+    w.add_key_value("gne.source_model_id", m.model_id, GGUFValueType.STRING)
+    return w
+
+
 def bake_bias_gguf(weights, vectors: dict[int, np.ndarray], src: str | Path, dst: str | Path, *,
                    recipe: Recipe | None = None) -> BakeReport:
     """v を blk.L.ffn_down.bias として書き込んだ派生 GGUF を作る。他のテンソルとメタデータは生バイトのまま写す。"""
@@ -348,24 +408,8 @@ def bake_bias_gguf(weights, vectors: dict[int, np.ndarray], src: str | Path, dst
             raise GneError("BAD_RECIPE", f"層 {L} のベクトルが不正です(n_layer={m.n_layer}, n_embd={m.n_embd})")
 
     r: GGUFReader = weights.reader
-    w = GGUFWriter(str(dst), arch=m.arch, endianess=r.endianess)
-    align = r.fields.get("general.alignment")
-    if align is not None:
-        w.data_alignment = int(align.contents())
     tag = f" +recipe:{recipe.name}" if recipe and recipe.name else " +recipe"
-    for f in r.fields.values():
-        if f.name == "general.architecture" or f.name.startswith("GGUF."):
-            continue
-        vtype = f.types[0]
-        sub = f.types[-1] if vtype == GGUFValueType.ARRAY else None
-        val = f.contents()
-        if f.name == "general.name":
-            val = f"{val}{tag}"
-        w.add_key_value(f.name, val, vtype, sub_type=sub)
-    if "general.name" not in r.fields:
-        w.add_key_value("general.name", f"{m.name}{tag}", GGUFValueType.STRING)
-    w.add_key_value("gne.recipe", json.dumps(recipe.to_dict() if recipe else {}, ensure_ascii=False), GGUFValueType.STRING)
-    w.add_key_value("gne.source_model_id", m.model_id, GGUFValueType.STRING)
+    w = copy_gguf_header(weights, dst, tag=tag, recipe=recipe)
 
     report = BakeReport(str(src), str(dst), m.arch, mode, sorted(vecs))
     plan: list[tuple[str, np.ndarray, GGMLQuantizationType]] = []   # (name, data, type)

@@ -98,7 +98,8 @@ class Live:
                             if piece:
                                 q.put({"type": "text", "col": _i, "text": piece})
                         try:
-                            out, winfo = generate_when(e, ctx, msgs, vecs, w, max_tokens=max_tokens, on_token=cb)
+                            out, winfo = generate_when(e, ctx, msgs, vecs, w, max_tokens=max_tokens, on_token=cb,
+                                                       lora=self.s.lora_for(r))
                             q.put({"type": "end", "col": i, "text": out.text, "finish": out.finish, "n_gen": out.n_gen,
                                    "when": winfo})
                         except _Stopped:

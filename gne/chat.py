@@ -38,7 +38,9 @@ class ChatState:
 
 def _with_dose(recipe: Recipe, dose: float | None, sign: float) -> Recipe:
     """dose を指定したら各ユニットの大きさをそろえる(符号は保つ)。sign で列の向き(+1 / −1)を掛ける。"""
-    units = [Unit(u.layer, u.neuron, (abs(dose) if dose is not None else abs(u.dose)) * (1 if u.dose >= 0 else -1) * sign,
+    # gain は − の列で「1 を挟んで反対側」の倍率にする(×2 なら ×0、×0 なら ×2)。dose はそろえない
+    units = [Unit(u.layer, u.neuron, 0.0, u.kind, u.seed, "gain", u.k if sign > 0 else 2 - u.k) if u.mode == "gain" else
+             Unit(u.layer, u.neuron, (abs(dose) if dose is not None else abs(u.dose)) * (1 if u.dose >= 0 else -1) * sign,
                   u.kind, u.seed) for u in recipe.units]
     return Recipe(units, recipe.model_id, recipe.dose_unit, recipe.name, recipe.when)
 
@@ -85,7 +87,8 @@ def chat_turn(session, state: ChatState, user: str, *, max_tokens: int = 256,
                 if piece:
                     on_text(_i, piece)
         when = (when_override or col.recipe.when) if col.recipe is not None else "all"
-        r, _ = generate_when(e, ctx, state.messages(i), vecs, when, max_tokens=max_tokens, on_token=cb)
+        r, _ = generate_when(e, ctx, state.messages(i), vecs, when, max_tokens=max_tokens, on_token=cb,
+                             lora=session.lora_for(col.recipe))
         if on_text is not None:
             tail = dec.decode(b"", final=True)
             if tail:

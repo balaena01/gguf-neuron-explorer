@@ -175,6 +175,8 @@ class UnitModel(_Strict):
     rho: float | None
     add: float | None
     down_norm: float | None
+    mode: Literal["add", "gain"] = "add"     # §6.16
+    k: float | None = None
 
 
 class RecipeModel(_Strict):
@@ -250,6 +252,17 @@ class BakeOut(Envelope):
     units: list[UnitModel]
     report: BakeReportModel
     verify: ReproCheck | None
+
+
+class GainOut(Envelope):                        # §6.16 gne gain
+    kind: Literal["lora", "bake"]
+    recipe: RecipeModel
+    path: str
+    bytes: int
+    layers: dict[str, list[list[float]]] | None = None     # lora: 層 → [[ニューロン, k]]
+    rank: dict[str, int] | None = None
+    modified: list[dict[str, str]] | None = None           # bake: 書き換えたテンソルと型
+    n_tensors: int | None = None
 
 
 # --- Phase 2: lens / reverse -----------------------------------------------------------------------------
@@ -476,5 +489,5 @@ COMMAND_SCHEMAS: dict[str, type[Envelope]] = {
     "lens logit": LensLogitOut, "lens steer": LensSteerOut, "reverse": ReverseOut,
     "info": InfoOut, "probe": ProbeOut, "verify": VerifyOut, "bench": BenchOut,
     "stats resid": StatsResidOut, "stats act": StatsActOut, "steer": SteerOut,
-    "export-cvec": ExportOut, "import-cvec": ImportOut, "bake": BakeOut,
+    "export-cvec": ExportOut, "import-cvec": ImportOut, "bake": BakeOut, "gain": GainOut,
 }

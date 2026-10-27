@@ -51,6 +51,10 @@ class Store:
     def reverse_dir(self, model_id: str) -> Path:
         return self._dir("reverse", model_id)
 
+    def gain_dir(self, model_id: str) -> Path:
+        """gain(§6.16)の実行時 LoRA の置き場所。"""
+        return self._dir("gain", model_id)
+
     def connections_path(self, model_id: str) -> Path:
         return self._dir("connections") / f"{model_id}.npz"
 

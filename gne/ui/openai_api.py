@@ -115,7 +115,8 @@ def register(app: FastAPI, session, live) -> None:
                         if piece:
                             q.put(("delta", piece))
                     try:
-                        r, info = generate_when(e, e.steer_ctx(), msgs, vecs, w, max_tokens=max_tokens, on_token=cb)
+                        r, info = generate_when(e, e.steer_ctx(), msgs, vecs, w, max_tokens=max_tokens, on_token=cb,
+                                                lora=session.lora_for(recipe))
                     except _Stopped:
                         q.put(("end", None))
                         return

@@ -217,7 +217,10 @@ class Session:
         return recipe if isinstance(recipe, Recipe) else self.recipe(units=list(recipe))
 
     def vectors(self, recipe: Recipe) -> tuple[dict[int, np.ndarray], list[dict]]:
-        sv = self.stats_view(recipe)
+        """add ユニットの control vector(層ごと)と、全ユニットの詳細。gain だけのレシピなら統計は要らない。"""
+        if not recipe.add_units:
+            return {}, unit_details(self.weights, None, recipe)
+        sv = self.stats_view(Recipe(recipe.add_units, recipe.model_id, recipe.dose_unit, recipe.name))
         return recipe_vectors(self.weights, sv, recipe), unit_details(self.weights, sv, recipe)
 
     @staticmethod
@@ -233,11 +236,12 @@ class Session:
         return ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": prompt}]
 
     def generate(self, vectors: dict[int, np.ndarray] | None, messages: list[dict], *, max_tokens: int = 128,
-                 when: str = "all") -> dict:
-        """1 本で greedy 生成する(バッチの組み方で結果が変わらないように、F2)。when は §6.15 の位置別ステアリング。"""
+                 when: str = "all", lora: list[tuple[str, float]] | None = None) -> dict:
+        """1 本で greedy 生成する(バッチの組み方で結果が変わらないように、F2)。when は §6.15 の位置別ステアリング、
+        lora は gain(§6.16)の LoRA アダプタ。"""
         from .when import generate_when
         e = self.engine
-        r, info = generate_when(e, e.steer_ctx(), messages, vectors, when, max_tokens=max_tokens)
+        r, info = generate_when(e, e.steer_ctx(), messages, vectors, when, max_tokens=max_tokens, lora=lora)
         return {"text": r.text, "finish": r.finish, "n_gen": r.n_gen, "token_ids": r.token_ids, "when": info}
 
     # --- steer ----------------------------------------------------------------------------------
@@ -248,14 +252,41 @@ class Session:
         msgs = self.messages(prompt, messages, system)
         vecs, details = self.vectors(recipe)
         base = self.generate(None, msgs, max_tokens=max_tokens) if compare else None
-        st = self.generate(vecs, msgs, max_tokens=max_tokens, when=when or recipe.when)
+        st = self.generate(vecs, msgs, max_tokens=max_tokens, when=when or recipe.when, lora=self.lora_for(recipe))
         return {"messages": msgs, "recipe": recipe.to_dict(), "units": details, "layer_norms": self._norms(vecs),
                 "when": when or recipe.when,
                 "baseline": base, "steered": st, "differs": None if base is None else base["token_ids"] != st["token_ids"]}
 
     # --- export / import ------------------------------------------------------------------------
 
+    def lora_for(self, recipe: Recipe | None) -> list[tuple[str, float]] | None:
+        """レシピの gain ユニットを当てる LoRA([(パス, 1.0)])。gain が無ければ None。作ったものは使い回す。"""
+        if recipe is None or not recipe.gain_units:
+            return None
+        from .gain import export_gain_lora, lora_cache_path
+        path = lora_cache_path(self.store.gain_dir(self.meta.model_id), recipe)
+        if not path.exists():
+            tmp = path.with_suffix(".part")
+            export_gain_lora(self.weights, Recipe(recipe.gain_units, self.meta.model_id, name=recipe.name), tmp)
+            tmp.replace(path)
+        return [(str(path), 1.0)]
+
+    def gain(self, recipe: Recipe | list[str], out: str | Path, *, bake: bool = False, requant: str = "q8_0") -> dict:
+        """gain ユニットを LoRA アダプタ GGUF(既定)か、W_up を書き換えた GGUF(bake)に書き出す(§6.16)。"""
+        from .gain import bake_gain_gguf, export_gain_lora
+        recipe = self._as_recipe(recipe)
+        if recipe.add_units:
+            self.warn("add のユニットは gain の書き出しに入りません(gne export-cvec で control vector に書き出せます)")
+        if bake:
+            rep = bake_gain_gguf(self.weights, recipe, out, requant=requant)
+        else:
+            rep = export_gain_lora(self.weights, recipe, out)
+        return {"kind": "bake" if bake else "lora", "recipe": recipe.to_dict(), **rep}
+
     def _warn_when(self, recipe: Recipe, what: str) -> None:
+        if recipe.gain_units:
+            self.warn(f"gain のユニット({len(recipe.gain_units)} 個)は {what} では表せないので外しました(§6.16)。"
+                      "gne gain で LoRA アダプタか書き換え GGUF に書き出してください")
         if recipe.when != "all":
             self.warn(f"レシピの when={recipe.when} は {what} では表せないので、全位置(all)として書き出しました(§6.15)。"
                       "位置別のまま使うなら gne steer / chat か gne serve --openai を使ってください")
@@ -265,6 +296,9 @@ class Session:
                     llama_completion: str | None = None) -> dict:
         recipe = self._as_recipe(recipe)
         self._warn_when(recipe, "control vector")
+        if not recipe.add_units:
+            raise GneError("BAD_RECIPE", "add のユニットがありません(gain だけのレシピは control vector になりません)",
+                           "gne gain で LoRA アダプタか書き換え GGUF に書き出してください")
         vecs, details = self.vectors(recipe)
         if fmt == "cvec" and 0 in vecs:
             raise GneError("BAD_RECIPE", "ブロック 0 は control vector に書けません(llama.cpp の仕様)",
@@ -319,6 +353,8 @@ class Session:
              verify_prompt: str = "Who are you?", n_tokens: int = 32) -> dict:
         recipe = self._as_recipe(recipe)
         self._warn_when(recipe, "bake")
+        if not recipe.add_units:
+            raise GneError("BAD_RECIPE", "add のユニットがありません", "gain は gne gain --bake で書き換え GGUF にできます")
         vecs, details = self.vectors(recipe)
         Path(dst).parent.mkdir(parents=True, exist_ok=True)
         rep = bake_bias_gguf(self.weights, vecs, self.path, dst, recipe=recipe)

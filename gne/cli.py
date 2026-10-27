@@ -315,7 +315,7 @@ def verify(c: Common, holder: dict,
     v = Verifier(s.engine, s.weights, layer=layer, seed=c.seed)
     steps = [("V1", v.v1_shapes), ("V2", v.v2_ffn_linearity), ("V3", v.v3_cvec_layer),
              ("V4", lambda: v.v4_direction_file(lc)), ("V5", lambda: v.v5_neuron_push(hf_model, hf_python)),
-             ("V6", v.v6_attention_sink), ("V12", v.v12_when_gen)]
+             ("V6", v.v6_attention_sink), ("V11", v.v11_gain), ("V12", v.v12_when_gen)]
     results, bench_result = [], None
 
     def show(r):
@@ -498,6 +498,31 @@ def bake(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Option
                  + f"、無介入との差: {'あり' if v['differs_from_baseline'] else 'なし'}")
         ok = v["differs_from_baseline"] and (v["match"] or not v["ours"])
     return d, text, 0 if ok else 1
+
+
+@gne_command(app, "gain")
+def gain(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Optional[list[str]] = _UNIT,
+         scale: float = _SCALE,
+         out: Optional[Path] = typer.Option(None, "--out", "-o", help="出力(既定 <root>/export/<レシピ名>.lora.gguf、--bake なら -gain.gguf)"),
+         bake: bool = typer.Option(False, "--bake", help="LoRA ではなく、W_up を書き換えた GGUF を作る"),
+         in_path: Optional[Path] = typer.Option(None, "--in", help="--bake の元の GGUF(既定 --model)"),
+         requant: str = typer.Option("q8_0", "--requant", help="--bake で書き換えた ffn_up の型: q8_0 / f16")):
+    """gain ユニット(L:N:x2 など、出力を k 倍)を LoRA アダプタ GGUF か書き換え GGUF に書き出す(§6.16)。"""
+    if in_path and c.model and in_path.resolve() != c.model.resolve():
+        raise GneError("BAD_ARGS", "--in と --model が違うファイルです")
+    s = holder["session"] = c.session(in_path)
+    r = s.recipe(units=unit, path=recipe, scale=scale)
+    name = r.name or "gain"
+    out = out or s.store.export_dir() / (f"{name}-gain.gguf" if bake else f"{name}.lora.gguf")
+    d = s.gain(r, out, bake=bake, requant=requant)
+    if bake:
+        text = f"{d['path']}({d['bytes'] / 1e6:.1f} MB)、書き換え: " + ", ".join(
+            f"{m['tensor']}({m['from']} → {m['to']})" for m in d["modified"])
+    else:
+        text = (f"{d['path']}({d['bytes'] / 1e6:.2f} MB、LoRA)\n"
+                + "\n".join(f"  L{L}: " + ", ".join(f"N{int(n)} ×{k:g}" for n, k in nk) for L, nk in d["layers"].items())
+                + "\n使い方: llama-cli -m <model> --lora " + d["path"])
+    return d, text, 0
 
 
 # --- lens / reverse(Phase 2) -----------------------------------------------------------------------------
