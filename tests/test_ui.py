@@ -788,7 +788,7 @@ def test_i18n_english_and_switch_back(server, browser):
     pg.click("#agent-btn")
     grab()
     pg.click("#agent-btn")
-    for view in ("layers", "embed"):
+    for view in ("layers", "eval", "embed"):
         pg.click(f"#views button[data-view={view}]")
         pg.wait_for_timeout(1500)
         grab()
@@ -801,5 +801,57 @@ def test_i18n_english_and_switch_back(server, browser):
     pg.wait_for_function("window.gne && window.gne.overlayReady && document.documentElement.lang === 'ja'", timeout=60000)
     assert pg.evaluate("document.querySelector('#web-toggle').textContent") == "線: 直接"
     assert pg.evaluate("localStorage.getItem('gne.lang')") == "ja"
+    assert not errors, errors
+    pg.close()
+
+
+@pytest.mark.model
+def test_eval_view_and_job(server, browser, tmp_path):
+    """eval ビュー(CHANGE-01 A): 保存済みの eval を折れ線と表で見る。「今のレシピで eval」でジョブを投げ、終われば一覧に出る。"""
+    import urllib.request
+
+    import yaml
+
+    def get(path):
+        return json.loads(urllib.request.urlopen(server + path).read())
+    (tmp_path / "ppl").mkdir()
+    (tmp_path / "ppl" / "en.txt").write_text("Alice was beginning to get very tired of sitting by her sister on the bank. " * 3)
+    suite = tmp_path / "mini.yaml"
+    suite.write_text(yaml.safe_dump({"name": "mini", "max_tokens": {"exact": 8, "format": 24, "mix": 24, "persona": 24},
+                                     "exact": [{"id": "add", "prompt": "What is 17 + 25? Answer with just the number.", "answer": ["42"]}],
+                                     "format": [], "mix": [{"id": "m", "prompt": "春について 1 文で。"}],
+                                     "persona": {"prompt_sets": ["en"]}, "ppl": [{"id": "en", "path": "ppl/en.txt"}]}))
+    req = urllib.request.Request(server + "/api/jobs", data=json.dumps({"kind": "eval", "params": {
+        "units": ["14:100:+1.5"], "doses": [0.5, 1], "suite": str(suite), "name": "ui-seed"}}).encode(),
+        headers={"Content-Type": "application/json"})
+    jid = json.loads(urllib.request.urlopen(req).read())["id"]
+    for _ in range(1500):
+        v = next(x for x in get("/api/jobs") if x["id"] == jid)
+        if v["status"] not in ("queued", "running"):
+            break
+        time.sleep(0.2)
+    assert v["status"] == "done", v
+    assert get("/api/evals")[0]["name"] == "ui-seed" and len(get("/api/evals/ui-seed")["rows"]) == 3
+    pg = browser.new_page(viewport={"width": 1500, "height": 860})
+    errors = []
+    pg.on("pageerror", lambda er: errors.append(str(er)))
+    pg.goto(server + "/")
+    pg.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
+    pg.click("#views button[data-view=eval]")
+    pg.wait_for_function("window.gne.evalView && window.gne.evalView.data", timeout=30000)
+    assert pg.evaluate("window.gne.evalView.data.name") == "ui-seed"
+    assert pg.evaluate("document.querySelectorAll('table.evx tbody tr').length") == 3
+    assert pg.evaluate("document.querySelector('#evx-canvas').width") > 0
+    assert pg.evaluate("document.querySelector('#evx-go').disabled")                      # レシピが空なら押せない
+    pg.click("table.evx tbody tr[data-dose='0.5']")
+    assert "0.50" in pg.evaluate("document.querySelector('#evx-sample h4').textContent")
+    # 今のレシピで投げる(既定のタスク集、倍率 0 と 1)
+    pg.evaluate("window.gne.recipe.add(14, 100, 1.0); window.gne.recipe.name = 'ui-run'; window.gne.evalView.refresh()")
+    pg.wait_for_function("!document.querySelector('#evx-go').disabled", timeout=10000)
+    pg.fill("#evx-doses", "0,1")
+    pg.click("#evx-go")
+    pg.wait_for_function("window.gne.evalView.data && window.gne.evalView.data.name === 'ui-run'", timeout=300000)
+    assert pg.evaluate("document.querySelectorAll('table.evx tbody tr').length") == 2
+    assert pg.evaluate("window.gne.evalView.data.suite.name") == "default"
     assert not errors, errors
     pg.close()

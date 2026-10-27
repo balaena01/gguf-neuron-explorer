@@ -265,6 +265,40 @@ class GainOut(Envelope):                        # §6.16 gne gain
     n_tensors: int | None = None
 
 
+class EvalRow(_Strict):                         # §6.14 gne eval の 1 倍率
+    dose: float
+    exact: float | None
+    format: float | None
+    capability: float | None                    # exact と format を合わせた正答率
+    ppl: dict[str, float]
+    ppl_mean: float | None
+    mix_zh: float
+    mix_other: float
+    persona: dict[str, Any]                     # novelty / mass / top_words / distinct4 / length / capped
+    failed: dict[str, list[str]]
+    capability_drop_pt: float
+    ppl_worse_pct: float
+    mix_increase: float
+    ok: dict[str, bool]
+    shippable: bool
+    judge: float | None = None
+    judge_scores: list[int | None] | None = None
+
+
+class EvalOut(Envelope):
+    name: str
+    path: str
+    created: str
+    recipe: RecipeModel
+    when: str
+    suite: dict[str, Any]
+    doses: list[float]
+    rows: list[EvalRow]
+    samples: dict[str, Any]
+    judge: dict[str, str] | None
+    seconds: float
+
+
 # --- Phase 2: lens / reverse -----------------------------------------------------------------------------
 
 class LogitNeuron(_Strict):
@@ -490,4 +524,5 @@ COMMAND_SCHEMAS: dict[str, type[Envelope]] = {
     "info": InfoOut, "probe": ProbeOut, "verify": VerifyOut, "bench": BenchOut,
     "stats resid": StatsResidOut, "stats act": StatsActOut, "steer": SteerOut,
     "export-cvec": ExportOut, "import-cvec": ImportOut, "bake": BakeOut, "gain": GainOut,
+    "eval": EvalOut,
 }

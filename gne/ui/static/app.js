@@ -7,6 +7,7 @@ import { AgentLink } from "./agent.js";
 import { LANG, setLang, t, translateDOM } from "./i18n.js";
 import { ChatPanel } from "./chat.js";
 import { EmbedView } from "./embed.js";
+import { EvalView } from "./eval.js";
 import { FiresPanel } from "./fires.js";
 import { JobsBar, KIND, computeMenu } from "./jobs.js";
 import { LayersView } from "./layers.js";
@@ -125,6 +126,7 @@ function updateStatus() {
   $("#perf").textContent = state.view === "embed"
     ? (embedView && embedView.data ? `${embedView.data.points.length.toLocaleString()} rollouts (embed)` : "— (embed)")
     : state.view === "layers" ? "(layers)"                                // 層の数は左にある
+    : state.view === "eval" ? "(eval)"
     : `${t("{n} 点", { n: (map?.nPoints ?? 0).toLocaleString() })} · ${map && map.fps !== null ? map.fps.toFixed(0) : "—"} fps`;
 }
 
@@ -394,7 +396,7 @@ function closeSearch() {
 }
 
 // --- LIST・NEURON ----------------------------------------------------------------------------------------
-let rank, neuron, layersView, searchList, chat, firesPanel, recipePanel, jobsBar, embedView, agent;
+let rank, neuron, layersView, searchList, chat, firesPanel, recipePanel, jobsBar, embedView, evalView, agent;
 
 function expand(id) {
   const p = $(`#${id}`);
@@ -442,6 +444,7 @@ async function onJobFinished(j) {
   fillColorSelect();
   if (j.kind === "layout") { layoutCache.clear(); if (state.layout === j.params.kind) applyLayout(state.layout); }
   if (j.kind === "connections" && state.focus) { showLinks(); neuron.render(); }
+  if (j.kind === "eval" && evalView) evalView.refresh(j.result && j.result.name);
   if (j.kind === "embed" && embedView) { embedView.setRuns(state.model.runs); if (embedView.run === j.params.run) embedView.load(j.params.run); }
   const f = state.overlay.field;
   if (f !== "none" && !f.startsWith("search:") && !f.startsWith("fires:")) applyOverlay(f);
@@ -472,13 +475,23 @@ function onLayerChanged(L) {
 async function setView(v) {
   state.view = v;
   for (const x of document.querySelectorAll("#views button")) x.classList.toggle("on", x.dataset.view === v);
-  const ph = $("#view-placeholder"), lv = $("#layers-view"), ev = $("#embed-view");
+  const ph = $("#view-placeholder"), lv = $("#layers-view"), ev = $("#embed-view"), xv = $("#eval-view");
   $("#map-wrap").classList.toggle("not-map", v !== "map");
   document.body.classList.toggle("view-other", v !== "map");             // 地図専用の header の部品を薄く
   if (state.map) state.map.setActive(v === "map");
   ph.classList.add("hidden");
   lv.classList.toggle("hidden", v !== "layers");
   ev.classList.toggle("hidden", v !== "embed");
+  xv.classList.toggle("hidden", v !== "eval");
+  if (v === "eval") {
+    if (!state.model) { xv.innerHTML = `<p class="muted" style="padding:16px">${t("合成の構造には eval がありません")}</p>`; return; }
+    if (!evalView) {
+      evalView = new EvalView(xv, { recipe: state.recipe, onRun: (p) => startJob("eval", p) });
+      state.evalView = evalView;                                         // 自動テスト用
+    }
+    await evalView.refresh();
+    return;
+  }
   if (v === "embed") {
     if (!state.model) { ev.innerHTML = `<p class="muted" style="padding:16px">${t("合成の構造には rollout がありません")}</p>`; return; }
     if (!embedView) {

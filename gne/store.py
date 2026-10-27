@@ -6,6 +6,8 @@
   lens/<model_id>/...
   runs/<model_id>/...
   reverse/<model_id>/<name>.directions.npz
+  gain/<model_id>/<hash>.lora.gguf  gain の実行時 LoRA
+  evals/<model_id>/<name>.json      gne eval の結果
   recipes/*.yaml
   export/*
 """
@@ -54,6 +56,10 @@ class Store:
     def gain_dir(self, model_id: str) -> Path:
         """gain(§6.16)の実行時 LoRA の置き場所。"""
         return self._dir("gain", model_id)
+
+    def eval_dir(self, model_id: str) -> Path:
+        """gne eval(§6.14)の結果の置き場所。"""
+        return self._dir("evals", model_id)
 
     def connections_path(self, model_id: str) -> Path:
         return self._dir("connections") / f"{model_id}.npz"

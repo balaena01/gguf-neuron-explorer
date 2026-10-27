@@ -5,7 +5,7 @@ import { t as tr } from "./i18n.js";
 import { esc } from "./panels.js";
 
 export const KIND = { embed: tr("埋め込み"), connections: "connections", layout: tr("配置"), lens_logit: "logit lens", lens_steer: "steer lens", sweep_rank: "sweep", sweep: "sweep", rank: "rank",
-               stats_resid: tr("残差の統計"), stats_act: tr("活性の統計"), reverse: tr("逆引き") };
+               stats_resid: tr("残差の統計"), stats_act: tr("活性の統計"), reverse: tr("逆引き"), eval: "eval" };
 
 function eta(s) {
   if (s === null || s === undefined || !Number.isFinite(s)) return "";
@@ -22,6 +22,7 @@ function what(j) {
   if (p.run) bits.push(p.run);
   if (p.layers !== undefined) bits.push(p.layers === "all" ? tr("全層") : `L${[].concat(p.layers).join(",")}`);
   if (p.design) bits.push(p.design);
+  if (j.kind === "eval") bits.push(p.name || p.recipe || tr("{n} ユニット", { n: (p.units || []).length }), ...(p.when && p.when !== "all" ? [`@${p.when}`] : []));
   if (p.neurons) bits.push(/^\d/.test(p.neurons) ? `N${p.neurons.replace("-", "–")}` : tr("ニューロン {s}", { s: p.neurons }));
   if (p.random_controls !== undefined) bits.push(tr("+ 対照 {n}", { n: p.random_controls }));
   return bits.join(" ");

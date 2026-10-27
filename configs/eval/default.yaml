@@ -1,0 +1,65 @@
+# gne eval の既定のタスク集(本体設計 §6.14)。自動で採点できるものだけを入れる。
+# exact: 正解との一致(小文字・記号を除いて、答えの語が出力の最初の行に含まれれば正解)。answer は別解のリスト
+# format: 形式の検査(json: 指定のキーを持つ JSON が取り出せる / lines:N: 空でない行がちょうど N / lang:en|ja: 答えの言語)
+# mix: 日本語での自由回答。簡体字固有の文字(zh_only_chars.txt)とハングル・キリル文字などの割合
+# persona: 性格の変化量。configs/prompts/default.yaml の組(sweep と同じ)で生成し、無介入との語彙の差を見る
+# ppl: 参照テキスト(teacher-forced の平均 logprob)。レシピは全位置に当てて測る
+name: default
+max_tokens: {exact: 32, format: 96, mix: 96, persona: 96}
+thresholds:                 # 「配布可」の目安(本体設計 §6.14)
+  capability_drop_pt: 5     # exact + format の正答率の低下(ポイント)
+  ppl_worse_pct: 10         # ppl の悪化(%)
+  mix_increase: 0.0         # mix が増えていない
+exact:
+  - {id: add1, prompt: "What is 17 + 25? Answer with just the number.", answer: ["42"]}
+  - {id: mul1, prompt: "What is 12 times 8? Answer with just the number.", answer: ["96"]}
+  - {id: sub1, prompt: "What is 100 minus 37? Answer with just the number.", answer: ["63"]}
+  - {id: div1, prompt: "What is 144 divided by 12? Answer with just the number.", answer: ["12"]}
+  - {id: add_ja, prompt: "23 + 19 はいくつですか？数字だけで答えてください。", answer: ["42"]}
+  - {id: mul_ja, prompt: "7 × 9 はいくつですか？数字だけで答えてください。", answer: ["63"]}
+  - {id: sub_ja, prompt: "50 − 18 はいくつですか？数字だけで答えてください。", answer: ["32"]}
+  - {id: sq_ja, prompt: "15 の 2 乗はいくつですか？数字だけで答えてください。", answer: ["225"]}
+  - {id: cap_fr, prompt: "What is the capital of France? Answer with one word.", answer: ["paris"]}
+  - {id: cap_jp, prompt: "What is the capital of Japan? Answer with one word.", answer: ["tokyo"]}
+  - {id: planet, prompt: "Which planet is known as the Red Planet? Answer with one word.", answer: ["mars"]}
+  - {id: water, prompt: "What is the chemical formula of water? Answer with just the formula.", answer: ["h2o", "h₂o"]}
+  - {id: cap_ja, prompt: "日本の首都はどこですか？一語で答えてください。", answer: ["東京"]}
+  - {id: sun_ja, prompt: "太陽は東と西のどちらから昇りますか？一語で答えてください。", answer: ["東"]}
+  - {id: week_ja, prompt: "1 週間は何日ですか？数字だけで答えてください。", answer: ["7"]}
+  - {id: fuji_ja, prompt: "日本で一番高い山は何ですか？一語で答えてください。", answer: ["富士山", "富士"]}
+  - {id: tr_cat, prompt: "Translate into English, answer with one word: 猫", answer: ["cat"]}
+  - {id: tr_water, prompt: "Translate into English, answer with one word: 水", answer: ["water"]}
+  - {id: tr_book, prompt: "Translate into English, answer with one word: 本", answer: ["book"]}
+  - {id: tr_red, prompt: "Translate into English, answer with one word: 赤", answer: ["red"]}
+  - {id: tr_dog, prompt: "次の英単語を日本語に訳してください。一語で: dog", answer: ["犬", "いぬ", "イヌ"]}
+  - {id: tr_apple, prompt: "次の英単語を日本語に訳してください。一語で: apple", answer: ["りんご", "林檎", "リンゴ"]}
+  - {id: tr_moon, prompt: "次の英単語を日本語に訳してください。一語で: moon", answer: ["月"]}
+  - {id: tr_school, prompt: "次の英単語を日本語に訳してください。一語で: school", answer: ["学校"]}
+format:
+  - {id: json1, prompt: "Return a JSON object with keys \"name\" and \"age\" for a person named Alice who is 30. Output only the JSON.", check: json, keys: [name, age]}
+  - {id: json2, prompt: "Return a JSON object with keys \"city\" and \"country\" for Paris. Output only the JSON.", check: json, keys: [city, country]}
+  - {id: json3, prompt: "名前 \"太郎\"、年齢 20 の人を、キー \"name\" と \"age\" を持つ JSON で返してください。JSON だけを出力してください。", check: json, keys: [name, age]}
+  - {id: json4, prompt: "Return a JSON array of three colors as strings. Output only the JSON.", check: json_array, n: 3}
+  - {id: lines1, prompt: "List three fruits, one per line, with nothing else.", check: "lines:3"}
+  - {id: lines2, prompt: "Write exactly two short sentences about the sea, each on its own line, and nothing else.", check: "lines:2"}
+  - {id: lines3, prompt: "季節を 4 つ、1 行に 1 つずつ書いてください。それ以外は書かないでください。", check: "lines:4"}
+  - {id: lines4, prompt: "List five numbers from 1 to 5, one per line, with nothing else.", check: "lines:5"}
+  - {id: lang_en1, prompt: "Answer in English in one sentence: 好きな食べ物は何ですか？", check: "lang:en"}
+  - {id: lang_en2, prompt: "Answer in English in one sentence: 今日の天気はどうですか？", check: "lang:en"}
+  - {id: lang_ja1, prompt: "Answer in Japanese in one sentence: What is your favorite season?", check: "lang:ja"}
+  - {id: lang_ja2, prompt: "日本語で 1 文で答えてください: What do you like to do on weekends?", check: "lang:ja"}
+mix:
+  - {id: mix1, prompt: "春の好きなところを 2 文で教えてください。"}
+  - {id: mix2, prompt: "おすすめの朝ごはんを 2 文で教えてください。"}
+  - {id: mix3, prompt: "猫と犬のどちらが好きか、理由を 2 文で書いてください。"}
+  - {id: mix4, prompt: "週末の過ごし方を 2 文で提案してください。"}
+  - {id: mix5, prompt: "雨の日の楽しみ方を 2 文で教えてください。"}
+  - {id: mix6, prompt: "日本の夏について 2 文で説明してください。"}
+  - {id: mix7, prompt: "勉強を続けるコツを 2 文で教えてください。"}
+  - {id: mix8, prompt: "好きな音楽について 2 文で書いてください。"}
+persona:
+  prompt_sets: [en, ja]
+ppl:
+  - {id: en, path: ppl/en.txt}
+  - {id: ja, path: ppl/ja.txt}
+  - {id: code, path: ppl/code.txt}

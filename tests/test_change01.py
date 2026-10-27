@@ -280,3 +280,123 @@ def test_gain_steer_and_llama_lora(session, tmp_path):
     assert out["kind"] == "lora" and out["rank"] == {"14": 2}
     with pytest.raises(GneError):                       # gain だけのレシピは control vector にならない
         session.export_cvec(r, tmp_path / "x.cvec.gguf")
+
+
+# --- eval(A): 採点はモデル不要 ----------------------------------------------------------------------------
+
+def test_eval_scoring():
+    from gne.evalx import (
+        load_suite,
+        mix_ratio,
+        persona_metrics,
+        score_exact,
+        score_format,
+    )
+    st = load_suite()
+    assert (len(st.exact), len(st.format), len(st.mix), len(st.persona), len(st.ppl)) == (24, 12, 8, 8, 3)
+    assert len(st.zh_only) > 3000 and "这" in st.zh_only and "日" not in st.zh_only       # 日本語と共通の字は入れない
+    assert score_exact("The answer is 42.", ["42"]) and not score_exact("420", ["42"])       # 数は語の境界で
+    assert score_exact("**Paris**", ["paris"]) and score_exact("東京です。", ["東京"])
+    assert not score_exact("Sure!\n42", ["42"])                                              # 最初の行だけを見る
+    assert score_format('```json\n{"name": "A", "age": 3}\n```', {"check": "json", "keys": ["name", "age"]})
+    assert not score_format('{"name": "A"}', {"check": "json", "keys": ["name", "age"]})
+    assert score_format('["a", "b", "c"]', {"check": "json_array", "n": 3})
+    assert score_format("a\n\nb\nc", {"check": "lines:3"}) and not score_format("1. a\n2. b", {"check": "lines:3"})
+    assert score_format("I like sushi.", {"check": "lang:en"}) and not score_format("寿司が好き", {"check": "lang:en"})
+    assert score_format("私は寿司が好きです。", {"check": "lang:ja"}) and not score_format("我喜欢寿司", {"check": "lang:ja"})
+    zh, other = mix_ratio("这是测试。日本語です", st.zh_only)
+    assert zh > 0.2 and other == 0
+    assert mix_ratio("안녕하세요 hello", st.zh_only)[1] == 0.5
+    words = ["", "a", "b", "c", "d"]
+    base = [{"token_ids": [1, 2, 0], "finish": "eog"}, {"token_ids": [1, 0], "finish": "eog"}]          # 末尾の 0 が EOG
+    out = [{"token_ids": [1, 3, 4], "finish": "length"}, {"token_ids": [3, 0], "finish": "eog"}]
+    pm = persona_metrics(base, out, words)
+    assert pm["novelty"] == pytest.approx((2 / 3 + 1) / 2) and pm["top_words"] == [["c", 2]] and pm["mass"] == 2
+    assert pm["capped"] == 0.5 and persona_metrics(base, base, words)["novelty"] == 0
+
+
+def _mini_suite(tmp_path):
+    (tmp_path / "ppl").mkdir()
+    (tmp_path / "ppl" / "en.txt").write_text("Alice was beginning to get very tired of sitting by her sister on the bank. " * 3)
+    (tmp_path / "zh_only_chars.txt").write_text("# test\n这们说\n")
+    d = {"name": "mini", "max_tokens": {"exact": 12, "format": 32, "mix": 32, "persona": 32},
+         "exact": [{"id": "add", "prompt": "What is 17 + 25? Answer with just the number.", "answer": ["42"]},
+                   {"id": "cap", "prompt": "What is the capital of France? Answer with one word.", "answer": ["paris"]}],
+         "format": [{"id": "j", "prompt": "Return a JSON object with keys \"a\" and \"b\". Output only the JSON.",
+                     "check": "json", "keys": ["a", "b"]}],
+         "mix": [{"id": "m", "prompt": "春の好きなところを 2 文で教えてください。"}],
+         "persona": {"prompt_sets": ["en"]}, "ppl": [{"id": "en", "path": "ppl/en.txt"}]}
+    p = tmp_path / "mini.yaml"
+    p.write_text(yaml.safe_dump(d, allow_unicode=True))
+    return p
+
+
+@pytest.mark.model
+def test_token_logprobs_matches_generation(session):
+    """teacher-forced の logprob が greedy 生成の logprob と合う(ppl の土台)。"""
+    import numpy as np
+    e = session.engine
+    ctx = e.steer_ctx()
+    ids = e.tokenize_prompt(e.render_chat([{"role": "user", "content": "Describe the color orange."}]))
+    r = e.generate_greedy(ctx, [ids], max_tokens=24)[0]
+    lp = e.token_logprobs(ctx, ids + r.token_ids, chunk=512)
+    assert lp.shape == (len(ids) + len(r.token_ids) - 1,)
+    tail = lp[len(ids) - 1:]
+    diff = np.abs(tail - np.array(r.logprob))
+    # 1 トークンずつの decode とまとめた decode ではカーネルが違い、0.6B Q8_0 で最大 0.13 nats ずれる(verification §11.3)
+    assert diff.mean() < 0.05 and diff.max() < 0.3 and np.all(lp <= 0)
+
+
+@pytest.mark.model
+def test_eval_end_to_end(session, tmp_path):
+    from gne.schemas import COMMAND_SCHEMAS
+    suite = _mini_suite(tmp_path)
+    r = session.recipe(units=["14:100:+1.5"], name="e2e")
+    d = session.eval(r, doses=[1.0, 0.5], suite=suite)
+    assert d["doses"] == [0.0, 0.5, 1.0] and [x["dose"] for x in d["rows"]] == [0.0, 0.5, 1.0]        # 0 は必ず入る
+    b, top = d["rows"][0], d["rows"][-1]
+    assert b["capability_drop_pt"] == 0 and b["ppl_worse_pct"] == 0 and b["persona"]["novelty"] == 0 and b["shippable"]
+    assert top["ppl_worse_pct"] > 0 and top["persona"]["novelty"] > 0
+    assert set(b["ppl"]) == {"en"} and set(d["samples"]) == {"0", "0.5", "1"}
+    assert Path(d["path"]).exists() and d["name"] == "e2e"
+    assert session.eval_load("e2e")["rows"] == json.loads(json.dumps(d["rows"]))
+    lst = session.evals()
+    assert lst[0]["name"] == "e2e" and lst[0]["units"] == ["14:100:+1.5"] and 0.0 in lst[0]["shippable"]
+    COMMAND_SCHEMAS["eval"].model_validate({**session.envelope("eval"), **d})
+    # 同じ条件なら同じ数(greedy・同じバッチの組み方)
+    again = session.eval(r, doses=[0], suite=suite, name="e2e-again")
+    assert again["rows"][0]["capability"] == b["capability"] and again["rows"][0]["ppl"] == b["ppl"]
+    # when=gen は 1 本ずつ。名前に @gen が付く。gain のレシピも測れる
+    g = session.eval(session.recipe(units=["14:100:x4"], name="g"), doses=[1], suite=suite, when="gen")
+    assert g["name"] == "g@gen" and g["when"] == "gen" and g["rows"][1]["persona"]["novelty"] >= 0
+    # 負の倍率でもベースラインは倍率 0 の行
+    n = session.eval(r, doses=[-0.5], suite=suite, name="neg")
+    assert [x["dose"] for x in n["rows"]] == [-0.5, 0.0] and n["rows"][1]["capability_drop_pt"] == 0
+    assert n["rows"][1]["persona"]["novelty"] == 0 and n["rows"][0]["persona"]["novelty"] > 0
+    # judge(採点用の GGUF。ここでは同じモデル)
+    j = session.eval(r, doses=[1], suite=suite, judge_model=MODEL, judge_target="a pirate", name="judged")
+    assert j["judge"]["target"] == "a pirate" and all(len(x["judge_scores"]) == 4 for x in j["rows"])
+    assert all(s_ is None or 1 <= s_ <= 5 for x in j["rows"] for s_ in x["judge_scores"])
+    COMMAND_SCHEMAS["eval"].model_validate({**session.envelope("eval"), **j})
+    with pytest.raises(GneError):
+        session.eval(r, suite=suite, judge_model="x.gguf")                                   # judge は 2 つそろえて
+    with pytest.raises(GneError):
+        session.eval_load("../x")
+
+
+@pytest.mark.model
+def test_eval_job_and_cli(session, tmp_path):
+    from gne.jobs import standard_kinds
+    suite = _mini_suite(tmp_path)
+    out = standard_kinds()["eval"](session, units=["14:100:+1.0"], doses=[1], suite=suite, name="job")
+    assert out["name"] == "job" and "samples" not in out and len(out["rows"]) == 2
+    with pytest.raises(GneError):
+        standard_kinds()["eval"](session, doses=[1])
+    from typer.testing import CliRunner
+
+    from gne.cli import app
+    res = CliRunner().invoke(app, ["eval", "-m", str(MODEL), "--root", str(session.store.root), "--unit", "14:100:+1.0",
+                                   "--doses", "0,1", "--suite", str(suite), "--name", "cli", "--json"])
+    assert res.exit_code == 0, res.output
+    d = json.loads(res.stdout.strip().splitlines()[-1])
+    assert d["command"] == "eval" and d["name"] == "cli" and len(d["rows"]) == 2

@@ -351,6 +351,23 @@ class Engine:
                     last[si] = lo
         return PrefillResult(last, all_logits, n_tok)
 
+    def token_logprobs(self, ctx: _Ctx, ids: list[int], *, chunk: int = 256) -> np.ndarray:
+        """teacher-forced: i = 0..len−2 について log p(ids[i+1] | ids[:i+1])。1 本のシーケンスを chunk ずつ評価する
+        (全位置のロジットを一度に持たないように、行ごとに logsumexp を取って捨てる)。§6.14 の ppl 用。"""
+        if ctx.capture is not None:
+            raise ValueError("token_logprobs は steer ctx で使ってください")
+        self.clear_memory(ctx)
+        n = len(ids) - 1
+        out = np.empty(max(n, 0), dtype=np.float64)
+        for c0 in range(0, n, chunk):
+            part = ids[c0:min(c0 + chunk, n)]
+            self._decode(ctx, [(t, c0 + j, 0, True) for j, t in enumerate(part)])
+            for j in range(len(part)):
+                lo = self._logits(ctx, j)
+                m = lo.max()
+                out[c0 + j] = float(lo[ids[c0 + j + 1]] - (m + np.log(np.exp(lo - m).sum())))
+        return out
+
     def generate_greedy(self, ctx: _Ctx, seqs: list[list[int]], *, max_tokens: int = 128, top_k: int = 5,
                         stop_on_eog: bool = True, prefilled: PrefillResult | None = None,
                         on_token: Callable[[int, int], None] | None = None,

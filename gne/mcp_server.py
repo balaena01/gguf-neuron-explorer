@@ -29,7 +29,7 @@ gguf-neuron-explorer: llama.cpp 上の GGUF モデルの MLP ニューロンを�
 2. 候補は neuron(L, n) の調書で判断する。null_pct(sweep が対照群の何割より上か)と kl_null_p95(steer lens の対照の 95% 点)を必ず見る。対照群を超えないものは報告しない。
 3. 「名乗り・作者名が変わる」はランダム方向でも起こる安い効果。複数のプロンプトで同じテーマが出るものだけを本物とみなす。
 4. rel dose: 0.5 で微かな挿入、0.8 で話題を上書き、1.0 以上は崩壊域。層 0〜2 には rel dose がそのまま通用しない。
-5. steer(units, compare=True) で無介入との差を確かめてから recipe_save → export_cvec。
+5. steer(units, compare=True) で無介入との差を確かめ、recipe_save → eval(recipe) で副作用(能力・ppl・言語の混入)を測ってから export_cvec。
 ユニットの書き方: "L:N:dose"(例 "14:8949:+1.0")、ランダム方向は "L:random:SEED:dose"。
 6. 人が UI(gne serve)を見ていれば、ui_open で調べているニューロンを開き、ui_highlight で候補を強調し、ui_note で判断の要点を
    ニューロンに貼る(--ui-url で繋いだときだけ。繋いでいなければ UI_NOT_RUNNING が返るので気にせず続ける)。
@@ -161,6 +161,21 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
             return session.gain(r, out, bake=bake)
         return await call(fn, gpu=False)
 
+    @srv.tool(name="eval")
+    async def eval_recipe(recipe: str | None = None, units: list[str] | None = None, doses: list[float] | None = None,
+                   when: str | None = None) -> dict:
+        """副作用チェック(§6.14)をジョブとして投げる。recipe は保存したレシピの名前、units は単発指定(どちらか)。
+        doses はレシピ全体の倍率(既定 [0, 0.25, 0.5, 0.75, 1]、0 が無介入)。倍率ごとに exact / format の正答率、ppl、
+        言語の混入(簡体字・ハングルなど)、性格の変化量(無介入にない語の割合など)を測り、配布可(能力 −5pt 以内、
+        ppl +10% 以内、混入が増えない)の倍率を返す。4B で数分。job_status で結果を見る(保存先 <root>/evals/)。"""
+        try:
+            p = {"recipe": recipe, "units": units, "when": when}
+            if doses is not None:
+                p["doses"] = doses
+            return jobs.start("eval", p).view()
+        except Exception as e:  # noqa: BLE001
+            return _err(e)
+
     @srv.tool()
     async def bake(name: str, dst: str, verify: bool = True) -> dict:
         """保存したレシピを FFN バイアスとして焼き付けた GGUF を dst に作る(対応 arch のみ、Qwen 系は不可)。"""
@@ -176,7 +191,7 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
 
     @srv.tool()
     async def job_start(kind: str, params: dict[str, Any] | None = None) -> dict:
-        """長時間の処理を投げる。kind: stats_resid / stats_act / lens_logit / lens_steer / sweep / rank / reverse。
+        """長時間の処理を投げる。kind: stats_resid / stats_act / lens_logit / lens_steer / sweep / rank / reverse / eval。
         params は gne.api の同名メソッドの引数(例 sweep: {"layer": 22, "neurons": "random:64", "design": "quick"})。"""
         try:
             return jobs.start(kind, params).view()

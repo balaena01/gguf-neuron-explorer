@@ -191,6 +191,14 @@ def create_app(session, *, warm: bool = True, openai: bool = False) -> FastAPI:
     def recipe_save(name: str, units: list[str] = Body(..., embed=True)):
         return session.recipe_save(name, units)
 
+    @app.get("/api/evals")
+    def evals():
+        return session.evals()
+
+    @app.get("/api/evals/{name}")
+    def eval_one(name: str):
+        return session.eval_load(name)
+
     @app.post("/api/export")
     def export(units: list[str] = Body(...), name: str = Body(...), verify: bool = Body(False)):
         return live.export(units, name, verify=verify)

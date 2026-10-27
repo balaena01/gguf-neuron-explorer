@@ -41,7 +41,7 @@ input::placeholder { color: #4a5464; }
 #layer-select { max-width: 280px; }
 #color-select { max-width: 200px; }
 @media (max-width: 1760px) { #header .lbl { display: none; } }            /* 幅が足りなければ layer / layout / color / jump の字を省く(欄の title に残る) */
-@media (max-width: 1440px) { #layer-select { max-width: 170px; } #color-select { max-width: 140px; } #search-q { width: 130px; } }
+@media (max-width: 1560px) { #layer-select { max-width: 170px; } #color-select { max-width: 140px; } #search-q { width: 130px; } }
 @media (max-width: 1340px) { #header { gap: 8px; } #layer-select { max-width: 140px; } #color-select { max-width: 120px; } #search-q { width: 100px; } #jump { width: 92px; } }
 #status { margin-left: auto; color: var(--muted); display: flex; min-width: 0; flex: 0 1 auto; justify-content: flex-end; gap: 10px; }
 #status-main { color: #a8b3c2; }
@@ -306,6 +306,22 @@ input[type=range].dose::-moz-range-thumb { width: 12px; height: 12px; border-rad
 /* embed ビュー */
 #embed-view { position: absolute; inset: 0; background: #000; display: flex; flex-direction: column; z-index: 10; }
 #layers-view { z-index: 10; }
+#eval-view { position: absolute; inset: 0; overflow-y: auto; overflow-x: hidden; background: #000; z-index: 10; padding: 0 12px 24px; }
+.evx-tools { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; padding: 10px 0 2px; }
+.evx-run { display: inline-flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.evx-help { margin: 4px 0 8px; }
+#evx-canvas { display: block; margin: 4px 0; }
+.evx-legend { display: flex; flex-wrap: wrap; gap: 4px 16px; color: #aeb9c8; }
+.evx-legend i { display: inline-block; width: 14px; height: 3px; vertical-align: middle; margin-right: 6px; }
+.evx-legend i.dot { width: 7px; height: 7px; border-radius: 50%; }
+table.evx { border-collapse: collapse; font-size: 12px; margin: 6px 0 10px; }
+table.evx th, table.evx td { padding: 3px 10px 3px 0; text-align: right; border-bottom: 1px solid #141a22; white-space: nowrap; }
+table.evx th { color: #8692a3; font-weight: normal; }
+table.evx tbody tr { cursor: pointer; }
+table.evx tbody tr.on { background: #121923; }
+table.evx td.ok { color: #6fcf8f; text-align: left; }
+table.evx td.ng { color: #ff8a8a; text-align: left; }
+#evx-sample p { margin: 4px 0; line-height: 1.5; max-width: 980px; }
 #map-wrap.not-map #overlay, #map-wrap.not-map #legend, #map-wrap.not-map #tooltip { display: none; }   /* 地図の札・凡例を他のビューに透かさない */
 .ev-tools { display: flex; gap: 12px; align-items: center; padding: 10px 12px 4px; flex-wrap: wrap; }
 #ev-info { margin: 4px 12px; padding: 6px 10px; height: 96px; flex: 0 0 auto; overflow: auto; font-size: 12px; line-height: 1.5;   /* 高さ固定(本文で伸びると図がずれる) */

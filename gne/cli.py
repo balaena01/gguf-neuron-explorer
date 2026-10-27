@@ -525,6 +525,51 @@ def gain(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Option
     return d, text, 0
 
 
+def _doses(text: str) -> list[float]:
+    try:
+        return [float(x) for x in text.split(",") if x.strip()]
+    except ValueError as e:
+        raise GneError("BAD_ARGS", f"--doses {text!r} はカンマ区切りの数です(例 0,0.5,1)") from e
+
+
+@gne_command(app, "eval")
+def eval_cmd(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Optional[list[str]] = _UNIT,
+             dose_unit: Optional[str] = _DOSE_UNIT,
+             doses: str = typer.Option("0,0.25,0.5,0.75,1", "--doses", help="レシピ全体に掛ける倍率(0 = 無介入は必ず入る)"),
+             suite: Optional[Path] = typer.Option(None, "--suite", help="タスク集 YAML(既定 configs/eval/default.yaml)"),
+             when: Optional[str] = _WHEN,
+             judge_model: Optional[Path] = typer.Option(None, "--judge-model", help="性格の採点に使う別の GGUF(任意)"),
+             judge_target: Optional[str] = typer.Option(None, "--judge-target", help="採点させる目標の性格(例 'a yandere anime girl')"),
+             name: Optional[str] = typer.Option(None, "--name", help="保存名(既定はレシピ名)")):
+    """副作用チェック: 倍率ごとに能力(exact / format)・ppl・言語の混入・性格の変化量を測り、配布可の倍率を示す(§6.14)。"""
+    s = holder["session"] = c.session()
+    r = s.recipe(units=unit, path=recipe, dose_unit=dose_unit)
+    d = s.eval(r, doses=_doses(doses), suite=suite, when=when, judge_model=judge_model, judge_target=judge_target,
+               name=name)
+    th = d["suite"]["thresholds"]
+    head = f"{'倍率':>5} {'能力':>6} {'低下pt':>6} {'ppl':>8} {'悪化%':>7} {'混入':>6} {'新語':>5} {'d4':>5} {'打切':>4}"
+    if d["judge"]:
+        head += f" {'judge':>5}"
+    lines = [head]
+    for row in d["rows"]:
+        pm = row["persona"]
+        line = (f"{row['dose']:>5g} {row['capability'] * 100:>5.1f}% {row['capability_drop_pt']:>6.1f} "
+                f"{row['ppl_mean']:>8.2f} {row['ppl_worse_pct']:>+6.1f}% {(row['mix_zh'] + row['mix_other']) * 100:>5.2f}% "
+                f"{pm['novelty']:>5.2f} {pm['distinct4']:>5.2f} {pm['capped'] * 100:>3.0f}%")
+        if d["judge"]:
+            line += f" {row['judge'] if row['judge'] is not None else float('nan'):>5.2f}"
+        lines.append(line + ("  配布可" if row["shippable"] else "  " + "・".join(k for k, ok in row["ok"].items() if not ok) + " ×"))
+    ok = [r_["dose"] for r_ in d["rows"] if r_["shippable"] and r_["dose"] > 0]
+    verdict = (f"配布可の最大倍率: {max(ok):g}" if ok else "配布可の倍率はありません(0 を除く)")
+    text = (f"eval {d['name']}(when={d['when']}、{d['suite']['n_tasks']} タスク、{d['seconds']:.0f} 秒)→ {d['path']}\n"
+            + "\n".join(lines) + f"\n基準: 能力 −{th['capability_drop_pt']:g}pt 以内・ppl +{th['ppl_worse_pct']:g}% 以内・混入が増えない。"
+            + verdict)
+    top = d["rows"][-1]["persona"]["top_words"][:8]
+    if top:
+        text += f"\n倍率 {d['rows'][-1]['dose']:g} で複数のプロンプトに新しく出た語: " + ", ".join(f"{w}({n})" for w, n in top)
+    return d, text, 0
+
+
 # --- lens / reverse(Phase 2) -----------------------------------------------------------------------------
 
 _NEURONS = typer.Option("all", "--neurons", help="all / random:384 / 1,5,9-12")

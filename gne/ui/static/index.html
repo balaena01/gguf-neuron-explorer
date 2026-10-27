@@ -14,7 +14,7 @@
 <header id="header">
   <span class="brand">gne</span>
   <span class="seg" id="views">
-    <button data-view="map" class="on">map</button><button data-view="layers">layers</button><button data-view="embed">embed</button>
+    <button data-view="map" class="on">map</button><button data-view="layers">layers</button><button data-view="eval">eval</button><button data-view="embed">embed</button>
   </span>
   <label class="map-only"><span class="lbl">layer</span> <select id="layer-select" data-i18n-title="表示する層" title="表示する層"></select></label>
   <label class="map-only"><span class="lbl">layout</span> <select id="layout-select" data-i18n-title="シート内の並べ方(§4.4)" title="シート内の並べ方(§4.4)"><option value="index">index</option><option value="writes">writes</option><option value="lens">lens</option></select></label>
@@ -45,6 +45,7 @@
     <div id="legend" class="mono"></div>
     <div id="view-placeholder" class="hidden"></div>
     <div id="layers-view" class="hidden"></div>
+    <div id="eval-view" class="hidden"></div>
     <div id="embed-view" class="hidden"></div>
     <div id="agent-pop" class="hidden"></div>
   </section>

@@ -112,6 +112,15 @@ def _sweep_rank(s, layer: int, **p) -> dict:
     return {"sweep": {k_: v for k_, v in r.items() if k_ != "units"}, "rank": {k_: v for k_, v in k.items() if k_ != "units"}}
 
 
+def _eval(s, recipe: str | None = None, units: list[str] | None = None, dose_unit: str | None = None, **p) -> dict:
+    """eval(§6.14)。recipe は保存したレシピの名前、units は単発指定(どちらか)。"""
+    if bool(recipe) == bool(units):
+        raise GneError("BAD_ARGS", "recipe(名前)か units のどちらかを渡してください")
+    r = s.recipe(path=s.recipe_path(recipe)) if recipe else s.recipe(units=list(units), dose_unit=dose_unit)
+    d = s.eval(r, **p)
+    return {k: v for k, v in d.items() if k != "samples"}
+
+
 def standard_kinds() -> dict[str, Callable[..., dict]]:
     """MCP(job_start)と Web UI が共通で使うジョブの種類。"""
     return {
@@ -126,6 +135,7 @@ def standard_kinds() -> dict[str, Callable[..., dict]]:
         "connections": lambda s, **p: s.connections(**p),
         "layout": lambda s, **p: s.layout(**p),
         "embed": lambda s, run, **p: s.embed(run, **p),
+        "eval": _eval,
     }
 
 

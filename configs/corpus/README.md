@@ -14,3 +14,5 @@
 | コード | 本ツール自身の `gne/weights.py`・`gne/capture.py`・`gne/steer.py`(2026-10-26 Phase 0 時点の写し) | 約 18,000 | 本リポジトリ |
 
 `absmax` dose は活性の最大値に依存し、最大値はコーパスに依存するので、同じコーパスで作った統計どうしでしか比べられない(統計ファイルに `corpus_sha` を記録する)。
+
+`configs/eval/ppl/`(`gne eval` の ppl 指標の参照テキスト)は、この `default.txt` から英語・日本語・コードを数 KB ずつ切り出したもの(権利は上の表と同じ)。

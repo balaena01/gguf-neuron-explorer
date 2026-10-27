@@ -1,0 +1,81 @@
+"""cb_eval による中間テンソル捕捉。設計書 §6.3。
+
+ggml の構造体レイアウトには依存せず、ggml の関数(ggml_get_name, ggml_nbytes, ggml_nrows,
+ggml_backend_tensor_get 等)だけでテンソルを読む。
+
+捕捉は ubatch(グラフの 1 回の計算)単位の step にまとめる。Engine は llama_decode の直後に end_step() を
+呼び、1 回の decode が複数の ubatch に分かれた場合は、同じ名前が step 内で再び来た時点で次の ubatch と
+みなして区切る(後勝ちで上書きしてデータを落とさないため)。take() は各 step の同名テンソルを
+トークン方向に連結して返す。行の並びは ubatch の並びで、llama_batch に詰めた順とは限らない
+(ハイブリッド/回帰型は複数シーケンスをシーケンスごとの ubatch に並べ替える)ので、probe ctx では
+1 シーケンスずつ n_ubatch 以下に切って評価する(docs/verification.md の F1)。
+"""
+
+from __future__ import annotations
+
+import ctypes
+from collections.abc import Callable
+
+import numpy as np
+from llama_cpp import llama_cpp as C
+from llama_cpp._ggml import libggml
+
+_vp = ctypes.c_void_p
+libggml.ggml_get_name.restype = ctypes.c_char_p
+libggml.ggml_get_name.argtypes = [_vp]
+libggml.ggml_nbytes.restype = ctypes.c_size_t
+libggml.ggml_nbytes.argtypes = [_vp]
+libggml.ggml_nelements.restype = ctypes.c_int64
+libggml.ggml_nelements.argtypes = [_vp]
+libggml.ggml_nrows.restype = ctypes.c_int64
+libggml.ggml_nrows.argtypes = [_vp]
+libggml.ggml_element_size.restype = ctypes.c_size_t
+libggml.ggml_element_size.argtypes = [_vp]
+libggml.ggml_is_contiguous.restype = ctypes.c_bool
+libggml.ggml_is_contiguous.argtypes = [_vp]
+libggml.ggml_backend_tensor_get.restype = None
+libggml.ggml_backend_tensor_get.argtypes = [_vp, _vp, ctypes.c_size_t, ctypes.c_size_t]
+
+
+class Capture:
+    """ggml_backend_sched_eval_callback の Python 実装。名前で選んだテンソルを float32 で回収する。"""
+
+    def __init__(self, wanted: Callable[[str], bool] | None = None):
+        self._wanted = wanted or (lambda name: False)
+        self._step: dict[str, np.ndarray] = {}
+        self._steps: list[dict[str, np.ndarray]] = []
+        self.seen: dict[str, int] = {}      # record_names=True のとき、ask 段階で見えた名前 → 回数
+        self.record_names = False
+        self.n_splits = 0                   # 同名の再来で step を区切った回数(1 decode が複数 ubatch だった)
+        self.skipped: dict[str, str] = {}   # F32 以外・非連続で回収できなかった名前 → 理由
+        self._cb = C.ggml_backend_sched_eval_callback(self._on_tensor)  # 参照を保持(GC 対策)
+
+    def install(self, cparams: C.llama_context_params) -> None:
+        cparams.cb_eval = self._cb
+        cparams.cb_eval_user_data = None
+
+    def set_wanted(self, wanted: Callable[[str], bool]) -> None:
+        self._wanted = wanted
+
+    def end_step(self) -> None:
+        """Engine が llama_decode の直後に呼ぶ。"""
+        if self._step:
+            self._steps.append(self._step)
+            self._step = {}
+
+    def reset(self) -> None:
+        self._step, self._steps = {}, []
+
+    def take(self) -> dict[str, np.ndarray]:
+        """直前の reset 以降に回収したもの。{name: (n_tokens, ne0) float32}(step 方向に連結)。"""
+        self.end_step()
+        steps, self._steps = self._steps, []
+        out: dict[str, list[np.ndarray]] = {}
+        for st in steps:
+            for name, arr in st.items():
+                out.setdefault(name, []).append(arr)
+        return {k: (v[0] if len(v) == 1 else np.concatenate(v, axis=0)) for k, v in out.items()}
+
+    def _store(self, name: str, arr: np.ndarray) -> None:
+        if name in self._step:              # 同じ名前がもう一度 = 次の ubatch のグラフ
+            self.n_splits += 1

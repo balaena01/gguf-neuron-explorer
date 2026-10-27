@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
@@ -688,6 +689,58 @@ class Session:
         return {"columns": [{"label": c.label, "recipe": c.recipe.to_dict() if c.recipe else None} for c in columns],
                 "system": system, "turns": turns}
 
+    # --- eval(§6.14)---------------------------------------------------------------------------
+
+    def eval(self, recipe: Recipe | list[str], *, doses=(0, 0.25, 0.5, 0.75, 1.0), suite: str | Path | None = None,
+             when: str | None = None, judge_model: str | Path | None = None, judge_target: str | None = None,
+             name: str | None = None) -> dict:
+        """レシピの倍率ごとの副作用(能力・ppl・言語混入)と性格の変化量を測り、<root>/evals/<model_id>/<name>.json に保存する。"""
+        from .evalx import Judge, evaluate
+        recipe = self._as_recipe(recipe)
+        if not recipe.units:
+            raise GneError("BAD_RECIPE", "ユニットがありません")
+        if (judge_model is None) != (judge_target is None):
+            raise GneError("BAD_ARGS", "--judge-model と --judge-target は両方指定してください")
+        judge = Judge(judge_model, judge_target) if judge_model else None
+        try:
+            d = evaluate(self, recipe, doses=doses, suite=suite, when=when, judge=judge, progress=self.progress)
+        finally:
+            if judge is not None:
+                judge.close()
+        name = name or recipe.name or "units-" + hashlib.sha256(
+            json.dumps(recipe.to_dict()["units"], sort_keys=True).encode()).hexdigest()[:8]
+        if not re.fullmatch(r"[\w.\-]+", name):
+            raise GneError("BAD_ARGS", f"名前 {name!r} は英数字・_・-・. だけにしてください")
+        if d["when"] != "all":
+            name += "@" + re.sub(r"[^\w.\-]+", "_", d["when"])
+        path = self.store.eval_dir(self.meta.model_id) / f"{name}.json"
+        d = {"name": name, "path": str(path), "created": time.strftime("%Y-%m-%dT%H:%M:%S"), **d}
+        path.write_text(json.dumps(d, ensure_ascii=False, indent=1))
+        return d
+
+    def evals(self) -> list[dict]:
+        """保存済みの eval の一覧(新しい順)。"""
+        out = []
+        for p in sorted(self.store.eval_dir(self.meta.model_id).glob("*.json"), key=lambda p: -p.stat().st_mtime):
+            try:
+                d = json.loads(p.read_text())
+            except ValueError:
+                continue
+            last = d["rows"][-1] if d.get("rows") else {}
+            out.append({"name": d.get("name", p.stem), "created": d.get("created"), "when": d.get("when"),
+                        "doses": d.get("doses"), "units": [_unit_spec(u) for u in d["recipe"]["units"]],
+                        "shippable": [r["dose"] for r in d.get("rows", []) if r.get("shippable")],
+                        "max_dose_drop_pt": last.get("capability_drop_pt")})
+        return out
+
+    def eval_load(self, name: str) -> dict:
+        if not re.fullmatch(r"[\w.\-@]+", name or ""):
+            raise GneError("BAD_ARGS", f"名前 {name!r} が不正です")
+        p = self.store.eval_dir(self.meta.model_id) / f"{name}.json"
+        if not p.exists():
+            raise GneError("FILE_NOT_FOUND", f"eval {name} がありません")
+        return json.loads(p.read_text())
+
     def _verify_candidates(self, cands, name: str, design_name: str, n_controls: int, max_tokens: int) -> dict:
         """候補を層ごとにまとめ、quick 設計の rollout(対照つき)を回す。順位づけは Phase 3 の rank。"""
         from .sweep import load_design, read_rollouts, run_sweep
@@ -711,6 +764,13 @@ class Session:
                      "text": texts.get((c.layer, c.neuron), "")} for c in cands]
         baselines = {f"L{L}": texts.get((L, None), "") for L in sorted(by_layer)}
         return {"design": design_name, "runs": runs, "examples": examples, "baselines": baselines}
+
+def _unit_spec(u: dict) -> str:
+    """to_dict() のユニット → L:N:+dose / L:N:xk。"""
+    tail = f"x{u['k']:g}" if u.get("mode") == "gain" else f"{u['dose']:+g}"
+    mid = f"random:{u['seed']}" if u.get("kind") == "random" else str(u["neuron"])
+    return f"{u['layer']}:{mid}:{tail}"
+
 
 def template_override(model_id: str, arch: str) -> tuple[str, str] | None:
     """configs/templates/<model_id>.yaml か <arch>.yaml の chat_template(§5.7 の 4)。"""

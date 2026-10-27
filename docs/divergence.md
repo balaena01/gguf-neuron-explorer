@@ -34,3 +34,10 @@
 | `gne gain --bake` | `--in model.gguf --out model-x.gguf` | `--in`(既定 --model)と `--out` / `-o`(既定 `<root>/export/<名前>-gain.gguf`)、`--requant q8_0 \| f16` | 他のコマンドと同じく --model を元にする |
 | gain の UI | 記述なし | UI のレシピ欄からは gain を作れない(API・CLI・MCP・`gne: {units: ["L:N:x2"]}` では使える) | CHANGE-01 の範囲外 |
 
+| eval の倍率 0(§6.14) | 0 がベースライン | 0 が無ければ足す。倍率 0 も他の倍率と同じ `when` の経路(all ならまとめて、それ以外は 1 本ずつ)で生成する | バッチの組み方で greedy の数値がわずかに変わるので、比べる行どうしで経路をそろえる |
+| eval の `ppl` | teacher-forced の平均 logprob | テキストごとに `exp(−平均 logprob)`、テキストをまたいだ値は幾何平均。レシピは `when` に関わらず全位置に当て、どの倍率でも同じ 512 トークンずつ decode する | 1 つの言語のテキストに引っ張られないように。decode の区切りで数値が最大 0.18 nats 変わるため(§11.3) |
+| eval の `persona` の mass | rank.py の mass | ベースラインに無い語(rank.py の `rollout_words`)のうち 2 つ以上のプロンプトに出た語の、上位 5 語の出たプロンプト数の和。主な指標は novelty(出力の語のうちベースラインに無い語の割合) | rank.py の mass は対照群の平均に対する z。eval は 1 レシピで対照群が無い |
+| eval の `exact` の採点 | 正規化後の一致 | 答え(別解のリスト)が出力の最初の空でない行に含まれるか。英数字の答えは語の境界で探す | 「42.」「**Paris**」を正解にし、「420」を不正解にするため |
+| eval の UI | 本体設計「変化量(x) vs 能力低下(y)」、CHANGE-01「dose を x、変化量と能力低下を y」 | CHANGE-01 のとおり x = 倍率。y に変化量(novelty)・能力低下(pt)・ppl の悪化(%)・judge を重ね、配布可の倍率に印 | 新しい方の指示に合わせた |
+| eval の保存名 | `evals/<model_id>/<recipe>.json` | レシピ名(無ければユニットの hash)。`when` が all 以外なら `@gen` などを付ける | 同じレシピの all と gen を並べて比べられるように |
+| eval の judge | 採点モデルのパスは設定 | `--judge-model` と `--judge-target`(目標の性格の文)を CLI で渡す。採点は persona のプロンプトの出力だけ | 目標の性格はレシピごとに違う |
