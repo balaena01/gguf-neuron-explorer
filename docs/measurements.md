@@ -228,3 +228,14 @@ Saluki 27B(qwen35、IQ2 系の混在)、`configs/contrast/yandere.yaml`(16 プ�
 | 方向を作る(27B、32 会話) | 135 秒 | |
 | 層選び add(27B、11 層 × 16 プロンプト × 64 トークン) | 127 秒 | |
 | V13(27B、128 ライターの rᵀW と 2 回の捕捉) | 100 秒 | |
+
+## CHANGE-02 B(2026-10-27、同じ環境)
+
+| 処理 | 時間 | 備考 |
+|---|---|---|
+| `gne ablate`(4B、LoRA、64 ライター、検証込み) | 10 秒 | 2.3 MiB |
+| `gne ablate --bake`(4B、Q8_0、65 テンソル、V13 + V14 込み) | 40 秒 | 4.3 GiB |
+| `gne ablate --bake --requant f16`(4B) | 47 秒 | 5.8 GiB |
+| `gne ablate --bake --via-f16`(4B、llama-quantize で Q8_0 に戻す) | 57 秒 | 中間 5.8 GiB、出力 4.3 GiB |
+| bake の 3 通りと via-f16(0.6B) | 2〜7 秒 | 0.6〜0.9 GiB |
+| V13 LoRA(27B、129 テンソル、埋め込み 248320 行の E·r を含む) | 115 秒 | |

@@ -763,6 +763,104 @@ class Session:
                 "validation": {"n_prompts": len(val.prompts), "match": val.match, "target": val.target},
                 "select": sel, "seconds": time.perf_counter() - t0}
 
+    def ablation_vector(self, direction: str, *, from_layer: int | None = None, per_layer: bool = False):
+        """消す方向: from_layer の r(既定は gne direction --select で選んだ層)、per_layer なら層ごとの r_L(dict)。"""
+        ds = self.direction_set(direction)
+        if per_layer:
+            return ds.raw, {"direction": ds.name, "per_layer": True}
+        if from_layer is None:
+            sel = ds.path.with_suffix(".select.json")
+            chosen = json.loads(sel.read_text()).get("selected") if sel.exists() else None
+            if chosen is None:
+                raise GneError("BAD_ARGS", f"方向 {ds.name} の層が決まっていません",
+                               "--from-layer で指定するか、gne direction --select auto / --layer で選んでください")
+            from_layer = int(chosen)
+        if from_layer not in ds.raw:
+            raise GneError("BAD_ARGS", f"方向 {ds.name} に層 {from_layer} がありません(0〜{max(ds.raw)})")
+        return ds.raw[from_layer], {"direction": ds.name, "from_layer": from_layer}
+
+    def ablate(self, direction: str, out: str | Path, *, from_layer: int | None = None, per_layer: bool = False,
+               layers: list[int] | None = None, scale: float = 1.0, embed: bool = True, bake: bool = False,
+               requant: str = "q8_0", via_f16: bool = False, imatrix: str | None = None,
+               llama_quantize: str | None = None, verify: bool = False) -> dict:
+        """方向の射影消去を LoRA アダプタ GGUF(既定)か、重みを書き換えた GGUF(bake)に書き出す(§6.17)。
+        verify なら、LoRA は V13(r 成分が残る分だけか)、bake は V13 と V14(LoRA と greedy が一致するか)を書き出したファイルで見る。"""
+        from .ablate import bake_ablation_gguf, bake_via_f16, export_ablation_lora
+        if not 0 < scale <= 1.5:
+            raise GneError("BAD_ARGS", "--scale は 0 より大きく 1.5 以下にしてください(1 で完全に消す)")
+        r, meta = self.ablation_vector(direction, from_layer=from_layer, per_layer=per_layer)
+        t0 = time.perf_counter()
+        if not bake:
+            rep = export_ablation_lora(self.weights, r, out, layers=layers, scale=scale, embed=embed, meta=meta,
+                                       progress=self.progress)
+            kind = "lora"
+        elif via_f16:
+            rep = bake_via_f16(self.weights, r, out, layers=layers, scale=scale, embed=embed, meta=meta,
+                               llama_quantize=llama_quantize, imatrix=imatrix, progress=self.progress)
+            kind = "bake"
+        else:
+            rep = bake_ablation_gguf(self.weights, r, out, layers=layers, scale=scale, embed=embed, requant=requant,
+                                     meta=meta, progress=self.progress)
+            kind = "bake"
+        for w_ in rep.get("warnings", []):
+            self.warn(w_)
+        check = self._check_ablation(r, Path(out), kind, rep) if verify else None
+        return {"kind": kind, **meta, **{k: v for k, v in rep.items() if k != "warnings"}, "verify": check,
+                "seconds": time.perf_counter() - t0}
+
+    def _check_ablation(self, r, out: Path, kind: str, rep: dict, n_tokens: int = 32) -> dict:
+        """書き出したファイルで V13 と(bake なら)V14 を見る。"""
+        from .ablate import embed_in_lora, export_ablation_lora, residual_writers, unit
+        from .verify import Verifier
+        if isinstance(r, dict):
+            return {"skipped": "層ごとの方向(--per-layer)の検証は未対応です"}
+        v = Verifier(self.engine, self.weights, seed=self.seed)
+        ru = unit(r)
+        ids = v.prompt_ids[0]
+        layers = rep.get("layers")
+        full = layers == sorted(residual_writers(self.weights))
+        er = self.weights.embed_rows(ids)[1:].astype(np.float64) @ ru
+        if kind == "lora":
+            res = v._resid_all(self.engine, ids, [(out, 1.0)])
+            expect = 0.0 if rep.get("embed") else er
+        else:
+            e2 = Engine(out, n_gpu_layers=self._engine_kw["n_gpu_layers"], n_ctx=self.engine.n_ctx, n_seq_max=self.engine.n_seq_max)
+            try:
+                res = v._resid_all(e2, ids)
+                lp = out.with_name(out.name + ".v14.lora.gguf")
+                export_ablation_lora(self.weights, r, lp, layers=layers, scale=rep["scale"],
+                                     embed=rep["embed"] and embed_in_lora(self.weights))
+                seqs = v.prompt_ids[:2]
+
+                def run(engine, lora=None):
+                    ctx = engine.steer_ctx()
+                    engine.set_lora(ctx, lora)
+                    try:
+                        return [engine.generate_greedy(ctx, [s_], max_tokens=n_tokens)[0] for s_ in seqs]
+                    finally:
+                        engine.set_lora(ctx, None)
+                a, b = run(self.engine, [(lp, 1.0)]), run(e2)
+                lp.unlink(missing_ok=True)
+            finally:
+                e2.close()
+            expect = 0.0 if rep.get("embed") else er
+        scale = rep["scale"]
+        devs = []
+        for L, la in sorted(res.items()):
+            # 部分消去(scale < 1)なら r 成分は (1 − s) 倍ぶん残るので、比べるのは全部消したときだけ
+            devs.append(float((np.abs(la @ ru - expect) / np.linalg.norm(la, axis=1)).max()))
+        out_ = {"v13": {"max_dev": max(devs), "pass": bool(max(devs) < 1e-2) if (scale == 1.0 and full) else None,
+                        "note": None if (scale == 1.0 and full) else "部分消去・層の範囲指定では r 成分は残るので合否は付けません"}}
+        if kind == "bake":
+            from .verify import compare_greedy
+            cmps = [compare_greedy(x.token_ids, x.top_ids, x.top_lps, y.token_ids, y.top_ids, y.top_lps)
+                    for x, y in zip(a, b, strict=True)]
+            out_["v14"] = {"n_tokens": n_tokens, "match": [c["first_diff"] is None for c in cmps],
+                           "summary": [c["summary"] for c in cmps], "pass": all(c["ok"] for c in cmps),
+                           "note": "量子化し直しの誤差で、僅差のトークンから分かれることがあります(F16 なら誤差が小さい)"
+                           if not all(c["first_diff"] is None for c in cmps) else None}
+        return out_
+
     # --- eval(§6.14)---------------------------------------------------------------------------
 
     def eval(self, recipe: Recipe | list[str], *, doses=(0, 0.25, 0.5, 0.75, 1.0), suite: str | Path | None = None,

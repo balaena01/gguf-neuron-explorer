@@ -138,6 +138,8 @@ def select_layer(session, ds: DirectionSet, cs: ContrastSet, val: Validate, *, m
                  min_distinct: float = 0.8, per_layer: bool = False, judge=None,
                  progress: Progress | None = None) -> dict:
     from .ablate import (
+        embed_in_lora,
+        embed_projection,
         export_ablation_lora,
         projection_rows,
         residual_writers,
@@ -200,15 +202,19 @@ def select_layer(session, ds: DirectionSet, cs: ContrastSet, val: Validate, *, m
     loras: dict[int, Path] = {}
     if mode == "ablate":                            # 全候補の rᵀW をまとめて 1 回で計算する
         adir = session.store.ablate_dir(session.meta.model_id)
-        need = {L: adir / f"{ds.name}-L{L}-{vector_key(ds.raw[L])}.lora.gguf" for L in Ls}
+        emb = embed_in_lora(session.weights)                  # tied でなければ埋め込みも消す(gne ablate の既定と同じ)
+        need = {L: adir / f"{ds.name}-L{L}-{vector_key(ds.raw[L])}{'-e' if emb else ''}.lora.gguf" for L in Ls}
         todo = [L for L, p in need.items() if not p.exists()]
         if todo:
             R = np.stack([ds.unit(L) for L in todo])
             rows_all = projection_rows(session.weights, R)
+            E = embed_projection(session.weights, R) if emb else None
             for i, L in enumerate(todo):
                 tmp = need[L].with_suffix(".part")
                 write_ablation_lora(session.weights, {n: R[i] for n in rows_all}, {n: v[i] for n, v in rows_all.items()},
-                                    tmp, meta={"direction": ds.name, "source_layer": L, "layers": sorted(residual_writers(session.weights))})
+                                    tmp, meta={"direction": ds.name, "source_layer": L,
+                                               "layers": sorted(residual_writers(session.weights))},
+                                    embed=(E[:, i], R[i]) if emb else None)
                 tmp.replace(need[L])
         loras = need
     sv = session._need_rho(Ls) if mode == "add" else None

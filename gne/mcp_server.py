@@ -199,6 +199,29 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
             return _err(e)
 
     @srv.tool()
+    async def ablate_export(name: str, layers: str = "all", scale: float = 1.0, bake: bool = False,
+                            from_layer: int | None = None) -> dict:
+        """方向 name(gne direction / direction ツールで作ったもの)の射影消去を書き出す(§6.17、いわゆる abliteration)。
+        既定は LoRA アダプタ GGUF(llama.cpp の --lora、--lora-scaled で部分消去)。bake=True なら重みを Q8_0 で書き換えた GGUF を
+        ジョブで作る(大きい。job_status で結果)。layers は "all" / "10-40"、scale は消す割合(1 で全部)。
+        使う r は from_layer の層で測ったもの(既定は direction の select で選んだ層)。"""
+        from .cli import parse_layers
+        try:
+            Ls = parse_layers(layers)
+            suffix = "-ablate.gguf" if bake else "-ablate.lora.gguf"
+            out = str(session.store.export_dir() / f"{name}{suffix}")
+            params = {"direction": name, "out": out, "layers": Ls, "scale": scale, "bake": bake, "from_layer": from_layer,
+                      "verify": True}
+        except Exception as e:  # noqa: BLE001
+            return _err(e)
+        if bake:
+            try:
+                return jobs.start("ablate", params).view()
+            except Exception as e:  # noqa: BLE001
+                return _err(e)
+        return await call(lambda: session.ablate(**{**params, "out": out}))
+
+    @srv.tool()
     async def bake(name: str, dst: str, verify: bool = True) -> dict:
         """保存したレシピを FFN バイアスとして焼き付けた GGUF を dst に作る(対応 arch のみ、Qwen 系は不可)。"""
         def fn():
@@ -213,7 +236,7 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
 
     @srv.tool()
     async def job_start(kind: str, params: dict[str, Any] | None = None) -> dict:
-        """長時間の処理を投げる。kind: stats_resid / stats_act / lens_logit / lens_steer / sweep / rank / reverse / eval / direction。
+        """長時間の処理を投げる。kind: stats_resid / stats_act / lens_logit / lens_steer / sweep / rank / reverse / eval / direction / ablate。
         params は gne.api の同名メソッドの引数(例 sweep: {"layer": 22, "neurons": "random:64", "design": "quick"})。"""
         try:
             return jobs.start(kind, params).view()

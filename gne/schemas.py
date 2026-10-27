@@ -323,6 +323,26 @@ class DirectionOut(Envelope):                   # §6.17 gne direction
     seconds: float
 
 
+class AblateOut(Envelope):                      # §6.17 gne ablate
+    kind: Literal["lora", "bake"]
+    direction: str
+    from_layer: int | None = None
+    per_layer: bool | None = None
+    path: str
+    bytes: int
+    layers: list[int]
+    scale: float
+    embed: bool
+    n_tensors: int | None = None                # lora
+    requant: str | None = None                  # bake: q8_0 / f16 / via-f16
+    modified: list[dict[str, str]] | None = None
+    n_modified: int | None = None
+    llama_quantize: str | None = None
+    intermediate_bytes: int | None = None
+    verify: dict[str, Any] | None
+    seconds: float
+
+
 # --- Phase 2: lens / reverse -----------------------------------------------------------------------------
 
 class LogitNeuron(_Strict):
@@ -550,5 +570,5 @@ COMMAND_SCHEMAS: dict[str, type[Envelope]] = {
     "info": InfoOut, "probe": ProbeOut, "verify": VerifyOut, "bench": BenchOut,
     "stats resid": StatsResidOut, "stats act": StatsActOut, "steer": SteerOut,
     "export-cvec": ExportOut, "import-cvec": ImportOut, "bake": BakeOut, "gain": GainOut,
-    "eval": EvalOut, "direction": DirectionOut,
+    "eval": EvalOut, "direction": DirectionOut, "ablate": AblateOut,
 }

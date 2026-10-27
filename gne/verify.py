@@ -228,52 +228,117 @@ class Verifier:
 
     # --- V13(§6.17 方向の射影消去、LoRA 版)--------------------------------------------------------------
 
-    def v13_ablation(self, r: np.ndarray | None = None) -> VResult:
-        """方向 r を全層の残差ライターから消す LoRA を当てると、l_out-L の r 成分はどの層でも埋め込み(token_embd の行)の
-        r 成分と同じになる(LoRA は埋め込みを変えられないので、r 成分はそれ以上増えも減りもしない)。
-        |r·l_out − r·e| / ‖l_out‖ が量子化の誤差の水準(< 1e-2)であることを見る。消す前のずれも並べる。
-        bake 版(埋め込みも射影して r 成分が 0 になる)は CHANGE-02 B で足す。"""
-        from .ablate import export_ablation_lora, unit
-        n_embd = self.w.meta.n_embd
-        r = unit(self.rng.standard_normal(n_embd) if r is None else r)
-        ids = self.prompt_ids[0]
-        Ls = list(range(self.e.n_layer - 1))                    # 最終層は行が間引かれ得るので除く
+    def _resid_all(self, engine: Engine, ids: list[int], lora=None) -> dict[int, np.ndarray]:
+        """全層(最終層を除く)の l_out-L(位置 0 = attention sink を除く)。"""
+        Ls = list(range(engine.n_layer - 1))                    # 最終層は行が間引かれ得るので除く
         names = {f"l_out-{L}": L for L in Ls}
         cap = Capture()
         cap.set_wanted(lambda n: n in names)
+        ctx = engine.probe_ctx(cap)
+        engine.clear_memory(ctx)
+        engine.set_cvec(ctx, None)
+        engine.set_lora(ctx, lora)
+        try:
+            engine.prefill(ctx, [ids])
+        finally:
+            engine.set_lora(ctx, None)
+        return {names[k]: v.astype(np.float64)[1:] for k, v in cap.take().items()}
 
-        def grab(lora):
-            ctx = self.e.probe_ctx(cap)
-            self.e.clear_memory(ctx)
-            self.e.set_cvec(ctx, None)
-            self.e.set_lora(ctx, lora)
-            try:
-                self.e.prefill(ctx, [ids])
-            finally:
-                self.e.set_lora(ctx, None)
-            return {k: v.astype(np.float64) for k, v in cap.take().items()}
+    def v13_ablation(self, r: np.ndarray | None = None, *, bake: bool = False) -> VResult:
+        """方向 r を全層の残差ライターから消したとき、l_out-L の r 成分が「消えずに残るはずの分」と一致するか。
+        - LoRA: 埋め込みも LoRA に入れられるモデル(出力層が別)では 0、tied のモデルでは埋め込みの r 成分のまま
+          (LoRA で埋め込みを変えられないので、それ以上増えも減りもしない)。
+        - bake(bake=True、F16): 埋め込みも射影するので 0。
+        |r·l_out − 期待値| / ‖l_out‖ が量子化の誤差の水準(< 1e-2)であることを見る。消す前のずれも並べる。"""
+        from .ablate import bake_ablation_gguf, embed_in_lora, export_ablation_lora, unit
+        r = unit(self.rng.standard_normal(self.w.meta.n_embd) if r is None else r)
+        ids = self.prompt_ids[0]
+        er = self.w.embed_rows(ids)[1:].astype(np.float64) @ r    # 埋め込みの r 成分(inp_embd は捕捉できない)
+        base = self._resid_all(self.e, ids)
+        variants = []
         with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "v13.lora.gguf"
-            rep = export_ablation_lora(self.w, r, path)
-            base, abl = grab(None), grab([(path, 1.0)])
-        er = self.w.embed_rows(ids)[1:].astype(np.float64) @ r    # 埋め込み(inp_embd は捕捉できない)。位置 0(attention sink)は除く
-        rows = []
-        for name, L in names.items():
-            la, lb = abl[name][1:], base[name][1:]
-            dev = np.abs(la @ r - er) / np.linalg.norm(la, axis=1)
-            bdev = np.abs(lb @ r - er) / np.linalg.norm(lb, axis=1)
-            perp_a, perp_b = la - np.outer(la @ r, r), lb - np.outer(lb @ r, r)
-            ch = np.linalg.norm(perp_a - perp_b, axis=1) / np.linalg.norm(perp_b, axis=1)
-            rows.append({"layer": L, "dev_max": float(dev.max()), "base_dev_med": float(np.median(bdev)),
-                         "perp_change_med": float(np.median(ch))})
-        max_dev = max(x["dev_max"] for x in rows)
-        base_med = float(np.median([x["base_dev_med"] for x in rows]))
-        ok = max_dev < 1e-2
-        return VResult("V13", "方向の射影消去(LoRA)", "pass" if ok else "fail",
-                       f"ランダムな方向を {rep['n_tensors']} 個のライターから消す LoRA({len(ids)} トークン、層 0〜{Ls[-1]}): "
-                       f"|r·l_out − r·e| / ‖l_out‖ 最大 {max_dev:.2e}(消す前は中央値 {base_med:.2e})、"
-                       f"r に直交する成分の変化 層 0 で {rows[0]['perp_change_med']:.3f}・最終で {rows[-1]['perp_change_med']:.3f}(中央値)",
-                       {"rows": rows, "max_dev": max_dev, "base_med_dev": base_med, "n_tensors": rep["n_tensors"]})
+            lp = Path(td) / "v13.lora.gguf"
+            rep = export_ablation_lora(self.w, r, lp)
+            variants.append(("LoRA", self._resid_all(self.e, ids, [(lp, 1.0)]), 0.0 if rep["embed"] else er, rep["n_tensors"]))
+            if bake:
+                bp = Path(td) / "v13-bake.gguf"
+                brep = bake_ablation_gguf(self.w, r, bp, requant="f16")
+                e2 = Engine(bp, n_gpu_layers=getattr(self.e, "n_gpu_layers", -1), n_ctx=self.e.n_ctx, n_seq_max=self.e.n_seq_max)
+                try:
+                    variants.append(("bake", self._resid_all(e2, ids), 0.0, brep["n_modified"]))
+                finally:
+                    e2.close()
+        out, ok = [], True
+        for kind, res, expect, n_t in variants:
+            rows = []
+            for L, la in sorted(res.items()):
+                lb = base[L]
+                dev = np.abs(la @ r - expect) / np.linalg.norm(la, axis=1)
+                bdev = np.abs(lb @ r - expect) / np.linalg.norm(lb, axis=1)
+                perp_a, perp_b = la - np.outer(la @ r, r), lb - np.outer(lb @ r, r)
+                ch = np.linalg.norm(perp_a - perp_b, axis=1) / np.linalg.norm(perp_b, axis=1)
+                rows.append({"layer": L, "dev_max": float(dev.max()), "base_dev_med": float(np.median(bdev)),
+                             "perp_change_med": float(np.median(ch))})
+            mx = max(x["dev_max"] for x in rows)
+            ok &= mx < 1e-2
+            out.append({"kind": kind, "expect": "0" if np.isscalar(expect) else "e·r", "n_tensors": n_t, "max_dev": mx,
+                        "base_med_dev": float(np.median([x["base_dev_med"] for x in rows])), "rows": rows})
+        detail = "; ".join(f"{v['kind']}({v['n_tensors']} テンソル、r 成分の期待値 {v['expect']}): 最大 {v['max_dev']:.2e}"
+                           f"(消す前は中央値 {v['base_med_dev']:.2e})、r に直交する成分の変化 層 0 で "
+                           f"{v['rows'][0]['perp_change_med']:.3f}・最終で {v['rows'][-1]['perp_change_med']:.3f}" for v in out)
+        lora = out[0]
+        return VResult("V13", "方向の射影消去", "pass" if ok else "fail",
+                       f"ランダムな方向({len(ids)} トークン、層 0〜{lora['rows'][-1]['layer']}、埋め込みを LoRA に"
+                       f"{'入れる' if embed_in_lora(self.w) else '入れない(tied)'}): " + detail,
+                       {"variants": out, "max_dev": max(v["max_dev"] for v in out), "base_med_dev": lora["base_med_dev"],
+                        "n_tensors": lora["n_tensors"], "rows": lora["rows"]})
+
+    def v14_lora_vs_bake(self, r: np.ndarray | None = None, n_tokens: int = 32) -> VResult:
+        """同じ方向を消す LoRA と bake(F16)で、greedy の先頭 n_tokens が一致するか。埋め込みは両方そろえる
+        (tied のモデルは LoRA に埋め込みを入れられないので bake も埋め込みを省く)。q8_0 の bake も参考に並べる。"""
+        from .ablate import bake_ablation_gguf, embed_in_lora, export_ablation_lora, unit
+        r = unit(self.rng.standard_normal(self.w.meta.n_embd) if r is None else r)
+        r = (r * 1.0).astype(np.float32)
+        embed = embed_in_lora(self.w)
+        seqs = self.prompt_ids[:2]
+
+        def run(engine, lora=None):
+            ctx = engine.steer_ctx()
+            engine.set_cvec(ctx, None)
+            engine.set_lora(ctx, lora)
+            try:
+                return [engine.generate_greedy(ctx, [s], max_tokens=n_tokens)[0] for s in seqs]
+            finally:
+                engine.set_lora(ctx, None)
+        base = [x.token_ids for x in run(self.e)]
+        rows, ok = [], True
+        with tempfile.TemporaryDirectory() as td:
+            lp = Path(td) / "v14.lora.gguf"
+            export_ablation_lora(self.w, r, lp, embed=embed)
+            lora = run(self.e, [(lp, 1.0)])
+            for requant in ("f16", "q8_0"):
+                bp = Path(td) / f"v14-{requant}.gguf"
+                bake_ablation_gguf(self.w, r, bp, requant=requant, embed=embed)
+                e2 = Engine(bp, n_gpu_layers=getattr(self.e, "n_gpu_layers", -1), n_ctx=self.e.n_ctx, n_seq_max=self.e.n_seq_max)
+                try:
+                    baked = run(e2)
+                finally:
+                    e2.close()
+                for i, (a, b) in enumerate(zip(lora, baked, strict=True)):
+                    # 完全一致か、最初の分岐が僅差(相手の選択が自分の最良から 0.5 nats 以内)なら合格(V9 と同じ基準)
+                    cmp = compare_greedy(a.token_ids, a.top_ids, a.top_lps, b.token_ids, b.top_ids, b.top_lps)
+                    rows.append({"requant": requant, "prompt": i, "match": cmp["first_diff"] is None, "ok": bool(cmp["ok"]),
+                                 "first_diff": cmp["first_diff"], "summary": cmp["summary"],
+                                 "lora_differs_from_base": a.token_ids != base[i]})
+                    if requant == "f16":
+                        ok &= bool(cmp["ok"])
+        detail = ", ".join(f"{x['requant']} プロンプト{x['prompt'] + 1}: " + ("一致" if x["match"] else x["summary"]
+                                                                            + ("" if x["ok"] else "、僅差ではない"))
+                           for x in rows)
+        return VResult("V14", "射影消去の LoRA と bake の一致", "pass" if ok else "fail",
+                       f"greedy {n_tokens} トークン、埋め込み{'あり' if embed else 'なし'}: {detail}"
+                       f"(無介入との差: {'あり' if any(x['lora_differs_from_base'] for x in rows) else 'なし'})",
+                       {"rows": rows, "embed": embed})
 
     # --- V12(§6.15 位置別ステアリング)----------------------------------------------------------------
 

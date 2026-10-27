@@ -86,7 +86,8 @@ def test_ablation_lora_tensors(tmp_path):
     w = Weights(tmp_path / "m.gguf")
     assert residual_writers(w) == {L: [f"blk.{L}.attn_output.weight", f"blk.{L}.ffn_down.weight"] for L in range(2)}
     info = writer_info(w)
-    assert info["verified"] and info["counts"] == {"attn_output": 2, "ffn_down": 2} and not info["warnings"]
+    assert info["verified"] and info["counts"] == {"attn_output": 2, "ffn_down": 2}
+    assert not info["embed_in_lora"] and len(info["warnings"]) == 1 and "tied" in info["warnings"][0]   # 出力層が無い = 共有
     r = np.random.default_rng(2).standard_normal(16)
     rep = export_ablation_lora(w, r, tmp_path / "a.lora.gguf", meta={"direction": "t"})
     assert rep["n_tensors"] == 4
@@ -220,3 +221,138 @@ def test_direction_cli_and_job(session, tmp_path):
     assert d["command"] == "direction" and d["name"] == "pirate_cli"
     out = standard_kinds()["direction"](session, contrast=str(c), name="pirate_job", select="12")
     assert out["select"]["selected"] == 12
+
+
+# --- B: gne ablate(書き出し・bake・V13 の bake 版・V14) --------------------------------------------------
+
+def _tiny_full(path, *, moe=False, iq=False):
+    """埋め込み・ライター(MoE なら ffn_down_exps)を持つ小さな GGUF(llama arch、出力層は別)。"""
+    from gguf import GGMLQuantizationType, GGUFWriter
+    from gguf.quants import quant_shape_to_byte_shape
+    rng = np.random.default_rng(3)
+    w = GGUFWriter(str(path), arch="llama")
+    w.add_name("tiny")
+    w.add_block_count(2)
+    w.add_embedding_length(32)
+    w.add_feed_forward_length(64)
+    w.add_token_list([f"t{i}" for i in range(10)])
+    if moe:
+        w.add_expert_count(2)
+        w.add_expert_used_count(1)
+    mats = {"token_embd.weight": rng.standard_normal((10, 32)).astype(np.float32),
+            "output.weight": rng.standard_normal((10, 32)).astype(np.float32)}
+    for L in range(2):
+        mats[f"blk.{L}.attn_output.weight"] = rng.standard_normal((32, 32)).astype(np.float32)
+        if moe:
+            mats[f"blk.{L}.ffn_down_exps.weight"] = rng.standard_normal((2, 32, 64)).astype(np.float32)
+        else:
+            mats[f"blk.{L}.ffn_down.weight"] = rng.standard_normal((32, 64)).astype(np.float32)
+    for n, m in mats.items():
+        w.add_tensor(n, m)
+    if iq:                                             # 中身はでたらめでよい(型だけを見る検査用)
+        bs = quant_shape_to_byte_shape((32, 256), GGMLQuantizationType.IQ2_XXS)
+        w.add_tensor("blk.0.attn_q.weight", np.zeros(bs, np.uint8), raw_dtype=GGMLQuantizationType.IQ2_XXS)
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+    return mats
+
+
+def test_bake_ablation_math(tmp_path):
+    """bake: ライター(軸 0)・埋め込み(軸 1)・MoE の ffn_down_exps(軸 1)から r が消え、他のテンソルは変わらない。部分消去。"""
+    from gne.ablate import (
+        bake_ablation_gguf,
+        embed_in_lora,
+        export_ablation_lora,
+        per_layer_directions,
+        unit,
+    )
+    from gne.weights import Weights, tensor_to_f32
+    r = unit(np.random.default_rng(4).standard_normal(32))
+    for moe in (False, True):
+        mats = _tiny_full(tmp_path / f"m{moe}.gguf", moe=moe)
+        w = Weights(tmp_path / f"m{moe}.gguf")
+        assert embed_in_lora(w)                                    # 出力層が別
+        rep = bake_ablation_gguf(w, r, tmp_path / f"b{moe}.gguf", requant="f16")
+        b = Weights(tmp_path / f"b{moe}.gguf")
+        got = {t.name: tensor_to_f32(t) for t in b.reader.tensors}
+        assert np.abs(got["token_embd.weight"] @ r).max() < 1e-2              # 埋め込み(F16 に丸め)
+        for L in range(2):
+            assert np.abs(r @ got[f"blk.{L}.attn_output.weight"]).max() < 1e-2
+            dn = got[f"blk.{L}.ffn_down_exps.weight"] if moe else got[f"blk.{L}.ffn_down.weight"]
+            assert np.abs(np.einsum("i,...ij->...j", r, dn)).max() < 1e-2
+        assert np.array_equal(got["output.weight"], mats["output.weight"])     # 出力層は触らない
+        assert rep["n_modified"] == 5 and {m["to"] for m in rep["modified"]} == {"F16"}
+        if moe:
+            with pytest.raises(GneError):
+                export_ablation_lora(w, r, tmp_path / "x.lora.gguf")            # MoE の LoRA は未対応
+    # 部分消去(scale 0.5)と q8_0、埋め込みを省く
+    w = Weights(tmp_path / "mFalse.gguf")
+    bake_ablation_gguf(w, r, tmp_path / "h.gguf", scale=0.5, requant="f16", embed=False)
+    h = {t.name: tensor_to_f32(t) for t in Weights(tmp_path / "h.gguf").reader.tensors}
+    W = _tiny_full(tmp_path / "again.gguf")["blk.0.attn_output.weight"]
+    assert np.allclose(r @ h["blk.0.attn_output.weight"], 0.5 * (r @ W), atol=2e-2)
+    assert np.allclose(h["token_embd.weight"], _tiny_full(tmp_path / "again.gguf")["token_embd.weight"], atol=1e-2)
+    rq = bake_ablation_gguf(w, r, tmp_path / "q.gguf", requant="q8_0")
+    assert {m["to"] for m in rq["modified"]} == {"Q8_0"}
+    with pytest.raises(GneError):
+        bake_ablation_gguf(w, r, tmp_path / "x.gguf", requant="q4_0")
+    # LoRA に埋め込みを入れる(出力層が別のモデル)
+    lr = export_ablation_lora(w, r, tmp_path / "e.lora.gguf")
+    from gguf import GGUFReader
+    t = {x.name: x for x in GGUFReader(tmp_path / "e.lora.gguf").tensors}
+    E = _tiny_full(tmp_path / "again.gguf")["token_embd.weight"]
+    assert lr["embed"] and np.allclose(np.asarray(t["token_embd.weight.lora_a"].data).reshape(-1), E @ r, atol=1e-5)
+    # 層ごとの方向: 方向の無い層は前の層のものを使う
+    per = per_layer_directions({0: r, 2: -r}, [0, 1, 2, 3])
+    assert np.allclose(per[1], r) and np.allclose(per[3], -r)
+
+
+def test_via_f16_prechecks(tmp_path):
+    from gne.ablate import bake_via_f16
+    from gne.weights import Weights
+    _tiny_full(tmp_path / "iq.gguf", iq=True)
+    w = Weights(tmp_path / "iq.gguf")
+    r = np.ones(32, np.float32)
+    with pytest.raises(GneError) as ei:
+        bake_via_f16(w, r, tmp_path / "o.gguf", llama_quantize=str(tmp_path / "missing"))
+    assert ei.value.code == "TOOL_NOT_FOUND"
+    with pytest.raises(GneError) as ei:
+        bake_via_f16(w, r, tmp_path / "o.gguf", llama_quantize="/bin/true")
+    assert ei.value.code == "NEEDS_IMATRIX" and "IQ2_XXS" in ei.value.message
+
+
+@pytest.mark.model
+def test_ablate_cli_and_v14(session, tmp_path):
+    """gne ablate の LoRA / bake(q8_0・f16・--via-f16)と検証、V13 の bake 版、V14。"""
+    from typer.testing import CliRunner
+
+    from gne.ablate import find_llama_quantize
+    from gne.cli import app
+    from gne.schemas import COMMAND_SCHEMAS
+    from gne.verify import Verifier
+    c = _contrast(tmp_path)
+    session.direction(contrast=c, name="pirate_abl", select="12")
+    d = session.ablate("pirate_abl", tmp_path / "p.lora.gguf", verify=True)
+    assert d["kind"] == "lora" and d["from_layer"] == 12 and not d["embed"] and d["verify"]["v13"]["pass"]
+    COMMAND_SCHEMAS["ablate"].model_validate({**session.envelope("ablate"), **d})
+    part = session.ablate("pirate_abl", tmp_path / "h.lora.gguf", scale=0.5, layers=[10, 11, 12], verify=True)
+    assert part["layers"] == [10, 11, 12] and part["verify"]["v13"]["pass"] is None             # 部分消去は合否なし
+    with pytest.raises(GneError):
+        session.ablate("pirate_abl", tmp_path / "x.lora.gguf", scale=0)
+    b = session.ablate("pirate_abl", tmp_path / "p-f16.gguf", bake=True, requant="f16", verify=True)
+    assert b["kind"] == "bake" and b["embed"] and b["verify"]["v13"]["pass"] and b["verify"]["v14"]["pass"]
+    if find_llama_quantize():
+        res = CliRunner().invoke(app, ["ablate", "-m", str(MODEL), "--root", str(session.store.root),
+                                       "--direction", "pirate_abl", "--bake", "--via-f16", "-o", str(tmp_path / "v.gguf"),
+                                       "--json"])
+        assert res.exit_code == 0, res.output
+        v = json.loads(res.stdout.strip().splitlines()[-1])
+        from gne.weights import Weights
+        types = {t.tensor_type.name for t in Weights(tmp_path / "v.gguf").reader.tensors if t.name.endswith("ffn_down.weight")}
+        assert v["requant"] == "via-f16" and types == {"Q8_0"}                                  # 元の型に戻る
+    rep = Verifier(session.engine, session.weights).v13_ablation(bake=True)
+    assert rep.status == "pass" and rep.data["variants"][1]["kind"] == "bake" and rep.data["variants"][1]["max_dev"] < 1e-3
+    v14 = Verifier(session.engine, session.weights).v14_lora_vs_bake()
+    assert v14.status == "pass", v14.detail

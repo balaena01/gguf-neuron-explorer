@@ -52,3 +52,10 @@
 | 方向のユニット(CHANGE-02 A) | 記述なし(方向は消すためのもの) | `L:dir:NAME:dose` で層 L にその層の r_L を足す。rel: dose · ρ_L · r̂_L、raw: dose · (mean_A − mean_B)_L、absmax は不可。control vector に書き出せる | ユーザーと合意した追加。レシピの他のユニットと一緒に steer / chat / eval / export-cvec / OpenAI 互換 API で使える |
 | 残差ライター(§6.17) | arch ごとのテンソル名の一覧 | `configs/arch/residual_writers.yaml` は候補(attn_output / ssm_out / ffn_down)・グラフで確かめた arch・post-norm の arch。層ごとに GGUF にある候補をライターとする。MTP(`blk.L.nextn.*` を持つ層)は除く | MTP の層は本流で実行されず、MTP を使わない読み込みではテンソルが作られないので、LoRA に含めると読み込みが拒否される(Saluki 27B の L64 で確認) |
 | V13(LoRA 版) | 消去後に `\|l_out · r\| / ‖l_out‖` が量子化ノイズ水準 | LoRA 版は「l_out-L の r 成分 = 埋め込みの r 成分」(\|r·l_out − r·e\| / ‖l_out‖ < 1e-2)で見る | LoRA は埋め込み(get_rows)を変えられないので r 成分は 0 にならず、埋め込みの値のまま残る。bake 版(埋め込みも射影)で 0 になることは CHANGE-02 B の V13 で見る |
+| 埋め込みと LoRA(§6.17) | 埋め込みは LoRA では表せない(bake のときだけ) | この llama.cpp は `token_embd` の LoRA を `build_inp_embd` で足すので、出力層が別のモデルでは LoRA にも埋め込みを入れる(既定、`--skip-embed` で省く)。tied のモデルでは入れない | F82・F83。tied のモデルでは出力層も同じ名前で LoRA が掛かり、形が合わない |
+| `gne ablate` の r(§6.17) | 1 本の r を全層に、`--per-layer` で層ごと | 1 本の r は `--from-layer` の層で測ったもの(既定は `gne direction --select` で選んだ層)。`--per-layer` で方向の無い層(最終層)は前の層の方向を使い、埋め込みは射影しない | 「1 本の r」をどの層で測るかを決める必要があるため |
+| `--scale`(§6.17) | 部分消去 | LoRA は `lora_b = −s·r` に入れる(llama.cpp の `--lora-scaled` でも弱められる)。bake は `W − s·r(rᵀW)` | LoRA を素の `--lora` で使っても指定どおりになるように |
+| `--via-f16`(§6.17) | F16 で書いて llama-quantize で元の型へ | `--tensor-type-file` で全テンソルに今の型を指定(同じ型は写すだけ)、ftype は Q8_0、`general.file_type` は元の値に。IQ1〜IQ2 系のテンソルがあるモデルは `--imatrix` が要る | F84 |
+| MoE(§6.17) | `ffn_down_exps` は軸 1 に射影、shared expert も | bake だけ対応。LoRA は未対応(ARCH_UNSUPPORTED) | 手元に MoE の GGUF が無く、`build_lora_mm_id` に 3 次元の LoRA を渡す形を実機で確かめられないため |
+| V14(§6.17) | 先頭 32 トークンで一致 | 完全一致か、最初の分岐が僅差(0.5 nats 未満)なら合格(V9 と同じ) | F85 |
+| `gne verify` の V13 / V14 | 記述なし | 2 GiB 未満のモデルは bake を 2 つ作って V13(bake)と V14 も見る。大きいモデルは V13(LoRA)だけで、`gne ablate --bake --verify` を案内 | 27B の bake は 10 GB を超える |

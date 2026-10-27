@@ -137,6 +137,7 @@ def standard_kinds() -> dict[str, Callable[..., dict]]:
         "embed": lambda s, run, **p: s.embed(run, **p),
         "eval": _eval,
         "direction": lambda s, **p: s.direction(**p),
+        "ablate": lambda s, direction, out, **p: s.ablate(direction, out, **p),
     }
 
 

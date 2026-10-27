@@ -654,3 +654,60 @@ V13(LoRA 版。ランダムな方向を全層のライターから消し、`|r·
 **F80. MTP の層は残差ライターから除く。** Saluki 27B の L64 は MTP(`blk.64.nextn.*`)の層で、本流では実行されない。MTP を使わない読み込みではテンソルが作られないので、LoRA にこの層を含めると「LoRA tensor 'blk.64.attn_output.weight' does not exist in base model」で読み込みが拒否される。`nextn` のテンソルを持つ層を除いた。
 
 **F81. 層選び(add)の dose は平均差の何倍かで決める。** 平均差の大きさは層で大きく違う(4B の evil で ρ の 0.02〜0.71 倍、27B のヤンデレで 0.03〜0.75 倍)。rel dose を一律にすると、浅い層では平均差の何倍にもなり、深い層では足りない。結果の表には、同じ大きさのレシピの rel dose を並べる。
+
+### 12.2 B: `gne ablate`(射影消去の書き出し、V13 の bake 版、V14)
+
+実装: `gne/ablate.py`(`export_ablation_lora`・`bake_ablation_gguf`・`bake_via_f16`)、`Session.ablate`、CLI `gne ablate`(`--direction`・`--from-layer`・`--per-layer`・`--layers`・`--scale`・`-o`・`--bake`・`--in`・`--requant q8_0|f16`・`--via-f16`・`--imatrix`・`--llama-quantize`・`--skip-embed`・`--verify`)、MCP `ablate_export(name, layers, scale, bake, from_layer)`(bake はジョブ)、ジョブの種類 `ablate`、`gne verify` に V13(2 GiB 未満のモデルは bake 版も)と V14。
+
+- **LoRA**: ライターごとに `lora_a = rᵀW`(1 × in)、`lora_b = −s·r`。`--scale` は lora_b に入れる(llama.cpp の `--lora-scaled` でも弱められる)。
+- **bake**: ライターと埋め込みを dequantize → 射影 → Q8_0 か F16。ほかのテンソルは生バイトのまま写す。
+  - メモリに載せるのは 1 テンソルずつ(テンソル情報を先に書き、データは書く直前に作る)。
+  - 埋め込みは 16384 行ずつ。
+  - ライターのバイアスも射影する。
+  - MoE の `ffn_down_exps` は (n_expert, n_embd, n_ff) の軸 1、`ffn_down_shexp` は軸 0。
+- **`--via-f16`**: 書き換えるテンソルを F16 で書いた中間の GGUF を作り、`llama-quantize` で元の型に戻す。
+  - `--tensor-type-file` で全テンソルに今の型を指定し、ftype は Q8_0 を渡す。同じ型のテンソルは写すだけになり、F16 にした分だけ元の型へ量子化される。
+  - `general.file_type` は `--override-kv` で元の値に戻す。
+  - `llama-quantize` は同梱の llama.cpp から `cmake --build build --target llama-quantize` で作れる。
+
+**[VERIFY] 埋め込みの LoRA**(llama.cpp `0c1e570` の `src/llama-graph.cpp` `build_inp_embd`、`src/llama-adapter.cpp`):
+- `token_embd.weight` の LoRA は、get_rows の後に `scale · (lora_b ⊗ get_rows(lora_a, tokens))` として足される。
+- 形の検査は他のテンソルと向きが逆で、`lora_a` は ne [r, n_vocab](numpy (n_vocab, r))、`lora_b` は ne [r, n_embd](numpy (n_embd, r))。
+- そこで `lora_a = E r`(n_vocab × 1)、`lora_b = −s·r` にすると、`e' = e − s(e·r) r` になる。本体設計の「埋め込みは LoRA では表せない」は、この版の llama.cpp には当てはまらない(F82)。
+
+V13 / V14(ランダムな方向、プロンプト 16 トークン):
+
+| モデル | LoRA(埋め込み) | V13 LoRA | V13 bake F16 | V14 F16 | V14 Q8_0 |
+|---|---|---|---|---|---|
+| Qwen3-0.6B Q8_0(tied) | 入れない | 5.97e-04(期待値 e·r) | 1.57e-05 | 2 プロンプト一致 | 5・14 トークン目で分岐 |
+| Saluki 27B(出力層が別) | 入れる(129 テンソル) | 3.60e-04(期待値 0) | — | — | — |
+
+- V14 は方向によっては F16 でも僅差の分岐が出る。0.6B の別の方向で、2 トークン目の「I am」と「I'm」(差 0.04 nats)が入れ替わった。
+  - LoRA と F16 bake の logprob の差は 0.01〜0.02 nats で、V9 と同じ「最初の分岐が僅差(0.5 nats 未満)なら合格」にした(F85)。
+
+`gne ablate --verify`(Qwen3.5-4B、evil の方向を L10 で測った r で全 32 層から消す。tied なので LoRA は埋め込みなし、bake は埋め込みあり):
+
+| 書き出し | 大きさ | 時間(検証込み) | V13 | V14 |
+|---|---|---|---|---|
+| LoRA | 2.3 MiB | 10 秒 | 8.83e-04 | — |
+| bake Q8_0 | 4.3 GiB | 40 秒 | 1.80e-03 | 2 プロンプト一致 |
+| bake F16 | 5.8 GiB | 47 秒 | 2.35e-05 | 一致 |
+| bake --via-f16 | 4.3 GiB(元の Q8_0 に戻る) | 57 秒 | 1.76e-03 | 一致 |
+
+テスト: `tests/test_change02.py` に 3 件を足した。
+- bake の数学: ライター・埋め込み・MoE の `ffn_down_exps` から r が消え、出力層は変わらない。部分消去、Q8_0、埋め込みを省く場合、LoRA の埋め込み、層ごとの方向の補い。
+- `--via-f16` の事前の検査: `llama-quantize` が無いとき、IQ2_XXS があるときの誤り。
+- `gne ablate` の LoRA / bake / `--via-f16` と検証、V13 の bake 版、V14。
+
+**F82. LoRA でも埋め込みを射影できる。** 上の [VERIFY] のとおり。tied でない Saluki 27B で、埋め込みを含む LoRA を当てると l_out の r 成分が 0 になった(最大 3.6e-4)。
+
+**F83. 出力層を埋め込みと共有する(tied)モデルの LoRA には埋め込みを入れない。**
+- tied のモデルでは、出力層のテンソルも `token_embd.weight` という名前で作られる(`TENSOR_DUPLICATED`)。llama.cpp の LoRA はテンソルを名前で引くので、埋め込み用の LoRA が出力層の `build_lora_mm` にも通常の向きで掛けられ、形が合わない。
+- 手元の Qwen3-0.6B・Qwen3.5-4B・SmolLM2 は tied で、Saluki 27B だけが出力層を別に持つ。
+- tied のモデルで埋め込みまで消すには bake を使う。この場合、埋め込みの射影は出力層にも効く(警告を出す)。
+
+**F84. `--via-f16` は、低ビットの IQ 型のテンソルが 1 つでもあると imatrix が要る。**
+- `llama-quantize` は前処理で、目標の型が IQ1_S / IQ1_M / IQ2_XXS / IQ2_XS / IQ2_S / IQ3_XXS のテンソル(埋め込みと出力層を除く)が 1 つでもあれば、imatrix が無いと止まる。写すだけのテンソルでも同じ。
+- Saluki 27B(IQ2_XXS・IQ1_S などの混在)は、元の imatrix が無いと `--via-f16` で戻せない。書き出す前に検査して、`--imatrix` か `--requant q8_0` を案内する。
+
+**F85. V14 は僅差の分岐を許す。** F16 の bake と LoRA は、量子化した重みの丸めと行列積の経路が違う。差は 0.01〜0.02 nats で、上位 2 候補が拮抗する箇所では greedy が入れ替わる。V9(bake の検証)と同じく、完全一致か最初の分岐が僅差なら合格とした。Q8_0 の bake は量子化し直しの誤差が加わるので、F16 より早く分岐しやすい。

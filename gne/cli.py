@@ -326,7 +326,12 @@ def verify(c: Common, holder: dict,
     v = Verifier(s.engine, s.weights, layer=layer, seed=c.seed)
     steps = [("V1", v.v1_shapes), ("V2", v.v2_ffn_linearity), ("V3", v.v3_cvec_layer),
              ("V4", lambda: v.v4_direction_file(lc)), ("V5", lambda: v.v5_neuron_push(hf_model, hf_python)),
-             ("V6", v.v6_attention_sink), ("V11", v.v11_gain), ("V12", v.v12_when_gen), ("V13", v.v13_ablation)]
+             ("V6", v.v6_attention_sink), ("V11", v.v11_gain), ("V12", v.v12_when_gen)]
+    small = s.meta.file_size < 2 * 2**30                         # bake を 2 つ作るので、大きいモデルでは LoRA だけ
+    steps += [("V13", lambda: v.v13_ablation(bake=small)),
+              ("V14", v.v14_lora_vs_bake if small else
+               lambda: VResult("V14", "射影消去の LoRA と bake の一致", "skip",
+                               "2 GiB 以上のモデルは省きます(gne ablate --bake --verify で確かめられます)"))]
     results, bench_result = [], None
 
     def show(r):
@@ -579,6 +584,55 @@ def eval_cmd(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Op
     if top:
         text += f"\n倍率 {d['rows'][-1]['dose']:g} で複数のプロンプトに新しく出た語: " + ", ".join(f"{w}({n})" for w, n in top)
     return d, text, 0
+
+
+@gne_command(app, "ablate")
+def ablate(c: Common, holder: dict,
+           direction: str = typer.Option(..., "--direction", help="gne direction で作った方向の名前(逆引きの方向も可)"),
+           from_layer: Optional[int] = typer.Option(None, "--from-layer", help="どの層で測った r を使うか(既定は --select で選んだ層)"),
+           per_layer: bool = typer.Option(False, "--per-layer", help="層ごとに、その層で測った r_L を消す"),
+           layers: str = typer.Option("all", "--layers", help="消す層: all / 10-40 / 1,5,9-12"),
+           scale: float = typer.Option(1.0, "--scale", help="消す割合(1 で全部、0.5 で半分)"),
+           out: Optional[Path] = typer.Option(None, "--out", "-o", help="出力(既定 <root>/export/<方向>-ablate.lora.gguf、--bake なら -ablate.gguf)"),
+           bake: bool = typer.Option(False, "--bake", help="LoRA ではなく、重みを書き換えた GGUF を作る"),
+           in_path: Optional[Path] = typer.Option(None, "--in", help="--bake の元の GGUF(既定 --model)"),
+           requant: str = typer.Option("q8_0", "--requant", help="--bake で書き換えたテンソルの型: q8_0 / f16"),
+           via_f16: bool = typer.Option(False, "--via-f16", help="--bake: F16 で書いて llama-quantize で元の型に戻す"),
+           imatrix: Optional[Path] = typer.Option(None, "--imatrix", help="--via-f16: IQ1〜IQ2 系のモデルに要る imatrix"),
+           llama_quantize: Optional[str] = typer.Option(None, "--llama-quantize", help="--via-f16 の llama-quantize のパス"),
+           skip_embed: bool = typer.Option(False, "--skip-embed", help="埋め込み(token_embd)は射影しない"),
+           verify: bool = typer.Option(False, "--verify", help="書き出したもので V13(r 成分)と、bake なら V14(LoRA と greedy 一致)を見る")):
+    """方向 r の射影消去(abliteration)を LoRA アダプタ GGUF か、重みを書き換えた GGUF に書き出す(§6.17)。"""
+    if in_path and c.model and in_path.resolve() != c.model.resolve():
+        raise GneError("BAD_ARGS", "--in と --model が違うファイルです")
+    if via_f16 and not bake:
+        raise GneError("BAD_ARGS", "--via-f16 は --bake と一緒に使います")
+    s = holder["session"] = c.session(in_path)
+    out = out or s.store.export_dir() / (f"{direction}-ablate.gguf" if bake else f"{direction}-ablate.lora.gguf")
+    d = s.ablate(direction, out, from_layer=from_layer, per_layer=per_layer, layers=parse_layers(layers), scale=scale,
+                 embed=not skip_embed, bake=bake, requant=requant, via_f16=via_f16,
+                 imatrix=str(imatrix) if imatrix else None, llama_quantize=llama_quantize, verify=verify)
+    src = "層ごとの r_L" if d.get("per_layer") else f"L{d['from_layer']} で測った r"
+    Ls = d["layers"]
+    head = (f"{d['path']}({d['bytes'] / 2**20:.1f} MiB、{'LoRA' if d['kind'] == 'lora' else 'bake ' + d['requant']}、"
+            f"{src}、層 {Ls[0]}〜{Ls[-1]}({len(Ls)} 層)、scale {d['scale']:g}、埋め込み {'あり' if d['embed'] else 'なし'}、"
+            f"{d['seconds']:.0f} 秒)")
+    lines = [head]
+    if d["kind"] == "lora":
+        lines.append(f"使い方: llama-cli -m <model> --lora {d['path']}(--lora-scaled {d['path']} 0.5 で半分だけ消す)")
+    ok = True
+    v = d["verify"]
+    if v and "v13" in v:
+        t = v["v13"]
+        lines.append(f"V13: |r·l_out − 期待値| / ‖l_out‖ 最大 {t['max_dev']:.2e}"
+                     + (f"({'合格' if t['pass'] else '不合格'})" if t["pass"] is not None else f"({t['note']})"))
+        ok &= t["pass"] is not False
+    if v and "v14" in v:
+        t = v["v14"]
+        lines.append(f"V14: LoRA と bake の greedy {t['n_tokens']} トークン: " + "、".join(t["summary"])
+                     + f"({'合格' if t['pass'] else '不合格'})" + (f"({t['note']})" if t["note"] else ""))
+        ok &= t["pass"]
+    return d, "\n".join(lines), 0 if ok else 1
 
 
 # --- lens / reverse(Phase 2) -----------------------------------------------------------------------------
