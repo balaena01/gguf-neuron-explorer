@@ -141,15 +141,16 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
 
     @srv.tool()
     async def direction(contrast: str, name: str | None = None, select: str | None = None, mode: str = "ablate",
-                        layers: str | None = None, dose: float = 1.0) -> dict:
+                        layers: str | None = None, dose: float = 1.0, positions: str = "last") -> dict:
         """対照集合(configs/contrast/ の名前かパス。system_a / system_b / user_prompts、層選びには validate.match)から
         全層の方向 r_L = mean_A − mean_B(生成プロンプトの最終トークン)を作って保存する(§6.17)。
         select="auto" なら候補層ごとに効果を測ってジョブで層を選ぶ(job_status で結果)。mode="add" は層 L に平均差の dose 倍を
         足して判定の一致率が上がるか、mode="ablate" は全層から r_L を消して下がるか(B 側の KL が 0.1 以下の層から)。
-        作った方向は steer の units に "L:dir:NAME:+0.5"(rel dose)で足せる。"""
+        作った方向は steer の units に "L:dir:NAME:+0.5"(rel dose)で足せる。
+        positions="response" は A / B の system で返事を生成し、返事のトークンで測る(性格を足す用途ではこちらが効きやすい)。"""
         try:
             params = {"contrast": str(_contrast_path(session, contrast, None, None, None, name)), "name": name,
-                      "select": select, "mode": mode, "layers": layers, "dose": dose}
+                      "select": select, "mode": mode, "layers": layers, "dose": dose, "positions": positions}
         except Exception as e:  # noqa: BLE001
             return _err(e)
         if select == "auto":

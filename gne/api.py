@@ -756,20 +756,25 @@ class Session:
     def direction(self, *, contrast: str | Path, name: str | None = None, positions: str = "last",
                   select: str | int | None = None, mode: str = "ablate", layers: str | list[int] | None = None,
                   dose: float = 0.5, max_tokens: int = 64, kl_max: float = 0.1, min_distinct: float = 0.8,
-                  per_layer: bool = False, judge_model: str | Path | None = None, judge_target: str | None = None) -> dict:
-        """対照集合から全層の方向 r_L を作って保存し、select="auto" なら効果の大きい層を選ぶ(数字なら手で指定)。"""
-        from .direction import (DirectionSet, candidate_layers, layer_table, load_contrast, save_directions,
-                                save_select, select_layer)
+                  per_layer: bool = False, judge_model: str | Path | None = None, judge_target: str | None = None,
+                  response_tokens: int = 96) -> dict:
+        """対照集合から全層の方向 r_L を作って保存し、select="auto" なら効果の大きい層を選ぶ(数字なら手で指定)。
+        positions="response" は返事のトークンから作る(A / B の system で response_tokens まで返事を生成して流す)。"""
+        from .direction import (DirectionSet, candidate_layers, layer_table, load_contrast, response_directions,
+                                save_directions, save_select, select_layer)
         from .evalx import Judge
         from .reverse import contrastive_directions
-        if positions not in ("last", "all", "assistant"):
-            raise GneError("BAD_ARGS", "positions は last / all / assistant です")
+        if positions not in ("last", "all", "assistant", "response"):
+            raise GneError("BAD_ARGS", "positions は last / all / assistant / response です")
         t0 = time.perf_counter()
         cs, val = load_contrast(contrast)
         name = name or cs.name
         if not re.fullmatch(r"[\w.\-]+", name):
             raise GneError("BAD_ARGS", f"名前 {name!r} は英数字・_・-・. だけにしてください")
-        cr = contrastive_directions(self.engine, cs, positions=positions, with_act=False, progress=self.progress)
+        if positions == "response":
+            cr = response_directions(self, cs, max_tokens=response_tokens, progress=self.progress)
+        else:
+            cr = contrastive_directions(self.engine, cs, positions=positions, with_act=False, progress=self.progress)
         path = self.store.direction_dir(self.meta.model_id) / f"{name}.npz"
         save_directions(path, cr, cs, str(contrast))
         ds = DirectionSet.load(path)

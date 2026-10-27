@@ -453,3 +453,40 @@ def test_ablate_in_openai_and_ui_stream(session, tmp_path):
         assert sv.status_code == 200, sv.text
         got = next(x for x in cl.get("/api/recipes").json() if x["name"] == "uiabl")
         assert got["ablate"]["scale"] == 0.5 and got["units"][0]["kind"] == "neuron"
+
+
+@pytest.mark.model
+def test_direction_from_responses(session, tmp_path):
+    """positions="response": A / B の system で返事を生成し、返事のトークンで測った平均の差。手で計算したものと一致する。"""
+    from gne.capture import Capture
+    from gne.direction import DirectionSet, load_contrast
+    from gne.evalx import _generate
+    c = _contrast(tmp_path)
+    d = session.direction(contrast=c, name="pirate_resp", positions="response", response_tokens=16)
+    ds = DirectionSet.load(d["path"])
+    assert d["positions"] == "response" and ds.meta["positions"] == "response" and 0 < d["n_rows"]["A"] <= 3 * 16
+    # 手で: 層 12 の A 側の返事のトークンの平均
+    e = session.engine
+    cs, _ = load_contrast(c)
+    rows = []
+    for side, system in (("A", cs.system_a), ("B", cs.system_b)):
+        convs = [[{"role": "system", "content": system}, {"role": "user", "content": u}] for u in cs.user_prompts]
+        outs = _generate(session, [(cv, 16) for cv in convs], None, None, "all", lambda n: None)
+        acc = []
+        cap = Capture()
+        cap.set_wanted(lambda n: n == "l_out-12")
+        for cv, o in zip(convs, outs, strict=True):
+            pids = e.tokenize_prompt(e.render_chat(cv))
+            resp = [t for t in o["token_ids"] if not e.is_eog(t)]
+            ctx = e.probe_ctx(cap)
+            e.clear_memory(ctx)
+            e.prefill(ctx, [pids + resp])
+            acc.append(cap.take()["l_out-12"][len(pids):].astype(np.float64))
+        rows.append(np.concatenate(acc).mean(axis=0))
+    assert np.allclose(ds.raw[12], rows[0] - rows[1], rtol=1e-4, atol=1e-4)
+    last = DirectionSet.load(session.direction(contrast=c, name="pirate_last")["path"])
+    assert abs(float(ds.unit(12) @ last.unit(12))) < 0.99                      # 指示の直後の方向とは別物
+    st = session.steer(session.recipe(units=["12:dir:pirate_resp:+0.5"]), prompt="Who are you?", max_tokens=12)
+    assert st["differs"]
+    with pytest.raises(GneError):
+        session.direction(contrast=c, positions="middle")

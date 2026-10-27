@@ -288,3 +288,49 @@ def top_writer_neurons(session, ds: DirectionSet, n: int) -> list[tuple[int, int
     pos = [c for c in cands if c.sign > 0]
     pos.sort(key=lambda c: -c.cos)
     return [(c.layer, c.neuron, c.cos) for c in pos[:n]]
+
+
+def response_directions(session, cs: ContrastSet, *, max_tokens: int = 96, progress: Progress | None = None):
+    """返事のトークンから作る方向(positions="response"、persona vector の作り方)。
+    A(system_a)と B(system_b)で各プロンプトに greedy で返事を生成し、その会話(system・プロンプト・返事)を流して
+    返事のトークンでの l_out-L の平均の差を取る。「指示の直後」ではなく「その性格で話している最中」の状態の差になる。
+    戻り値は reverse.ContrastResult と同じ形(act_diff は空)。"""
+    from .capture import Capture
+    from .evalx import _generate
+    from .reverse import ContrastResult
+    e = session.engine
+    Ls = list(range(e.n_layer - 1))                         # 最終層は行が間引かれ得るので除く
+    names = {f"l_out-{L}": L for L in Ls}
+    sums = {side: {L: np.zeros(e.n_embd) for L in Ls} for side in "AB"}
+    sq = {L: np.zeros(e.n_embd) for L in Ls}
+    cnt = {"A": 0, "B": 0}
+    total, step = 2 * len(cs.user_prompts), 0
+    for side, system in (("A", cs.system_a), ("B", cs.system_b)):
+        convs = [[{"role": "system", "content": system}, {"role": "user", "content": u}] for u in cs.user_prompts]
+        outs = _generate(session, [(c, max_tokens) for c in convs], None, None, "all", lambda n: None)
+        cap = Capture()
+        cap.set_wanted(lambda n: n in names)
+        for c, o in zip(convs, outs, strict=True):
+            pids = e.tokenize_prompt(e.render_chat(c))
+            resp = [t for t in o["token_ids"] if not e.is_eog(t)]
+            if not resp:
+                continue
+            ctx = e.probe_ctx(cap)
+            e.clear_memory(ctx)
+            e.set_cvec(ctx, None)
+            e.prefill(ctx, [pids + resp])
+            got = cap.take()
+            for nm, L in names.items():
+                rows = got[nm][len(pids):].astype(np.float64)        # 返事のトークンだけ
+                sums[side][L] += rows.sum(axis=0)
+                sq[L] += np.square(rows).sum(axis=0)
+            cnt[side] += len(resp)
+            step += 1
+            if progress:
+                progress(step, total, "direction: response")
+    if not cnt["A"] or not cnt["B"]:
+        raise GneError("BAD_CONTRAST", "返事が生成されませんでした")
+    n = cnt["A"] + cnt["B"]
+    dirs = {L: (sums["A"][L] / cnt["A"] - sums["B"][L] / cnt["B"]).astype(np.float32) for L in Ls}
+    scale = {L: np.sqrt(np.maximum(sq[L] / n - ((sums["A"][L] + sums["B"][L]) / n) ** 2, 0)).astype(np.float32) for L in Ls}
+    return ContrastResult(dirs, {}, "mean_diff", "response", cnt, scale)

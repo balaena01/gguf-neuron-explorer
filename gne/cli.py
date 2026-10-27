@@ -739,7 +739,8 @@ def reverse(c: Common, holder: dict,
 def direction(c: Common, holder: dict,
               contrast: Path = typer.Option(..., "--contrast", help="対照集合 YAML(reverse と同じ形。層選びには validate.match)"),
               name: Optional[str] = typer.Option(None, "--name", help="保存名(既定は対照集合の name)"),
-              positions: str = typer.Option("last", "--positions", help="last(生成プロンプトの最終トークン)/ all / assistant"),
+              positions: str = typer.Option("last", "--positions", help="last(生成プロンプトの最終トークン)/ all / assistant / response(A・B の system で返事を生成し、返事のトークンで測る)"),
+              response_tokens: int = typer.Option(96, "--response-tokens", help="--positions response で生成する返事の長さ"),
               select: Optional[str] = typer.Option(None, "--select", help="auto(候補層ごとに効果を測って選ぶ)か層の番号"),
               layer: Optional[int] = typer.Option(None, "--layer", help="層を手で指定する(--select <番号> と同じ)"),
               mode: str = typer.Option("ablate", "--mode", help="--select auto の測り方: ablate(消して効果が下がるか)/ add(足して効果が上がるか)"),
@@ -762,7 +763,7 @@ def direction(c: Common, holder: dict,
     s = holder["session"] = c.session()
     d = s.direction(contrast=contrast, name=name, positions=positions, select=select, mode=mode, layers=layers,
                     dose=dose, max_tokens=max_tokens, kl_max=kl_max, min_distinct=min_distinct, per_layer=per_layer,
-                    judge_model=judge_model, judge_target=judge_target)
+                    judge_model=judge_model, judge_target=judge_target, response_tokens=response_tokens)
     lines = [f"{d['path']}(A/B 各 {d['n_prompts']} 会話、行数 {d['n_rows']}、位置 {d['positions']}、{d['seconds']:.0f} 秒)",
              "層ごとの ‖平均差‖/ρ(rel dose に直した大きさ)と前の層との cos:"]
     lines.append("  " + " ".join(f"L{r['layer']}:{r['rel']:.2f}" if r["rel"] is not None else f"L{r['layer']}:—"
