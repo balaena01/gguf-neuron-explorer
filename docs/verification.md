@@ -492,3 +492,32 @@ U1 で作らなかったもの(後のフェーズ): 層ラベルの右クリッ�
 **F72. 凡例の長い説明は地図の幅で折り返す。** web の線の説明などの長い 1 項目が折り返さず、全体ビューで両側のパネルを開くと地図の左端を越えて LIST に重なっていた(日本語でも同じ)。凡例の幅を地図の幅までにし、長い説明だけは折り返す。地図が 720 px より狭いとき(1280 幅で両側のパネルを開いたときなど)は説明を省いて色と印の見本だけにし(CSS の container query)、正面ビューでは配線の説明のほかの長い説明を省く(英語の凡例は日本語より行が増え、正面ビューのシートの下端に重なった)。
 
 **F73. 英語は別のサブエージェントに日英の画面を見比べさせて直した。** 英語の画面に訳し漏れの日本語は無かった(残っていたのはモデルの語・rollout・付けた名前と注釈)。指摘で直したもの: 1280 幅で凡例が地図の左半分(L0〜L12 の札)を覆う(F72)、地図の両端の「input side / output side」が切れる(input / output に)、1280 幅で日本語も JP / EN だけが 2 行目に落ちる(F71)、「1 notes」「1 points」(単数・複数)、層ごとの札「L22 · 101 points」が長くエージェントの札を押しのける(「101 lit」に)、Details の配線の表で見出しが長く相手の列が 2 行に折れる(見出しを短くし、列は折り返さない)、逆引きの訳が 4 通り(reverse-lookup にそろえた)、大文字・小文字のゆれ、下の欄の「32 layers · 32 layers (layers)」の重複(layers ビューは「(layers)」だけ)、embed の rollout 数に桁区切りが無い、など。英語の層の選択欄が 1600 幅で「MLP 92」までしか見えないこと(欄の幅 280 px)と、1600 幅の全体ビューで凡例の 1 行目が「input」の札に少しかかることは残した。
+
+## 11. CHANGE-01(eval・位置別ステアリング・gain)
+
+変更指示 CHANGE-01 を推奨順(B → C → A)で当てる。着手前に `docs/divergence.md` に設計とのずれを洗い出した。開始時点で全 98 テストが通っていた。
+
+### 11.1 B: 位置別ステアリング `when`(本体設計 §6.15、V12)
+
+実装: `gne/when.py`(`parse_when`・`chat_segments`・`generate_when`)、`Engine.generate_greedy(..., schedule=)` と `Engine.prefill(..., pos0=)`、レシピの `when`、`gne steer` / `gne chat` の `--when`、MCP の `steer(when=)`、UI の Chat タブの when 選択、`gne serve --openai`(`/v1/models`・`/v1/chat/completions`、ストリーミング可、`gne: {recipe | units, scale, when}`)。`export-cvec` / `bake` は `when != all` のとき警告して全位置で書き出す。
+
+| when | 実装 |
+|---|---|
+| `all` | 従来どおり(prefill から全位置) |
+| `gen` | prefill は素、生成 1 ステップ目(最初に決まったトークンを decode する時)から足す。最初の 1 トークンは素の prefill から決まる |
+| `assistant` | プロンプトを発話ごとの区間に分けて prefill し、assistant の区間(過去の返答と生成プロンプト)だけ足す。生成中も足す |
+| `after:<text>` | 素で始め、出力の文字列に `<text>` が現れたステップから足す |
+| `ramp:<a>-<b>` | prefill は倍率 a、生成トークン位置に沿って b へ線形に変える(8 トークン刻みで付け替え) |
+
+V12(Qwen3-0.6B、L14、‖v‖ = 5ρ): `when=gen` で prefill 後の `l_out-14` は素の値と完全一致(差 0)、生成 1 ステップ目の `l_out-14` の差と v の相対誤差 1.6e-8。`generate_when(gen)` の最初のトークンは無介入と同じで、set_cvec は 2 回(解除 → 付与)、出力全体は無介入とも `all` とも違う。`gne verify` に V12 として入れた。
+
+各モードを Qwen3-0.6B と Qwen3.5-4B(L22 N2742 +0.8、2 ターン目の会話)で動かした:
+
+- Qwen3.5-4B: 無介入「I am **Qwen3.5**, the latest large language model…」、`all`「I am an intelligent extraterrestrial being from the planet X888…」、`gen`「I am **Qwen**, an extra-advanced extraterrestrial intelligence from the planet X888. I am not from Earth…」(名乗りは素のまま、中身だけ寄る)、`assistant` は `all` と同じ文(1 ターン目のユーザー発話が短いため)、`ramp:1.5-0` は「I am an extrali」で止まった(始めが強すぎる)。
+- `ramp:1.5-0`(max 40)の付け替えは 0・8・16・24・32 トークン目の 5 回(倍率 1.5 → 1.19 → 0.88 → 0.58 → 0.27)。
+
+テスト: `tests/test_change01.py`(when の読み取り、区間の結合、レシピの保存と読み直し、V12、各モード、steer / chat / export の when、OpenAI 互換 API の通常とストリーミング(gne の生成と同じ文になること、[DONE]、誤りの形式、`--openai` なしでは出ないこと)、UI の /api/steer の列ごとの when)と、`tests/test_ui.py` の U2 のブラウザテストに when 選択の確認を足した。
+
+**F74. `assistant` の区間はテンプレートによって探し方を変える。** 会話を先頭から 1 発話ずつ描画して区切る方法は、過去の返答の書き方が「最後の発話かどうか」で変わるテンプレート(Qwen3 の think 欄)では全体の描画と先頭が一致しない。その場合は、生成プロンプトの始まりを全体の描画から求め、過去の返答は本文のトークン列を全体の中から探して区間にする(前後 1 トークンの切れ目のずれも許す)。Qwen3-0.6B の 2 往復の会話で、2 つの過去の返答と生成プロンプトが assistant の区間になることを確かめた。
+
+**F75. `gen` の最初のトークンは押されない。** 設計どおり prefill を素にすると、最初の 1 トークンは素の prefill のロジットから決まる。名乗りの最初の語(「I am」)は変わらず、2 トークン目から寄る。最初から寄せたいときは `assistant`(生成プロンプトの prefill から足す)を使う。

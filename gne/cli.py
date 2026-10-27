@@ -315,7 +315,7 @@ def verify(c: Common, holder: dict,
     v = Verifier(s.engine, s.weights, layer=layer, seed=c.seed)
     steps = [("V1", v.v1_shapes), ("V2", v.v2_ffn_linearity), ("V3", v.v3_cvec_layer),
              ("V4", lambda: v.v4_direction_file(lc)), ("V5", lambda: v.v5_neuron_push(hf_model, hf_python)),
-             ("V6", v.v6_attention_sink)]
+             ("V6", v.v6_attention_sink), ("V12", v.v12_when_gen)]
     results, bench_result = [], None
 
     def show(r):
@@ -408,6 +408,7 @@ _RECIPE = typer.Option(None, "--recipe", help="レシピ YAML")
 _UNIT = typer.Option(None, "--unit", help="L:N:dose(例 14:8949:+1.0)または L:random:SEED:dose。複数可")
 _DOSE_UNIT = typer.Option(None, "--dose-unit", help="rel / absmax / raw(既定はレシピの値、--unit なら rel)")
 _SCALE = typer.Option(1.0, "--scale", help="全ユニットの dose に掛ける係数")
+_WHEN = typer.Option(None, "--when", help="足す位置(§6.15): all / gen / assistant / after:<文字列> / ramp:<a>-<b>。既定はレシピの値(無ければ all)")
 
 
 @gne_command(app, "steer")
@@ -416,12 +417,13 @@ def steer(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Optio
           prompt: Optional[str] = typer.Option(None, "--prompt", "-p", help="ユーザーの発話"),
           system: Optional[str] = typer.Option(None, "--system", help="system プロンプト"),
           max_tokens: int = typer.Option(128, "--max-tokens"),
-          compare: bool = typer.Option(False, "--compare", help="無介入の生成も並べる")):
+          compare: bool = typer.Option(False, "--compare", help="無介入の生成も並べる"),
+          when: Optional[str] = _WHEN):
     """レシピまたは単発指定でプロンプトに回答する(greedy、1 本ずつ)。"""
     s = holder["session"] = c.session()
-    r = s.recipe(units=unit, path=recipe, dose_unit=dose_unit, scale=scale)
+    r = s.recipe(units=unit, path=recipe, dose_unit=dose_unit, scale=scale, when=when)
     d = s.steer(r, prompt=prompt, system=system, max_tokens=max_tokens, compare=compare)
-    parts = [f"ユニット({r.dose_unit}):\n" + _units_text(d["units"])]
+    parts = [f"ユニット({r.dose_unit}、位置 {r.when}):\n" + _units_text(d["units"])]
     if d["baseline"] is not None:
         parts.append(f"── 無介入 ──({d['baseline']['finish']}, {d['baseline']['n_gen']} tok)\n{d['baseline']['text']}")
     label = ", ".join(u.label() for u in r.units)
@@ -637,10 +639,14 @@ def chat(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Option
                                                     help="ユーザーの発話(複数で多ターン)。無ければ対話モード"),
          system: Optional[str] = typer.Option(None, "--system"),
          max_tokens: int = typer.Option(256, "--max-tokens"),
-         stream: bool = typer.Option(True, "--stream/--no-stream", help="生成しながら表示する")):
+         stream: bool = typer.Option(True, "--stream/--no-stream", help="生成しながら表示する"),
+         when: Optional[str] = _WHEN):
     """−/0/+ の 3 列比較チャット(ユーザーの発話は共有、返答は列ごと)。"""
     from .chat import ChatState, chat_turn, make_columns
     s = holder["session"] = c.session()
+    if when:
+        from .when import parse_when
+        parse_when(when)
     base = s.recipe(units=unit, path=recipe, dose_unit=dose_unit) if (unit or recipe) else None
     load = lambda p: s.recipe(path=p) if p else None  # noqa: E731
     cols = make_columns(base, dose=dose, left=load(left), right=load(right), center=load(center))
@@ -660,7 +666,8 @@ def chat(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Option
                 print(f"\n> {user}", flush=True)
             turns.append({"user": user, "replies": chat_turn(s, state, user, max_tokens=max_tokens,
                                                              on_text=on_text if live else None,
-                                                             on_column=on_column if live else None)})
+                                                             on_column=on_column if live else None,
+                                                             when_override=when)})
         d = {"columns": [{"label": col.label, "recipe": col.recipe.to_dict() if col.recipe else None} for col in cols],
              "system": system, "turns": turns}
         if live:
@@ -690,7 +697,7 @@ def chat(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Option
         if not user.strip():
             continue
         replies = chat_turn(s, state, user, max_tokens=max_tokens, on_text=on_text if stream else None,
-                            on_column=on_column if stream else None)
+                            on_column=on_column if stream else None, when_override=when)
         if not stream:
             for col, rep in zip(cols, replies, strict=True):
                 print(f"── {col.label} ──\n{rep['text']}")
@@ -755,7 +762,8 @@ def serve_cmd(ctx: typer.Context,
               model: Optional[Path] = typer.Option(None, "--model", "-m", envvar="GNE_MODEL", help="GGUF ファイル"),
               port: int = typer.Option(8791, "--port"),
               host: str = typer.Option("127.0.0.1", "--host", help="ローカル専用(127.0.0.1)"),
-              root: Optional[Path] = typer.Option(None, "--root", envvar="GNE_ROOT")):
+              root: Optional[Path] = typer.Option(None, "--root", envvar="GNE_ROOT"),
+              openai: bool = typer.Option(False, "--openai", help="OpenAI 互換の /v1/chat/completions も出す(レシピと when は gne で指定、§6.15)")):
     """Web UI(http://127.0.0.1:8791)。"""
     from .ui.server import serve
     c: Common = ctx.obj or Common()
@@ -764,8 +772,9 @@ def serve_cmd(ctx: typer.Context,
         print("エラー[BAD_ARGS]: --model を指定してください", file=sys.stderr)
         raise typer.Exit(2)
     try:
-        print(f"gne serve: http://{host}:{port}/", file=sys.stderr)
-        serve(path, host=host, port=port, root=root or c.root, n_gpu_layers=c.n_gpu_layers, n_ctx=c.n_ctx, seed=c.seed)
+        print(f"gne serve: http://{host}:{port}/" + (f"  (OpenAI 互換: http://{host}:{port}/v1)" if openai else ""), file=sys.stderr)
+        serve(path, host=host, port=port, root=root or c.root, n_gpu_layers=c.n_gpu_layers, n_ctx=c.n_ctx, seed=c.seed,
+              openai=openai)
     except GneError as e:
         print(f"エラー[{e.code}]: {e.message}", file=sys.stderr)
         raise typer.Exit(2) from e

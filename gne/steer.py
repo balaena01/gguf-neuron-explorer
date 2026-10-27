@@ -53,6 +53,7 @@ class Recipe:
     model_id: str | None = None
     dose_unit: DoseUnit = "rel"
     name: str | None = None
+    when: str = "all"               # §6.15 位置別ステアリング: all / gen / assistant / after:<text> / ramp:<a>-<b>
 
     @classmethod
     def load(cls, path: str | Path) -> Recipe:
@@ -60,29 +61,32 @@ class Recipe:
         units = [Unit(layer=int(u["layer"]), neuron=None if u.get("neuron") is None else int(u["neuron"]),
                       dose=float(u["dose"]), kind=u.get("kind", "neuron"), seed=u.get("seed"))
                  for u in d.get("units", [])]
-        r = cls(units, d.get("model_id"), d.get("dose_unit", "rel"), d.get("name") or Path(path).stem)
+        r = cls(units, d.get("model_id"), d.get("dose_unit", "rel"), d.get("name") or Path(path).stem, d.get("when") or "all")
         r.validate()
         return r
 
     def save(self, path: str | Path) -> None:
         d = {"name": self.name, "model_id": self.model_id, "dose_unit": self.dose_unit,
+             **({"when": self.when} if self.when != "all" else {}),
              "units": [{k: v for k, v in asdict(u).items() if v is not None and not (k == "kind" and v == "neuron")}
                        for u in self.units]}
         Path(path).write_text(yaml.safe_dump(d, allow_unicode=True, sort_keys=False), encoding="utf-8")
 
     def to_dict(self) -> dict:
-        return {"name": self.name, "model_id": self.model_id, "dose_unit": self.dose_unit,
+        return {"name": self.name, "model_id": self.model_id, "dose_unit": self.dose_unit, "when": self.when,
                 "units": [asdict(u) for u in self.units]}
 
     def scaled(self, k: float) -> Recipe:
         return Recipe([Unit(u.layer, u.neuron, u.dose * k, u.kind, u.seed) for u in self.units],
-                      self.model_id, self.dose_unit, self.name)
+                      self.model_id, self.dose_unit, self.name, self.when)
 
     def validate(self) -> None:
         if self.dose_unit not in ("rel", "absmax", "raw"):
             raise GneError("BAD_RECIPE", f"dose_unit={self.dose_unit!r} は rel / absmax / raw のどれかです")
         if not self.units:
             raise GneError("BAD_RECIPE", "ユニットがありません")
+        from .when import parse_when
+        parse_when(self.when)                      # 書き方の誤りはここで返す
         for u in self.units:
             if u.kind == "neuron" and u.neuron is None:
                 raise GneError("BAD_RECIPE", f"{u}: neuron がありません")

@@ -601,6 +601,7 @@ async function main() {
   if (state.model) {
     state.recipe = new Recipe(state.model.meta.model_id, recipeChanged);
     chat = new ChatPanel({ recipe: state.recipe });
+    state.chat = chat;                                                   // 自動テスト用
     recipePanel = new RecipePanel($("#recipe-list"), state.recipe, {
       onOpen: (u) => openNeuron(u),
       onChat: () => {

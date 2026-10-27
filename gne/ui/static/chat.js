@@ -18,6 +18,8 @@ export class ChatPanel {
     this.dose = 0.8;
     this.scale = 1.0;
     this.maxTokens = 128;
+    this.when = "all";                 // 足す位置(本体設計 §6.15): all / gen / assistant / after / ramp
+    this.whenArg = "";                 // after の文字列、ramp の a-b
     this.turns = [];                   // [{ user, labels, replies: [], finish: [] }]
     this.neuron = null;                // { layer, n }
     this.busy = false;
@@ -85,6 +87,9 @@ export class ChatPanel {
       <div class="ch-row">${t.replies.map((r, ci) => `<div class="ch-cell ${["minus", "", "plus"][ci] || ""}" data-t="${ti}" data-c="${ci}">${this.cellHTML(t, ci)}</div>`).join("")}</div>`).join("");
     return `
       <div class="ch-tools">${amount}<span class="muted">max</span><input id="ch-max" type="number" min="1" max="2048" value="${this.maxTokens}">
+        <span class="muted" title="${tr("足す位置: all = 全位置 / gen = 生成中だけ(プロンプトの理解を壊さない)/ assistant = assistant の発話だけ / after = 出力にその文字列が出てから / ramp = 倍率を a から b へ変える")}">when</span><select id="ch-when">${
+          ["all", "gen", "assistant", "after", "ramp"].map((w) => `<option value="${w}"${this.when === w ? " selected" : ""}>${w}</option>`).join("")}</select>${
+          this.when === "after" || this.when === "ramp" ? `<input id="ch-when-x" size="8" value="${esc(this.whenArg)}" placeholder="${this.when === "after" ? tr("結論:") : "1.5-0.5"}">` : ""}
         <button class="small" id="ch-reset"${this.busy ? " disabled" : ""}>${tr("会話を消す")}</button></div>
       <div class="ch-log">
         <div class="ch-row ch-head">${cols.map((c, i) => `<div class="${["minus", "", "plus"][i]}">${esc(c.label)}${
@@ -103,6 +108,12 @@ export class ChatPanel {
     return `${badge}<div class="txt">${esc(t.replies[ci])}${cur}</div>`;
   }
 
+  whenSpec() {
+    if (this.when === "after") return this.whenArg ? `after:${this.whenArg}` : "all";
+    if (this.when === "ramp") return `ramp:${this.whenArg || "1.5-0.5"}`;
+    return this.when;
+  }
+
   wireWrites() {
     const $ = (s) => this.el.querySelector(s);
     const dose = $("#ch-dose");
@@ -119,6 +130,9 @@ export class ChatPanel {
       });
     }
     $("#ch-max").addEventListener("change", (ev) => { this.maxTokens = Math.max(1, Math.min(2048, +ev.target.value || 128)); });
+    $("#ch-when").addEventListener("change", (ev) => { this.when = ev.target.value; this.render(); });
+    const wx = $("#ch-when-x");
+    if (wx) wx.addEventListener("change", (ev) => { this.whenArg = ev.target.value.trim(); });
     $("#ch-reset").addEventListener("click", () => { this.turns = []; this.status = ""; this.render(); });
     const text = $("#ch-text");
     text.addEventListener("keydown", (ev) => { if (ev.key === "Enter" && (ev.ctrlKey || ev.metaKey)) this.send(text.value); });
@@ -143,6 +157,7 @@ export class ChatPanel {
     const t0 = performance.now();
     const body = {
       max_tokens: this.maxTokens,
+      when: this.whenSpec(),
       columns: cols.map((c, ci) => ({
         label: c.label, units: c.units,
         messages: [...prev.flatMap((t) => [{ role: "user", content: t.user }, { role: "assistant", content: t.replies[ci] }]),

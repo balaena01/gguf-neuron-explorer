@@ -336,4 +336,6 @@ export const EN = {
   "表示する層": "Layer to show",
   "点の色(overlay)": "Point color (overlay)",
   "ニューロンへ飛ぶ(L14 N8949 の形で Enter)": "Jump to a neuron (type L14 N8949 and press Enter)",
+  "足す位置: all = 全位置 / gen = 生成中だけ(プロンプトの理解を壊さない)/ assistant = assistant の発話だけ / after = 出力にその文字列が出てから / ramp = 倍率を a から b へ変える": "Where to add: all = every position / gen = only while generating (keeps the prompt intact) / assistant = only the assistant's turns / after = once the text appears in the output / ramp = scale from a to b",
+  "結論:": "Answer:",
 };

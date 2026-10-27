@@ -163,6 +163,52 @@ class Verifier:
                        {"d_prev_max": float(np.abs(d_prev).max()), "err_L": err_L,
                         "d_next_max": float(np.abs(d_next).max()), "restore": restore, "stale": stale})
 
+    # --- V12(§6.15 位置別ステアリング)----------------------------------------------------------------
+
+    def v12_when_gen(self) -> VResult:
+        """when=gen: prefill は素のまま(l_out-L が素の値と完全一致)、生成 1 ステップ目から v が加わる。
+        さらに gne の generate_when(gen) の最初のトークンが無介入と同じで、全体として無介入とも all とも違うことを見る。"""
+        from .when import generate_when
+        L, n_embd = self.L, self.e.n_embd
+        ids = self.prompt_ids[0]
+        v = self.rng.standard_normal(n_embd).astype(np.float32)
+        v *= 5.0 * self.rho() / np.linalg.norm(v)
+        name = f"l_out-{L}"
+        cap = Capture()
+        cap.set_wanted(lambda n: n == name)
+        ctx = self.e.probe_ctx(cap)
+
+        def run(gen_vec):
+            self.e.clear_memory(ctx)
+            self.e.set_cvec(ctx, None)
+            pre = self.e.prefill(ctx, [ids])
+            a = cap.take()[name]
+            tok = int(pre.logits[0].argmax())
+            self.e.set_cvec(ctx, gen_vec)
+            self.e._decode(ctx, [(tok, len(ids), 0, True)])
+            b = cap.take()[name]
+            self.e.set_cvec(ctx, None)
+            return a, b
+        a0, b0 = run(None)
+        a1, b1 = run({L: v})
+        prefill_same = float(np.abs(a1 - a0).max())
+        err_gen = float(np.linalg.norm((b1 - b0)[-1] - v) / np.linalg.norm(v))
+        # 実際の経路: generate_when の gen / all / 無介入
+        msgs = [{"role": "user", "content": PROMPTS[0]}]
+        sctx = self.e.steer_ctx()
+        g_base, _ = generate_when(self.e, sctx, msgs, None, "all", max_tokens=24)
+        g_gen, info = generate_when(self.e, sctx, msgs, {L: v}, "gen", max_tokens=24)
+        g_all, _ = generate_when(self.e, sctx, msgs, {L: v}, "all", max_tokens=24)
+        first_same = bool(g_gen.token_ids[:1] == g_base.token_ids[:1])
+        ok = prefill_same == 0 and err_gen < 1e-3 and first_same and info["set_cvec"] == 2
+        return VResult("V12", "位置別ステアリング(when=gen)", "pass" if ok else "fail",
+                       f"l_out-{L}: prefill の差 最大 {prefill_same:.3g}(0 であること)、生成 1 ステップ目の差と v の相対誤差 {err_gen:.2e}。"
+                       f"generate_when(gen): 最初のトークンが無介入と{'同じ' if first_same else '違う'}、set_cvec {info['set_cvec']} 回、"
+                       f"無介入と{'同じ' if g_gen.token_ids == g_base.token_ids else '違う'}、all と{'同じ' if g_gen.token_ids == g_all.token_ids else '違う'}",
+                       {"prefill_diff_max": prefill_same, "err_gen": err_gen, "first_token_same": first_same,
+                        "set_cvec": info["set_cvec"], "gen_eq_base": g_gen.token_ids == g_base.token_ids,
+                        "gen_eq_all": g_gen.token_ids == g_all.token_ids})
+
     # --- V4 -------------------------------------------------------------------------------------
 
     def v4_direction_file(self, llama_completion: str | None = None, n_tokens: int = 32) -> VResult:

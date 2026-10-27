@@ -187,7 +187,8 @@ class Session:
     # --- recipe ---------------------------------------------------------------------------------
 
     def recipe(self, *, units: list[str] | None = None, path: str | Path | None = None,
-               dose_unit: str | None = None, scale: float = 1.0, name: str | None = None) -> Recipe:
+               dose_unit: str | None = None, scale: float = 1.0, name: str | None = None,
+               when: str | None = None) -> Recipe:
         if bool(units) == bool(path):
             raise GneError("BAD_ARGS", "--recipe か --unit のどちらか一方を指定してください")
         if path:
@@ -198,6 +199,8 @@ class Session:
                 r.dose_unit = dose_unit
         else:
             r = Recipe([parse_unit(u) for u in units], self.meta.model_id, dose_unit or "rel", name)
+        if when:
+            r.when = when
         r.validate()
         if r.model_id and r.model_id != self.meta.model_id:
             self.warn(f"レシピの model_id {r.model_id!r} が読み込んだモデル {self.meta.model_id!r} と違います")
@@ -229,39 +232,39 @@ class Session:
             raise GneError("BAD_ARGS", "--prompt が要ります")
         return ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": prompt}]
 
-    def generate(self, vectors: dict[int, np.ndarray] | None, messages: list[dict], *, max_tokens: int = 128) -> dict:
-        """1 本で greedy 生成する(バッチの組み方で結果が変わらないように、F2)。"""
+    def generate(self, vectors: dict[int, np.ndarray] | None, messages: list[dict], *, max_tokens: int = 128,
+                 when: str = "all") -> dict:
+        """1 本で greedy 生成する(バッチの組み方で結果が変わらないように、F2)。when は §6.15 の位置別ステアリング。"""
+        from .when import generate_when
         e = self.engine
-        ids = e.tokenize_prompt(e.render_chat(messages))
-        ctx = e.steer_ctx()
-        try:
-            e.set_cvec(ctx, vectors)
-        except ValueError as ex:
-            raise GneError("BAD_RECIPE", str(ex), "ブロック 0 は control vector で操作できません(bake なら可)") from ex
-        try:
-            r = e.generate_greedy(ctx, [ids], max_tokens=max_tokens)[0]
-        finally:
-            e.set_cvec(ctx, None)
-        return {"text": r.text, "finish": r.finish, "n_gen": r.n_gen, "token_ids": r.token_ids}
+        r, info = generate_when(e, e.steer_ctx(), messages, vectors, when, max_tokens=max_tokens)
+        return {"text": r.text, "finish": r.finish, "n_gen": r.n_gen, "token_ids": r.token_ids, "when": info}
 
     # --- steer ----------------------------------------------------------------------------------
 
     def steer(self, recipe: Recipe | list[str], *, prompt: str | None = None, messages: list[dict] | None = None,
-              system: str | None = None, max_tokens: int = 128, compare: bool = True) -> dict:
+              system: str | None = None, max_tokens: int = 128, compare: bool = True, when: str | None = None) -> dict:
         recipe = self._as_recipe(recipe)
         msgs = self.messages(prompt, messages, system)
         vecs, details = self.vectors(recipe)
         base = self.generate(None, msgs, max_tokens=max_tokens) if compare else None
-        st = self.generate(vecs, msgs, max_tokens=max_tokens)
+        st = self.generate(vecs, msgs, max_tokens=max_tokens, when=when or recipe.when)
         return {"messages": msgs, "recipe": recipe.to_dict(), "units": details, "layer_norms": self._norms(vecs),
+                "when": when or recipe.when,
                 "baseline": base, "steered": st, "differs": None if base is None else base["token_ids"] != st["token_ids"]}
 
     # --- export / import ------------------------------------------------------------------------
+
+    def _warn_when(self, recipe: Recipe, what: str) -> None:
+        if recipe.when != "all":
+            self.warn(f"レシピの when={recipe.when} は {what} では表せないので、全位置(all)として書き出しました(§6.15)。"
+                      "位置別のまま使うなら gne steer / chat か gne serve --openai を使ってください")
 
     def export_cvec(self, recipe: Recipe | list[str], path: str | Path, *, fmt: str = "cvec", verify: bool = False,
                     verify_prompt: str = "Who are you?", n_tokens: int = 32,
                     llama_completion: str | None = None) -> dict:
         recipe = self._as_recipe(recipe)
+        self._warn_when(recipe, "control vector")
         vecs, details = self.vectors(recipe)
         if fmt == "cvec" and 0 in vecs:
             raise GneError("BAD_RECIPE", "ブロック 0 は control vector に書けません(llama.cpp の仕様)",
@@ -315,6 +318,7 @@ class Session:
     def bake(self, recipe: Recipe | list[str], dst: str | Path, *, verify: bool = False,
              verify_prompt: str = "Who are you?", n_tokens: int = 32) -> dict:
         recipe = self._as_recipe(recipe)
+        self._warn_when(recipe, "bake")
         vecs, details = self.vectors(recipe)
         Path(dst).parent.mkdir(parents=True, exist_ok=True)
         rep = bake_bias_gguf(self.weights, vecs, self.path, dst, recipe=recipe)
@@ -638,13 +642,13 @@ class Session:
         return q
 
     def chat(self, columns, prompts: list[str], *, system: str | None = None, max_tokens: int = 256,
-             on_text=None, on_column=None) -> dict:
+             on_text=None, on_column=None, when: str | None = None) -> dict:
         from .chat import ChatState, chat_turn
         state = ChatState(columns, system)
         turns = []
         for u in prompts:
             turns.append({"user": u, "replies": chat_turn(self, state, u, max_tokens=max_tokens, on_text=on_text,
-                                                          on_column=on_column)})
+                                                          on_column=on_column, when_override=when)})
         return {"columns": [{"label": c.label, "recipe": c.recipe.to_dict() if c.recipe else None} for c in columns],
                 "system": system, "turns": turns}
 

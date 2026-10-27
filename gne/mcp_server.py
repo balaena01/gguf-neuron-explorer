@@ -102,10 +102,12 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
     @srv.tool()
     async def steer(units: list[str], prompt: str | None = None, messages: list[dict[str, str]] | None = None,
                     max_tokens: int = 128, compare: bool = True, dose_unit: str = "rel",
-                    system: str | None = None) -> dict:
-        """ユニット(例 ["14:8949:+1.0", "13:7956:-1.0"])で押して生成する(greedy)。compare=True なら無介入も並べる。"""
+                    system: str | None = None, when: str = "all") -> dict:
+        """ユニット(例 ["14:8949:+1.0", "13:7956:-1.0"])で押して生成する(greedy)。compare=True なら無介入も並べる。
+        when は足す位置: all(全位置) / gen(生成中だけ、プロンプトの理解を壊さない) / assistant(assistant の発話だけ) /
+        after:<文字列>(出力にその文字列が出てから) / ramp:<a>-<b>(倍率を a から b へ)。"""
         def fn():
-            r = session.recipe(units=units, dose_unit=dose_unit)
+            r = session.recipe(units=units, dose_unit=dose_unit, when=when)
             return session.steer(r, prompt=prompt, messages=messages, system=system, max_tokens=max_tokens,
                                  compare=compare)
         return await call(fn)

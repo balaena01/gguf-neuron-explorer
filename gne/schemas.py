@@ -181,6 +181,7 @@ class RecipeModel(_Strict):
     name: str | None
     model_id: str | None
     dose_unit: Literal["rel", "absmax", "raw"]
+    when: str = "all"                 # §6.15
     units: list[dict[str, Any]]
 
 
@@ -189,6 +190,7 @@ class Generation(_Strict):
     finish: Literal["eog", "length"]
     n_gen: int
     token_ids: list[int] | None = None
+    when: dict[str, Any] | None = None   # 位置別ステアリングの記録(set_cvec の回数、区間など)
 
 
 class SteerOut(Envelope):
@@ -199,6 +201,7 @@ class SteerOut(Envelope):
     baseline: Generation | None
     steered: Generation
     differs: bool | None
+    when: str = "all"
 
 
 class ReproCheck(_Strict):

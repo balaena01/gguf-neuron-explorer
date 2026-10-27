@@ -29,7 +29,7 @@ def _binary(body: bytes, shape: str, meta: dict) -> Response:
                     headers={"X-Shape": shape, "X-Meta": json.dumps(meta, ensure_ascii=True), "Cache-Control": "no-store"})
 
 
-def create_app(session, *, warm: bool = True) -> FastAPI:
+def create_app(session, *, warm: bool = True, openai: bool = False) -> FastAPI:
     from ..arch import arch_info
     from .agent import AgentBus
     from .data import UIData
@@ -40,6 +40,9 @@ def create_app(session, *, warm: bool = True) -> FastAPI:
     data = UIData(session)
     app.state.data = data
     live = Live(session, data)
+    if openai:                                     # §6.15: gne serve --openai
+        from .openai_api import register
+        register(app, session, live)
     app.state.live = live
     agent = AgentBus(session.meta.n_layer, session.meta.n_ff_at)
     app.state.agent = agent
@@ -246,11 +249,11 @@ def create_app(session, *, warm: bool = True) -> FastAPI:
 
 
 def serve(model: str | Path, *, host: str = "127.0.0.1", port: int = 8791, root: str | Path | None = None,
-          n_gpu_layers: int = -1, n_ctx: int = 4096, seed: int = 0) -> None:
+          n_gpu_layers: int = -1, n_ctx: int = 4096, seed: int = 0, openai: bool = False) -> None:
     import uvicorn
 
     from ..api import Session
     if host not in ("127.0.0.1", "localhost", "::1"):
         raise GneError("BAD_ARGS", "UI はローカル専用です(--host は 127.0.0.1)", "別冊 UI 設計 §1 の非ゴール: マルチユーザー・認証")
     session = Session(model, root=root, n_gpu_layers=n_gpu_layers, n_ctx=n_ctx, seed=seed)
-    uvicorn.run(create_app(session), host=host, port=port, log_level="warning")
+    uvicorn.run(create_app(session, openai=openai), host=host, port=port, log_level="warning")

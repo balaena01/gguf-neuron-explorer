@@ -53,8 +53,9 @@ class Live:
 
     # --- 3 列チャット(§5.3)。SSE の行を順に返す ---------------------------------------------------------
     def steer_stream(self, body: dict):
-        """body: {columns: [{label, units: ["14:8949:+1"], messages: [...]}], max_tokens, system}。
-        列ごとに会話の履歴(最後がユーザーの発話)を受け取り、1 列ずつ逐次生成する。状態はクライアントが持つ。"""
+        """body: {columns: [{label, units: ["14:8949:+1"], messages: [...], when?}], max_tokens, system, when}。
+        列ごとに会話の履歴(最後がユーザーの発話)を受け取り、1 列ずつ逐次生成する。状態はクライアントが持つ。
+        when は足す位置(§6.15)。列ごとに指定が無ければ全体の when、それも無ければ all。"""
         cols = body.get("columns") or []
         if not cols or len(cols) > 6:
             raise GneError("BAD_ARGS", "columns は 1〜6 列です")
@@ -62,6 +63,8 @@ class Live:
         if not 1 <= max_tokens <= 2048:
             raise GneError("BAD_ARGS", "max_tokens は 1〜2048 です")
         recipes = [self.recipe(c.get("units") or []) for c in cols]          # 形式の誤りは始める前に返す
+        from ..when import generate_when, parse_when
+        whens = [parse_when(c.get("when") or body.get("when") or "all") for c in cols]
         system = body.get("system")
         sid = uuid.uuid4().hex[:8]
         stop = threading.Event()
@@ -76,7 +79,7 @@ class Live:
                     self.s.warnings = []
                     e = self.s.engine
                     ctx = e.steer_ctx()
-                    for i, (c, r) in enumerate(zip(cols, recipes, strict=True)):
+                    for i, (c, r, w) in enumerate(zip(cols, recipes, whens, strict=True)):
                         if stop.is_set():
                             break
                         msgs = ([{"role": "system", "content": system}] if system else []) + list(c.get("messages") or [])
@@ -95,14 +98,12 @@ class Live:
                             if piece:
                                 q.put({"type": "text", "col": _i, "text": piece})
                         try:
-                            e.set_cvec(ctx, vecs)
-                            out = e.generate_greedy(ctx, [ids], max_tokens=max_tokens, on_token=cb)[0]
-                            q.put({"type": "end", "col": i, "text": out.text, "finish": out.finish, "n_gen": out.n_gen})
+                            out, winfo = generate_when(e, ctx, msgs, vecs, w, max_tokens=max_tokens, on_token=cb)
+                            q.put({"type": "end", "col": i, "text": out.text, "finish": out.finish, "n_gen": out.n_gen,
+                                   "when": winfo})
                         except _Stopped:
                             q.put({"type": "end", "col": i, "text": None, "finish": "stopped", "n_gen": None})
                             break
-                        finally:
-                            e.set_cvec(ctx, None)
                     if self.s.warnings:
                         q.put({"type": "warn", "warnings": list(self.s.warnings)})
             except GneError as ex:

@@ -40,7 +40,7 @@ def _with_dose(recipe: Recipe, dose: float | None, sign: float) -> Recipe:
     """dose を指定したら各ユニットの大きさをそろえる(符号は保つ)。sign で列の向き(+1 / −1)を掛ける。"""
     units = [Unit(u.layer, u.neuron, (abs(dose) if dose is not None else abs(u.dose)) * (1 if u.dose >= 0 else -1) * sign,
                   u.kind, u.seed) for u in recipe.units]
-    return Recipe(units, recipe.model_id, recipe.dose_unit, recipe.name)
+    return Recipe(units, recipe.model_id, recipe.dose_unit, recipe.name, recipe.when)
 
 
 def make_columns(recipe: Recipe | None, *, dose: float | None = None, left: Recipe | None = None,
@@ -61,8 +61,10 @@ def make_columns(recipe: Recipe | None, *, dose: float | None = None, left: Reci
 
 def chat_turn(session, state: ChatState, user: str, *, max_tokens: int = 256,
               on_text: Callable[[int, str], None] | None = None,
-              on_column: Callable[[int, Column], None] | None = None) -> list[dict]:
+              on_column: Callable[[int, Column], None] | None = None,
+              when_override: str | None = None) -> list[dict]:
     """ユーザーの発話を全列に足し、列ごとに返答を生成して履歴に足す。on_text(列, 文字列の断片)で逐次表示できる。"""
+    from .when import generate_when
     e = session.engine
     ctx = e.steer_ctx()
     replies = []
@@ -82,13 +84,8 @@ def chat_turn(session, state: ChatState, user: str, *, max_tokens: int = 256,
                 piece = _dec.decode(e.token_bytes(tok))
                 if piece:
                     on_text(_i, piece)
-        try:
-            e.set_cvec(ctx, vecs)
-            r = e.generate_greedy(ctx, [ids], max_tokens=max_tokens, on_token=cb)[0]
-        except ValueError as ex:
-            raise GneError("BAD_RECIPE", str(ex)) from ex
-        finally:
-            e.set_cvec(ctx, None)
+        when = (when_override or col.recipe.when) if col.recipe is not None else "all"
+        r, _ = generate_when(e, ctx, state.messages(i), vecs, when, max_tokens=max_tokens, on_token=cb)
         if on_text is not None:
             tail = dec.decode(b"", final=True)
             if tail:

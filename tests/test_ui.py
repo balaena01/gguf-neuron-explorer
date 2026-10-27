@@ -455,6 +455,10 @@ def test_u2_recipe_chat_fires_in_browser(server, browser):
     pg.wait_for_selector("#ch-text", timeout=30000)
     pg.fill("#ch-max", "6")
     pg.dispatch_event("#ch-max", "change")
+    pg.select_option("#ch-when", "ramp")                                            # 位置別ステアリング(§6.15)
+    pg.wait_for_selector("#ch-when-x", timeout=5000)
+    assert pg.evaluate("window.gne.chat.whenSpec()") == "ramp:1.5-0.5"
+    pg.select_option("#ch-when", "gen")
     pg.fill("#ch-text", "Hello")
     pg.click("#ch-send")
     pg.wait_for_function("!document.querySelector('#ch-send').disabled", timeout=120000)

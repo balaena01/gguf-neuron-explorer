@@ -42,6 +42,9 @@ def log_softmax(logits: np.ndarray) -> np.ndarray:
     return (x - np.log(np.exp(x).sum(axis=-1, keepdims=True))).astype(np.float32, copy=False)
 
 
+KEEP = object()          # generate_greedy の schedule が「control vector はそのまま」を表す
+
+
 @dataclass
 class PrefillResult:
     logits: np.ndarray                         # (n_seq, n_vocab) 各シーケンスの最終位置
@@ -279,11 +282,13 @@ class Engine:
             raise RuntimeError(f"logits[{i}] がありません")
         return np.ctypeslib.as_array(ptr, shape=(self.n_vocab,)).copy()
 
-    def prefill(self, ctx: _Ctx, seqs: list[list[int]], *, logits_all: bool = False) -> PrefillResult:
+    def prefill(self, ctx: _Ctx, seqs: list[list[int]], *, logits_all: bool = False, pos0: int = 0) -> PrefillResult:
         """複数シーケンスを評価し、各 seq の最終位置ロジットを返す。メモリは呼び出し側で clear しておく。
 
         steer ctx: 全 seq を seq_id 0.. で 1 バッチに詰める(n_batch を超えたら分割)。
-        probe ctx: 1 seq ずつ(seq の間で memory を clear)、n_ubatch 以下に切って評価する。"""
+        probe ctx: 1 seq ずつ(seq の間で memory を clear)、n_ubatch 以下に切って評価する。
+        pos0: 先頭トークンの位置。1 本のプロンプトを区切って評価するとき(§6.15 の位置別ステアリング)に、
+        続きの区間を前の区間の後ろに置くために使う(その間は clear しない)。"""
         if not seqs or any(len(s) == 0 for s in seqs):
             raise ValueError("空のシーケンスがあります")
         last = np.empty((len(seqs), self.n_vocab), dtype=np.float32)
@@ -297,7 +302,7 @@ class Engine:
                     self.clear_memory(ctx)
                 for c0 in range(0, len(s), ctx.n_ubatch):
                     chunk = s[c0:c0 + ctx.n_ubatch]
-                    items = [(t, c0 + j, 0, logits_all or c0 + j == len(s) - 1) for j, t in enumerate(chunk)]
+                    items = [(t, pos0 + c0 + j, 0, logits_all or c0 + j == len(s) - 1) for j, t in enumerate(chunk)]
                     self._decode(ctx, items)
                     if logits_all:
                         for j in range(len(chunk)):
@@ -308,7 +313,7 @@ class Engine:
 
         if len(seqs) > ctx.n_seq_max:
             raise ValueError(f"シーケンス数 {len(seqs)} が n_seq_max={ctx.n_seq_max} を超えています")
-        flat = [(t, p, si, logits_all or p == len(s) - 1) for si, s in enumerate(seqs) for p, t in enumerate(s)]
+        flat = [(t, pos0 + p, si, logits_all or p == len(s) - 1) for si, s in enumerate(seqs) for p, t in enumerate(s)]
         for c0 in range(0, len(flat), ctx.n_batch):
             chunk = flat[c0:c0 + ctx.n_batch]
             self._decode(ctx, chunk)
@@ -317,18 +322,24 @@ class Engine:
                     continue
                 lo = self._logits(ctx, j)
                 if logits_all:
-                    all_logits[si][p] = lo
-                if p == len(seqs[si]) - 1:
+                    all_logits[si][p - pos0] = lo
+                if p - pos0 == len(seqs[si]) - 1:
                     last[si] = lo
         return PrefillResult(last, all_logits, n_tok)
 
     def generate_greedy(self, ctx: _Ctx, seqs: list[list[int]], *, max_tokens: int = 128, top_k: int = 5,
                         stop_on_eog: bool = True, prefilled: PrefillResult | None = None,
-                        on_token: Callable[[int, int], None] | None = None) -> list[Rollout]:
+                        on_token: Callable[[int, int], None] | None = None,
+                        schedule: Callable[[int, list[Rollout]], object] | None = None) -> list[Rollout]:
         """バッチ貪欲生成。prefilled が無ければ clear_memory → prefill から始める。
-        on_token(シーケンス番号, トークン) は EOG 以外のトークンが決まるたびに呼ばれる(逐次表示用)。"""
+        on_token(シーケンス番号, トークン) は EOG 以外のトークンが決まるたびに呼ばれる(逐次表示用)。
+        schedule(step, rollouts) は step 番目のトークンが決まった後、それを decode する前に呼ばれ、
+        control vector を付け替える(§6.15)。KEEP を返せばそのまま、None で解除、dict で差し替え。
+        control vector はコンテキスト単位なので、schedule を使うときはシーケンスを 1 本にする。"""
         if ctx.capture is not None:
             raise ValueError("generate_greedy は steer ctx で使ってください")
+        if schedule is not None and len(seqs) != 1:
+            raise ValueError("schedule はシーケンス 1 本のときだけ使えます")
         if prefilled is None:
             self.clear_memory(ctx)
             prefilled = self.prefill(ctx, seqs)
@@ -362,6 +373,10 @@ class Engine:
                         on_token(si, tok)
             if not nxt or step == max_tokens - 1:
                 break
+            if schedule is not None:
+                vecs = schedule(step, outs)
+                if vecs is not KEEP:
+                    self.set_cvec(ctx, vecs)
             self._decode(ctx, [(tok, pos[si], si, True) for si, tok in nxt])
             cur = np.stack([self._logits(ctx, j) for j in range(len(nxt))])
             for si, _ in nxt:
