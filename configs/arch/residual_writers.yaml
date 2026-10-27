@@ -1,0 +1,18 @@
+# 残差ライター(本体設計 §6.17): 出力がそのまま残差に足される行列。方向の射影消去(ablate)はこれらから方向 r を取り除く。
+# llama.cpp の src/models/<arch>.cpp と src/llama-graph.cpp を読んで作った表。どれも build_lora_mm を通るので LoRA で表せる。
+checked_llama_cpp: "0c1e570 (2026-10-01、llama-cpp-python 0.3.36 同梱)"
+
+# 層ごとに、ここに挙げたテンソルのうち GGUF にあるものをライターとみなす(numpy 形状 (n_embd, in) の軸 0 を射影する)
+candidates: [attn_output, ssm_out, ffn_down]
+
+# グラフを読んで確かめた arch。
+#   qwen35: full attention の層は attn_output(build_attn の後 build_lora_mm(wo))、線形注意の層は ssm_out
+#           (build_layer_attn_linear の最後で build_lora_mm(ssm_out))。FFN は build_ffn の build_lora_mm(down)。
+#           attn_post_norm は FFN の前の norm で、残差は norm の前から取る(pre-norm)
+#   qwen3 / llama: build_attn の build_lora_mm(wo) と build_ffn の build_lora_mm(down)
+verified: [qwen35, qwen3, llama]
+
+# ライターの出力が norm を通ってから残差に足される arch(post-norm)。射影は厳密には保たれないので近似として警告する
+post_norm: [gemma2, gemma3, gemma3n, gemma4, gemma-embedding, olmo2, glm4, exaone4, grok, plamo2, plamo3, afmoe]
+
+# MoE の ffn_down_exps / ffn_down_shexp はまだ扱わない(CHANGE-02 B で 3 次元の軸 1 に射影する)

@@ -1,0 +1,222 @@
+"""CHANGE-02 A のテスト: gne direction(方向)・方向のユニット(L:dir:NAME:dose)・方向を消す LoRA(V13 の LoRA 版)。
+
+モデルを使うものは Qwen3-0.6B(GNE_TEST_MODEL)。無ければ飛ばす。
+"""
+
+import json
+import os
+from pathlib import Path
+
+import numpy as np
+import pytest
+import yaml
+
+from gne.steer import GneError, Recipe, parse_unit
+
+ROOT = Path(__file__).resolve().parent.parent
+MODEL = Path(os.environ.get("GNE_TEST_MODEL", ROOT / "models" / "Qwen3-0.6B-Q8_0.gguf"))
+
+
+# --- モデル不要 ----------------------------------------------------------------------------------------
+
+def test_direction_unit_parse_and_recipe(tmp_path):
+    u = parse_unit("12:dir:yandere:+0.5")
+    assert (u.layer, u.kind, u.direction, u.dose, u.neuron) == (12, "direction", "yandere", 0.5, None)
+    assert u.label() == "L12 dir:yandere +0.5"
+    with pytest.raises(GneError):
+        parse_unit("12:dir:yandere:x2")                       # gain はニューロンだけ
+    r = Recipe([u, parse_unit("3:100:-1")], name="mix", when="gen")
+    r.save(tmp_path / "r.yaml")
+    d = yaml.safe_load((tmp_path / "r.yaml").read_text())
+    assert d["units"][0] == {"layer": 12, "dose": 0.5, "kind": "direction", "direction": "yandere"}
+    back = Recipe.load(tmp_path / "r.yaml")
+    assert back.units[0] == u and back.scaled(0.5).units[0].direction == "yandere" and back.scaled(0.5).units[0].dose == 0.25
+    with pytest.raises(GneError):
+        Recipe([u], dose_unit="absmax").validate()             # absmax はニューロン用
+
+
+def test_candidate_layers_and_contrast(tmp_path):
+    from gne.direction import candidate_layers, load_contrast
+    assert candidate_layers(28) == list(range(8, 23))         # 0.3·28 〜 0.8·28
+    assert candidate_layers(28, "10-16:3") == [10, 13, 16] and candidate_layers(28, "0,5,27,30") == [5]
+    with pytest.raises(GneError):
+        candidate_layers(28, "x")
+    p = tmp_path / "c.yaml"
+    p.write_text(yaml.safe_dump({"name": "c", "system_a": "A", "system_b": "B", "user_prompts": ["hi", "yo"],
+                                 "validate": {"match": "love|愛", "target": "clingy"}}))
+    _, v = load_contrast(p)
+    assert v.prompts == ["hi", "yo"] and v.match == "love|愛" and v.target == "clingy"
+    p.write_text(yaml.safe_dump({"name": "c", "system_a": "A", "system_b": "B", "user_prompts": ["hi"],
+                                 "validate": {"match": "("}}))
+    with pytest.raises(GneError):
+        load_contrast(p)
+
+
+def _tiny_writers(path):
+    """attn_output と ffn_down を持つ小さな GGUF(llama arch)。"""
+    from gguf import GGUFWriter
+    rng = np.random.default_rng(1)
+    w = GGUFWriter(str(path), arch="llama")
+    w.add_name("tiny")
+    w.add_block_count(2)
+    w.add_embedding_length(16)
+    w.add_feed_forward_length(24)
+    w.add_token_list([f"t{i}" for i in range(8)])
+    mats = {}
+    for L in range(2):
+        for nm, shape in (("attn_output", (16, 12)), ("ffn_down", (16, 24))):
+            m = rng.standard_normal(shape).astype(np.float32)
+            mats[f"blk.{L}.{nm}.weight"] = m
+            w.add_tensor(f"blk.{L}.{nm}.weight", m)
+    w.add_tensor("token_embd.weight", rng.standard_normal((8, 16)).astype(np.float32))
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+    return mats
+
+
+def test_ablation_lora_tensors(tmp_path):
+    """W + B A = (I − r rᵀ) W になり、出力から r 成分が消える。LoRA GGUF の形とメタデータ。"""
+    from gguf import GGUFReader
+
+    from gne.ablate import export_ablation_lora, residual_writers, writer_info
+    from gne.weights import Weights
+    mats = _tiny_writers(tmp_path / "m.gguf")
+    w = Weights(tmp_path / "m.gguf")
+    assert residual_writers(w) == {L: [f"blk.{L}.attn_output.weight", f"blk.{L}.ffn_down.weight"] for L in range(2)}
+    info = writer_info(w)
+    assert info["verified"] and info["counts"] == {"attn_output": 2, "ffn_down": 2} and not info["warnings"]
+    r = np.random.default_rng(2).standard_normal(16)
+    rep = export_ablation_lora(w, r, tmp_path / "a.lora.gguf", meta={"direction": "t"})
+    assert rep["n_tensors"] == 4
+    rd = GGUFReader(tmp_path / "a.lora.gguf")
+    ru = r / np.linalg.norm(r)
+    for name, W in mats.items():
+        t = {x.name: x for x in rd.tensors}
+        A = np.asarray(t[f"{name}.lora_a"].data).reshape(1, -1)
+        B = np.asarray(t[f"{name}.lora_b"].data).reshape(-1, 1)
+        assert A.shape == (1, W.shape[1]) and B.shape == (W.shape[0], 1)
+        Wp = W + B @ A
+        assert np.allclose(Wp, W - np.outer(ru, ru @ W), atol=1e-5)
+        assert np.abs(ru @ Wp).max() < 1e-5                                  # 出力に r 成分が無い
+    assert rd.fields["general.type"].contents() == "adapter" and json.loads(rd.fields["gne.ablate"].contents())["direction"] == "t"
+    # 層ごとの方向(--per-layer)
+    rep2 = export_ablation_lora(w, {0: r, 1: -r}, tmp_path / "p.lora.gguf")
+    t = {x.name: x for x in GGUFReader(tmp_path / "p.lora.gguf").tensors}
+    assert np.allclose(np.asarray(t["blk.1.ffn_down.weight.lora_b"].data).reshape(-1), ru, atol=1e-6) and rep2["n_tensors"] == 4
+
+
+# --- モデルを使う ----------------------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def session(tmp_path_factory):
+    if not MODEL.exists():
+        pytest.skip("モデルがありません")
+    from gne.api import Session
+    s = Session(MODEL, root=tmp_path_factory.mktemp("c02"))
+    yield s
+    s.close()
+
+
+def _contrast(tmp_path):
+    p = tmp_path / "pirate.yaml"
+    p.write_text(yaml.safe_dump({
+        "name": "pirate", "system_a": "You are a pirate. Always talk like a pirate, with arr and matey.",
+        "system_b": "You are a helpful assistant.",
+        "user_prompts": ["Who are you?", "Tell me about the weather.", "What is your favorite food?"],
+        "validate": {"match": r"\barr+\b|matey|ahoy|ye\b", "target": "a pirate"}}))
+    return p
+
+
+@pytest.mark.model
+def test_direction_end_to_end(session, tmp_path):
+    from gne.direction import DirectionSet
+    from gne.reverse import ContrastSet, contrastive_directions
+    from gne.schemas import COMMAND_SCHEMAS
+    c = _contrast(tmp_path)
+    d = session.direction(contrast=c)
+    assert d["name"] == "pirate" and d["positions"] == "last" and d["n_rows"] == {"A": 3, "B": 3} and d["select"] is None
+    ds = DirectionSet.load(d["path"])
+    n_layer = session.meta.n_layer
+    assert sorted(ds.raw) == list(range(n_layer - 1)) and ds.meta["positions"] == "last"
+    cr = contrastive_directions(session.engine, ContrastSet.load(c), positions="last", with_act=False)
+    assert all(np.allclose(ds.raw[L], cr.directions[L]) for L in (3, 14))               # reverse の捕捉と同じ
+    z = np.load(d["path"])
+    assert z["cos"].shape == (n_layer - 1, n_layer - 1) and np.allclose(np.diag(z["cos"]), 1, atol=1e-5)
+    rows = {r["layer"]: r for r in d["layers"]}
+    assert rows[0]["cos_prev"] is None and rows[14]["norm"] > 0
+    COMMAND_SCHEMAS["direction"].model_validate({**session.envelope("direction"), **d})
+    # 層選び: add(足して一致率が上がるか)と ablate(消して下がるか)
+    a = session.direction(contrast=c, name="pirate", select="auto", mode="add", layers="10-14:2", dose=4.0, max_tokens=24)
+    sel = a["select"]
+    assert sel["mode"] == "add" and [r["layer"] for r in sel["rows"]] == [10, 12, 14] and sel["metric"] == "rate"
+    assert all(r["rel_dose"] > 0 and 0 <= r["distinct4"] <= 1 and r["kl"] > 0 for r in sel["rows"])
+    assert sel["selected"] in (None, 10, 12, 14) and Path(d["path"]).with_suffix(".select.json").exists()
+    b = session.direction(contrast=c, name="pirate", select="auto", mode="ablate", layers="12", max_tokens=24)
+    sb = b["select"]
+    assert sb["mode"] == "ablate" and sb["rows"][0]["layer"] == 12 and sb["base"]["rate"] > 0      # system で海賊になる
+    assert list(session.store.ablate_dir(session.meta.model_id).glob("pirate-L12-*.lora.gguf"))
+    m = session.direction(contrast=c, name="pirate", select="13")
+    assert m["select"] == {"mode": "manual", "selected": 13}
+    with pytest.raises(GneError):
+        session.direction(contrast=c, select="99")
+    # 判定が無い対照集合では層を選べない
+    c2 = tmp_path / "noval.yaml"
+    c2.write_text(yaml.safe_dump({"name": "noval", "system_a": "A", "system_b": "B", "user_prompts": ["hi"]}))
+    with pytest.raises(GneError):
+        session.direction(contrast=c2, select="auto", layers="12")
+
+
+@pytest.mark.model
+def test_direction_unit_vectors_and_steer(session, tmp_path):
+    session.direction(contrast=_contrast(tmp_path))
+    ds = session.direction_set("pirate")
+    r = session.recipe(units=["12:dir:pirate:+0.5"])
+    vecs, det = session.vectors(r)
+    rho = session.resid_stats().rho(12)
+    want = 0.5 * rho * ds.raw[12] / np.linalg.norm(ds.raw[12])
+    assert set(vecs) == {12} and np.allclose(vecs[12], want, rtol=1e-5)
+    assert det[0]["kind"] == "direction" and det[0]["direction"] == "pirate"
+    assert det[0]["diff_rel"] == pytest.approx(np.linalg.norm(ds.raw[12]) / rho, rel=1e-5)
+    raw = session.vectors(session.recipe(units=["12:dir:pirate:+2"], dose_unit="raw"))[0]
+    assert np.allclose(raw[12], 2 * ds.raw[12])                                                   # raw: 平均差の 2 倍
+    st = session.steer(r, prompt="Who are you?", max_tokens=16)
+    assert st["differs"] and st["units"][0]["direction"] == "pirate"
+    assert st["steered"]["text"] == session.generate(vecs, [{"role": "user", "content": "Who are you?"}],
+                                                     max_tokens=16)["text"]
+    out = session.export_cvec(r, tmp_path / "p.cvec.gguf")
+    assert Path(out["path"]).exists()
+    with pytest.raises(GneError):
+        session.vectors(session.recipe(units=["12:dir:nope:+0.5"]))
+    # 逆引きは gne direction の方向でもニューロンを順位づけできる。調書とマップの方向にも出る
+    rv = session.reverse(directions="pirate", top=5, layers=[12])
+    assert rv["n_candidates"] == 5 and rv["candidates"][0]["layer"] == 12
+    assert "pirate" in session.neuron(12, 0)["directions"]
+
+
+@pytest.mark.model
+def test_v13_ablation_lora(session):
+    """V13(LoRA 版): 方向 r を全層のライターから消すと、l_out-L の r 成分はどの層でも埋め込みの r 成分と同じになる
+    (LoRA は埋め込みを変えられない)。消す前は層ごとに違う。"""
+    from gne.verify import Verifier
+    rep = Verifier(session.engine, session.weights).v13_ablation()
+    assert rep.status == "pass", rep.detail
+    assert rep.data["max_dev"] < 5e-3 and rep.data["base_med_dev"] > 5 * rep.data["max_dev"]
+    assert rep.data["n_tensors"] == 2 * session.meta.n_layer
+
+
+@pytest.mark.model
+def test_direction_cli_and_job(session, tmp_path):
+    from typer.testing import CliRunner
+
+    from gne.cli import app
+    from gne.jobs import standard_kinds
+    c = _contrast(tmp_path)
+    res = CliRunner().invoke(app, ["direction", "-m", str(MODEL), "--root", str(session.store.root), "--contrast", str(c),
+                                   "--name", "pirate_cli", "--json"])
+    assert res.exit_code == 0, res.output
+    d = json.loads(res.stdout.strip().splitlines()[-1])
+    assert d["command"] == "direction" and d["name"] == "pirate_cli"
+    out = standard_kinds()["direction"](session, contrast=str(c), name="pirate_job", select="12")
+    assert out["select"]["selected"] == 12

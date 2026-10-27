@@ -168,8 +168,13 @@ def persona_metrics(base: list[dict], outs: list[dict], token_words) -> dict:
 
 # --- 生成 ---------------------------------------------------------------------------------------------
 
-def _generate(session, items: list[tuple[str, int]], vecs, lora, when: str, tick: Callable[[int], None]) -> list[dict]:
-    """items: [(プロンプト, max_tokens)]。when = all ならまとめて(n_seq_max 本ずつ、n_ctx に収まる分)、それ以外は 1 本ずつ。"""
+def _msgs(p: str | list[dict]) -> list[dict]:
+    return [{"role": "user", "content": p}] if isinstance(p, str) else p
+
+
+def _generate(session, items: list[tuple[str | list[dict], int]], vecs, lora, when: str,
+              tick: Callable[[int], None]) -> list[dict]:
+    """items: [(プロンプトか会話, max_tokens)]。when = all ならまとめて(n_seq_max 本ずつ、n_ctx に収まる分)、それ以外は 1 本ずつ。"""
     from .when import generate_when
     e = session.engine
     ctx = e.steer_ctx()
@@ -179,14 +184,14 @@ def _generate(session, items: list[tuple[str, int]], vecs, lora, when: str, tick
         return {"text": r.text, "token_ids": r.token_ids, "finish": r.finish}
     if when != "all":
         for i, (prompt, mt) in enumerate(items):
-            r, _ = generate_when(e, ctx, [{"role": "user", "content": prompt}], vecs, when, max_tokens=mt, lora=lora)
+            r, _ = generate_when(e, ctx, _msgs(prompt), vecs, when, max_tokens=mt, lora=lora)
             outs[i] = keep(r)
             tick(1)
         return outs
     e.set_lora(ctx, lora)
     try:
         e.set_cvec(ctx, vecs or None)
-        seqs = [e.tokenize_prompt(e.render_chat([{"role": "user", "content": p}])) for p, _ in items]
+        seqs = [e.tokenize_prompt(e.render_chat(_msgs(p))) for p, _ in items]
         by_mt: dict[int, list[int]] = {}
         for i, (_, mt) in enumerate(items):
             by_mt.setdefault(mt, []).append(i)

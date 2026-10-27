@@ -31,7 +31,8 @@ gguf-neuron-explorer: llama.cpp 上の GGUF モデルの MLP ニューロンを�
 4. rel dose: 0.5 で微かな挿入、0.8 で話題を上書き、1.0 以上は崩壊域。層 0〜2 には rel dose がそのまま通用しない。
 5. steer(units, compare=True) で無介入との差を確かめ、recipe_save → eval(recipe) で副作用(能力・ppl・言語の混入)を測ってから export_cvec。
    抑える用途は add の − より gain の x0 を先に試す。位置(when)は gen を第一候補にして all と比べる。
-ユニットの書き方: "L:N:dose"(例 "14:8949:+1.0")、gain は "L:N:x2"(出力を k 倍、x0 で消去)、ランダム方向は "L:random:SEED:dose"。
+ユニットの書き方: "L:N:dose"(例 "14:8949:+1.0")、gain は "L:N:x2"(出力を k 倍、x0 で消去)、ランダム方向は "L:random:SEED:dose"、
+direction で作った方向は "L:dir:NAME:dose"。
 6. 人が UI(gne serve)を見ていれば、ui_open で調べているニューロンを開き、ui_highlight で候補を強調し、ui_note で判断の要点を
    ニューロンに貼る(--ui-url で繋いだときだけ。繋いでいなければ UI_NOT_RUNNING が返るので気にせず続ける)。
 """
@@ -136,6 +137,26 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
         return await call(fn)
 
     @srv.tool()
+    async def direction(contrast: str, name: str | None = None, select: str | None = None, mode: str = "ablate",
+                        layers: str | None = None, dose: float = 1.0) -> dict:
+        """対照集合(configs/contrast/ の名前かパス。system_a / system_b / user_prompts、層選びには validate.match)から
+        全層の方向 r_L = mean_A − mean_B(生成プロンプトの最終トークン)を作って保存する(§6.17)。
+        select="auto" なら候補層ごとに効果を測ってジョブで層を選ぶ(job_status で結果)。mode="add" は層 L に平均差の dose 倍を
+        足して判定の一致率が上がるか、mode="ablate" は全層から r_L を消して下がるか(B 側の KL が 0.1 以下の層から)。
+        作った方向は steer の units に "L:dir:NAME:+0.5"(rel dose)で足せる。"""
+        try:
+            params = {"contrast": str(_contrast_path(session, contrast, None, None, None, name)), "name": name,
+                      "select": select, "mode": mode, "layers": layers, "dose": dose}
+        except Exception as e:  # noqa: BLE001
+            return _err(e)
+        if select == "auto":
+            try:
+                return jobs.start("direction", params).view()
+            except Exception as e:  # noqa: BLE001
+                return _err(e)
+        return await call(session.direction, **params)
+
+    @srv.tool()
     async def recipe_save(name: str, units: list[str], dose_unit: str = "rel") -> dict:
         """レシピを <root>/recipes/<name>.yaml に保存する。"""
         return await call(session.recipe_save, name, units, dose_unit=dose_unit, gpu=False)
@@ -192,7 +213,7 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
 
     @srv.tool()
     async def job_start(kind: str, params: dict[str, Any] | None = None) -> dict:
-        """長時間の処理を投げる。kind: stats_resid / stats_act / lens_logit / lens_steer / sweep / rank / reverse / eval。
+        """長時間の処理を投げる。kind: stats_resid / stats_act / lens_logit / lens_steer / sweep / rank / reverse / eval / direction。
         params は gne.api の同名メソッドの引数(例 sweep: {"layer": 22, "neurons": "random:64", "design": "quick"})。"""
         try:
             return jobs.start(kind, params).view()

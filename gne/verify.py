@@ -226,6 +226,55 @@ class Verifier:
         return VResult("V11", "gain の等価性(LoRA / 書き換え)", "pass" if ok else "fail", detail,
                        {"layer": L, "neuron": n, "act": act, "rows": rows, "act_max": scale})
 
+    # --- V13(§6.17 方向の射影消去、LoRA 版)--------------------------------------------------------------
+
+    def v13_ablation(self, r: np.ndarray | None = None) -> VResult:
+        """方向 r を全層の残差ライターから消す LoRA を当てると、l_out-L の r 成分はどの層でも埋め込み(token_embd の行)の
+        r 成分と同じになる(LoRA は埋め込みを変えられないので、r 成分はそれ以上増えも減りもしない)。
+        |r·l_out − r·e| / ‖l_out‖ が量子化の誤差の水準(< 1e-2)であることを見る。消す前のずれも並べる。
+        bake 版(埋め込みも射影して r 成分が 0 になる)は CHANGE-02 B で足す。"""
+        from .ablate import export_ablation_lora, unit
+        n_embd = self.w.meta.n_embd
+        r = unit(self.rng.standard_normal(n_embd) if r is None else r)
+        ids = self.prompt_ids[0]
+        Ls = list(range(self.e.n_layer - 1))                    # 最終層は行が間引かれ得るので除く
+        names = {f"l_out-{L}": L for L in Ls}
+        cap = Capture()
+        cap.set_wanted(lambda n: n in names)
+
+        def grab(lora):
+            ctx = self.e.probe_ctx(cap)
+            self.e.clear_memory(ctx)
+            self.e.set_cvec(ctx, None)
+            self.e.set_lora(ctx, lora)
+            try:
+                self.e.prefill(ctx, [ids])
+            finally:
+                self.e.set_lora(ctx, None)
+            return {k: v.astype(np.float64) for k, v in cap.take().items()}
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "v13.lora.gguf"
+            rep = export_ablation_lora(self.w, r, path)
+            base, abl = grab(None), grab([(path, 1.0)])
+        er = self.w.embed_rows(ids)[1:].astype(np.float64) @ r    # 埋め込み(inp_embd は捕捉できない)。位置 0(attention sink)は除く
+        rows = []
+        for name, L in names.items():
+            la, lb = abl[name][1:], base[name][1:]
+            dev = np.abs(la @ r - er) / np.linalg.norm(la, axis=1)
+            bdev = np.abs(lb @ r - er) / np.linalg.norm(lb, axis=1)
+            perp_a, perp_b = la - np.outer(la @ r, r), lb - np.outer(lb @ r, r)
+            ch = np.linalg.norm(perp_a - perp_b, axis=1) / np.linalg.norm(perp_b, axis=1)
+            rows.append({"layer": L, "dev_max": float(dev.max()), "base_dev_med": float(np.median(bdev)),
+                         "perp_change_med": float(np.median(ch))})
+        max_dev = max(x["dev_max"] for x in rows)
+        base_med = float(np.median([x["base_dev_med"] for x in rows]))
+        ok = max_dev < 1e-2
+        return VResult("V13", "方向の射影消去(LoRA)", "pass" if ok else "fail",
+                       f"ランダムな方向を {rep['n_tensors']} 個のライターから消す LoRA({len(ids)} トークン、層 0〜{Ls[-1]}): "
+                       f"|r·l_out − r·e| / ‖l_out‖ 最大 {max_dev:.2e}(消す前は中央値 {base_med:.2e})、"
+                       f"r に直交する成分の変化 層 0 で {rows[0]['perp_change_med']:.3f}・最終で {rows[-1]['perp_change_med']:.3f}(中央値)",
+                       {"rows": rows, "max_dev": max_dev, "base_med_dev": base_med, "n_tensors": rep["n_tensors"]})
+
     # --- V12(§6.15 位置別ステアリング)----------------------------------------------------------------
 
     def v12_when_gen(self) -> VResult:

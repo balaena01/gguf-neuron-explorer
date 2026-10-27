@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -39,13 +40,14 @@ class Unit:
     layer: int
     neuron: int | None
     dose: float
-    kind: Literal["neuron", "random"] = "neuron"
+    kind: Literal["neuron", "random", "direction"] = "neuron"
     seed: int | None = None          # random 用
     mode: Literal["add", "gain"] = "add"   # §6.16: add = 活性に定数を足す(dose)、gain = 出力を k 倍
     k: float | None = None           # gain の倍率(0 で消去、負で反転)
+    direction: str | None = None     # direction 用: gne direction(§6.17)で作った方向の名前。その層の r_L を足す
 
     def label(self) -> str:
-        who = f"N{self.neuron}" if self.kind == "neuron" else f"random{self.seed}"
+        who = {"neuron": f"N{self.neuron}", "random": f"random{self.seed}", "direction": f"dir:{self.direction}"}[self.kind]
         if self.mode == "gain":
             return f"L{self.layer} {who} ×{self.k:g}"
         return f"L{self.layer} {who} {self.dose:+g}"
@@ -64,7 +66,8 @@ class Recipe:
         d = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
         units = [Unit(layer=int(u["layer"]), neuron=None if u.get("neuron") is None else int(u["neuron"]),
                       dose=float(u.get("dose", 0.0)), kind=u.get("kind", "neuron"), seed=u.get("seed"),
-                      mode=u.get("mode", "add"), k=None if u.get("k") is None else float(u["k"]))
+                      mode=u.get("mode", "add"), k=None if u.get("k") is None else float(u["k"]),
+                      direction=u.get("direction"))
                  for u in d.get("units", [])]
         r = cls(units, d.get("model_id"), d.get("dose_unit", "rel"), d.get("name") or Path(path).stem, d.get("when") or "all")
         r.validate()
@@ -83,7 +86,7 @@ class Recipe:
     def scaled(self, k: float) -> Recipe:
         # add は dose を k 倍、gain は倍率を「1(何もしない)から k_unit へ」の間で k の割合だけ動かす(eval の倍率列で 0 が無介入になるように)
         return Recipe([Unit(u.layer, u.neuron, u.dose * k if u.mode == "add" else u.dose, u.kind, u.seed, u.mode,
-                            None if u.k is None else 1 + (u.k - 1) * k) for u in self.units],
+                            None if u.k is None else 1 + (u.k - 1) * k, u.direction) for u in self.units],
                       self.model_id, self.dose_unit, self.name, self.when)
 
     @property
@@ -112,24 +115,33 @@ class Recipe:
                 raise GneError("BAD_RECIPE", f"{u}: random には seed が要ります")
             if u.kind == "random" and self.dose_unit != "rel":
                 raise GneError("BAD_RECIPE", "ランダム方向のユニットは dose_unit=rel でだけ使えます")
+            if u.kind == "direction" and (not u.direction or u.mode != "add"):
+                raise GneError("BAD_RECIPE", f"{u}: direction には方向の名前が要り、gain にはできません(例 {u.layer}:dir:yandere:+0.5)")
+            if u.kind == "direction" and self.dose_unit == "absmax":
+                raise GneError("BAD_RECIPE", "方向のユニットは dose_unit=rel か raw で使います(absmax はニューロン用)")
+            if u.kind not in ("neuron", "random", "direction"):
+                raise GneError("BAD_RECIPE", f"{u}: kind は neuron / random / direction です")
 
 
-_UNIT_RE = re.compile(r"^(\d+):(?:(\d+)|random:(\d+)):(x?)([+-]?[\d.]+(?:e[+-]?\d+)?)$", re.I)
+_UNIT_RE = re.compile(r"^(\d+):(?:(\d+)|random:(\d+)|dir:([\w.\-@]+)):(x?)([+-]?[\d.]+(?:e[+-]?\d+)?)$", re.I)
 
 
 def parse_unit(spec: str) -> Unit:
-    """"L:N:dose"(例 14:8949:+1.0)、"L:random:SEED:dose"、gain は "L:N:x2"(x の後が倍率 k、§6.16)。"""
+    """"L:N:dose"(例 14:8949:+1.0)、"L:random:SEED:dose"、gain は "L:N:x2"(x の後が倍率 k、§6.16)、
+    方向は "L:dir:NAME:dose"(gne direction で作った方向 NAME の r_L を層 L に足す、§6.17)。"""
     m = _UNIT_RE.match(spec.strip())
     if not m:
         raise GneError("BAD_UNIT", f"ユニット指定 {spec!r} を読めません",
-                       "L:N:dose(例 14:8949:+1.0)、L:random:SEED:dose、gain は L:N:x2(倍率)")
-    L, n, seed, gain, val = m.groups()
+                       "L:N:dose(例 14:8949:+1.0)、L:random:SEED:dose、gain は L:N:x2(倍率)、方向は L:dir:NAME:dose")
+    L, n, seed, dname, gain, val = m.groups()
     if gain:
-        if seed is not None:
-            raise GneError("BAD_UNIT", f"{spec!r}: gain はランダム方向には使えません")
+        if n is None:
+            raise GneError("BAD_UNIT", f"{spec!r}: gain はニューロンにだけ使えます")
         return Unit(int(L), int(n), 0.0, mode="gain", k=float(val))
     if seed is not None:
         return Unit(int(L), None, float(val), "random", int(seed))
+    if dname is not None:
+        return Unit(int(L), None, float(val), "direction", direction=dname)
     return Unit(int(L), int(n), float(val))
 
 
@@ -153,13 +165,28 @@ def _down_scale(weights, L: int) -> float:
     return (weights.meta.ffn_down_scale or {}).get(L, 1.0)
 
 
-def unit_vector(weights, stats, unit: Unit, dose_unit: DoseUnit = "rel") -> np.ndarray:
+DirLoader = Callable[[str, int], np.ndarray]
+
+
+def unit_vector(weights, stats, unit: Unit, dose_unit: DoseUnit = "rel", dirs: DirLoader | None = None) -> np.ndarray:
     """層 L の出力残差に足すベクトル v。
     rel:    dose · ρ_L · u_n           (u_n = W_down[:, n] / ‖W_down[:, n]‖)
     absmax: dose · absmax_n · s · W_down[:, n]
     raw:    dose · s · W_down[:, n]     (s = ffn_down.scale、無ければ 1)
-    absmax と raw は「活性 a_n に定数を足す」量なので、ffn_down.scale があれば s を掛ける。"""
+    absmax と raw は「活性 a_n に定数を足す」量なので、ffn_down.scale があれば s を掛ける。
+    方向(kind=direction)は d_L = dirs(名前, L)(対照の平均差 mean_A − mean_B)について
+    rel: dose · ρ_L · d_L / ‖d_L‖、raw: dose · d_L(1.0 で平均差そのもの)。"""
     L = unit.layer
+    if unit.kind == "direction":
+        if dirs is None:
+            raise GneError("BAD_RECIPE", "方向のユニットには方向の読み込み先が要ります(Session.vectors を使ってください)")
+        d = np.asarray(dirs(unit.direction, L), dtype=np.float32)
+        if dose_unit == "rel":
+            nrm = float(np.linalg.norm(d))
+            return (unit.dose * stats.rho(L) * d / nrm).astype(np.float32) if nrm > 0 else np.zeros_like(d)
+        if dose_unit == "raw":
+            return (unit.dose * d).astype(np.float32)
+        raise GneError("BAD_RECIPE", "方向のユニットは dose_unit=rel か raw で使います")
     if unit.kind == "random":
         if dose_unit != "rel":
             raise GneError("BAD_RECIPE", "ランダム方向のユニットは dose_unit=rel でだけ使えます")
@@ -175,24 +202,25 @@ def unit_vector(weights, stats, unit: Unit, dose_unit: DoseUnit = "rel") -> np.n
     raise GneError("BAD_RECIPE", f"dose_unit={dose_unit!r}")
 
 
-def recipe_vectors(weights, stats, recipe: Recipe) -> dict[int, np.ndarray]:
+def recipe_vectors(weights, stats, recipe: Recipe, dirs: DirLoader | None = None) -> dict[int, np.ndarray]:
     """レシピの各ユニットのベクトルを層ごとに合計する(§2.3)。"""
     out: dict[int, np.ndarray] = {}
     for u in recipe.add_units:                 # gain は control vector ではなく LoRA で当てる(§6.16)
-        v = unit_vector(weights, stats, u, recipe.dose_unit)
+        v = unit_vector(weights, stats, u, recipe.dose_unit, dirs)
         out[u.layer] = out[u.layer] + v if u.layer in out else v
     return out
 
 
-def unit_details(weights, stats, recipe: Recipe) -> list[dict]:
-    """各ユニットの大きさ。rel_push = ‖v‖ / ρ_L、add = 活性 a_n に足した相当量(符号つき)。"""
+def unit_details(weights, stats, recipe: Recipe, dirs: DirLoader | None = None) -> list[dict]:
+    """各ユニットの大きさ。rel_push = ‖v‖ / ρ_L、add = 活性 a_n に足した相当量(符号つき)。
+    方向のユニットは diff_rel = ‖平均差‖ / ρ_L(rel dose がこの値なら平均差と同じ大きさ)も返す。"""
     rows = []
     for u in recipe.units:
         if u.mode == "gain":
             rows.append({"layer": u.layer, "neuron": u.neuron, "kind": u.kind, "seed": None, "dose": 0.0, "norm": 0.0,
                          "rel_push": None, "rho": None, "add": None, "down_norm": None, "mode": "gain", "k": u.k})
             continue
-        v = unit_vector(weights, stats, u, recipe.dose_unit)
+        v = unit_vector(weights, stats, u, recipe.dose_unit, dirs)
         norm = float(np.linalg.norm(v))
         try:
             rho = stats.rho(u.layer)
@@ -200,6 +228,9 @@ def unit_details(weights, stats, recipe: Recipe) -> list[dict]:
             rho = None
         d = {"layer": u.layer, "neuron": u.neuron, "kind": u.kind, "seed": u.seed, "dose": u.dose,
              "norm": norm, "rel_push": norm / rho if rho else None, "rho": rho, "add": None, "down_norm": None}
+        if u.kind == "direction":
+            d["direction"] = u.direction
+            d["diff_rel"] = float(np.linalg.norm(dirs(u.direction, u.layer))) / rho if rho else None
         if u.kind == "neuron":
             dn = float(weights.down_norms(u.layer)[u.neuron])
             d["down_norm"] = dn

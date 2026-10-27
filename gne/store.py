@@ -8,6 +8,8 @@
   reverse/<model_id>/<name>.directions.npz
   gain/<model_id>/<hash>.lora.gguf  gain の実行時 LoRA
   evals/<model_id>/<name>.json      gne eval の結果
+  directions/<model_id>/<name>.npz  gne direction の方向(層ごとの mean_A − mean_B)
+  ablate/<model_id>/*.lora.gguf     方向を消す LoRA(層選びと gne ablate)
   recipes/*.yaml
   export/*
 """
@@ -56,6 +58,14 @@ class Store:
     def gain_dir(self, model_id: str) -> Path:
         """gain(§6.16)の実行時 LoRA の置き場所。"""
         return self._dir("gain", model_id)
+
+    def direction_dir(self, model_id: str) -> Path:
+        """gne direction(§6.17)の方向の置き場所。"""
+        return self._dir("directions", model_id)
+
+    def ablate_dir(self, model_id: str) -> Path:
+        """方向を消す LoRA(§6.17)の置き場所。"""
+        return self._dir("ablate", model_id)
 
     def eval_dir(self, model_id: str) -> Path:
         """gne eval(§6.14)の結果の置き場所。"""

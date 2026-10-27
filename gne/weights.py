@@ -239,6 +239,16 @@ class Weights:
                 raise NotImplementedError(f"{t.name}: 量子化型 {t.tensor_type.name} は dequantize できません")
             yield i, rows
 
+    def embed_rows(self, ids) -> np.ndarray:
+        """token_embd の指定の行だけを float32 で(全語彙を dequantize しない)。埋め込みに倍率を掛ける arch(Gemma)は未考慮。"""
+        t = self.tensor("token_embd.weight")
+        rows = np.asarray(t.data)[np.asarray(ids, dtype=np.int64)]
+        if t.tensor_type == GGMLQuantizationType.F32:
+            return rows.astype(np.float32)
+        if t.tensor_type == GGMLQuantizationType.F16:
+            return rows.view(np.float16).astype(np.float32) if rows.dtype != np.float16 else rows.astype(np.float32)
+        return gquants.dequantize(rows, t.tensor_type).astype(np.float32, copy=False)
+
     def unit_direction(self, L: int, n: int) -> np.ndarray:
         col = self.down_column(L, n)
         return col / np.linalg.norm(col)

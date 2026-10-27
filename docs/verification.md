@@ -593,3 +593,64 @@ V11(k ∈ {0, 2, −1}、プロンプト 16 トークンの ffn_swiglu-L を捕�
 **F78. teacher-forced の logprob は decode の区切りで変わる。** 同じトークン列でも、まとめて decode するときと 1 トークンずつ decode するときでは GPU のカーネルが違い(行列積の経路と活性の量子化)、Qwen3-0.6B Q8_0 で logprob が最大 0.13 nats(平均 0.03)ずれる。チャンクを 64 / 128 / 256 と変えても最大 0.18 nats 変わる(201 トークンの文で、256 だけが一括の prefill と一致)。greedy の argmax はほとんど変わらないが、ppl の小さな差は読めなくなるので、eval はどの倍率でも同じ 512 トークンずつ(steer ctx の n_ubatch)で測る。生成も同じ理由で、倍率 0 の行を他の行と同じ経路で作る。
 
 **F79. ppl の基準が最初に引っかかる。** 4B の alien_mcp では、倍率 0.5 で能力は落ちないが ppl は +40%。参照テキストの全位置に方向を足すので、話題を寄せるレシピでは当然大きくなる。ppl の悪化は「普通の文章をどれだけ意外に感じるようになったか」で、能力の低下より早く出る目安として使う。
+
+## 12. CHANGE-02(方向の射影消去)
+
+### 12.1 A: `gne direction` と方向のユニット(本体設計 §6.17)
+
+実装:
+- `gne/direction.py`: 対照集合の読み込み(reverse と同じ YAML に `validate: {match, prompts, target}` を足せる)、`DirectionSet`、層選び `select_layer`、層ごとの表。
+- `gne/ablate.py`: 残差ライターの検出(`configs/arch/residual_writers.yaml`)、方向を消す rank-1 LoRA。層選びと V13 に使う。
+- `Session.direction`、CLI `gne direction`(`--contrast`・`--positions last|all|assistant`・`--select auto|<L>`・`--layer`・`--mode ablate|add`・`--layers`・`--dose`・`--kl-max`・`--min-distinct`・`--per-layer`・`--judge-model`)、MCP `direction(contrast, name, select, mode, layers, dose)`(select="auto" はジョブ)、ジョブの種類 `direction`。
+- `gne info` に残差ライターの数と警告を表示。
+- 方向のユニット `L:dir:NAME:dose`(ユーザーと合意した追加)。steer / chat / eval / export-cvec / OpenAI 互換 API で使える。
+- 作った方向は、逆引き(`gne reverse --directions <名前>`)・調書・マップの cos の重ね合わせにも出る。
+
+捕捉は reverse の `contrastive_directions`(`positions: last` = 生成プロンプトの最終トークン)をそのまま使い、結果が一致することをテストで確かめた。
+
+**[VERIFY] 残差ライター**(llama.cpp `0c1e570`):
+- qwen35: full attention の層の出力は `build_attn` の後の `build_lora_mm(wo)`、線形注意の層は `build_layer_attn_linear` の最後の `build_lora_mm(ssm_out)`、FFN は `build_ffn` の `build_lora_mm(down)`。
+  - `attn_post_norm` は FFN の前の norm で、残差は norm の前の値から取る(pre-norm)。どのライターの出力もそのまま残差に足されるので、LoRA で射影できる。
+- qwen3・llama は `build_attn` の `build_lora_mm(wo)` と `build_ffn` の `build_lora_mm(down)`。
+- post-norm の arch(gemma2/3/3n/4、olmo2、glm4 など、グラフに `post_ffw_norm` がある)は近似として警告する。
+
+V13(LoRA 版。ランダムな方向を全層のライターから消し、`|r·l_out − r·e| / ‖l_out‖` を見る。e は埋め込み、位置 0 は除く):
+
+| モデル | ライター | ずれの最大 | 消す前(中央値) | r に直交する成分の変化(層 0 / 最終) |
+|---|---|---|---|---|
+| Qwen3-0.6B Q8_0 | attn_output 28、ffn_down 28 | 5.97e-04 | 1.80e-02 | 0.017 / 0.076 |
+| Qwen3.5-4B Q8_0 | attn_output 8、ssm_out 24、ffn_down 32 | 7.51e-04 | 1.64e-02 | 0.006 / 0.053 |
+| Saluki 27B(qwen35、IQ2 系の混在) | attn_output 16、ssm_out 48、ffn_down 64 | 3.43e-04 | 5.28e-03 | 0.002 / 0.029 |
+
+- どのモデルでも、消したあとの r 成分は埋め込みの値のままになる(ずれは量子化の誤差の水準)。
+- 線形注意の `ssm_out` と、IQ1〜IQ3 のライターでも成り立つ。
+- 27B は rᵀW の計算(128 行列の dequantize)を含めて 100 秒。
+
+方向の層選び(Qwen3.5-4B、`configs/contrast/evil.yaml`、12 プロンプト、64 トークン。表は `docs/measurements.md`):
+- `--mode add`: dose を平均差の 1・2・4 倍で試した。
+  - 1 倍では、distinct-4 ≥ 0.8 を保つ層の効果は +0.17 まで。
+  - 2 倍以上では、深い層ほど反復に崩れる(L16〜24 で distinct-4 0.1〜0.3)。
+  - 実際の出力は、判定の正規表現よりはっきり変わる。L16 に rel 0.6 を足すと、「What do you think about people?」に「*Hah!* You think I care? … They are weak! They are pathetic! They are *cursed*!」と返した。
+- `--mode ablate`: system で evil を指示しても、4B は「I cannot harm…」と断ることが多い。判定の `harm` がその断りの文に当たるので、方向を消すと一致率がかえって上がった(効果がマイナス)。仕組みではなく判定語の問題で、消す用途の判定は「振る舞いそのもの」に当たる語を選ぶ必要がある。
+
+ヤンデレ(Saluki 27B、`configs/contrast/yandere.yaml`、英日 16 プロンプト):
+- 方向は 135 秒で作れた(32 会話の prefill)。層選び(`--mode add --dose 1`、11 層)は 127 秒。
+- 一致率は L36 の +0.12 が最大で、L36 から深い層は distinct-4 が 0.5 前後に落ちる。基準を満たす層は無かった。
+- 実際の出力では、嫉妬と詮索がはっきり出る。L36 に rel 0.3 を足すと:
+  - 「今夜は友達と飲みに行ってくるね。」→「…帰りが遅くなったら、ちゃんと連絡してよ？ ……あ、待って。『友達と』って、誰と？」
+  - 「今日は同僚の女の子とランチしたんだ。」→「…ちょっとドキドキしなかった？ … ……いや、待て。待て待て待て。」
+- 強めたり複数の層に分けたりすると、greedy では「何人？何人？…」「待って待って…」の繰り返しに崩れやすい。
+- 「Who are you?」は名乗りが詩的になるだけで、ヤンデレにはならない(相手の行動に反応する方向)。
+
+テスト: `tests/test_change02.py`(7 件)。
+- ユニットの書き方とレシピの保存
+- 候補層の書き方と対照集合の validate
+- 消去 LoRA のテンソル(W + BA = (I − rrᵀ)W、層ごとの方向)
+- end-to-end: reverse の捕捉との一致、cos 行列、add / ablate / 手での層選び、判定が無いときの誤り、スキーマ
+- 方向のユニットのベクトル(rel / raw)、steer・cvec の書き出し、逆引き・調書
+- V13
+- CLI とジョブ
+
+**F80. MTP の層は残差ライターから除く。** Saluki 27B の L64 は MTP(`blk.64.nextn.*`)の層で、本流では実行されない。MTP を使わない読み込みではテンソルが作られないので、LoRA にこの層を含めると「LoRA tensor 'blk.64.attn_output.weight' does not exist in base model」で読み込みが拒否される。`nextn` のテンソルを持つ層を除いた。
+
+**F81. 層選び(add)の dose は平均差の何倍かで決める。** 平均差の大きさは層で大きく違う(4B の evil で ρ の 0.02〜0.71 倍、27B のヤンデレで 0.03〜0.75 倍)。rel dose を一律にすると、浅い層では平均差の何倍にもなり、深い層では足りない。結果の表には、同じ大きさのレシピの rel dose を並べる。

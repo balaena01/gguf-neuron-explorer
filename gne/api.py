@@ -107,9 +107,11 @@ class Session:
         mode, reason, checked = bias_support(m.arch)
         rp = self.store.resid_path(m.model_id)
         acts = sorted(int(p.stem.split("_L")[1]) for p in self.store.stats_dir(m.model_id).glob("act_L*.npz"))
+        from .ablate import writer_info
         return {"meta": meta, "arch_warnings": self.weights.check_arch(), "llama_cpp": llama,
                 "bake": {"supported": mode is not None, "mode": mode, "reason": reason, "checked_llama_cpp": checked},
-                "stats": {"resid": str(rp) if rp.exists() else None, "act_layers": acts}}
+                "stats": {"resid": str(rp) if rp.exists() else None, "act_layers": acts},
+                "residual_writers": writer_info(self.weights)}
 
     # --- stats ----------------------------------------------------------------------------------
 
@@ -222,7 +224,35 @@ class Session:
         if not recipe.add_units:
             return {}, unit_details(self.weights, None, recipe)
         sv = self.stats_view(Recipe(recipe.add_units, recipe.model_id, recipe.dose_unit, recipe.name))
-        return recipe_vectors(self.weights, sv, recipe), unit_details(self.weights, sv, recipe)
+        return (recipe_vectors(self.weights, sv, recipe, self.direction_vec),
+                unit_details(self.weights, sv, recipe, self.direction_vec))
+
+    def direction_path(self, name: str) -> Path:
+        """方向の名前 → ファイル。<root>/directions/ を先に、無ければ逆引きの <root>/reverse/ を探す。パスも可。"""
+        p = Path(name)
+        if p.suffix == ".npz" and p.exists():
+            return p
+        for q in (self.store.direction_dir(self.meta.model_id) / f"{name}.npz",
+                  self.store.reverse_dir(self.meta.model_id) / f"{name}.directions.npz"):
+            if q.exists():
+                return q
+        raise GneError("FILE_NOT_FOUND", f"方向 {name} がありません", "gne direction --contrast <対照集合> で作ってください")
+
+    def direction_set(self, name: str):
+        from .direction import DirectionSet
+        p = self.direction_path(name)
+        key, mt = str(p.resolve()), p.stat().st_mtime
+        cache = self.__dict__.setdefault("_dirsets", {})
+        if key not in cache or cache[key][0] != mt:
+            cache[key] = (mt, DirectionSet.load(p))
+        return cache[key][1]
+
+    def direction_vec(self, name: str, L: int) -> np.ndarray:
+        """方向ユニット(L:dir:NAME:dose)が足す元のベクトル(その層の mean_A − mean_B)。"""
+        ds = self.direction_set(name)
+        if L not in ds.raw:
+            raise GneError("BAD_RECIPE", f"方向 {name} に層 {L} がありません(0〜{max(ds.raw)})")
+        return ds.raw[L]
 
     @staticmethod
     def _norms(vecs: dict[int, np.ndarray]) -> dict[str, float]:
@@ -499,10 +529,7 @@ class Session:
         else:
             p = Path(directions)
             if not p.exists():
-                p = rdir / f"{directions}.directions.npz"
-            if not p.exists():
-                raise GneError("FILE_NOT_FOUND", f"方向 {directions} がありません",
-                               f"{rdir} の *.directions.npz の名前か、ファイルのパスを渡してください")
+                p = self.direction_path(str(directions))         # 逆引きの方向、無ければ gne direction の方向
             z = np.load(p)
             dirs = {int(L): z[f"layer_{L}"] for L in z["layers"] if layers is None or int(L) in layers}
             act = {int(k[4:]): z[k] for k in z.files if k.startswith("act_")} or None
@@ -688,6 +715,53 @@ class Session:
                                                           on_column=on_column, when_override=when)})
         return {"columns": [{"label": c.label, "recipe": c.recipe.to_dict() if c.recipe else None} for c in columns],
                 "system": system, "turns": turns}
+
+    # --- direction(§6.17)-----------------------------------------------------------------------
+
+    def direction(self, *, contrast: str | Path, name: str | None = None, positions: str = "last",
+                  select: str | int | None = None, mode: str = "ablate", layers: str | list[int] | None = None,
+                  dose: float = 0.5, max_tokens: int = 64, kl_max: float = 0.1, min_distinct: float = 0.8,
+                  per_layer: bool = False, judge_model: str | Path | None = None, judge_target: str | None = None) -> dict:
+        """対照集合から全層の方向 r_L を作って保存し、select="auto" なら効果の大きい層を選ぶ(数字なら手で指定)。"""
+        from .direction import (DirectionSet, candidate_layers, layer_table, load_contrast, save_directions,
+                                save_select, select_layer)
+        from .evalx import Judge
+        from .reverse import contrastive_directions
+        if positions not in ("last", "all", "assistant"):
+            raise GneError("BAD_ARGS", "positions は last / all / assistant です")
+        t0 = time.perf_counter()
+        cs, val = load_contrast(contrast)
+        name = name or cs.name
+        if not re.fullmatch(r"[\w.\-]+", name):
+            raise GneError("BAD_ARGS", f"名前 {name!r} は英数字・_・-・. だけにしてください")
+        cr = contrastive_directions(self.engine, cs, positions=positions, with_act=False, progress=self.progress)
+        path = self.store.direction_dir(self.meta.model_id) / f"{name}.npz"
+        save_directions(path, cr, cs, str(contrast))
+        ds = DirectionSet.load(path)
+        resid = self.resid_stats()
+
+        def rho(L):
+            return float(resid.rho(L)) if resid is not None and L in resid.layers else None
+        sel = None
+        if select is not None and str(select) != "auto":
+            if not str(select).isdigit() or int(select) not in ds.raw:
+                raise GneError("BAD_ARGS", f"--select は auto か層の番号です({min(ds.raw)}〜{max(ds.raw)})")
+            sel = {"mode": "manual", "selected": int(select)}
+        elif select == "auto":
+            judge = Judge(judge_model, judge_target or val.target or cs.system_a) if judge_model else None
+            try:
+                sel = select_layer(self, ds, cs, val, mode=mode, layers=candidate_layers(self.meta.n_layer, layers),
+                                   dose=dose, max_tokens=max_tokens, kl_max=kl_max, min_distinct=min_distinct,
+                                   per_layer=per_layer, judge=judge, progress=self.progress)
+            finally:
+                if judge is not None:
+                    judge.close()
+        if sel is not None:
+            save_select(path.with_suffix(".select.json"), sel)
+        return {"name": name, "path": str(path), "contrast": str(contrast), "contrast_sha": cs.sha, "positions": positions,
+                "n_prompts": len(cs.user_prompts), "n_rows": cr.n_rows, "layers": layer_table(ds, rho),
+                "validation": {"n_prompts": len(val.prompts), "match": val.match, "target": val.target},
+                "select": sel, "seconds": time.perf_counter() - t0}
 
     # --- eval(§6.14)---------------------------------------------------------------------------
 

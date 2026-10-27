@@ -91,6 +91,7 @@ class InfoOut(Envelope):
     llama_cpp: LoadInfo | None
     bake: BakeSupport
     stats: dict[str, Any]
+    residual_writers: dict[str, Any] | None = None    # §6.17 残差ライター(射影消去の対象)
 
 
 class ProbeOut(Envelope):
@@ -167,7 +168,7 @@ class StatsActOut(Envelope):
 class UnitModel(_Strict):
     layer: int
     neuron: int | None
-    kind: Literal["neuron", "random"]
+    kind: Literal["neuron", "random", "direction"]
     seed: int | None
     dose: float
     norm: float
@@ -177,6 +178,8 @@ class UnitModel(_Strict):
     down_norm: float | None
     mode: Literal["add", "gain"] = "add"     # §6.16
     k: float | None = None
+    direction: str | None = None              # §6.17 方向のユニット
+    diff_rel: float | None = None             # ‖平均差‖ / ρ_L
 
 
 class RecipeModel(_Strict):
@@ -296,6 +299,27 @@ class EvalOut(Envelope):
     rows: list[EvalRow]
     samples: dict[str, Any]
     judge: dict[str, str] | None
+    seconds: float
+
+
+class DirectionLayer(_Strict):
+    layer: int
+    norm: float
+    rel: float | None
+    cos_prev: float | None
+
+
+class DirectionOut(Envelope):                   # §6.17 gne direction
+    name: str
+    path: str
+    contrast: str
+    contrast_sha: str
+    positions: str
+    n_prompts: int
+    n_rows: dict[str, int]
+    layers: list[DirectionLayer]
+    validation: dict[str, Any]                 # 対照集合の validate(層選びの判定)
+    select: dict[str, Any] | None
     seconds: float
 
 
@@ -526,5 +550,5 @@ COMMAND_SCHEMAS: dict[str, type[Envelope]] = {
     "info": InfoOut, "probe": ProbeOut, "verify": VerifyOut, "bench": BenchOut,
     "stats resid": StatsResidOut, "stats act": StatsActOut, "steer": SteerOut,
     "export-cvec": ExportOut, "import-cvec": ImportOut, "bake": BakeOut, "gain": GainOut,
-    "eval": EvalOut,
+    "eval": EvalOut, "direction": DirectionOut,
 }

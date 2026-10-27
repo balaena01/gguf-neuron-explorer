@@ -219,12 +219,14 @@ def parse_layers(spec: Optional[str]) -> Optional[list[int]]:
 def _units_text(units: list[dict]) -> str:
     rows = []
     for u in units:
-        who = f"N{u['neuron']}" if u["kind"] == "neuron" else f"random{u['seed']}"
+        who = {"neuron": f"N{u['neuron']}", "random": f"random{u['seed']}"}.get(u["kind"], f"dir:{u.get('direction')}")
         if u.get("mode") == "gain":
             rows.append(f"  L{u['layer']} {who} ×{u['k']:g}(gain: 出力を {u['k']:g} 倍、LoRA で当てる)")
             continue
         rp = f"rel_push {u['rel_push']:.2f}、ρ={u['rho']:.2f}" if u.get("rel_push") is not None else "ρ 不明"
         add = f"、活性に {u['add']:+.3g} 相当" if u.get("add") is not None else ""
+        if u.get("diff_rel") is not None:
+            add += f"、平均差の {u['norm'] / (u['diff_rel'] * u['rho']):.2f} 倍"
         rows.append(f"  L{u['layer']} {who} dose {u['dose']:+g}: ‖v‖={u['norm']:.2f}({rp}{add})")
     return "\n".join(rows)
 
@@ -254,12 +256,18 @@ def info(c: Common, holder: dict,
         ("bake", (f"可({b['mode']})" if b["supported"] else "不可") + f": {b['reason']}(表: {b['checked_llama_cpp']})"),
         ("統計", f"resid {'あり' if d['stats']['resid'] else 'なし'}、act の層 {d['stats']['act_layers'] or 'なし'}"),
     ]
+    rw = d.get("residual_writers")
+    if rw:
+        rows.append(("残差ライター", ", ".join(f"{k} {n}" for k, n in rw["counts"].items())
+                     + ("(グラフで確認済み)" if rw["verified"] else "(テンソル名で推定)")))
     lc = d["llama_cpp"]
     if lc is not None:
         rows.append(("llama.cpp", f"読み込み可(n_layer {lc['n_layer']}, n_embd {lc['n_embd']}, n_vocab {lc['n_vocab']})"
                      if lc["ok"] else f"読み込めません: {lc['error']}(新しい llama.cpp でのビルドが必要かもしれません、R6)"))
     text = _table(rows)
     text += "".join(f"\n警告: {w}" for w in d["arch_warnings"]) or "\n警告なし: dense FFN、ニューロン押しは control vector と等価です"
+    if rw and rw["warnings"]:
+        text += "".join(f"\n射影消去: {w}" for w in rw["warnings"])
     return d, text, 0
 
 
@@ -318,7 +326,7 @@ def verify(c: Common, holder: dict,
     v = Verifier(s.engine, s.weights, layer=layer, seed=c.seed)
     steps = [("V1", v.v1_shapes), ("V2", v.v2_ffn_linearity), ("V3", v.v3_cvec_layer),
              ("V4", lambda: v.v4_direction_file(lc)), ("V5", lambda: v.v5_neuron_push(hf_model, hf_python)),
-             ("V6", v.v6_attention_sink), ("V11", v.v11_gain), ("V12", v.v12_when_gen)]
+             ("V6", v.v6_attention_sink), ("V11", v.v11_gain), ("V12", v.v12_when_gen), ("V13", v.v13_ablation)]
     results, bench_result = [], None
 
     def show(r):
@@ -647,6 +655,65 @@ def reverse(c: Common, holder: dict,
         for ex in d["verify"]["examples"][:min(show, 10)]:
             lines.append(f"  L{ex['layer']} N{ex['neuron']} ({'+' if ex['sign'] > 0 else '-'}) {ex['prompt']}: "
                          f"{ex['text'][:160]!r}")
+    return d, "\n".join(lines), 0
+
+
+@gne_command(app, "direction")
+def direction(c: Common, holder: dict,
+              contrast: Path = typer.Option(..., "--contrast", help="対照集合 YAML(reverse と同じ形。層選びには validate.match)"),
+              name: Optional[str] = typer.Option(None, "--name", help="保存名(既定は対照集合の name)"),
+              positions: str = typer.Option("last", "--positions", help="last(生成プロンプトの最終トークン)/ all / assistant"),
+              select: Optional[str] = typer.Option(None, "--select", help="auto(候補層ごとに効果を測って選ぶ)か層の番号"),
+              layer: Optional[int] = typer.Option(None, "--layer", help="層を手で指定する(--select <番号> と同じ)"),
+              mode: str = typer.Option("ablate", "--mode", help="--select auto の測り方: ablate(消して効果が下がるか)/ add(足して効果が上がるか)"),
+              layers: Optional[str] = typer.Option(None, "--layers", help="候補の層(既定 0.3〜0.8·n_layer。10-24、10-24:2、12,16)"),
+              dose: float = typer.Option(1.0, "--dose", help="mode=add で足す大きさ(平均差 mean_A − mean_B の何倍か)"),
+              max_tokens: int = typer.Option(64, "--max-tokens"),
+              kl_max: float = typer.Option(0.1, "--kl-max", help="mode=ablate: B 側の次トークン KL の上限"),
+              min_distinct: float = typer.Option(0.8, "--min-distinct", help="mode=add: distinct-4 の下限(反復していないか)"),
+              per_layer: bool = typer.Option(False, "--per-layer", help="mode=ablate: 層ごとの r_L を各層に当てる変種も測る"),
+              judge_model: Optional[Path] = typer.Option(None, "--judge-model", help="判定に使う別の GGUF(validate.match の代わり)"),
+              judge_target: Optional[str] = typer.Option(None, "--judge-target", help="judge に渡す目標の性格(既定 validate.target か system_a)")):
+    """対照集合から全層の方向 r_L(mean_A − mean_B)を作って保存し、--select auto で効果の大きい層を選ぶ(§6.17)。
+    作った方向は L:dir:NAME:dose のユニットで足せる(gne steer / chat / eval / export-cvec)。"""
+    if mode not in ("ablate", "add"):
+        raise GneError("BAD_ARGS", "--mode は ablate か add です")
+    if layer is not None:
+        if select not in (None, str(layer)):
+            raise GneError("BAD_ARGS", "--layer と --select はどちらか一方にしてください")
+        select = str(layer)
+    s = holder["session"] = c.session()
+    d = s.direction(contrast=contrast, name=name, positions=positions, select=select, mode=mode, layers=layers,
+                    dose=dose, max_tokens=max_tokens, kl_max=kl_max, min_distinct=min_distinct, per_layer=per_layer,
+                    judge_model=judge_model, judge_target=judge_target)
+    lines = [f"{d['path']}(A/B 各 {d['n_prompts']} 会話、行数 {d['n_rows']}、位置 {d['positions']}、{d['seconds']:.0f} 秒)",
+             "層ごとの ‖平均差‖/ρ(rel dose に直した大きさ)と前の層との cos:"]
+    lines.append("  " + " ".join(f"L{r['layer']}:{r['rel']:.2f}" if r["rel"] is not None else f"L{r['layer']}:—"
+                                 for r in d["layers"]))
+    lines.append("  " + " ".join(f"L{r['layer']}:{r['cos_prev']:+.2f}" for r in d["layers"] if r["cos_prev"] is not None))
+    sel = d["select"]
+    if sel and sel["mode"] == "manual":
+        lines.append(f"層 {sel['selected']} を選びました(手で指定)")
+    elif sel:
+        key = sel["metric"]
+        b = sel["base"]
+        head = (f"層選び(mode={sel['mode']}、{sel['n_prompts']} プロンプト、{sel['max_tokens']} トークン"
+                + (f"、dose {sel['dose']:g}" if sel["dose"] is not None else "") + f"、{sel['seconds']:.0f} 秒)")
+        lines += [head, f"  無介入: {key} {b[key]:.2f}  distinct-4 {b['distinct4']:.2f}",
+                  f"  {'層':>4} {'効果':>6} {key:>6} {'KL':>7} {'d4':>5}" + (f" {'rel':>5}" if sel["mode"] == "add" else "")]
+        for r in sel["rows"] + ([{**sel["per_layer"], "layer": "層別"}] if sel["per_layer"] else []):
+            mark = "  ← 選択" if r["layer"] == sel["selected"] else ("" if r["ok"] else "  ×")
+            eff = "—" if r["effect"] is None else f"{r['effect']:+.2f}"
+            val = "—" if r.get(key) is None else f"{r[key]:.2f}"
+            rel = f" {r['rel_dose']:>5.2f}" if r.get("rel_dose") is not None else ""
+            lines.append(f"  {r['layer']!s:>4} {eff:>6} {val:>6} {r['kl']:>7.3f} {r['distinct4']:>5.2f}{rel}{mark}")
+        crit = sel["criteria"]
+        lines.append("基準: " + (f"KL ≤ {crit['kl_max']:g}" if "kl_max" in crit else f"distinct-4 ≥ {crit['min_distinct']:g}")
+                     + ("。選べる層がありません" if sel["selected"] is None else ""))
+        if sel["selected"] is not None and sel["mode"] == "add":
+            rd = next(r["rel_dose"] for r in sel["rows"] if r["layer"] == sel["selected"])
+            lines.append(f"試す(平均差の {sel['dose']:g} 倍 = rel {rd:.2f}): "
+                         f"gne steer --unit {sel['selected']}:dir:{d['name']}:+{rd:.2f} -p \"Who are you?\" --compare")
     return d, "\n".join(lines), 0
 
 

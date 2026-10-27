@@ -43,7 +43,13 @@ def _read_jsonl(p: Path) -> list[dict]:
 
 
 def _directions(session) -> list[tuple[str, Path]]:
-    return [(p.name.split(".")[0], p) for p in sorted(session.store.reverse_dir(session.meta.model_id).glob("*.directions.npz"))]
+    """逆引きの方向と gne direction の方向(§6.17)。名前が重なれば direction の方に @dir を付ける。"""
+    out = [(p.name.split(".")[0], p) for p in sorted(session.store.reverse_dir(session.meta.model_id).glob("*.directions.npz"))]
+    seen = {n for n, _ in out}
+    for p in sorted(session.store.direction_dir(session.meta.model_id).glob("*.npz")):
+        n = p.name.split(".")[0]
+        out.append((f"{n}@dir" if n in seen else n, p))
+    return out
 
 
 def _lens_paths(session, L: int) -> tuple[Path, Path]:
