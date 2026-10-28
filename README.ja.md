@@ -223,9 +223,12 @@ r = client.chat.completions.create(
 
 送らなかった値は、レシピの `sampling`、それも無ければ llama-server の既定を使います。tools と logprobs には対応していません。GPU は UI のチャットと譲り合います。
 
-サーバーは状態を持たないので、リクエストごとに強さを変えられます。たとえば配信のゲージに合わせるなら、発言ごとに `"gne": {"recipe": "yandere_qwen38_27b", "scale": 0.7, "when": "ramp:0.5-1.5"}` を送り、ゲージに合わせて `scale` と `when` を変えます。
+サーバーは会話の状態を持たないので、会話の好きなタイミングで強さを変えられます。発言と一緒に `"gne": {"recipe": "yandere_qwen38_27b", "scale": 0.7, "when": "ramp:0.5-1.5"}` を送り、変えたいときに `scale` と `when` を変えます。
 
-[`examples/gauge/gauge_chat.py`](examples/gauge/gauge_chat.py) がその例です。発言のたびにファイルからゲージ（0〜100）を読み、[docs/verification.md](docs/verification.md) の F94・F96 の結果をもとに `when` と `scale` に変えます。
+[`examples/strength/strength_chat.py`](examples/strength/strength_chat.py) がその例です。強さを 0〜100 で持ち、発言のたびに [docs/verification.md](docs/verification.md) の F94・F96 の結果をもとに `when` と `scale` に変えて送ります。強さは次のどちらかで変えます。
+
+- 会話の中で `/s 70` と打つ
+- ファイルを書き換える（ゲームのイベントや配信のゲージなど、別のプログラムから変えるとき）
 
 注意点が 2 つあります。
 
