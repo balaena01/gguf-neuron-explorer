@@ -1,0 +1,18 @@
+# ヤンデレのアニメの女の子を、ニューロン 6 個で作るレシピ(LFM3-1.7B、英語だけ。docs/verification.md §12.6、F99)。
+# 候補 115 個を 1 個ずつ押して採点なしの物差しでふるい、貪欲法で 6 個を選び、英語のプロンプトだけで強さを進化戦略で決めた。
+# 英語では日英版(315 個)より強い。日本語では「俺」口調になり、意味のない文に崩れる。
+# when=assistant(ユーザーの文は素のまま読む)。能力(gne eval、倍率 1): assistant −5.6pt、all −27.8pt。
+# 強さを決める前の組(6 個すべて ±0.3)は、assistant で能力が落ちない。少し弱いが、能力を優先するならそちら。
+#   gne steer -m <モデル> --recipe configs/recipes/yandere_lfm3_en6.yaml -p "My ex texted me today." --compare
+name: yandere_lfm3_en6
+model_id: lfm3-1.7b-f2ecde3aae
+dose_unit: rel
+when: assistant
+sampling: {temperature: 0.3, top_k: 50, top_p: 0.95, min_p: 0.05, presence_penalty: 0.5}
+units:
+  - {layer: 14, neuron: 4047, dose: -0.236}
+  - {layer: 12, neuron: 4759, dose: +0.426}
+  - {layer: 11, neuron: 231, dose: +0.191}
+  - {layer: 10, neuron: 5768, dose: +0.494}
+  - {layer: 14, neuron: 332, dose: +0.153}
+  - {layer: 15, neuron: 4086, dose: -0.145}

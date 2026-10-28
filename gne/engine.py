@@ -18,6 +18,7 @@ from datetime import datetime
 from pathlib import Path
 
 import jinja2
+import jinja2.ext
 import jinja2.sandbox
 import numpy as np
 import llama_cpp
@@ -507,12 +508,22 @@ def _tojson(x, ensure_ascii=False, indent=None, separators=None, sort_keys=False
     return json.dumps(x, ensure_ascii=ensure_ascii, indent=indent, separators=separators, sort_keys=sort_keys)
 
 
+class _GenerationTag(jinja2.ext.Extension):
+    """HF transformers の {% generation %}…{% endgeneration %}(アシスタントの発話の範囲の印、LFM3 など)。中身をそのまま出す。"""
+    tags = {"generation"}
+
+    def parse(self, parser):
+        lineno = next(parser.stream).lineno
+        body = parser.parse_statements(("name:endgeneration",), drop_needle=True)
+        return jinja2.nodes.Scope(body, lineno=lineno)
+
+
 def render_template(template: str, messages: list[dict], *, enable_thinking: bool = False,
                     add_generation_prompt: bool = True, bos_token: str = "", eos_token: str = "",
                     **extra) -> str:
     """GGUF の tokenizer.chat_template(HF 形式の jinja2)を描画する。"""
     env = jinja2.sandbox.ImmutableSandboxedEnvironment(trim_blocks=True, lstrip_blocks=True,
-                                                      extensions=["jinja2.ext.loopcontrols"])
+                                                      extensions=["jinja2.ext.loopcontrols", _GenerationTag])
     env.filters["tojson"] = _tojson
     env.globals["raise_exception"] = _raise_exception
     env.globals["strftime_now"] = lambda fmt: datetime.now().strftime(fmt)

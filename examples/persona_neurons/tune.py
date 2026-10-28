@@ -8,7 +8,7 @@
 - 採点は --judge self(モデル自身)か file(名前を伏せたファイル、Claude や人が採点。common.py を参照)。
 
 START はレシピの YAML(units に layer・neuron・dose)か、1 行に 1 つ「L:N:dose」を書いたテキスト。
-使い方: python tune.py MODEL CONFIG.yaml START OUT_DIR [--when all] [--rounds 10] [--lam 4] [--judge self]
+使い方: python tune.py MODEL CONFIG.yaml START OUT_DIR [--when all] [--rounds 10] [--lam 4] [--judge self] [--sampling JSON]
 """
 
 from __future__ import annotations
@@ -63,6 +63,7 @@ def main():
     ap.add_argument("--seeds", default="7,31", help="1 回に使う種(回ごとに +1000 ずつずらす)")
     ap.add_argument("--max-tokens", type=int, default=100)
     ap.add_argument("--judge", choices=("self", "file"), default="self")
+    ap.add_argument("--sampling", default=None, help='サンプリングの値の JSON(例 {"temperature": 0.3})。小さいモデルは温度を下げる')
     a = ap.parse_args()
     cfg = load_config(a.config)
     out = Path(a.out_dir)
@@ -71,6 +72,7 @@ def main():
         write_rubric(out, cfg, a.max_tokens)
     names, x0 = load_start(a.start)
     seeds = tuple(int(v) for v in a.seeds.split(","))
+    sampling = json.loads(a.sampling) if a.sampling else None
     s = Session(a.model)
     rng = np.random.default_rng(0)
     t0 = time.perf_counter()
@@ -78,7 +80,8 @@ def main():
     def judge_round(tag, cands, prompts, sds):
         items = []
         for name, x in cands:
-            items += [dict(r, cand=name) for r in generate(s, prompts, units_of(names, x), a.when, sds, max_tokens=a.max_tokens)]
+            items += [dict(r, cand=name) for r in generate(s, prompts, units_of(names, x), a.when, sds, max_tokens=a.max_tokens,
+                                                                  sampling=sampling)]
         scores = judge_self(s, items, cfg["target"]) if a.judge == "self" else judge_file(out, tag, items)
         res = {}
         for name, _ in cands:

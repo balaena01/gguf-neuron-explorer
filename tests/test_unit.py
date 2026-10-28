@@ -171,6 +171,14 @@ def test_render_template_hf_conventions():
 
 # --- capture -----------------------------------------------------------------------------------------------
 
+def test_render_template_generation_tag():
+    """HF transformers の {% generation %}(LFM3 などがアシスタントの発話を印す)は、中身をそのまま出す。"""
+    tpl = ("{% for m in messages %}<{{ m.role }}>{% if m.role == 'assistant' %}{% generation %}{{ m.content }}{% endgeneration %}"
+           "{% else %}{{ m.content }}{% endif %}{% endfor %}")
+    out = render_template(tpl, [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "yo"}])
+    assert out == "<user>hi<assistant>yo"
+
+
 def test_capture_take_concatenates_steps():
     cap = Capture(lambda n: True)
     cap._store("l_out-3", np.zeros((2, 4), np.float32))

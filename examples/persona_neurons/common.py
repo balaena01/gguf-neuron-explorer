@@ -69,10 +69,13 @@ def units_of(names: list[str], x) -> list[str]:
 
 
 def generate(session, prompts: list[str], units: list[str], when: str, seeds, *, max_tokens: int = 100,
-             batched: bool = True) -> list[dict]:
+             batched: bool = True, sampling: dict | None = None) -> list[dict]:
     """プロンプト × 種で返事を作る。when が all / gen なら n_seq_max 本ずつまとめて(gen はプロンプトの prefill を素のまま
     読み、生成だけ押す)、それ以外(assistant・ramp・after)と batched=False は 1 本ずつ generate_when。
-    1 本ずつのときは種 sd + プロンプト番号で引くので、押し方どうしで対になる。"""
+    1 本ずつのときは種 sd + プロンプト番号で引くので、押し方どうしで対になる。
+    sampling はサンプリングの値(温度・top-k など、seed 以外)。無ければ engine.Sampling の既定(温度 1.0・presence 0.9)。
+    小さいモデルは温度が高いと崩れやすいので、モデルの推奨に合わせる。"""
+    sp = dict(sampling or {})
     e = session.engine
     ctx = e.steer_ctx()
     vecs = session.vectors(session.recipe(units=units))[0] if units else None
@@ -86,12 +89,12 @@ def generate(session, prompts: list[str], units: list[str], when: str, seeds, *,
                 e.set_cvec(ctx, vecs if when == "all" else None)
                 pre = e.prefill(ctx, seqs)
                 e.set_cvec(ctx, vecs)
-                rs = e.generate_greedy(ctx, seqs, max_tokens=max_tokens, prefilled=pre, sampling=Sampling(seed=sd + c0))
+                rs = e.generate_greedy(ctx, seqs, max_tokens=max_tokens, prefilled=pre, sampling=Sampling(**sp, seed=sd + c0))
                 rows += [{"prompt": p, "seed": sd, "text": r.text} for p, r in zip(ps, rs, strict=True)]
         else:
             for i, p in enumerate(prompts):
                 r, _ = generate_when(e, ctx, [{"role": "user", "content": p}], vecs, when, max_tokens=max_tokens,
-                                     sampling=Sampling(seed=sd + i))
+                                     sampling=Sampling(**sp, seed=sd + i))
                 rows.append({"prompt": p, "seed": sd, "text": r.text})
     e.set_cvec(ctx, None)
     return rows

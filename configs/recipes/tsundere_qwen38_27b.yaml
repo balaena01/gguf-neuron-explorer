@@ -1,0 +1,38 @@
+# ツンデレのアニメの女の子をニューロン 24 個で作るレシピ(Qwen3.8-27B GSQ-RCO、qwen35。docs/verification.md §12.7、F102〜F104)。
+# ツンデレを部品(とげ・高飛車・照れ・デレ・傲娇・女の子)と反対の性質(丁寧・素直な甘さ・冷静)に分けて語のニューロンを探し
+# (examples/persona_neurons/tsundere.yaml)、男口調を消すニューロン 4 個と「调皮」「少女」の 2 個を足して、when=assistant で強さを進化戦略で決めた。
+# その強さを 0.75 倍したもの(押し方を比べて、性格がいちばん出た)。
+# 英語のほうがよく出る。日本語でもとげは出るが、「〜なんだからね！」のような語尾は出ない(F104)。
+# 能力(gne eval): assistant ×0.75 で 97.2%(押さないのと同じ)。×1 だと assistant −16.7pt、all −55.6pt、ramp:0.5-1.5 は 0pt。
+#   gne steer -m <モデル> --recipe configs/recipes/tsundere_qwen38_27b.yaml -p "Did you miss me while I was gone?" --compare
+name: tsundere_qwen38_27b
+model_id: qwen3.8-27b-gsq-rco-e875854807
+dose_unit: rel
+when: assistant
+# 試したサンプリング(Qwen3.8-27B の llama-server の既定と同じ)
+sampling: {temperature: 1.0, top_k: 20, top_p: 0.95, min_p: 0.05, presence_penalty: 0.9}
+units:
+  - {layer: 40, neuron: 1003, dose: -0.164}
+  - {layer: 49, neuron: 768, dose: +0.104}
+  - {layer: 38, neuron: 8719, dose: +0.125}
+  - {layer: 46, neuron: 2817, dose: -0.154}
+  - {layer: 42, neuron: 15911, dose: +0.181}
+  - {layer: 37, neuron: 5370, dose: -0.146}
+  - {layer: 38, neuron: 8496, dose: -0.137}
+  - {layer: 38, neuron: 9896, dose: +0.189}
+  - {layer: 36, neuron: 9573, dose: +0.17}
+  - {layer: 40, neuron: 6996, dose: +0.14}
+  - {layer: 38, neuron: 6481, dose: +0.097}
+  - {layer: 49, neuron: 6161, dose: -0.146}
+  - {layer: 49, neuron: 5066, dose: -0.117}
+  - {layer: 39, neuron: 11118, dose: +0.064}
+  - {layer: 50, neuron: 2720, dose: +0.094}
+  - {layer: 50, neuron: 5172, dose: +0.102}
+  - {layer: 38, neuron: 10799, dose: -0.012}
+  - {layer: 36, neuron: 5352, dose: -0.062}
+  - {layer: 49, neuron: 10510, dose: +0.164}
+  - {layer: 45, neuron: 11408, dose: -0.078}
+  - {layer: 42, neuron: 11169, dose: -0.152}
+  - {layer: 45, neuron: 123, dose: +0.078}
+  - {layer: 37, neuron: 16918, dose: +0.203}
+  - {layer: 41, neuron: 13566, dose: -0.143}
