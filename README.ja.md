@@ -206,7 +206,7 @@ r = client.chat.completions.create(
     extra_body={"gne": {"units": ["22:2742:+0.8"], "when": "gen"}})
 ```
 
-`units` の代わりに `"recipe"` で `~/.gne/recipes` に保存したレシピの名前を渡せます。`"scale"` はその dose に掛ける倍率です。生成は greedy だけです（`temperature` などの指定は無視し、tools と logprobs には対応していません）。GPU は UI のチャットと譲り合います。
+`units` の代わりに `"recipe"` で `~/.gne/recipes` に保存したレシピの名前を渡せます。`"scale"` はその dose に掛ける倍率です。生成は既定で greedy です。`temperature` を 0 より大きくするか、`top_p`・`top_k`・`min_p`・`presence_penalty`・`seed` のどれかを送るとサンプリングになります（llama.cpp と同じ順番で、送らなかった値は llama-server の既定）。tools と logprobs には対応していません。GPU は UI のチャットと譲り合います。
 
 ## エージェントから使う（MCP）
 

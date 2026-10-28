@@ -523,3 +523,27 @@ def test_sampling_in_engine_and_ui_stream(session, tmp_path):
         assert len(ends) == 2 and ends[0]["text"] == ends[1]["text"]                  # 同じ seed なら列どうしも同じ
         bad = cl.post("/api/steer", json={**body, "sampling": {"seed": 1, "temp": 2}})
         assert bad.status_code == 400
+
+
+@pytest.mark.model
+def test_openai_api_sampling(session):
+    """OpenAI 互換 API のサンプリング: 何も送らなければ greedy、seed が同じなら同じ返事、値の誤りは 400。"""
+    from fastapi.testclient import TestClient
+
+    from gne.ui.openai_api import sampling_from
+    from gne.ui.server import create_app
+    assert sampling_from({}) is None and sampling_from({"temperature": 0}) is None
+    sp = sampling_from({"temperature": 0.7, "seed": 3})
+    assert (sp.temperature, sp.top_k, sp.top_p, sp.min_p, sp.presence_penalty, sp.seed) == (0.7, 40, 0.95, 0.05, 0.0, 3)
+    app = create_app(session, warm=False, openai=True)
+    msgs = [{"role": "user", "content": "Write one sentence about the moon."}]
+    with TestClient(app, base_url="http://127.0.0.1") as cl:
+        greedy = cl.post("/v1/chat/completions", json={"messages": msgs, "max_tokens": 20}).json()
+        assert greedy["gne"]["sampling"] is None
+        assert greedy["choices"][0]["message"]["content"] == session.generate(None, msgs, max_tokens=20)["text"]
+        body = {"messages": msgs, "max_tokens": 20, "temperature": 1.0, "seed": 11}
+        a, b = (cl.post("/v1/chat/completions", json=body).json() for _ in range(2))
+        c = cl.post("/v1/chat/completions", json={**body, "seed": 12}).json()
+        assert a["choices"][0]["message"]["content"] == b["choices"][0]["message"]["content"]
+        assert a["gne"]["sampling"]["seed"] == 11 and c["choices"][0]["message"]["content"] != a["choices"][0]["message"]["content"]
+        assert cl.post("/v1/chat/completions", json={**body, "top_p": 2}).status_code == 400

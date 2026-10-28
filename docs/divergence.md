@@ -27,7 +27,7 @@
 | `when=assistant` の区間(§6.15) | 生成プロンプト以降 | 過去の返答も含め、発話ごとの区間で付け替える。テンプレートによっては本文を探して区間にする(F74) | 「多ターンで assistant の発話だけ常に寄せる」を満たすため |
 | `when=after:<text>` | 出力に現れた以降 | 出力を毎ステップ文字列に戻して探す | トークンの切れ目に依らないように |
 | `Engine.generate_greedy` の `schedule` | `schedule(step, seq_state) -> vectors \| None` | 戻り値 `KEEP` で「そのまま」、`None` で解除、dict で差し替え。シーケンス 1 本のときだけ | 付け替えない回を表すため。control vector はコンテキスト単位 |
-| `gne serve --openai` | 最小実装 | greedy だけ(temperature などは無視)、`stop`・`n`・tools・logprobs は扱わない。`gne` に `recipe`(名前か `{units, dose_unit, when}`)・`units`・`scale`・`when` | 設計の「最小実装」の範囲 |
+| `gne serve --openai` | 最小実装 | 既定は greedy。`temperature` > 0 か `top_p`・`top_k`・`min_p`・`presence_penalty`・`seed` があればサンプリング(送らない値は llama-server の既定)。`stop`・`n`・tools・logprobs は扱わない。`gne` に `recipe`(名前か `{units, dose_unit, when}`)・`units`・`scale`・`when` | 設計の「最小実装」の範囲 |
 | LoRA の `adapter.lora.alpha`(§6.16) | 書く | 書かない(scale = adapter_scale) | 層ごとに rank が違うと alpha/rank が 1 にならないため |
 | V11 の k=0 の合格基準 | 絶対値 < 1e-3 | 素の活性の最大値に対する比 < 3%(F76) | LoRA 版は量子化差が残り、活性の大きさはモデルで違う |
 | gain の `Recipe.scaled` と 3 列チャットの − の列 | 記述なし | scaled(s) は 1 と k の間、− の列は 2 − k(F77) | eval の倍率 0 を無介入に、− の列を「反対側」にするため |

@@ -202,7 +202,7 @@ r = client.chat.completions.create(
     extra_body={"gne": {"units": ["22:2742:+0.8"], "when": "gen"}})
 ```
 
-Instead of `units`, `"recipe"` takes the name of a recipe saved under `~/.gne/recipes`, and `"scale"` multiplies its doses. Generation is greedy: sampling options such as `temperature` are ignored, and tools and logprobs are not supported. Requests share the GPU with the UI's chat.
+Instead of `units`, `"recipe"` takes the name of a recipe saved under `~/.gne/recipes`, and `"scale"` multiplies its doses. Generation is greedy unless the request sets `temperature` above 0 or any of `top_p`, `top_k`, `min_p`, `presence_penalty` and `seed`; then it samples in llama.cpp's order, and values left out take llama-server's defaults. Tools and logprobs are not supported. Requests share the GPU with the UI's chat.
 
 ## Using it from an agent (MCP)
 

@@ -77,6 +77,7 @@ class ContrastResult:
     positions: str
     n_rows: dict[str, int]
     scale: dict[int, np.ndarray]             # 層 → (n_embd,) 残差の次元ごとの標準偏差(A∪B)
+    act_std: dict[int, np.ndarray] | None = None   # 層 → (n_ff,) 活性の標準偏差(A∪B)。返事のトークンで測るときだけ
 
 
 def contrastive_directions(engine: Engine, cs: ContrastSet, *, layers: Sequence[int] | None = None,

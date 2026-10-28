@@ -83,7 +83,9 @@ def save_directions(path: Path, cr, cs: ContrastSet, source: str) -> None:
     Ls = sorted(cr.directions)
     U = np.stack([cr.directions[L] / max(float(np.linalg.norm(cr.directions[L])), 1e-30) for L in Ls])
     np.savez(path, layers=np.array(Ls, dtype=np.int32), **{f"layer_{L}": cr.directions[L] for L in Ls},
-             **{f"scale_{L}": cr.scale[L] for L in Ls}, cos=(U @ U.T).astype(np.float32),
+             **{f"scale_{L}": cr.scale[L] for L in Ls}, **{f"act_{L}": a for L, a in (cr.act_diff or {}).items()},
+             **{f"actstd_{L}": a for L, a in (cr.act_std or {}).items()},
+             cos=(U @ U.T).astype(np.float32),
              method=cr.method, positions=cr.positions, contrast_sha=cs.sha, source=source,
              n_rows_A=cr.n_rows["A"], n_rows_B=cr.n_rows["B"])
 
@@ -290,17 +292,29 @@ def top_writer_neurons(session, ds: DirectionSet, n: int) -> list[tuple[int, int
     return [(c.layer, c.neuron, c.cos) for c in pos[:n]]
 
 
-def response_directions(session, cs: ContrastSet, *, max_tokens: int = 96, progress: Progress | None = None):
+def response_directions(session, cs: ContrastSet, *, max_tokens: int = 96, with_act: bool = True,
+                        progress: Progress | None = None):
     """返事のトークンから作る方向(positions="response"、persona vector の作り方)。
     A(system_a)と B(system_b)で各プロンプトに greedy で返事を生成し、その会話(system・プロンプト・返事)を流して
     返事のトークンでの l_out-L の平均の差を取る。「指示の直後」ではなく「その性格で話している最中」の状態の差になる。
-    戻り値は reverse.ContrastResult と同じ形(act_diff は空)。"""
-    from .capture import Capture
+    with_act なら ffn_down の入力(ニューロンの活性)の平均の差も返事のトークンで取る(逆引きの act_diff、部品のニューロン探し用)。
+    戻り値は reverse.ContrastResult と同じ形。"""
+    from .capture import Capture, pick_act_name
     from .evalx import _generate
     from .reverse import ContrastResult
     e = session.engine
     Ls = list(range(e.n_layer - 1))                         # 最終層は行が間引かれ得るので除く
     names = {f"l_out-{L}": L for L in Ls}
+    act_names: dict[str, int] = {}
+    if with_act:
+        probe = e.tokenize_prompt(e.render_chat([{"role": "user", "content": cs.user_prompts[0]}]))
+        seen = e.list_names(probe[:16])
+        for L in Ls:
+            nm = pick_act_name(seen, L)
+            if nm:
+                act_names[nm] = L
+    act_sums = {side: {L: 0.0 for L in act_names.values()} for side in "AB"}
+    act_sq = {L: 0.0 for L in act_names.values()}             # A∪B の活性の二乗和(効果量 = 差 ÷ 標準偏差 に使う)
     sums = {side: {L: np.zeros(e.n_embd) for L in Ls} for side in "AB"}
     sq = {L: np.zeros(e.n_embd) for L in Ls}
     cnt = {"A": 0, "B": 0}
@@ -309,7 +323,7 @@ def response_directions(session, cs: ContrastSet, *, max_tokens: int = 96, progr
         convs = [[{"role": "system", "content": system}, {"role": "user", "content": u}] for u in cs.user_prompts]
         outs = _generate(session, [(c, max_tokens) for c in convs], None, None, "all", lambda n: None)
         cap = Capture()
-        cap.set_wanted(lambda n: n in names)
+        cap.set_wanted(lambda n: n in names or n in act_names)
         for c, o in zip(convs, outs, strict=True):
             pids = e.tokenize_prompt(e.render_chat(c))
             resp = [t for t in o["token_ids"] if not e.is_eog(t)]
@@ -324,6 +338,10 @@ def response_directions(session, cs: ContrastSet, *, max_tokens: int = 96, progr
                 rows = got[nm][len(pids):].astype(np.float64)        # 返事のトークンだけ
                 sums[side][L] += rows.sum(axis=0)
                 sq[L] += np.square(rows).sum(axis=0)
+            for nm, L in act_names.items():
+                a = got[nm][len(pids):].astype(np.float64)
+                act_sums[side][L] = act_sums[side][L] + a.sum(axis=0)
+                act_sq[L] = act_sq[L] + np.square(a).sum(axis=0)
             cnt[side] += len(resp)
             step += 1
             if progress:
@@ -333,4 +351,8 @@ def response_directions(session, cs: ContrastSet, *, max_tokens: int = 96, progr
     n = cnt["A"] + cnt["B"]
     dirs = {L: (sums["A"][L] / cnt["A"] - sums["B"][L] / cnt["B"]).astype(np.float32) for L in Ls}
     scale = {L: np.sqrt(np.maximum(sq[L] / n - ((sums["A"][L] + sums["B"][L]) / n) ** 2, 0)).astype(np.float32) for L in Ls}
-    return ContrastResult(dirs, {}, "mean_diff", "response", cnt, scale)
+    act = {L: (act_sums["A"][L] / cnt["A"] - act_sums["B"][L] / cnt["B"]).astype(np.float32) for L in act_names.values()}
+    # ニューロンごとの活性の標準偏差(A∪B)。act_diff ÷ これ = 効果量で、もともと活性の大きいニューロンが上に来すぎない
+    act_std = {L: np.sqrt(np.maximum(act_sq[L] / n - ((act_sums["A"][L] + act_sums["B"][L]) / n) ** 2, 0)).astype(np.float32)
+                  for L in act_names.values()}
+    return ContrastResult(dirs, act, "mean_diff", "response", cnt, scale, act_std)

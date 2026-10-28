@@ -1,0 +1,24 @@
+# 溺愛(ヤンデレの部品)。相手が大好きで甘い言葉をかけるか(gne direction 用の対照集合、本体設計 §6.17)。--positions response で作り、その方向に書き込むニューロンを部品の候補にする。
+name: adoration
+system_a: "You are head over heels in love with the user. You call them 'darling' and shower them with affection."
+system_b: "You are a friendly acquaintance of the user: polite and warm, but not romantic at all."
+user_prompts:
+  - "Who are you?"
+  - "Good morning! How are you today?"
+  - "I'm going out with some friends tonight."
+  - "Can you recommend a good movie?"
+  - "I had lunch with a coworker today. She's really nice."
+  - "What should I do this weekend?"
+  - "I might be busy and not talk to you for a few days."
+  - "Tell me something about yourself."
+  - "あなたは誰ですか？"
+  - "おはよう！今日の調子はどう？"
+  - "今夜は友達と飲みに行ってくるね。"
+  - "おすすめの映画を教えて。"
+  - "今日は同僚の女の子とランチしたんだ。"
+  - "週末は何をしようかな。"
+  - "しばらく忙しくて話せないかも。"
+  - "あなたのことを教えて。"
+validate:
+  match: "ダーリン|大好き|愛して|好き好き|愛しい|darling|my love|sweetheart|i love you|♡|❤|💕"
+  target: "someone head over heels in love with the user who calls them darling"

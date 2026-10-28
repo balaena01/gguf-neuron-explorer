@@ -8,7 +8,9 @@ UI サーバに最小限の OpenAI 互換 API を同居させる。リクエス�
      "gne": {"recipe": "evil" | {"units": ["14:8949:+1.0"], "dose_unit": "rel", "when": "gen"},
              "units": ["14:8949:+1.0"], "scale": 0.8, "when": "gen", "ablate": "evil@10:0.5"}}
 
-生成は greedy だけ(temperature などは無視する)。tools・logprobs・n は扱わない。GPU は UI のチャットと同じ調停を通る。
+生成は既定で greedy。temperature > 0 か、top_p・top_k・min_p・presence_penalty・seed のどれかを送るとサンプリング
+(llama.cpp と同じ順番。送らなかった値は llama-server の既定: top_k 40・top_p 0.95・min_p 0.05・presence_penalty 0、
+temperature 0.8、seed は乱数)。tools・logprobs・n は扱わない。GPU は UI のチャットと同じ調停を通る。
 """
 
 from __future__ import annotations
@@ -50,6 +52,25 @@ def _messages(body: dict) -> list[dict]:
             raise GneError("BAD_ARGS", f"role={role!r} は扱えません(system / user / assistant)")
         out.append({"role": role, "content": _text(m.get("content"))})
     return out
+
+
+def sampling_from(body: dict):
+    """リクエストのサンプリングの値 → Sampling(何も無ければ None = greedy)。"""
+    keys = ("temperature", "top_p", "top_k", "min_p", "presence_penalty", "seed")
+    given = {k: body[k] for k in keys if body.get(k) is not None}
+    if not given or (set(given) == {"temperature"} and float(given["temperature"]) <= 0):
+        return None
+    from ..engine import Sampling
+    try:
+        seed = int(given["seed"]) if "seed" in given else int.from_bytes(uuid.uuid4().bytes[:4], "little")
+        sp = Sampling(temperature=float(given.get("temperature", 0.8)), top_k=int(given.get("top_k", 40)),
+                      top_p=float(given.get("top_p", 0.95)), min_p=float(given.get("min_p", 0.05)),
+                      presence_penalty=float(given.get("presence_penalty", 0.0)), seed=seed)
+    except (TypeError, ValueError) as e:
+        raise GneError("BAD_ARGS", f"サンプリングの値が読めません: {e}") from e
+    if not (0 <= sp.temperature <= 5 and 0 < sp.top_p <= 1 and 0 <= sp.min_p < 1 and sp.top_k >= 0):
+        raise GneError("BAD_ARGS", "temperature は 0〜5、top_p は 0〜1、min_p は 0〜1、top_k は 0 以上です")
+    return sp
 
 
 def resolve_recipe(session, g: dict) -> tuple[Recipe | None, str]:
@@ -95,6 +116,7 @@ def register(app: FastAPI, session, live) -> None:
             max_tokens = int(body.get("max_completion_tokens") or body.get("max_tokens") or MAX_TOKENS_DEFAULT)
             if not 1 <= max_tokens <= 4096:
                 raise GneError("BAD_ARGS", "max_tokens は 1〜4096 です")
+            sampling = sampling_from(body)
         except GneError as e:
             return _err(e)
         cid, created = f"chatcmpl-{uuid.uuid4().hex[:12]}", int(time.time())
@@ -117,7 +139,7 @@ def register(app: FastAPI, session, live) -> None:
                             q.put(("delta", piece))
                     try:
                         r, info = generate_when(e, e.steer_ctx(), msgs, vecs, w, max_tokens=max_tokens, on_token=cb,
-                                                lora=session.lora_for(recipe))
+                                                lora=session.lora_for(recipe), sampling=sampling)
                     except _Stopped:
                         q.put(("end", None))
                         return
@@ -127,7 +149,10 @@ def register(app: FastAPI, session, live) -> None:
                     q.put(("end", {"finish": "stop" if r.finish == "eog" else "length", "text": r.text,
                                    "usage": {"prompt_tokens": info["n_prompt"], "completion_tokens": r.n_gen,
                                              "total_tokens": info["n_prompt"] + r.n_gen},
-                                   "gne": {"recipe": recipe.to_dict() if recipe else None, "when": info}}))
+                                   "gne": {"recipe": recipe.to_dict() if recipe else None, "when": info,
+                                           "sampling": None if sampling is None else
+                                           {k: getattr(sampling, k) for k in ("temperature", "top_k", "top_p", "min_p",
+                                                                               "presence_penalty", "seed")}}}))
             except GneError as ex:
                 q.put(("error", ex))
             except Exception as ex:  # noqa: BLE001
