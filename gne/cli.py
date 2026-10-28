@@ -426,6 +426,42 @@ _DOSE_UNIT = typer.Option(None, "--dose-unit", help="rel / absmax / raw(既定�
 _SCALE = typer.Option(1.0, "--scale", help="全ユニットの dose に掛ける係数")
 _ABLATE = typer.Option(None, "--ablate", help="方向の射影消去(§6.17): NAME、NAME@層、NAME:倍率(例 evil@10:0.5)。LoRA で当てる")
 _WHEN = typer.Option(None, "--when", help="足す位置(§6.15): all / gen / assistant / after:<文字列> / ramp:<a>-<b>。既定はレシピの値(無ければ all)")
+_TEMP = typer.Option(None, "--temperature", help="サンプリングの温度。サンプリングの値をどれか付けるか、レシピに sampling があればサンプリング"
+                                                 "(足りない値はレシピの sampling、無ければ llama-server の既定)。0 だけなら greedy")
+_TOP_K = typer.Option(None, "--top-k", help="サンプリングの top-k(0 で切らない)")
+_TOP_P = typer.Option(None, "--top-p", help="サンプリングの top-p")
+_MIN_P = typer.Option(None, "--min-p", help="サンプリングの min-p")
+_PRES = typer.Option(None, "--presence-penalty", help="サンプリングの presence penalty(この返事で出たトークンのロジットから引く)")
+_SSEED = typer.Option(None, "--sample-seed", help="サンプリングの乱数(既定は毎回ランダム)")
+_GREEDY = typer.Option(False, "--greedy", help="レシピに sampling があっても greedy で生成する")
+
+
+def _sampling(recipe, greedy, temperature, top_k, top_p, min_p, presence_penalty, sample_seed):
+    """CLI の値とレシピの sampling → engine.Sampling(greedy なら None)。"""
+    import random
+
+    from .engine import Sampling
+    from .steer import sampling_values
+    given = {k: v for k, v in (("temperature", temperature), ("top_k", top_k), ("top_p", top_p), ("min_p", min_p),
+                               ("presence_penalty", presence_penalty)) if v is not None}
+    if greedy:
+        if given or sample_seed is not None:
+            raise GneError("BAD_ARGS", "--greedy とサンプリングの値は一緒に使えません")
+        return None
+    base = recipe.sampling if recipe is not None else None
+    if not given and sample_seed is None and base is None:
+        return None
+    if set(given) == {"temperature"} and given["temperature"] <= 0:
+        return None
+    vals = sampling_values(given, base=base, seed=False)
+    return Sampling(**vals, seed=sample_seed if sample_seed is not None else random.randrange(2 ** 31))
+
+
+def _sampling_text(sp) -> str:
+    if sp is None:
+        return "greedy"
+    return (f"サンプリング(温度 {sp.temperature:g}・top-k {sp.top_k}・top-p {sp.top_p:g}・min-p {sp.min_p:g}・"
+            f"presence {sp.presence_penalty:g}・seed {sp.seed})")
 
 
 @gne_command(app, "steer")
@@ -434,20 +470,24 @@ def steer(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Optio
           prompt: Optional[str] = typer.Option(None, "--prompt", "-p", help="ユーザーの発話"),
           system: Optional[str] = typer.Option(None, "--system", help="system プロンプト"),
           max_tokens: int = typer.Option(128, "--max-tokens"),
-          compare: bool = typer.Option(False, "--compare", help="無介入の生成も並べる"),
-          when: Optional[str] = _WHEN, ablate: Optional[str] = _ABLATE):
-    """レシピまたは単発指定でプロンプトに回答する(greedy、1 本ずつ)。"""
+          compare: bool = typer.Option(False, "--compare", help="無介入の生成も並べる(サンプリングなら同じ seed)"),
+          when: Optional[str] = _WHEN, ablate: Optional[str] = _ABLATE,
+          temperature: Optional[float] = _TEMP, top_k: Optional[int] = _TOP_K, top_p: Optional[float] = _TOP_P,
+          min_p: Optional[float] = _MIN_P, presence_penalty: Optional[float] = _PRES,
+          sample_seed: Optional[int] = _SSEED, greedy: bool = _GREEDY):
+    """レシピまたは単発指定でプロンプトに回答する(既定は greedy、1 本ずつ)。"""
     s = holder["session"] = c.session()
     r = s.recipe(units=unit, path=recipe, dose_unit=dose_unit, scale=scale, when=when, ablate=ablate)
-    d = s.steer(r, prompt=prompt, system=system, max_tokens=max_tokens, compare=compare)
-    parts = [f"ユニット({r.dose_unit}、位置 {r.when}):\n" + (_units_text(d["units"]) or "  なし")
+    sp = _sampling(r, greedy, temperature, top_k, top_p, min_p, presence_penalty, sample_seed)
+    d = s.steer(r, prompt=prompt, system=system, max_tokens=max_tokens, compare=compare, sampling=sp)
+    parts = [f"ユニット({r.dose_unit}、位置 {r.when}、{_sampling_text(sp)}):\n" + (_units_text(d["units"]) or "  なし")
              + (f"\n  {r.ablate.label()}(LoRA)" if r.ablate else "")]
     if d["baseline"] is not None:
         parts.append(f"── 無介入 ──({d['baseline']['finish']}, {d['baseline']['n_gen']} tok)\n{d['baseline']['text']}")
     label = ", ".join([u.label() for u in r.units] + ([r.ablate.label()] if r.ablate else []))
     parts.append(f"── 介入: {label} ──({d['steered']['finish']}, {d['steered']['n_gen']} tok)\n{d['steered']['text']}")
     if d["differs"] is not None:
-        parts.append("無介入との差: " + ("あり" if d["differs"] else "なし(同じ greedy 列)"))
+        parts.append("無介入との差: " + ("あり" if d["differs"] else "なし(同じ列)"))
     return d, "\n\n".join(parts), 0
 
 
@@ -470,6 +510,8 @@ def export_cvec(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit:
     path = out or s.store.export_dir() / f"{r.name or 'units'}{_EXT[fmt]}"
     d = s.export_cvec(r, path, fmt=fmt, verify=verify, verify_prompt=verify_prompt, llama_completion=llama_completion)
     text = f"{d['path']}({fmt}、層 {', '.join(d['layer_norms'])})\n" + _units_text(d["units"])
+    if d.get("llama_server_args"):
+        text += f"\nレシピのサンプリング(cvec には入らないので llama-server 側で付ける): {d['llama_server_args']}"
     v = d["verify"]
     if v:
         text += (f"\n本家での再現({Path(v['tool']).name}、greedy {v['n_tokens']} トークン): "
@@ -858,14 +900,18 @@ def chat(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Option
          system: Optional[str] = typer.Option(None, "--system"),
          max_tokens: int = typer.Option(256, "--max-tokens"),
          stream: bool = typer.Option(True, "--stream/--no-stream", help="生成しながら表示する"),
-         when: Optional[str] = _WHEN, ablate: Optional[str] = _ABLATE):
-    """−/0/+ の 3 列比較チャット(ユーザーの発話は共有、返答は列ごと)。"""
+         when: Optional[str] = _WHEN, ablate: Optional[str] = _ABLATE,
+         temperature: Optional[float] = _TEMP, top_k: Optional[int] = _TOP_K, top_p: Optional[float] = _TOP_P,
+         min_p: Optional[float] = _MIN_P, presence_penalty: Optional[float] = _PRES,
+         sample_seed: Optional[int] = _SSEED, greedy: bool = _GREEDY):
+    """−/0/+ の 3 列比較チャット(ユーザーの発話は共有、返答は列ごと)。サンプリングなら 3 列とも同じ seed で引く。"""
     from .chat import ChatState, chat_turn, make_columns
     s = holder["session"] = c.session()
     if when:
         from .when import parse_when
         parse_when(when)
     base = s.recipe(units=unit, path=recipe, dose_unit=dose_unit, ablate=ablate) if (unit or recipe or ablate) else None
+    sp = _sampling(base, greedy, temperature, top_k, top_p, min_p, presence_penalty, sample_seed)
     load = lambda p: s.recipe(path=p) if p else None  # noqa: E731
     cols = make_columns(base, dose=dose, left=load(left), right=load(right), center=load(center))
     live = stream and not c.json
@@ -885,9 +931,9 @@ def chat(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Option
             turns.append({"user": user, "replies": chat_turn(s, state, user, max_tokens=max_tokens,
                                                              on_text=on_text if live else None,
                                                              on_column=on_column if live else None,
-                                                             when_override=when)})
+                                                             when_override=when, sampling=sp)})
         d = {"columns": [{"label": col.label, "recipe": col.recipe.to_dict() if col.recipe else None} for col in cols],
-             "system": system, "turns": turns}
+             "system": system, "turns": turns, "sampling": None if sp is None else sp.to_dict()}
         if live:
             print()
             return d, "", 0
@@ -900,7 +946,8 @@ def chat(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Option
     if c.json:
         raise GneError("BAD_ARGS", "--json では --prompt で発話を渡してください(対話モードは使えません)")
     state = ChatState(cols, system)
-    print("列: " + " | ".join(col.label for col in cols) + "\n/reset で会話をやり直し、/quit か Ctrl-D で終了", file=sys.stderr)
+    print("列: " + " | ".join(col.label for col in cols) + f"({_sampling_text(sp)})"
+          + "\n/reset で会話をやり直し、/quit か Ctrl-D で終了", file=sys.stderr)
     turns = []
     while True:
         try:
@@ -915,7 +962,7 @@ def chat(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Option
         if not user.strip():
             continue
         replies = chat_turn(s, state, user, max_tokens=max_tokens, on_text=on_text if stream else None,
-                            on_column=on_column if stream else None, when_override=when)
+                            on_column=on_column if stream else None, when_override=when, sampling=sp)
         if not stream:
             for col, rep in zip(cols, replies, strict=True):
                 print(f"── {col.label} ──\n{rep['text']}")

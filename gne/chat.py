@@ -68,8 +68,9 @@ def make_columns(recipe: Recipe | None, *, dose: float | None = None, left: Reci
 def chat_turn(session, state: ChatState, user: str, *, max_tokens: int = 256,
               on_text: Callable[[int, str], None] | None = None,
               on_column: Callable[[int, Column], None] | None = None,
-              when_override: str | None = None) -> list[dict]:
-    """ユーザーの発話を全列に足し、列ごとに返答を生成して履歴に足す。on_text(列, 文字列の断片)で逐次表示できる。"""
+              when_override: str | None = None, sampling=None) -> list[dict]:
+    """ユーザーの発話を全列に足し、列ごとに返答を生成して履歴に足す。on_text(列, 文字列の断片)で逐次表示できる。
+    sampling(engine.Sampling)を渡すと、どの列も同じ seed で引く(列の違いは介入の違いだけ)。"""
     from .when import generate_when
     e = session.engine
     ctx = e.steer_ctx()
@@ -92,7 +93,7 @@ def chat_turn(session, state: ChatState, user: str, *, max_tokens: int = 256,
                     on_text(_i, piece)
         when = (when_override or col.recipe.when) if col.recipe is not None else "all"
         r, _ = generate_when(e, ctx, state.messages(i), vecs, when, max_tokens=max_tokens, on_token=cb,
-                             lora=session.lora_for(col.recipe))
+                             lora=session.lora_for(col.recipe), sampling=sampling)
         if on_text is not None:
             tail = dec.decode(b"", final=True)
             if tail:

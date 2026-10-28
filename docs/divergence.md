@@ -66,4 +66,6 @@
 | エージェントへの指示(CHANGE-02 E) | `docs/agent_playbook.md` に「消したい振る舞いは direction → ablate と上位ニューロンの gain k=0 を eval --compare-ablation で比べてから選ぶ」 | そのとおりに加え、方向で性格を「足す」手順(mode=add、反応する場面のプロンプトで確かめる)と、判定語の選び方(F86)を §4.1 に書いた。MCP の instructions にも要約 | 実際に evil とヤンデレで方向を使って分かったこと |
 | `gne direction --positions response`(追加) | 対照捕捉の位置は last / all | `response`: A / B の system で返事を生成し(`--response-tokens`、既定 96)、返事のトークンで l_out の平均の差を取る | ヤンデレの詰めで、性格を足す用途では last より効いた(verification.md §12.4、F89)。persona vector の作り方 |
 | UI のチャットのサンプリング(追加) | 生成は greedy(F2、再現性のため) | 既定は greedy のまま。チャットの「サンプリング」で、llama.cpp と同じ順番・既定値のサンプリングを選べる(3 列とも同じ seed) | 性格を足すレシピは、greedy では反復に落ちる強さでも、実際に使う llama-server(サンプリング)では落ちない(§12.4)。録画・試用では実際の見え方に合わせる |
+| レシピの `sampling`(追加) | 記述なし(生成は greedy、F2) | レシピに試すときのサンプリング(温度・top-k・top-p・min-p・presence penalty、seed なし)を持てる。steer / chat(`--temperature` など、`--greedy`)・UI のチャットの「レシピの設定」・OpenAI 互換 API の既定に使う。eval は greedy のまま。export-cvec は llama-server の引数を表示する | 性格のレシピは、強さとサンプリングを一緒に詰めないと見え方が決まらない(§12.4・F96) |
+| UI のチャットのサンプリングの型(追加) | 記述なし | greedy / llama-server の既定 / よく使う設定 / レシピの設定 / 自由。値の欄と seed の固定。送ったターンに使った設定を表示する | 試しながらサンプリングも詰めるため。モデルは読み直さない(サンプリングはロジットから Python で選ぶ) |
 | UI の recipe タブの方向ユニット(追加) | 記述なし | 保存したレシピの方向ユニットを読み込み、強さを変えて 3 列チャットで試せる。gain のユニットは引き続き外す | §12.4 のレシピ(方向だけでできている)を UI で試すため |

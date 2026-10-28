@@ -105,7 +105,7 @@ llama-cli -m models/Qwen3.5-4B-Q8_0.gguf --control-vector-scaled ~/.gne/export/e
 llama-cli -m models/Qwen3.5-4B-Q8_0.gguf --lora ~/.gne/export/alien_gain.lora.gguf
 ```
 
-A recipe is a small YAML file. `when` and gain units are optional:
+A recipe is a small YAML file. `when`, `sampling` and gain units are optional:
 
 ```yaml
 name: example
@@ -117,7 +117,10 @@ units:
   - {layer: 13, neuron: 7956, mode: gain, k: 0} # gain: remove this neuron's output (×0)
   - {layer: 16, kind: direction, direction: evil, dose: +0.3}   # add a direction from gne direction
 ablate: {direction: refusal, scale: 1.0}        # project a direction out of every residual writer (LoRA)
+sampling: {temperature: 1.0, top_k: 20, top_p: 0.95, min_p: 0.05, presence_penalty: 0.9}   # how to try it (no seed)
 ```
+
+`sampling` is how the recipe is meant to be tried. `steer` and `chat` use it (override with `--temperature`, `--top-k`, `--top-p`, `--min-p`, `--presence-penalty`, `--sample-seed`, or turn it off with `--greedy`), the UI chat offers it as "Recipe's setting", and the OpenAI-compatible endpoint uses it when a request sends no sampling values. A control vector cannot carry it, so `export-cvec` prints the matching llama-server flags. Without `sampling`, generation is greedy. `eval` is always greedy.
 
 Run `gne --help` and `gne <command> --help` for the full list. The help text is in Japanese.
 
@@ -202,7 +205,9 @@ r = client.chat.completions.create(
     extra_body={"gne": {"units": ["22:2742:+0.8"], "when": "gen"}})
 ```
 
-Instead of `units`, `"recipe"` takes the name of a recipe saved under `~/.gne/recipes`, and `"scale"` multiplies its doses. Generation is greedy unless the request sets `temperature` above 0 or any of `top_p`, `top_k`, `min_p`, `presence_penalty` and `seed`; then it samples in llama.cpp's order, and values left out take llama-server's defaults. Tools and logprobs are not supported. Requests share the GPU with the UI's chat.
+Instead of `units`, `"recipe"` takes the name of a recipe saved under `~/.gne/recipes`, and `"scale"` multiplies its doses. Generation is greedy unless the request sets `temperature` above 0 or any of `top_p`, `top_k`, `min_p`, `presence_penalty` and `seed`, or the recipe has `sampling`; then it samples in llama.cpp's order. Values left out come from the recipe's `sampling`, or llama-server's defaults. Tools and logprobs are not supported. Requests share the GPU with the UI's chat.
+
+The server keeps no state, so every request can use a different strength. To follow a gauge on a stream, for example, send `"gne": {"recipe": "yandere_qwen38_27b", "scale": 0.7, "when": "ramp:0.5-1.5"}` with each message and change `scale` and `when` as the gauge moves. [`examples/gauge/gauge_chat.py`](examples/gauge/gauge_chat.py) reads a gauge (0–100) from a file before each message and maps it to `when` and `scale` using the measurements in [docs/verification.md](docs/verification.md) (F94, F96). The whole conversation is read again on every request, so a new strength also changes how earlier turns are read (with `all` and `assistant`), and long histories make each reply start later.
 
 ## Using it from an agent (MCP)
 

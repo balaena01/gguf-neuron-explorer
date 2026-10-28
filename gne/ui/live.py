@@ -55,7 +55,8 @@ class Live:
     def steer_stream(self, body: dict):
         """body: {columns: [{label, units: ["14:8949:+1"], ablate?, messages: [...], when?}], max_tokens, system, when}。
         ablate は {direction, scale, layers, from_layer} か "NAME@層:倍率"(§6.17)。
-        sampling: {seed, temperature?, top_k?, top_p?, min_p?, presence_penalty?} ならサンプリング(既定は start.sh と同じ値)。
+        sampling: {seed?, temperature?, top_k?, top_p?, min_p?, presence_penalty?} ならサンプリング
+        (足りない値は SAMPLING_PRESETS["common"]、seed が無ければ乱数)。
         どの列も同じ seed で引くので、列の違いは介入の違いだけになる。
         列ごとに会話の履歴(最後がユーザーの発話)を受け取り、1 列ずつ逐次生成する。状態はクライアントが持つ。
         when は足す位置(§6.15)。列ごとに指定が無ければ全体の when、それも無ければ all。"""
@@ -71,11 +72,12 @@ class Live:
         sampling = None
         if body.get("sampling"):
             from ..engine import Sampling
-            sp = dict(body["sampling"])
-            allowed = {"seed", "temperature", "top_k", "top_p", "min_p", "presence_penalty"}
-            if set(sp) - allowed:
-                raise GneError("BAD_ARGS", f"sampling に使えるのは {', '.join(sorted(allowed))} です")
-            sampling = Sampling(**{k: (int(v) if k in ("seed", "top_k") else float(v)) for k, v in sp.items()})
+            from ..steer import SAMPLING_PRESETS, sampling_values
+            if not isinstance(body["sampling"], dict):
+                raise GneError("BAD_ARGS", "sampling は {seed, temperature, top_k, top_p, min_p, presence_penalty} の表です")
+            vals = sampling_values(body["sampling"], base=SAMPLING_PRESETS["common"])
+            seed = vals.pop("seed", None)
+            sampling = Sampling(**vals, seed=seed if seed is not None else int.from_bytes(uuid.uuid4().bytes[:4], "little"))
         system = body.get("system")
         sid = uuid.uuid4().hex[:8]
         stop = threading.Event()
@@ -276,7 +278,7 @@ class Live:
             out.append({"name": p.stem, "model_id": r.model_id, "dose_unit": r.dose_unit,
                         "units": [{"layer": u.layer, "neuron": u.neuron, "dose": u.dose, "kind": u.kind, "mode": u.mode,
                                    "k": u.k, "direction": u.direction} for u in r.units],
-                        "ablate": r.ablate.to_dict() if r.ablate else None, "when": r.when,
+                        "ablate": r.ablate.to_dict() if r.ablate else None, "when": r.when, "sampling": r.sampling,
                         "this_model": r.model_id in (None, self.s.meta.model_id)})
         return out
 

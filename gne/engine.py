@@ -85,6 +85,9 @@ class Sampling:
         q = np.exp((lo - lo.max()) / self.temperature)
         return int(idx[rng.choice(len(idx), p=q / q.sum())])
 
+    def to_dict(self) -> dict:
+        return {k: getattr(self, k) for k in ("temperature", "top_k", "top_p", "min_p", "presence_penalty", "seed")}
+
 
 @dataclass
 class Rollout:

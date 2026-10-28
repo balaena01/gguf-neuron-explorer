@@ -9,8 +9,9 @@ UI サーバに最小限の OpenAI 互換 API を同居させる。リクエス�
              "units": ["14:8949:+1.0"], "scale": 0.8, "when": "gen", "ablate": "evil@10:0.5"}}
 
 生成は既定で greedy。temperature > 0 か、top_p・top_k・min_p・presence_penalty・seed のどれかを送るとサンプリング
-(llama.cpp と同じ順番。送らなかった値は llama-server の既定: top_k 40・top_p 0.95・min_p 0.05・presence_penalty 0、
-temperature 0.8、seed は乱数)。tools・logprobs・n は扱わない。GPU は UI のチャットと同じ調停を通る。
+(llama.cpp と同じ順番)。レシピに sampling があれば、何も送らなくてもその値でサンプリングする。送らなかった値は
+レシピの sampling、無ければ llama-server の既定(top_k 40・top_p 0.95・min_p 0.05・presence_penalty 0・temperature 0.8)、
+seed は乱数。tools・logprobs・n は扱わない。GPU は UI のチャットと同じ調停を通る。
 """
 
 from __future__ import annotations
@@ -54,23 +55,24 @@ def _messages(body: dict) -> list[dict]:
     return out
 
 
-def sampling_from(body: dict):
-    """リクエストのサンプリングの値 → Sampling(何も無ければ None = greedy)。"""
+def sampling_from(body: dict, recipe: Recipe | None = None):
+    """リクエストのサンプリングの値 → Sampling(None = greedy)。値が無ければレシピの sampling、それも無ければ greedy。
+    送った値はレシピの値より優先し、足りない値はレシピの値(無ければ llama-server の既定)で埋める。"""
+    from ..engine import Sampling
+    from ..steer import sampling_values
     keys = ("temperature", "top_p", "top_k", "min_p", "presence_penalty", "seed")
     given = {k: body[k] for k in keys if body.get(k) is not None}
-    if not given or (set(given) == {"temperature"} and float(given["temperature"]) <= 0):
+    base = recipe.sampling if recipe is not None else None
+    if not given and base is None:
         return None
-    from ..engine import Sampling
     try:
-        seed = int(given["seed"]) if "seed" in given else int.from_bytes(uuid.uuid4().bytes[:4], "little")
-        sp = Sampling(temperature=float(given.get("temperature", 0.8)), top_k=int(given.get("top_k", 40)),
-                      top_p=float(given.get("top_p", 0.95)), min_p=float(given.get("min_p", 0.05)),
-                      presence_penalty=float(given.get("presence_penalty", 0.0)), seed=seed)
+        if set(given) == {"temperature"} and float(given["temperature"]) <= 0:
+            return None
     except (TypeError, ValueError) as e:
         raise GneError("BAD_ARGS", f"サンプリングの値が読めません: {e}") from e
-    if not (0 <= sp.temperature <= 5 and 0 < sp.top_p <= 1 and 0 <= sp.min_p < 1 and sp.top_k >= 0):
-        raise GneError("BAD_ARGS", "temperature は 0〜5、top_p は 0〜1、min_p は 0〜1、top_k は 0 以上です")
-    return sp
+    vals = sampling_values(given, base=base)
+    seed = vals.pop("seed", None)
+    return Sampling(**vals, seed=seed if seed is not None else int.from_bytes(uuid.uuid4().bytes[:4], "little"))
 
 
 def resolve_recipe(session, g: dict) -> tuple[Recipe | None, str]:
@@ -116,7 +118,7 @@ def register(app: FastAPI, session, live) -> None:
             max_tokens = int(body.get("max_completion_tokens") or body.get("max_tokens") or MAX_TOKENS_DEFAULT)
             if not 1 <= max_tokens <= 4096:
                 raise GneError("BAD_ARGS", "max_tokens は 1〜4096 です")
-            sampling = sampling_from(body)
+            sampling = sampling_from(body, recipe)
         except GneError as e:
             return _err(e)
         cid, created = f"chatcmpl-{uuid.uuid4().hex[:12]}", int(time.time())
@@ -150,9 +152,7 @@ def register(app: FastAPI, session, live) -> None:
                                    "usage": {"prompt_tokens": info["n_prompt"], "completion_tokens": r.n_gen,
                                              "total_tokens": info["n_prompt"] + r.n_gen},
                                    "gne": {"recipe": recipe.to_dict() if recipe else None, "when": info,
-                                           "sampling": None if sampling is None else
-                                           {k: getattr(sampling, k) for k in ("temperature", "top_k", "top_p", "min_p",
-                                                                               "presence_penalty", "seed")}}}))
+                                           "sampling": None if sampling is None else sampling.to_dict()}}))
             except GneError as ex:
                 q.put(("error", ex))
             except Exception as ex:  # noqa: BLE001

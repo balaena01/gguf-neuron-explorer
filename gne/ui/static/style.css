@@ -216,6 +216,10 @@ a { color: #8fb4e8; }
 a:visited { color: #a9a3e0; }
 .ch-tools { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 6px; }
 .ch-tools input[type=number] { width: 64px; font-family: var(--mono); }
+.ch-sp input[type=number] { width: 66px; }
+.ch-sp #ch-seed { width: 96px; }
+.ch-user .ch-sp-used { margin-left: 8px; font-size: 11px; }
+.rc-sampling { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .ch-tools .seg button, .ch-tools > .seg button { font-size: 12px; padding: 2px 8px; }
 .ch-lens { font-size: 11px; color: var(--muted); margin: 4px 0 6px; line-height: 1.9; }
 .ch-log { border: 1px solid var(--line); border-radius: 4px; max-height: 52vh; overflow: auto; padding: 4px; background: #090c11; }

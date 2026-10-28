@@ -547,3 +547,67 @@ def test_openai_api_sampling(session):
         assert a["choices"][0]["message"]["content"] == b["choices"][0]["message"]["content"]
         assert a["gne"]["sampling"]["seed"] == 11 and c["choices"][0]["message"]["content"] != a["choices"][0]["message"]["content"]
         assert cl.post("/v1/chat/completions", json={**body, "top_p": 2}).status_code == 400
+
+
+def test_recipe_sampling_block(tmp_path):
+    """レシピの sampling: 足りない値は llama-server の既定で埋めて保存し、読み直せる。scaled でも残る。範囲外は誤り。"""
+    from gne.steer import (
+        GneError,
+        Recipe,
+        llama_server_args,
+        parse_unit,
+        sampling_values,
+    )
+    r = Recipe([parse_unit("3:5:+0.5")], name="sp", sampling={"temperature": 1.0, "presence_penalty": 0.9})
+    r.validate()
+    assert r.sampling == {"temperature": 1.0, "top_k": 40, "top_p": 0.95, "min_p": 0.05, "presence_penalty": 0.9}
+    p = tmp_path / "sp.yaml"
+    r.save(p)
+    q = Recipe.load(p)
+    assert q.sampling == r.sampling and q.scaled(0.5).sampling == r.sampling and q.to_dict()["sampling"] == r.sampling
+    assert llama_server_args(q.sampling) == "--temp 1 --top-k 40 --top-p 0.95 --min-p 0.05 --presence-penalty 0.9"
+    for bad in ({"temperature": 9}, {"top_p": 0}, {"seed": 3}, {"temp": 1}):
+        with pytest.raises(GneError):
+            Recipe([parse_unit("3:5:+0.5")], sampling=bad).validate()
+    with pytest.raises(GneError):
+        Recipe([parse_unit("3:5:+0.5")], sampling="hot").validate()
+    assert sampling_values({"seed": 7}, base={"temperature": 1.0, "top_k": 20, "top_p": 0.9, "min_p": 0.0,
+                                              "presence_penalty": 0.0})["seed"] == 7
+
+
+@pytest.mark.model
+def test_recipe_sampling_in_api_and_cli(session, tmp_path):
+    """レシピの sampling は OpenAI 互換 API の既定になり(送った値が優先、温度 0 だけなら greedy)、
+    CLI の steer でも使われる(--greedy で切る、--sample-seed で同じ返事)。"""
+    from fastapi.testclient import TestClient
+    from typer.testing import CliRunner
+
+    from gne.cli import app as cli_app
+    from gne.steer import Recipe, parse_unit
+    from gne.ui.openai_api import sampling_from
+    from gne.ui.server import create_app
+    r = Recipe([parse_unit("14:100:+0.5")], name="spr", sampling={"temperature": 1.2, "top_k": 10})
+    r.validate()
+    sp = sampling_from({}, r)
+    assert (sp.temperature, sp.top_k, sp.top_p) == (1.2, 10, 0.95)
+    sp = sampling_from({"temperature": 0.5, "seed": 4}, r)
+    assert (sp.temperature, sp.top_k, sp.seed) == (0.5, 10, 4)
+    assert sampling_from({"temperature": 0}, r) is None
+    session.recipe_save("spr", ["14:100:+0.5"], sampling={"temperature": 1.2, "top_k": 10})
+    msgs = [{"role": "user", "content": "Say something about cats."}]
+    app = create_app(session, warm=False, openai=True)
+    with TestClient(app, base_url="http://127.0.0.1") as cl:
+        res = cl.post("/v1/chat/completions", json={"messages": msgs, "max_tokens": 8, "seed": 5, "gne": {"recipe": "spr"}}).json()
+        assert res["gne"]["sampling"]["temperature"] == 1.2 and res["gne"]["sampling"]["seed"] == 5
+    path = session.store.recipes_dir() / "spr.yaml"
+    base = ["steer", "-m", str(MODEL), "--root", str(session.store.root), "--recipe", str(path), "-p", "Hi!",
+            "--max-tokens", "8", "--json"]
+    runs = [CliRunner().invoke(cli_app, base + ["--sample-seed", "9"]) for _ in range(2)]
+    assert all(x.exit_code == 0 for x in runs), runs[0].output
+    outs = [json.loads(x.stdout.strip().splitlines()[-1]) for x in runs]
+    assert outs[0]["sampling"]["temperature"] == 1.2 and outs[0]["sampling"]["seed"] == 9
+    assert outs[0]["steered"]["text"] == outs[1]["steered"]["text"]
+    g = json.loads(CliRunner().invoke(cli_app, base + ["--greedy"]).stdout.strip().splitlines()[-1])
+    assert g["sampling"] is None
+    bad = CliRunner().invoke(cli_app, base + ["--greedy", "--temperature", "1"])
+    assert bad.exit_code != 0

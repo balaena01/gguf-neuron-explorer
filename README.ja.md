@@ -109,7 +109,7 @@ llama-cli -m models/Qwen3.5-4B-Q8_0.gguf --control-vector-scaled ~/.gne/export/e
 llama-cli -m models/Qwen3.5-4B-Q8_0.gguf --lora ~/.gne/export/alien_gain.lora.gguf
 ```
 
-レシピは小さな YAML です。`when` と gain のユニットは省けます。
+レシピは小さな YAML です。`when`・`sampling`・gain のユニットは省けます。
 
 ```yaml
 name: example
@@ -121,7 +121,16 @@ units:
   - {layer: 13, neuron: 7956, mode: gain, k: 0} # gain: このニューロンの出力を消す(×0)
   - {layer: 16, kind: direction, direction: evil, dose: +0.3}   # gne direction で作った方向を足す
 ablate: {direction: refusal, scale: 1.0}        # 方向を残差に書き込む重みから消す(LoRA)
+sampling: {temperature: 1.0, top_k: 20, top_p: 0.95, min_p: 0.05, presence_penalty: 0.9}   # 試すときのサンプリング(seed は持たない)
 ```
+
+`sampling` は、そのレシピを試すときのサンプリングです。次の場所で使います。
+
+- `steer` と `chat`：この値で生成します。`--temperature`・`--top-k`・`--top-p`・`--min-p`・`--presence-penalty`・`--sample-seed` で上書きでき、`--greedy` で切れます。
+- UI のチャット：「レシピの設定」として選べます。
+- OpenAI 互換の API：リクエストにサンプリングの値が無いときに使います。
+
+control vector には入らないので、`export-cvec` は同じ設定の llama-server の引数を表示します。`sampling` が無ければ greedy です。`eval` はいつも greedy です。
 
 コマンドの一覧は `gne --help`、各コマンドの使い方は `gne <コマンド> --help` で見られます。
 
@@ -206,7 +215,22 @@ r = client.chat.completions.create(
     extra_body={"gne": {"units": ["22:2742:+0.8"], "when": "gen"}})
 ```
 
-`units` の代わりに `"recipe"` で `~/.gne/recipes` に保存したレシピの名前を渡せます。`"scale"` はその dose に掛ける倍率です。生成は既定で greedy です。`temperature` を 0 より大きくするか、`top_p`・`top_k`・`min_p`・`presence_penalty`・`seed` のどれかを送るとサンプリングになります（llama.cpp と同じ順番で、送らなかった値は llama-server の既定）。tools と logprobs には対応していません。GPU は UI のチャットと譲り合います。
+`units` の代わりに `"recipe"` で `~/.gne/recipes` に保存したレシピの名前を渡せます。`"scale"` はその dose に掛ける倍率です。生成は既定で greedy です。次のどれかに当てはまると、llama.cpp と同じ順番でサンプリングします。
+
+- `temperature` を 0 より大きくする
+- `top_p`・`top_k`・`min_p`・`presence_penalty`・`seed` のどれかを送る
+- レシピに `sampling` がある
+
+送らなかった値は、レシピの `sampling`、それも無ければ llama-server の既定を使います。tools と logprobs には対応していません。GPU は UI のチャットと譲り合います。
+
+サーバーは状態を持たないので、リクエストごとに強さを変えられます。たとえば配信のゲージに合わせるなら、発言ごとに `"gne": {"recipe": "yandere_qwen38_27b", "scale": 0.7, "when": "ramp:0.5-1.5"}` を送り、ゲージに合わせて `scale` と `when` を変えます。
+
+[`examples/gauge/gauge_chat.py`](examples/gauge/gauge_chat.py) がその例です。発言のたびにファイルからゲージ（0〜100）を読み、[docs/verification.md](docs/verification.md) の F94・F96 の結果をもとに `when` と `scale` に変えます。
+
+注意点が 2 つあります。
+
+- 会話は毎回最初から読み直すので、強さを変えると過去の発言の読まれ方も変わります（`all` と `assistant` のとき）。
+- 履歴が長いと、返事が出始めるまで遅くなります。
 
 ## エージェントから使う（MCP）
 

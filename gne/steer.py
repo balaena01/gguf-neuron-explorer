@@ -53,6 +53,41 @@ class Unit:
         return f"L{self.layer} {who} {self.dose:+g}"
 
 
+SAMPLING_KEYS = ("temperature", "top_k", "top_p", "min_p", "presence_penalty")
+# llama-server の既定(llama.cpp の common の既定値)と、性格のレシピを試すときによく使う設定
+SAMPLING_PRESETS = {
+    "llama_server": {"temperature": 0.8, "top_k": 40, "top_p": 0.95, "min_p": 0.05, "presence_penalty": 0.0},
+    "common": {"temperature": 1.0, "top_k": 20, "top_p": 0.95, "min_p": 0.05, "presence_penalty": 0.9},
+}
+
+
+def sampling_values(d: dict | None, *, base: dict | None = None, seed: bool = True) -> dict:
+    """サンプリングの値を確かめ、足りない値を base(既定は llama-server の既定)で埋めた dict を返す。
+    seed=True なら seed も受け付ける(レシピには seed を持たせない)。"""
+    allowed = set(SAMPLING_KEYS) | ({"seed"} if seed else set())
+    extra = sorted(set(d or {}) - allowed)
+    if extra:
+        raise GneError("BAD_ARGS", f"サンプリングに {', '.join(extra)} は使えません(使えるのは {', '.join(sorted(allowed))})")
+    out = dict(base or SAMPLING_PRESETS["llama_server"])
+    try:
+        for k, v in (d or {}).items():
+            if v is not None:
+                out[k] = int(v) if k in ("top_k", "seed") else float(v)
+    except (TypeError, ValueError) as e:
+        raise GneError("BAD_ARGS", f"サンプリングの値が読めません: {e}") from e
+    if not (0 <= out["temperature"] <= 5 and 0 < out["top_p"] <= 1 and 0 <= out["min_p"] < 1 and out["top_k"] >= 0
+            and -2 <= out["presence_penalty"] <= 2):
+        raise GneError("BAD_ARGS", "temperature は 0〜5、top_p は 0〜1、min_p は 0〜1、top_k は 0 以上、"
+                                   "presence_penalty は −2〜2 です")
+    return out
+
+
+def llama_server_args(sp: dict) -> str:
+    """サンプリングの値 → llama-server / llama-cli の引数(cvec には入らないので、使う側で合わせる)。"""
+    return (f"--temp {sp['temperature']:g} --top-k {sp['top_k']} --top-p {sp['top_p']:g} --min-p {sp['min_p']:g} "
+            f"--presence-penalty {sp['presence_penalty']:g}")
+
+
 @dataclass
 class AblateSpec:
     """方向の射影消去(§6.17)。direction の r(from_layer の層で測ったもの。既定は gne direction --select で選んだ層)を
@@ -100,6 +135,7 @@ class Recipe:
     name: str | None = None
     when: str = "all"               # §6.15 位置別ステアリング: all / gen / assistant / after:<text> / ramp:<a>-<b>
     ablate: AblateSpec | None = None   # §6.17 方向の射影消去(LoRA で当てる)
+    sampling: dict | None = None       # このレシピを試すときのサンプリング(SAMPLING_KEYS、seed なし)。無ければ呼ぶ側の既定
 
     @classmethod
     def load(cls, path: str | Path) -> Recipe:
@@ -110,7 +146,7 @@ class Recipe:
                       direction=u.get("direction"))
                  for u in d.get("units", [])]
         r = cls(units, d.get("model_id"), d.get("dose_unit", "rel"), d.get("name") or Path(path).stem, d.get("when") or "all",
-                AblateSpec.from_dict(d.get("ablate")))
+                AblateSpec.from_dict(d.get("ablate")), d.get("sampling") or None)
         r.validate()
         return r
 
@@ -118,12 +154,14 @@ class Recipe:
         d = {"name": self.name, "model_id": self.model_id, "dose_unit": self.dose_unit,
              **({"when": self.when} if self.when != "all" else {}),
              **({"ablate": {k: v for k, v in self.ablate.to_dict().items() if v is not None}} if self.ablate else {}),
+             **({"sampling": dict(self.sampling)} if self.sampling else {}),
              "units": [_unit_yaml(u) for u in self.units]}
         Path(path).write_text(yaml.safe_dump(d, allow_unicode=True, sort_keys=False), encoding="utf-8")
 
     def to_dict(self) -> dict:
         return {"name": self.name, "model_id": self.model_id, "dose_unit": self.dose_unit, "when": self.when,
-                "units": [asdict(u) for u in self.units], "ablate": self.ablate.to_dict() if self.ablate else None}
+                "units": [asdict(u) for u in self.units], "ablate": self.ablate.to_dict() if self.ablate else None,
+                "sampling": self.sampling}
 
     def scaled(self, k: float) -> Recipe:
         # add は dose を k 倍、gain は倍率を「1(何もしない)から k_unit へ」の間で k の割合だけ動かす(eval の倍率列で 0 が無介入になるように)
@@ -131,7 +169,7 @@ class Recipe:
                             None if u.k is None else 1 + (u.k - 1) * k, u.direction) for u in self.units],
                       self.model_id, self.dose_unit, self.name, self.when,
                       None if self.ablate is None else AblateSpec(self.ablate.direction, self.ablate.scale * k,
-                                                                 self.ablate.layers, self.ablate.from_layer))
+                                                                 self.ablate.layers, self.ablate.from_layer), self.sampling)
 
     @property
     def add_units(self) -> list[Unit]:
@@ -153,6 +191,10 @@ class Recipe:
                 raise GneError("BAD_RECIPE", "ablate の scale は −1.5〜1.5 です(1 で全部消す、負はその方向を強める)")
         from .when import parse_when
         parse_when(self.when)                      # 書き方の誤りはここで返す
+        if self.sampling is not None:
+            if not isinstance(self.sampling, dict):
+                raise GneError("BAD_RECIPE", "sampling は {temperature, top_k, top_p, min_p, presence_penalty} の表です")
+            self.sampling = sampling_values(self.sampling, seed=False)
         for u in self.units:
             if u.mode not in ("add", "gain"):
                 raise GneError("BAD_RECIPE", f"{u}: mode は add か gain です")

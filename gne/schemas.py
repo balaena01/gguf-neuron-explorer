@@ -189,6 +189,7 @@ class RecipeModel(_Strict):
     when: str = "all"                 # §6.15
     units: list[dict[str, Any]]
     ablate: dict[str, Any] | None = None      # §6.17
+    sampling: dict[str, float] | None = None  # 試すときのサンプリング(seed なし)
 
 
 class Generation(_Strict):
@@ -208,6 +209,7 @@ class SteerOut(Envelope):
     steered: Generation
     differs: bool | None
     when: str = "all"
+    sampling: dict[str, float] | None = None       # 使ったサンプリング(seed 込み)。greedy なら None
 
 
 class ReproCheck(_Strict):
@@ -231,6 +233,7 @@ class ExportOut(Envelope):
     units: list[UnitModel]
     layer_norms: dict[str, float]
     verify: ReproCheck | None
+    llama_server_args: str | None = None             # レシピの sampling を llama-server で使う引数
 
 
 class ImportOut(Envelope):
@@ -543,6 +546,7 @@ class ChatOut(Envelope):
     columns: list[ChatColumn]
     system: str | None
     turns: list[ChatTurn]
+    sampling: dict[str, float] | None = None
 
 
 class DossierSweep(_Strict):

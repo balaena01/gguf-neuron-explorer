@@ -26,15 +26,20 @@ export class Recipe {
     this.name = "";
     this.units = [];                   // [{ layer, neuron, dose }]
     this.ablate = null;                // { direction, scale, layers, from_layer } か null
+    this.sampling = null;              // このレシピを試すときのサンプリング { temperature, top_k, top_p, min_p, presence_penalty } か null
     this.skipped = 0;                  // 読み込んだレシピのうち UI では扱えないユニット(gain・方向)の数
     try {
       const d = JSON.parse(localStorage.getItem(this.key) || "null");
-      if (d && Array.isArray(d.units)) { this.name = d.name || ""; this.units = d.units; this.ablate = d.ablate || null; }
+      if (d && Array.isArray(d.units)) {
+        this.name = d.name || ""; this.units = d.units; this.ablate = d.ablate || null; this.sampling = d.sampling || null;
+      }
     } catch { /* 下書きが読めなくても空から始める */ }
   }
 
   _save() {
-    try { localStorage.setItem(this.key, JSON.stringify({ name: this.name, units: this.units, ablate: this.ablate })); } catch { /* 置けなくても使える */ }
+    try {
+      localStorage.setItem(this.key, JSON.stringify({ name: this.name, units: this.units, ablate: this.ablate, sampling: this.sampling }));
+    } catch { /* 置けなくても使える */ }
     this.onChange(this);
   }
 
@@ -42,6 +47,7 @@ export class Recipe {
   // ablate を倍率 s で(− の列は s < 0 = その方向を強める)。無ければ undefined
   ablateAt(s = 1) { return this.ablate ? { ...this.ablate, scale: +(this.ablate.scale * s).toFixed(4) } : undefined; }
   setAblate(a) { this.ablate = a && a.direction ? a : null; this._save(); }
+  setSampling(sp) { this.sampling = sp ? { ...sp } : null; this._save(); }
 
   specs(scale = 1) {
     return this.units.map((u) => `${u.layer}:${isDir(u) ? `dir:${u.direction}` : u.neuron}:${u.dose * scale >= 0 ? "+" : ""}${+(u.dose * scale).toFixed(4)}`);
@@ -56,17 +62,21 @@ export class Recipe {
   }
   set(i, dose) { this.units[i].dose = dose; this._save(); }
   remove(i) { this.units.splice(i, 1); this._save(); }
-  clear() { this.units = []; this.name = ""; this.ablate = null; this.skipped = 0; this._save(); }
-  load(name, units, ablate = null) {
+  clear() { this.units = []; this.name = ""; this.ablate = null; this.sampling = null; this.skipped = 0; this._save(); }
+  load(name, units, ablate = null, sampling = null) {
     const ok = units.filter((u) => ((u.kind || "neuron") === "neuron" || u.kind === "direction") && (u.mode || "add") === "add");
     this.skipped = units.length - ok.length;
     this.name = name;
     this.units = ok.map((u) => (isDir(u) ? { layer: u.layer, kind: "direction", direction: u.direction, dose: u.dose }
       : { layer: u.layer, neuron: u.neuron, dose: u.dose }));
     this.ablate = ablate || null;
+    this.sampling = sampling || null;
     this._save();
   }
 }
+
+// サンプリングの値の短い表示(温度 1.0・top-k 20・…)
+export const samplingLabel = (sp) => (sp ? `${t("温度")} ${+sp.temperature} · top-k ${sp.top_k} · top-p ${+sp.top_p} · min-p ${+sp.min_p} · presence ${+sp.presence_penalty}` : "");
 
 export class RecipePanel {
   constructor(root, recipe, { onOpen, onChat, unitWords, directions }) {
@@ -107,6 +117,7 @@ export class RecipePanel {
         : `<p class="muted note">${t("ユニットがありません。NEURON の「+ レシピ」「− レシピ」で足します。")}</p>`}
       ${r.skipped ? `<p class="muted note">${t("UI では扱えないユニット(gain・方向){n} 個を外しました", { n: r.skipped })}</p>` : ""}
       ${this.ablateHTML()}
+      ${r.sampling ? `<div class="rc-sampling muted note" title="${t("このレシピを試すときのサンプリング。チャットの「レシピの設定」で使い、保存するとレシピのファイルに入る(OpenAI 互換 API の既定にもなる)")}">${t("サンプリング")}: <span class="mono">${esc(samplingLabel(r.sampling))}</span><button class="small" id="rc-sp-rm" title="${t("レシピから外す")}">×</button></div>` : ""}
       <p class="muted note">${t("dose は rel(その層の残差ノルムの中央値に対する大きさ)。マップに + は黄、− は赤紫の輪で出ます。")}</p>
       <div class="rc-actions">
         <button id="rc-chat"${r.empty() ? " disabled" : ""}>${t("3 列チャットで試す")}</button>
@@ -122,7 +133,7 @@ export class RecipePanel {
     if (clr) clr.addEventListener("click", () => { if (confirm(t("レシピの {n} ユニットをすべて外しますか", { n: r.units.length }))) { r.clear(); this.render(); } });
     $("#rc-load").addEventListener("change", (ev) => {
       const x = this.saved.find((y) => y.name === ev.target.value);
-      if (x) { r.load(x.name, x.units, x.ablate); this.render(); }
+      if (x) { r.load(x.name, x.units, x.ablate, x.sampling); this.render(); }
     });
     for (const el of this.root.querySelectorAll("input[data-i]")) {
       el.addEventListener("input", (ev) => {
@@ -142,6 +153,8 @@ export class RecipePanel {
       el.addEventListener("click", (ev) => { ev.preventDefault(); const u = r.units[+el.dataset.open]; this.onOpen({ layer: u.layer, n: u.neuron }); });
     }
     $("#rc-chat").addEventListener("click", () => this.onChat());
+    const sprm = $("#rc-sp-rm");
+    if (sprm) sprm.addEventListener("click", () => { r.setSampling(null); this.render(); });
     this.wireAblate();
     $("#rc-export").addEventListener("click", () => this.export());
   }
@@ -183,7 +196,7 @@ export class RecipePanel {
     if (!/^[\w.-]+$/.test(name)) { res.innerHTML = `<p class="err">${t("名前は英数字・_・-・. だけにしてください")}</p>`; return; }
     this.r.name = name; this.r._save();
     try {
-      await postJSON(`/api/recipes/${encodeURIComponent(name)}`, { units: this.r.specs(), ablate: this.r.ablate });
+      await postJSON(`/api/recipes/${encodeURIComponent(name)}`, { units: this.r.specs(), ablate: this.r.ablate, sampling: this.r.sampling });
       await this.refreshSaved();                     // 一覧を描き直してから知らせる(描き直すと #rc-result も作り直される)
       this.root.querySelector("#rc-result").innerHTML =
         `<p class="muted note">${t("保存しました({path})", { path: `~/.gne/recipes/${esc(name)}.yaml` })}</p>`;

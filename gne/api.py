@@ -278,25 +278,29 @@ class Session:
         return ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": prompt}]
 
     def generate(self, vectors: dict[int, np.ndarray] | None, messages: list[dict], *, max_tokens: int = 128,
-                 when: str = "all", lora: list[tuple[str, float]] | None = None) -> dict:
-        """1 本で greedy 生成する(バッチの組み方で結果が変わらないように、F2)。when は §6.15 の位置別ステアリング、
-        lora は gain(§6.16)の LoRA アダプタ。"""
+                 when: str = "all", lora: list[tuple[str, float]] | None = None, sampling=None) -> dict:
+        """1 本で生成する(バッチの組み方で結果が変わらないように、F2)。既定は greedy、sampling(engine.Sampling)で
+        サンプリング。when は §6.15 の位置別ステアリング、lora は gain(§6.16)の LoRA アダプタ。"""
         from .when import generate_when
         e = self.engine
-        r, info = generate_when(e, e.steer_ctx(), messages, vectors, when, max_tokens=max_tokens, lora=lora)
+        r, info = generate_when(e, e.steer_ctx(), messages, vectors, when, max_tokens=max_tokens, lora=lora,
+                                sampling=sampling)
         return {"text": r.text, "finish": r.finish, "n_gen": r.n_gen, "token_ids": r.token_ids, "when": info}
 
     # --- steer ----------------------------------------------------------------------------------
 
     def steer(self, recipe: Recipe | list[str], *, prompt: str | None = None, messages: list[dict] | None = None,
-              system: str | None = None, max_tokens: int = 128, compare: bool = True, when: str | None = None) -> dict:
+              system: str | None = None, max_tokens: int = 128, compare: bool = True, when: str | None = None,
+              sampling=None) -> dict:
+        """sampling(engine.Sampling)を渡すと、無介入と介入を同じ seed で引く(違いは介入だけになる)。"""
         recipe = self._as_recipe(recipe)
         msgs = self.messages(prompt, messages, system)
         vecs, details = self.vectors(recipe)
-        base = self.generate(None, msgs, max_tokens=max_tokens) if compare else None
-        st = self.generate(vecs, msgs, max_tokens=max_tokens, when=when or recipe.when, lora=self.lora_for(recipe))
+        base = self.generate(None, msgs, max_tokens=max_tokens, sampling=sampling) if compare else None
+        st = self.generate(vecs, msgs, max_tokens=max_tokens, when=when or recipe.when, lora=self.lora_for(recipe),
+                           sampling=sampling)
         return {"messages": msgs, "recipe": recipe.to_dict(), "units": details, "layer_norms": self._norms(vecs),
-                "when": when or recipe.when,
+                "when": when or recipe.when, "sampling": None if sampling is None else sampling.to_dict(),
                 "baseline": base, "steered": st, "differs": None if base is None else base["token_ids"] != st["token_ids"]}
 
     # --- export / import ------------------------------------------------------------------------
@@ -376,8 +380,10 @@ class Session:
             if fmt != "cvec":
                 raise GneError("BAD_ARGS", "--verify は --format cvec のときだけ使えます")
             check = self.check_cvec_with_llama(Path(path), verify_prompt, n_tokens, llama_completion)
+        from .steer import llama_server_args
         return {"path": str(path), "format": fmt, "recipe": recipe.to_dict(), "units": details,
-                "layer_norms": self._norms(vecs), "verify": check}
+                "layer_norms": self._norms(vecs), "verify": check,
+                "llama_server_args": llama_server_args(recipe.sampling) if recipe.sampling else None}
 
     def check_cvec_with_llama(self, path: Path, prompt: str, n_tokens: int, binary: str | None) -> dict:
         """書き出した cvec を本家のローダ(llama-completion --control-vector)で読ませ、greedy 出力を比べる。"""
@@ -721,11 +727,15 @@ class Session:
         return {"layer": L, "neuron": n, "name": name or None}
 
     def recipe_save(self, name: str, units: list[str] | Recipe, *, dose_unit: str = "rel",
-                    ablate: str | dict | None = None, when: str | None = None) -> dict:
+                    ablate: str | dict | None = None, when: str | None = None, sampling: dict | None = None) -> dict:
+        """sampling はこのレシピを試すときのサンプリング(seed は持たない)。"""
+        from .steer import sampling_values
         if not re.fullmatch(r"[\w.\-]+", name or ""):
             raise GneError("BAD_ARGS", f"レシピ名 {name!r} は英数字・_・-・. だけにしてください")
         r = units if isinstance(units, Recipe) else self.recipe(units=list(units), dose_unit=dose_unit, name=name,
                                                                ablate=ablate, when=when)
+        if sampling:
+            r.sampling = sampling_values(sampling, seed=False)
         r.name = name
         path = self.store.recipes_dir() / f"{name}.yaml"
         r.save(path)
@@ -741,13 +751,13 @@ class Session:
         return q
 
     def chat(self, columns, prompts: list[str], *, system: str | None = None, max_tokens: int = 256,
-             on_text=None, on_column=None, when: str | None = None) -> dict:
+             on_text=None, on_column=None, when: str | None = None, sampling=None) -> dict:
         from .chat import ChatState, chat_turn
         state = ChatState(columns, system)
         turns = []
         for u in prompts:
             turns.append({"user": u, "replies": chat_turn(self, state, u, max_tokens=max_tokens, on_text=on_text,
-                                                          on_column=on_column, when_override=when)})
+                                                          on_column=on_column, when_override=when, sampling=sampling)})
         return {"columns": [{"label": c.label, "recipe": c.recipe.to_dict() if c.recipe else None} for c in columns],
                 "system": system, "turns": turns}
 

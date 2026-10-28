@@ -4,6 +4,7 @@
 import { postJSON, postSSE } from "./api.js";
 import { t as tr } from "./i18n.js";                 // t は会話のターンの変数名に使っているので tr
 import { esc, tokHTML } from "./panels.js";
+import { samplingLabel } from "./recipe.js";
 
 // "14:8949:+1" → "L14 N8949 +1"
 const unitLabel = (spec) => {
@@ -11,6 +12,15 @@ const unitLabel = (spec) => {
   return `L${p[0]} ${who} ${(d >= 0 ? "+" : "−") + +Math.abs(d).toFixed(4)}`;
 };
 const fmt = (x, d = 2) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : (+x).toFixed(d));
+
+// サンプリングの型。値は gne/steer.py の SAMPLING_PRESETS と同じ。recipe = 読み込んだレシピの sampling、custom = 自由
+const SP_PRESETS = {
+  llama_server: { temperature: 0.8, top_k: 40, top_p: 0.95, min_p: 0.05, presence_penalty: 0 },
+  common: { temperature: 1.0, top_k: 20, top_p: 0.95, min_p: 0.05, presence_penalty: 0.9 },
+};
+const SP_FIELDS = [["temperature", "温度", 0.05], ["top_k", "top-k", 1], ["top_p", "top-p", 0.01], ["min_p", "min-p", 0.01],
+                   ["presence_penalty", "presence", 0.1]];
+const SP_KEY = "gne.chat.sampling";            // このブラウザに覚えておく(使えなければ覚えない)
 
 export class ChatPanel {
   constructor({ recipe, onStatus }) {
@@ -21,7 +31,14 @@ export class ChatPanel {
     this.dose = 0.8;
     this.scale = 1.0;
     this.maxTokens = 128;
-    this.sample = false;               // サンプリング(llama-server と同じ見え方)。列はどれも同じ seed で引く
+    this.spPreset = "greedy";          // greedy / llama_server / common / recipe / custom。列はどれも同じ seed で引く
+    this.sp = { ...SP_PRESETS.common };  // custom の値
+    this.seedFixed = false;            // seed を固定する(強さだけ変えて送り直したとき、違いが介入だけになる)
+    this.seed = 1234;
+    try {
+      const d = JSON.parse(localStorage.getItem(SP_KEY) || "null");
+      if (d) { Object.assign(this, { spPreset: d.preset || "greedy", sp: { ...this.sp, ...(d.sp || {}) }, seedFixed: !!d.seedFixed, seed: +d.seed || 1234 }); }
+    } catch { /* 覚えていなくても使える */ }
     this.when = "all";                 // 足す位置(本体設計 §6.15): all / gen / assistant / after / ramp
     this.whenArg = "";                 // after の文字列、ramp の a-b
     this.turns = [];                   // [{ user, labels, replies: [], finish: [] }]
@@ -42,7 +59,44 @@ export class ChatPanel {
     this.detail = detail;
   }
 
-  useRecipe() { this.target = "recipe"; this.mode = "writes"; }
+  useRecipe() {
+    this.target = "recipe"; this.mode = "writes";
+    if (this.recipe.sampling) { this.spPreset = "recipe"; this.saveSp(); }      // レシピにサンプリングがあればそれで試す
+  }
+
+  saveSp() {
+    try { localStorage.setItem(SP_KEY, JSON.stringify({ preset: this.spPreset, sp: this.sp, seedFixed: this.seedFixed, seed: this.seed })); } catch { /* 置けなくても使える */ }
+  }
+
+  // 今の型のサンプリングの値(greedy なら null)
+  spValues() {
+    if (this.spPreset === "greedy") return null;
+    if (this.spPreset === "recipe") return this.recipe.sampling || SP_PRESETS.common;
+    if (this.spPreset === "custom") return this.sp;
+    return SP_PRESETS[this.spPreset] || SP_PRESETS.common;
+  }
+
+  samplingHTML() {
+    const recipeSp = this.target === "recipe" && this.recipe.sampling;
+    const opts = [["greedy", tr("サンプリングなし(greedy)")], ["llama_server", tr("llama-server の既定")], ["common", tr("よく使う設定")],
+                  ...(recipeSp || this.spPreset === "recipe" ? [["recipe", tr("レシピの設定"), !recipeSp]] : []), ["custom", tr("自由")]];
+    const v = this.spValues();
+    const sel = `<span class="muted" title="${tr("greedy は毎回いちばん確率の高い語を選ぶ(同じ入力なら毎回同じ返事)。サンプリングは llama.cpp と同じ順番(presence penalty → top-k → top-p → min-p → 温度)で、3 列とも同じ乱数で引くので、違いは介入の違いだけ")}">${tr("サンプリング")}</span><select id="ch-sp">${
+      opts.map(([k, label, dis]) => `<option value="${k}"${k === this.spPreset ? " selected" : ""}${dis ? " disabled" : ""}>${label}</option>`).join("")}</select>`;
+    if (!v) return sel;
+    const fields = SP_FIELDS.map(([k, label, step]) => `<span class="muted">${k === "temperature" ? tr(label) : label}</span><input class="sp-v" data-k="${k}" type="number" step="${step}" min="${k === "presence_penalty" ? -2 : 0}" value="${v[k]}">`).join("");
+    return `${sel}</div><div class="ch-tools ch-sp">${fields}
+      <label class="muted" title="${tr("固定すると、強さやレシピだけ変えて送り直したときに違いが介入だけになる。切ると毎回変える")}"><input type="checkbox" id="ch-seed-fixed"${this.seedFixed ? " checked" : ""}> seed ${tr("固定")}</label><input id="ch-seed" type="number" min="0" step="1" value="${this.seed}"${this.seedFixed ? "" : " disabled"}>
+      ${this.target === "recipe" && this.spPreset !== "recipe" ? `<button class="small" id="ch-sp-to-recipe" title="${tr("この値をレシピに入れる(レシピのタブで保存するとファイルに入る)")}">${tr("レシピに入れる")}</button>` : ""}`;
+  }
+
+  // 送る本文の sampling(greedy なら無し)。seed は固定か、毎回新しく引く
+  samplingBody() {
+    const v = this.spValues();
+    if (!v) return { body: {}, label: "greedy" };
+    const seed = this.seedFixed ? this.seed : Math.floor(Math.random() * 2 ** 31);
+    return { body: { sampling: { ...v, seed } }, label: `${samplingLabel(v)} · seed ${seed}` };
+  }
 
   columns() {
     if (this.target === "recipe") {                // − 列はレシピ全体の符号を反転したもの(− のユニットだけ、ではない)
@@ -88,15 +142,15 @@ export class ChatPanel {
       : `dose <button class="small" data-step="-0.1" title="${tr("小さく")}">▼</button><input id="ch-dose" type="number" step="0.1" value="${this.dose}"><button class="small" data-step="0.1" title="${tr("大きく")}">▲</button>
          <span class="seg"><button class="on" title="${tr("本体設計の rel dose(残差ノルムの中央値に対する大きさ)を足す")}">add</button><button disabled title="${tr("活性の倍率は本体設計で未対応")}">×</button></span>`;
     const turns = this.turns.map((t, ti) => `
-      <div class="ch-user"><span class="muted">${tr("あなた")}</span> ${esc(t.user)}${t.labels.join() !== cols.map((c) => c.label).join() ? `<span class="muted note">(${t.labels.map(esc).join(" / ")})</span>` : ""}</div>
+      <div class="ch-user"><span class="muted">${tr("あなた")}</span> ${esc(t.user)}${t.labels.join() !== cols.map((c) => c.label).join() ? `<span class="muted note">(${t.labels.map(esc).join(" / ")})</span>` : ""}${t.sp ? `<span class="muted note ch-sp-used">${esc(t.sp)}</span>` : ""}</div>
       <div class="ch-row">${t.replies.map((r, ci) => `<div class="ch-cell ${["minus", "", "plus"][ci] || ""}" data-t="${ti}" data-c="${ci}">${this.cellHTML(t, ci)}</div>`).join("")}</div>`).join("");
     return `
       <div class="ch-tools">${amount}<span class="muted">max</span><input id="ch-max" type="number" min="1" max="2048" value="${this.maxTokens}">
         <span class="muted" title="${tr("足す位置: all = 全位置 / gen = 生成中だけ(プロンプトの理解を壊さない)/ assistant = assistant の発話だけ / after = 出力にその文字列が出てから / ramp = 倍率を a から b へ変える")}">when</span><select id="ch-when">${
           ["all", "gen", "assistant", "after", "ramp"].map((w) => `<option value="${w}"${this.when === w ? " selected" : ""}>${w}</option>`).join("")}</select>${
           this.when === "after" || this.when === "ramp" ? `<input id="ch-when-x" size="8" value="${esc(this.whenArg)}" placeholder="${this.when === "after" ? tr("結論:") : "1.5-0.5"}">` : ""}
-        <label class="muted" title="${tr("サンプリングで生成する(温度 1.0・top-p 0.95・top-k 20・min-p 0.05・presence penalty 0.9。llama-server でよく使う設定)。3 列とも同じ乱数で引くので、違いは介入の違いだけ。切ると greedy")}"><input type="checkbox" id="ch-sample"${this.sample ? " checked" : ""}> ${tr("サンプリング")}</label>
         <button class="small" id="ch-reset"${this.busy ? " disabled" : ""}>${tr("会話を消す")}</button></div>
+      <div class="ch-tools">${this.samplingHTML()}</div>
       <div class="ch-log">
         <div class="ch-row ch-head">${cols.map((c, i) => `<div class="${["minus", "", "plus"][i]}">${esc(c.label)}${
           this.target === "recipe" && c.units.length ? `<div class="ch-units muted">${c.units.map((u) => `<span class="u">${esc(unitLabel(u))}</span>`).join(" · ")}</div>` : ""}</div>`).join("")}</div>
@@ -136,7 +190,26 @@ export class ChatPanel {
       });
     }
     $("#ch-max").addEventListener("change", (ev) => { this.maxTokens = Math.max(1, Math.min(2048, +ev.target.value || 128)); });
-    $("#ch-sample").addEventListener("change", (ev) => { this.sample = ev.target.checked; });
+    $("#ch-sp").addEventListener("change", (ev) => {
+      const v = this.spValues();
+      this.spPreset = ev.target.value;
+      if (this.spPreset === "custom" && v) this.sp = { ...v };          // 今の値から自由に変える
+      this.saveSp(); this.render();
+    });
+    for (const el of this.el.querySelectorAll(".sp-v")) {
+      el.addEventListener("change", () => {                              // 値を変えたら「自由」に切り替える
+        const n = +el.value;
+        if (!Number.isFinite(n)) return;
+        this.sp = { ...(this.spValues() || SP_PRESETS.common), [el.dataset.k]: el.dataset.k === "top_k" ? Math.max(0, Math.round(n)) : n };
+        this.spPreset = "custom"; this.saveSp(); this.render();
+      });
+    }
+    const sf = $("#ch-seed-fixed");
+    if (sf) sf.addEventListener("change", (ev) => { this.seedFixed = ev.target.checked; this.saveSp(); this.render(); });
+    const sd = $("#ch-seed");
+    if (sd) sd.addEventListener("change", (ev) => { this.seed = Math.max(0, Math.floor(+ev.target.value || 0)); this.saveSp(); });
+    const tor = $("#ch-sp-to-recipe");
+    if (tor) tor.addEventListener("click", () => { this.recipe.setSampling(this.spValues()); this.spPreset = "recipe"; this.saveSp(); this.render(); });
     $("#ch-when").addEventListener("change", (ev) => { this.when = ev.target.value; this.render(); });
     const wx = $("#ch-when-x");
     if (wx) wx.addEventListener("change", (ev) => { this.whenArg = ev.target.value.trim(); });
@@ -153,7 +226,8 @@ export class ChatPanel {
     user = (user || "").trim();
     if (!user || this.busy) return;
     const cols = this.columns();
-    const turn = { user, labels: cols.map((c) => c.label), replies: cols.map(() => ""), finish: cols.map(() => null) };
+    const sp = this.samplingBody();
+    const turn = { user, labels: cols.map((c) => c.label), replies: cols.map(() => ""), finish: cols.map(() => null), sp: sp.label };
     const prev = this.turns.slice();
     this.turns.push(turn);
     this.busy = true;
@@ -164,7 +238,7 @@ export class ChatPanel {
     const t0 = performance.now();
     const body = {
       max_tokens: this.maxTokens,
-      ...(this.sample ? { sampling: { seed: Math.floor(Math.random() * 2 ** 31) } } : {}),
+      ...sp.body,
       when: this.whenSpec(),
       columns: cols.map((c, ci) => ({
         label: c.label, units: c.units, ...(c.ablate ? { ablate: c.ablate } : {}),

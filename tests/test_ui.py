@@ -925,10 +925,32 @@ def test_recipe_ablate_row(server, browser, tmp_path):
     assert pg.evaluate("document.querySelector('#recipe-list tr[data-i=\"0\"] input.dose').step") == "0.005"
     assert pg.evaluate("window.gne.recipe.neurons().length") == 1
     pg.click("#rc-chat")
-    pg.wait_for_function("document.querySelector('#ch-sample')", timeout=10000)
+    pg.wait_for_function("document.querySelector('#ch-sp')", timeout=10000)
     cols = pg.evaluate("window.gne.chat.columns()")
     assert cols[2]["units"] == ["12:dir:pirate_ui:+0.27", "14:100:+0.5"] and cols[0]["units"][0] == "12:dir:pirate_ui:-0.27"
-    pg.check("#ch-sample")
-    assert pg.evaluate("window.gne.chat.sample") is True
+    # サンプリング: 既定は greedy(送る本文に sampling が無い)。型を選ぶと値の欄が出る。値を変えると「自由」に
+    assert pg.evaluate("window.gne.chat.samplingBody().body") == {}
+    pg.select_option("#ch-sp", "llama_server")
+    assert pg.evaluate("document.querySelector('.sp-v[data-k=top_k]').value") == "40"
+    pg.fill(".sp-v[data-k=temperature]", "0.7")
+    pg.dispatch_event(".sp-v[data-k=temperature]", "change")
+    assert pg.evaluate("window.gne.chat.spPreset") == "custom"
+    pg.check("#ch-seed-fixed")
+    pg.fill("#ch-seed", "42")
+    pg.dispatch_event("#ch-seed", "change")
+    body = pg.evaluate("window.gne.chat.samplingBody().body")
+    assert body == {"sampling": {"temperature": 0.7, "top_k": 40, "top_p": 0.95, "min_p": 0.05, "presence_penalty": 0, "seed": 42}}
+    pg.click("#ch-sp-to-recipe")                                                    # この値をレシピに入れて保存する
+    assert pg.evaluate("window.gne.recipe.sampling.temperature") == 0.7
+    assert pg.evaluate("window.gne.chat.spPreset") == "recipe"
+    pg.click("#list-tabs button[data-tab=recipe]")
+    pg.wait_for_function("document.querySelector('.rc-sampling')", timeout=10000)
+    pg.wait_for_load_state("networkidle")                                           # 保存一覧を読み直して描き直すまで待つ
+    pg.fill("#rc-name", "ui_sp")
+    pg.dispatch_event("#rc-name", "change")
+    pg.click("#rc-save")
+    pg.wait_for_function("document.querySelector('#rc-result').textContent.includes('ui_sp')", timeout=10000)
+    saved = next(x for x in get("/api/recipes") if x["name"] == "ui_sp")
+    assert saved["sampling"] == {"temperature": 0.7, "top_k": 40, "top_p": 0.95, "min_p": 0.05, "presence_penalty": 0.0}
     assert not errors, errors
     pg.close()

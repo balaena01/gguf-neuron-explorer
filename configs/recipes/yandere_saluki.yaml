@@ -10,6 +10,8 @@
 name: yandere_saluki
 model_id: qwen3.8-27b-gsq-rco-a594099db1
 dose_unit: rel
+# 試したサンプリング(§12.4 で cvec を当てた llama-server と同じ)。steer / chat・UI の「レシピの設定」・OpenAI 互換 API の既定になる
+sampling: {temperature: 1.0, top_k: 20, top_p: 0.95, min_p: 0.05, presence_penalty: 0.9}
 units:
   - {layer: 24, kind: direction, direction: yandere_r, dose: +0.2707}
   - {layer: 40, kind: direction, direction: female_r, dose: +0.0564}
