@@ -234,6 +234,7 @@ The documentation is in Japanese:
 - [docs/verification.md](docs/verification.md): what was checked against llama.cpp, and the findings.
 - [docs/measurements.md](docs/measurements.md): timings and throughput.
 - [docs/agent_playbook.md](docs/agent_playbook.md): how to read the results.
+- [docs/persona_workflow.md](docs/persona_workflow.md): building a persona from neurons, step by step (with the scripts in `examples/persona_neurons/` and the yandere case as the worked example).
 
 ## License
 

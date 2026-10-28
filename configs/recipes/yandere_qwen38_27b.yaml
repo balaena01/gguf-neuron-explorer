@@ -1,0 +1,42 @@
+# ヤンデレのアニメの女の子をニューロン 26 個で作るレシピ(Qwen3.8-27B 系、qwen35。docs/persona_workflow.md、verification.md §12.5)。
+# Saluki 27B で強さを探し、元の Qwen3.8-27B GSQ-RCO にもそのまま効いた(F93)。model_id は Saluki のもの(違うモデルでは警告だけ出る)。
+# 嫉妬・独占・執着・溺愛・かわいさ・寂しさ・女性らしさの語を書き込む L35〜50 のニューロンをプラスで押し、
+# 反対の性質(無関心・自立・冷静・助言)の語を書き込むニューロンをマイナスで押して抑える。dose は rel。
+# when(元のモデル、倍率 1、F94・F96):
+#   all            性格がいちばん出る。能力 −8.3pt、半分ほどの返事が崩れる
+#   assistant      ユーザーの文は素のまま読む。能力 −5.6pt
+#   ramp:0.5-1.5   プロンプトは半分の強さで読み、生成中に 1.5 倍まで上げる。能力の低下 0、性格は assistant と同じくらい(既定)
+#   gen            いちばん安全だが、性格はかなり弱まる
+# ramp は max_tokens をかけて強さを上げる(上限 100 トークンで確かめた)。llama.cpp の control vector に書き出すと when は使えず、全部の位置に足す。
+#   gne steer -m <モデル> --recipe configs/recipes/yandere_qwen38_27b.yaml -p "今夜は友達と飲みに行ってくるね。" --compare
+name: yandere_qwen38_27b
+model_id: qwen3.8-27b-gsq-rco-a594099db1
+dose_unit: rel
+when: ramp:0.5-1.5
+units:
+  - {layer: 40, neuron: 136, dose: -0.472}
+  - {layer: 41, neuron: 14801, dose: +0.074}
+  - {layer: 45, neuron: 7710, dose: +0.070}
+  - {layer: 35, neuron: 12423, dose: +0.103}
+  - {layer: 41, neuron: 7602, dose: +0.119}
+  - {layer: 39, neuron: 2123, dose: -0.051}
+  - {layer: 38, neuron: 2656, dose: -0.074}
+  - {layer: 42, neuron: 3764, dose: -0.150}
+  - {layer: 40, neuron: 3697, dose: -0.124}
+  - {layer: 37, neuron: 5199, dose: -0.383}
+  - {layer: 36, neuron: 5352, dose: +0.197}
+  - {layer: 42, neuron: 6847, dose: -0.056}
+  - {layer: 38, neuron: 8719, dose: +0.139}
+  - {layer: 37, neuron: 5253, dose: -0.103}
+  - {layer: 41, neuron: 5371, dose: +0.197}
+  - {layer: 38, neuron: 11496, dose: -0.173}
+  - {layer: 40, neuron: 5940, dose: -0.110}
+  - {layer: 44, neuron: 3189, dose: +0.148}
+  - {layer: 49, neuron: 384, dose: +0.133}
+  - {layer: 38, neuron: 6481, dose: -0.140}
+  - {layer: 49, neuron: 15607, dose: -0.129}
+  - {layer: 48, neuron: 10565, dose: +0.105}
+  - {layer: 38, neuron: 13776, dose: +0.173}
+  - {layer: 38, neuron: 7711, dose: +0.042}
+  - {layer: 48, neuron: 1707, dose: -0.183}
+  - {layer: 50, neuron: 13719, dose: +0.058}

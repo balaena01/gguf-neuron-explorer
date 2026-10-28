@@ -33,7 +33,6 @@
 | gain の `Recipe.scaled` と 3 列チャットの − の列 | 記述なし | scaled(s) は 1 と k の間、− の列は 2 − k(F77) | eval の倍率 0 を無介入に、− の列を「反対側」にするため |
 | `gne gain --bake` | `--in model.gguf --out model-x.gguf` | `--in`(既定 --model)と `--out` / `-o`(既定 `<root>/export/<名前>-gain.gguf`)、`--requant q8_0 \| f16` | 他のコマンドと同じく --model を元にする |
 | gain の UI | 記述なし | UI のレシピ欄からは gain を作れない(API・CLI・MCP・`gne: {units: ["L:N:x2"]}` では使える) | CHANGE-01 の範囲外 |
-
 | eval の倍率 0(§6.14) | 0 がベースライン | 0 が無ければ足す。倍率 0 も他の倍率と同じ `when` の経路(all ならまとめて、それ以外は 1 本ずつ)で生成する | バッチの組み方で greedy の数値がわずかに変わるので、比べる行どうしで経路をそろえる |
 | eval の `ppl` | teacher-forced の平均 logprob | テキストごとに `exp(−平均 logprob)`、テキストをまたいだ値は幾何平均。レシピは `when` に関わらず全位置に当て、どの倍率でも同じ 512 トークンずつ decode する | 1 つの言語のテキストに引っ張られないように。decode の区切りで数値が最大 0.18 nats 変わるため(§11.3) |
 | eval の `persona` の mass | rank.py の mass | ベースラインに無い語(rank.py の `rollout_words`)のうち 2 つ以上のプロンプトに出た語の、上位 5 語の出たプロンプト数の和。主な指標は novelty(出力の語のうちベースラインに無い語の割合) | rank.py の mass は対照群の平均に対する z。eval は 1 レシピで対照群が無い |

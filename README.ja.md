@@ -237,6 +237,7 @@ python -m pytest -q
 - [docs/verification.md](docs/verification.md): llama.cpp で確かめたことと、そこから分かったこと
 - [docs/measurements.md](docs/measurements.md): 速度の実測
 - [docs/agent_playbook.md](docs/agent_playbook.md): 結果の読み方
+- [docs/persona_workflow.md](docs/persona_workflow.md): 性格をニューロンで作る手順（`examples/persona_neurons/` のスクリプトと、ヤンデレでたどった道）
 
 ## ライセンス
 
