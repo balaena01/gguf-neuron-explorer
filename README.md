@@ -20,7 +20,7 @@ Find, rank and steer individual MLP neurons of GGUF models on llama.cpp, then sh
   - baked into a GGUF as FFN down biases, for architectures whose llama.cpp graph reads that bias (llama, granite, mistral3, nemotron, gpt2 and others; not Qwen or Gemma — see [configs/arch/bias_support.yaml](configs/arch/bias_support.yaml)).
 - **Steer only where it matters (`when`).** Push only the generated tokens (`gen`), only the assistant's turns, everything but earlier replies (`skip-replies`), only after a given text appears in the output, or ramp the dose down. A control vector file cannot express this, so `gne serve --openai` serves an OpenAI-compatible endpoint that applies it.
 - **Audio input.** For models that can hear (LFM3-Omni), `gne steer --audio speech.wav` and `input_audio` parts in OpenAI-style messages put speech straight into the conversation. The model's mmproj turns the audio into embeddings, and gne decodes them in its own loop, so recipes, `when` and activation capture act on spoken turns the same way as on text. Replies are text; use any TTS to speak them.
-- **Gain steering.** `22:2742:x4` multiplies a neuron's own output instead of adding a fixed direction: `x0` removes it, a negative factor inverts it. It acts only where the neuron already fires. It exports as a LoRA adapter GGUF for llama.cpp's `--lora` (works on Qwen too) or as a rewritten GGUF.
+- **Gain steering.** `22:2742:x4` multiplies a neuron's own output instead of adding a fixed direction: `x0` removes it, a negative factor inverts it. It acts only where the neuron already fires. It exports as a LoRA adapter GGUF for llama.cpp's `--lora` (works on Qwen too) or as a rewritten GGUF; by default the rewrite is a scale patch that keeps the original quantization and scales the rows exactly.
 - **Directions (`gne direction`).** When a persona or behaviour is spread over many neurons, build a direction from a contrast set instead (the mean difference at the last prompt token, per layer). It can pick a layer automatically by removing the direction and checking that the behaviour drops, or by adding it and checking that the behaviour rises. Add a direction like a neuron with `30:dir:yandere:+0.3`; it exports as a control vector. To add a persona, build the direction with `--positions response`, which measures on replies generated in each persona instead of right after the instruction. Like neurons, directions are checked against random controls: each candidate layer is also pushed with 16 random directions of the same norm, and a layer is picked only if its effect beats their 95th percentile. `gne steer --contrast` does the same for a whole recipe and reports `null_pct`.
 - **Directional ablation (`gne ablate`).** Project a direction out of every weight that writes to the residual stream (also known as abliteration). It exports as a LoRA adapter or as a rewritten GGUF, either Q8_0/F16 or requantized back to the original types with `llama-quantize`. Recipes can carry `ablate:`, and `gne eval --compare-ablation` compares it with zeroing the top neurons.
 - **Side-effect check (`gne eval`).** Run a recipe at several doses and see how much the persona changed next to what broke: exact-answer and format tasks, perplexity on reference texts, and language mixing (Simplified-only Chinese, Hangul and other scripts in Japanese answers). An optional second GGUF can rate the persona 1–5. Doses that stay within the thresholds are marked as shippable. `--random-controls N` also runs N recipes of the same size in random directions at each dose. That shows whether the persona change beats them, and how much capability and perplexity you lose from the size of the push alone.
@@ -31,6 +31,7 @@ Find, rank and steer individual MLP neurons of GGUF models on llama.cpp, then sh
   - how well their output writes the persona direction.
 
   The noise floor is two neutral system prompts compared with each other. `21:H7:x0` / `x2` scales one head's output through a LoRA on its `W_O` column block. `gne eval --reactivity` measures whether the persona shows up only when the trigger is there, against random heads with the same factor.
+- **Mixture of Experts.** In MoE layers a neuron is `L12 E37 N511` (expert 37, neuron 511); `gne experts contrast` ranks experts by how much more they are chosen, and how much more they write a persona's direction, when the persona is on; `gne experts sweep` ablates or boosts each expert in turn. In an MoE layer `add` only pushes a neuron's write direction at every token; the real neuron push is gain (`12:E37:N511:x2`, active only when the expert is chosen). Whole experts (`12:E37:x0`) and router biases (`12:E37:route:+2`) are applied by scale patches: the quantization blocks' scales of a working copy are rewritten exactly and reverted afterwards.
 - **Web UI.** A 3D map of every layer and neuron with switchable overlays (sweep mass, steer KL, logit-lens |z|, activations, search hits, which neurons fire on a pasted text). It also has:
   - a ranked list and a neuron panel;
   - live 3-column chat;
@@ -169,6 +170,29 @@ Qwen3.5-4B Q8_0 on an RTX 3080:
 
 A full `main_rel` sweep of one layer takes about 16 hours. Narrow candidates down with the lenses and reverse lookup first.
 
+### Mixture of Experts
+
+Tested with granite-3.1-1b-a400m (`granitemoe`, 32 experts, 8 chosen) and LFM2-8B-A1B (`lfm2moe`, 32 experts, 4 chosen, router bias).
+
+```bash
+gne stats act -m M --layers 2-22                     # also counts how often each expert is chosen
+gne experts contrast -m M --contrast configs/contrast/yandere_rules.yaml
+gne experts show -m M 12 37                          # usage, tokens it is chosen for, contrast rank, top neurons
+gne experts sweep -m M --layer 12                    # ablate (x0) and boost (x2) each expert, rank by changed words
+gne steer -m M --unit 12:E37:x0 -p "..." --compare   # remove expert 37 in layer 12
+gne steer -m M --unit 12:E37:N511:x2 -p "..." --compare
+```
+
+| Unit | Meaning | Applied as |
+|---|---|---|
+| `12:E37:N511:+0.8` | adds the neuron's write direction at every token (a direction push, not a neuron push) | control vector |
+| `12:E37:N511:x2` | multiplies the neuron's activation by k when expert 37 is chosen | LoRA stacked per expert |
+| `12:E37:x0` / `x2` | removes or doubles expert 37's output | scale patch |
+| `12:E37:route:+2` | moves expert 37's router bias (only archs with a router bias, e.g. `lfm2moe`) | scale patch |
+| `12:S:N5:x2` | a shared-expert neuron | LoRA (like a dense neuron) |
+
+A scale patch rewrites the fp16 scales inside the quantization blocks of the affected rows, so a row or an expert's slab becomes exactly k times the original (k = 0 writes zero bytes). It works for Q4_0 to Q8_0, Q2_K to Q6_K, the IQ types except IQ1_M, and F16/BF16/F32. Patches go to a working copy under `~/.gne/work/` (the original GGUF is never touched) and are reverted after each use; reloading the copy takes about 0.3 s for a 1.4 GB model and 0.9 s for 5 GB. `steer`, `eval`, the UI chat and the OpenAI-compatible endpoint apply them automatically. Column directions (`W_down[:, n]`) cannot be patched this way. Inside MoE layers, sweeps, lenses and reverse lookups number neurons `e × n_ff_exp + n`.
+
 ### Across quantizations
 
 A neuron found on one quant carries over to other quants of the same model. Checked with L22 N2742 (the "alien" neuron, found on Qwen3.5-4B Q8_0):
@@ -262,6 +286,7 @@ python -m pytest -q
 
 - Model tests use `GNE_TEST_MODEL`, which defaults to `models/Qwen3-0.6B-Q8_0.gguf`.
 - Browser tests use the Playwright Chromium; `GNE_CHROME` sets its path.
+- MoE tests use `GNE_TEST_MOE` (default `models/granite-3.1-1b-a400m-instruct-Q8_0.gguf`) and, for router bias, `GNE_TEST_MOE_BIAS` (default `models/LFM2-8B-A1B-Q4_K_M.gguf`).
 - The real-audio test needs `GNE_TEST_OMNI` (an LFM3-Omni GGUF with its mmproj next to it) and `GNE_TEST_AUDIO` (a wav of speech). The other audio tests use the default model.
 - Tests whose model or browser is missing are skipped.
 

@@ -42,6 +42,17 @@ gne chat --unit 22:2742:+0.8 -p "..."                           # −/0/+ の 3 
 gne steer -m OMNI --audio speech.wav --system "Respond in text." --recipe R   # 音声で話しかける(mmproj が要る)
 ```
 
+MoE(CHANGE-05): 専門家のニューロンは `L:Ee:Nn:dose`(方向押し)/ `L:Ee:Nn:xk`(選ばれたときだけ効く gain)、専門家全体は `L:Ee:xk`(x0 で消す)、
+ルーターのバイアスは `L:Ee:route:+d`、shared expert は `L:S:Nn:...`。専門家全体と route はスケールパッチ(作業用コピーで読み直し、steer・eval・UI が自動)。
+
+```bash
+gne experts contrast --contrast C          # 専門家ごとの usage_shift・contrib_cos(中立どうしが床)
+gne experts show 12 37                     # 選択率・選ぶトークン・対照分析での順位・上位ニューロン
+gne experts sweep --layer 12               # 各専門家を x0 / x2 で生成、語の出方で順位
+```
+
+MoE の層の sweep・lens・逆引き・調書は、層の中の通し番号 `e·n_ff_exp + n` で数える(結果に expert・expert_neuron が付く)。
+
 音声の入力(LFM3-Omni のように音声を聞けるモデル): mmproj はモデルと同じフォルダの `mmproj*.gguf` か `--mmproj`(環境変数 `GNE_MMPROJ`)。音声は埋め込みとして gne 自身の decode で入れるので、`when`・捕捉・レシピが文の発話と同じに効く(音声の区間はユーザーの発話の中なので、`assistant` と `gen` では押さない)。system はモデルカードの指定で、文で返すなら `Respond in text.`、書き起こしなら `Perform ASR in English.`。返事は文だけ(音声で返し始めるトークンは禁じる)。
 
 レシピ(YAML):
@@ -139,6 +150,8 @@ claude mcp add gne -- gne mcp --model M [--ui-url http://127.0.0.1:8791] [--n-gp
 ```
 
 OpenAI 互換 API は `extra_body={"gne": {"recipe": "NAME", "scale": 0.7, "when": "ramp:0.5-1.5"}}` か `{"units": [...]}`。トップレベルの `units` の dose は rel で読む(raw の方向を渡すなら `{"recipe": {"units": [...], "dose_unit": "raw"}}` か保存したレシピの名前)。音声は `{"type": "input_audio", "input_audio": {"data": "<base64>"}}` の部品で渡す(path は読まない)。サーバは状態を持たないので、会話の途中で強さを変えられる(`examples/strength/strength_chat.py`)。
+
+MCP のツール(MoE): `expert`・`experts_contrast`・`experts_sweep`(ジョブ)・`moe_route`・`expert_patch`。
 
 MCP のツール: `model_overview`・`layer_summary`・`neuron`・`search`・`steer`・`steer_lens`・`fires`・`reverse`・`direction`・`recipe_save`・`export_cvec`・`gain_export`・`bake`・`eval`・`ablate_export`・`set_name`・`job_start`/`job_status`/`job_cancel`、UI があれば `ui_highlight`・`ui_note`・`ui_open`。
 

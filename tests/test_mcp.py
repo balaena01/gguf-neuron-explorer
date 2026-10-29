@@ -37,7 +37,8 @@ def test_mcp_acceptance_sequence(tmp_path):
                 names = {t.name for t in (await s.list_tools()).tools}
                 assert {"model_overview", "layer_summary", "neuron", "search", "steer", "steer_lens", "fires",
                         "reverse", "recipe_save", "export_cvec", "bake", "job_start", "job_status",
-                        "ui_highlight", "ui_note", "ui_open"} <= names
+                        "ui_highlight", "ui_note", "ui_open",
+                        "expert", "experts_contrast", "experts_sweep", "moe_route", "expert_patch"} <= names   # CHANGE-05
 
                 async def call(tool, **args):
                     return _payload(await s.call_tool(tool, args))

@@ -1273,3 +1273,39 @@ Omni の L14 の attention の書き足し(F114)をレシピ `14:dir:wr_mix14`(r
 - system なしでも返事は文になる(音声で返し始めるトークンを禁じるため)。ただし発話を「返事を考える題材」として扱うことがある(「Here are a few ways to respond, depending on the vibe you want:」)。`Respond in text.` を入れると会話の返事になる。
 
 テスト: `tests/test_ui.py::test_live_audio_parts`(UI の API が base64 の音声を受け付け、path を読まない)、`test_chat_mic_sends_wav`(偽の録音デバイスで録り、16 kHz の WAV と system を送る。英語の辞書がそろう)。
+
+## 17. CHANGE-05: MoE 対応(着手前の確認)
+
+試したモデル: granite-3.1-1b-a400m-instruct(Q8_0、`granitemoe`)と LFM2-8B-A1B(Q4_K_M、`lfm2moe`)。
+
+| | granitemoe | lfm2moe |
+|---|---|---|
+| 層 | 24 層すべて MoE | 0・1 層が dense(n_ff 7168)、2 層から MoE(`leading_dense_block_count` 2) |
+| 専門家 | 32 個中 8 個、1 個あたり 512 | 32 個中 4 個、1 個あたり 1792(`expert_feed_forward_length`) |
+| shared expert | なし | なし |
+| ルーター | softmax(`expert_gating_func` なし) | sigmoid(`expert_gating_func` 2)、バイアスあり |
+| 量子化 | すべて Q8_0 | up・gate Q4_K、down Q6_K、ルーター F32 |
+
+1. **テンソル形状**: `ffn_down_exps` は ne `[n_ff_exp, n_embd, n_expert]` → numpy `(n_expert, n_embd, n_ff_exp)`。`ffn_up_exps`・`ffn_gate_exps` は numpy `(n_expert, n_ff_exp, n_embd)`、ルーター `ffn_gate_inp` は F32 で `(n_expert, n_embd)`。設計書のとおり。**ルーターバイアスの名前は `blk.L.exp_probs_b.bias`**(設計書の `ffn_exp_probs_b.bias` ではない)、F32 で `(n_expert,)`。lfm2moe の `feed_forward_length` は dense の層の値で、MoE の層の幅は `expert_feed_forward_length`。
+2. **3D の dequantize**: gguf-py で `(n_expert, n_embd, n_ff_exp)` が返る(Q8_0・Q4_K・Q6_K)。専門家 1 つ分(`data[e]`)だけを dequantize しても全体の `[e]` と一致する(LFM2 の down で全体 1.1 秒、1 つ 0.03 秒)。
+3. **グラフのテンソル名**: MoE の層は `ffn_moe_logits`・`ffn_moe_probs`(lfm2moe は `ffn_moe_probs_biased` も)・`ffn_moe_argsort`・`ffn_moe_topk`・`ffn_moe_weights`・`ffn_moe_weights_sum`・`ffn_moe_weights_sum_clamped`・`ffn_moe_weights_norm`・`ffn_moe_gate`・`ffn_moe_up`・`ffn_moe_swiglu`・`ffn_moe_down`・`ffn_moe_weighted`・`ffn_moe_out`。どちらも重みを正規化するので、実効のルーティング重みは最後に現れる `ffn_moe_weights_norm`。lfm2moe の dense の層は `ffn_swiglu` など dense と同じ名前。
+4. **専門家テンソルへの LoRA**(`build_lora_mm_id`、`llama-adapter.cpp` の形の確認): LoRA の差分は `mul_mat_id(b, mul_mat_id(a, x, ids), ids)` で、専門家の番号で A・B を選ぶ。形の確認は `model.ne[0] == a.ne[0]`・`model.ne[1] == b.ne[1]`・`a.ne[1] == b.ne[0]` だけ。つまり `lora_a` の ne は `[n_in, r, n_expert]`、`lora_b` は `[r, n_out, n_expert]`(numpy `(n_expert, r, n_in)`・`(n_expert, n_out, r)`)。設計書のとおり。
+5. **専門家の CPU への置き場所**: llama-cpp-python は `llama_model_params.tensor_buft_overrides` を `c_void_p`(「unused」)として持つだけで、そのままでは渡せない。今回の 2 つのモデルは 12 GB の GPU に全部載るので使わない。
+
+**V18〜V23 の結果**(granite L5 と LFM2 L6、`tests/test_change05.py`)
+
+- **V18 散布の整合**: 捕捉した `ffn_moe_swiglu` と選んだ専門家から散らした活性は、dequantize した `W_gate_e`・`W_up_e` と `ffn_norm-L` の出力から numpy で計算し直した `silu(g)·u` と、相対誤差の中央値 0.88%(p95 1.3%、granite、456 組)で一致した。選ばれていない専門家は未観測(NaN)のまま。選んだ専門家の番号 `ffn_moe_topk` は `ffn_moe_argsort` の view で並びが続いていないので捕捉できず、`ffn_moe_argsort` の先頭 n_used 列を使う。正規化した重み `ffn_moe_weights_norm` は 2D(`[n_used, T]`)で出る。lfm2moe では FFN の入力にあたる `norm-L` が同じ名前で 2 つ(演算子の norm と FFN の norm)あり、捕捉は先に来た方を採るので、numpy での比べ直しは granite で行った。
+- **V19 専門家のニューロンの gain(LoRA)**: 専門家ごとに積んだ rank-1 の LoRA で `(e, n)` を k 倍すると、e が選ばれたトークンで活性がちょうど k 倍になった(k = 0・2・−1 で相対誤差 0.35〜0.7%、LFM2 の Q4_K で 0.9〜1.8%)。ほかの `(e′, n′)` はビット単位で同じ、選ばれる専門家も変わらない。
+- **V20 スケールパッチの厳密性**: Q4_0・Q4_1・Q5_0・Q5_1・Q8_0・Q2_K〜Q6_K・IQ2_XXS・IQ2_XS・IQ2_S・IQ3_XXS・IQ3_S・IQ1_S・IQ4_NL・IQ4_XS・F16・F32 の合成テンソルで、行のスケールを k 倍(2・−1・0.37)すると dequantize がちょうど k 倍(fp16 のスケールの丸め以内)、k = 0 で全 0、ほかの行はビット単位で不変、revert でファイルが元のバイトに戻る。3D のスラブ(専門家)も同じ。ブロックのバイト数は 18 型とも gguf-py の `GGML_QUANT_SIZES` と一致。スケールの位置をわざとずらすとテストが落ちることも確かめた。
+- **V21 専門家の ablate**: granite L5 の E24(53 トークン中 52 で選ばれる)の `ffn_down_exps` のスラブをパッチで 0 にすると、`ffn_moe_weighted` の E24 のスライスがちょうど 0、ほかの専門家は同じ、`ffn_moe_out` の差は元の E24 の寄与と最大 1.8e-7 で一致。選ばれる専門家はその層では変わらない。revert の後は元の出力とちょうど同じ。読み直しは 0.48 秒(1.4 GB、ページキャッシュあり)。
+- **V22 add の意味の注記**: MoE のニューロンの add は `gne steer` と `export-cvec` で「書き込み方向の押し」の警告を出し、ユニットの詳細に `semantics: direction` を付ける。
+- **V23 ルーターのバイアス(lfm2moe)**: L6 で一度も選ばれない E0 に +1 を足すと選択率 0 → 1.00、よく選ばれる E2(0.67)に −5 で 0.00。選び方が変わらなかったトークンでは重みはちょうど同じ(バイアスは選ぶのにだけ効き、重み付けには効かない)。元のバイアスは ±0.005 程度なので、±1 でも強い。
+
+**E・F の確かめ**(granite-3.1-1b-a400m、`tests/test_change05.py`)
+
+- **E.1 専門家の対照分析**: 海賊の system(6 プロンプト、48 トークン)で 768 専門家を 3 秒で測れた。床(中立どうしの p95)は usage_shift 0.017・contrib_cos 0.20。上位は usage_shift が床の 4〜7 倍(L21 E2 の選択率 0.65 → 0.73、L12 E14 は 0.31 → 0.20 と減る)。上位 8 個の「ペルソナのときに呼ばれる」専門家を消すと、海賊の語は 20 → 13(床の近くの 8 個を消すと 15)。性格の大部分は system から来ていて、専門家 1 つ 1 つの役は小さい。
+- **E.2 専門家の sweep**: L12 の 32 専門家 × 倍率 0・2 を 33 秒(読み直し平均 0.31 秒)。消すと出方がいちばん変わるのは E15(「you・help・here」、アシスタントの決まり文句)。
+- **E.3 逆引き・lens**: MoE の層は全専門家のニューロン(granite で 1 層 16,384 本)を通し番号で並べて cos を取る。書き込みが全部 0 の列(使われない専門家のニューロン、L1 E20 N502 など)があり、単位ベクトルにするときの 0 割りで cos が NaN になって順位の 1 位に来ていたので、0 のままにした。logit lens・steer lens・sweep も通し番号で動き、sweep の結果に `semantics: direction` を付ける。
+- **fires**: MoE の層は、選ばれた専門家の活性を通し番号に散らし(選ばれなければ 0)、トークンごとに選ばれた専門家を `routed` で返す。
+- **F eval**: 専門家全体の gain・route を含むレシピは、倍率ごとに作業用コピーにパッチを当てて測る(倍率 d では k は 1 から k へ、route は 0 から delta へ d の割合で動く)。ランダムな対照も同じパッチで測る。L12 の 2 専門家を消すと能力 0.75 → 0.72、ppl 9.37 → 9.41。終わった後、作業用コピーにパッチは残らない。
+- **最終層**: llama.cpp は最終層で出力のトークンの行だけを計算するので、専門家の捕捉で最終層を含めるときは全位置のロジットを出させる(`logits_all`)。

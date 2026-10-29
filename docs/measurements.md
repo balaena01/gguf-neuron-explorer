@@ -291,3 +291,15 @@ Qwen3.5-4B Q8_0、`gne direction --select auto --mode add`(12 プロンプト、
 見積もりと実測の比較は `docs/verification.md` §13.3。
 
 `steer --contrast` をレシピのサンプリングで(Saluki 27B、`yandere_react.yaml` の 10 場面 × 4 本、128 トークン、対照 16 本): 方向版 10 分、26 ニューロン版(all)13 分。結果は `docs/verification.md` §13.1。
+
+## CHANGE-05(2026-10-29、同じ環境)
+
+| 処理 | 時間 | 備考 |
+|---|---|---|
+| スケールパッチを当てた作業用コピーの読み直し(granite-3.1-1b-a400m Q8_0、1.4 GB) | 0.3〜0.5 秒 | ページキャッシュあり。作業用コピーを作るのは初回だけ(ext4 なので全部コピー) |
+| 同じ(LFM2-8B-A1B Q4_K_M、5.0 GB) | 0.88 秒(平均) | 初回は作業用コピーを作る分を足して +約 10 秒 |
+| `gne experts sweep`(granite L12、32 専門家 × 倍率 0・2、quick の 3 プロンプト、32 トークン) | 33 秒 | 1 回 ≈ 読み直し 0.3 秒 + 生成 |
+| `gne experts contrast`(granite、6 プロンプト、24 層 × 32 専門家、48 トークン) | 3 秒 | |
+| `gne stats act`(granite、2 層、約 3,700 トークン) | 1.5 秒 | 専門家ごとの積算を含む |
+| 専門家 1 つの W_down の dequantize(LFM2 の Q6_K、2048 × 1792) | 0.03 秒 | 層全体(32 個)は 1.1 秒 |
+

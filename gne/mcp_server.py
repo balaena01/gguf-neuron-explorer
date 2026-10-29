@@ -42,6 +42,10 @@ direction で作った方向は "L:dir:NAME:dose"、attention ヘッドの gain 
    対照(同じ k のランダムなヘッド)を超えたものだけ残す。
 6. 人が UI(gne serve)を見ていれば、ui_open で調べているニューロンを開き、ui_highlight で候補を強調し、ui_note で判断の要点を
    ニューロンに貼る(--ui-url で繋いだときだけ。繋いでいなければ UI_NOT_RUNNING が返るので気にせず続ける)。
+8. MoE(専門家を選ぶモデル)では、専門家のニューロンは "L:Ee:Nn:dose"(例 "12:E37:N511:+0.8")。MoE の add は「書き込み方向の押し」
+   (専門家が選ばれたかに関係なく全トークンに足す)で、ニューロンを押すなら gain("12:E37:N511:x2"、選ばれたときだけ効く)。
+   専門家全体は "L:Ee:x0"(消す)/ "L:Ee:x2"、ルーターのバイアスは "L:Ee:route:+2"(バイアスを持つ arch だけ)。
+   まず experts_contrast で専門家を絞り(usage_shift = ペルソナのときに呼ばれる、contrib_cos = 方向を書く)、その中のニューロンを gain で試す。
 """
 
 
@@ -275,6 +279,50 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
             return jobs.start("heads_contrast", params).view()
         except Exception as e:  # noqa: BLE001
             return _err(e)
+
+    @srv.tool()
+    async def expert(layer: int, expert: int) -> dict:
+        """MoE の専門家 1 個の調書(CHANGE-05): 選択率・選ばれたときの重みの平均・よく選ぶトークン(stats act があるとき)、
+        保存済みの experts_contrast での指標と順位、書き込みの大きいニューロン(q999 × ‖W_down[:, n]‖)。"""
+        return await call(session.expert, layer, expert)
+
+    @srv.tool()
+    async def experts_contrast(contrast: str, name: str | None = None, direction: str | None = None,
+                               layers: str | None = None, max_tokens: int = 48) -> dict:
+        """専門家の対照分析をジョブとして投げる(job_status で結果)。対照集合の同じ返事をペルソナあり(system_a)と中立(system_b)で
+        読ませ、MoE の層の専門家ごとに usage_shift(選ばれた割合の差)・weight_shift(実効の重みの差)・contrib_cos(寄与の差と
+        その層の状態の向きの cos)・contrib_norm を測り、中立どうしを床にして z で順位づける。数秒〜数十秒。"""
+        from .cli import parse_layers
+        try:
+            params = {"contrast": str(_contrast_path(session, contrast, None, None, None, name)), "name": name,
+                      "direction": direction, "layers": parse_layers(layers), "max_tokens": max_tokens}
+            return jobs.start("experts_contrast", params).view()
+        except Exception as e:  # noqa: BLE001
+            return _err(e)
+
+    @srv.tool()
+    async def experts_sweep(layer: int, experts: list[int] | None = None, ks: list[float] | None = None,
+                            max_tokens: int = 48) -> dict:
+        """専門家単位のスイープをジョブとして投げる。層の各専門家を k 倍(既定 0 と 2)するスケールパッチで生成し、語の出方で
+        順位づける(帰無は同じ層の全専門家)。1 専門家・1 倍率ごとにモデルを読み直す(小さいモデルで 0.3〜1 秒)。"""
+        try:
+            p = {"layer": layer, "experts": experts, "ks": tuple(ks) if ks else (0.0, 2.0), "max_tokens": max_tokens}
+            return jobs.start("experts_sweep", p).view()
+        except Exception as e:  # noqa: BLE001
+            return _err(e)
+
+    @srv.tool()
+    async def moe_route(text: str, layers: str | None = None, chat: bool = False) -> dict:
+        """文を流し、MoE の層ごとに各トークンで選ばれた専門家と実効のルーティング重み(大きい順)を返す。"""
+        from .cli import parse_layers
+        return await call(session.moe_route, text, layers=parse_layers(layers), chat=chat)
+
+    @srv.tool()
+    async def expert_patch(layer: int, expert: int, k: float, prompt: str, system: str | None = None,
+                           max_tokens: int = 64) -> dict:
+        """専門家 e の出力を k 倍(0 で消す)するスケールパッチを作業用コピーに当てて生成し、無介入と並べる。終わったら元に戻す
+        (元の GGUF は触らない)。レシピに入れるなら "L:Ee:xk" を recipe_save に渡す。"""
+        return await call(session.steer, [f"{layer}:E{expert}:x{k:g}"], prompt=prompt, system=system, max_tokens=max_tokens)
 
     @srv.tool()
     async def writers(contrast: str, name: str | None = None, ref_layer: int | None = None,

@@ -85,6 +85,14 @@
 4. `attention(text, layer, head)` で、そのヘッドが各トークンからどこを見ているかを確かめる(T × T のパターン)。
 5. (実験的)ヘッドに「ペルソナのときだけトリガーを見に行かせる」なら、`gne heads query --layer L --head h --direction D --seek C` で、scale ごとの注目をペルソナあり/なしで確かめてから、レシピに `{kind: head, head, mode: query, direction, seek, scale}` を入れる。注目が増えても返事の性格が増えるとは限らないので、最後は `eval(reactivity=...)` で確かめる(verification.md §14.4)。
 
+## 4.3 MoE のモデル(CHANGE-05)
+
+1. 専門家のニューロンは `L12 E37 N511`(ユニットは `"12:E37:N511:..."`)。**MoE の add は方向押し**(専門家が選ばれたかに関係なく、その書き込み方向を全トークンに足す)。ニューロンを押すなら gain(`x2`、選ばれたときだけ効く)。専門家全体は `L:Ee:x0` / `x2`、ルーターのバイアスは `L:Ee:route:+d`(バイアスを持つ arch だけ、±1 でも強い)。
+2. まず `stats act`(専門家ごとの選択率と選ばれるトークン)と `experts_contrast(contrast)` で専門家を絞る。`usage_shift` が大きい = ペルソナのときに呼ばれる、`contrib_cos` が大きい = ペルソナの方向を書く。床(中立どうしの p95)を超えないものは報告しない。
+3. 絞った専門家を `steer(["L:Ee:x0"])` / `x2` と `experts_sweep(L)` で試す。専門家 1 つを消しても、system で作った性格はあまり減らない(granite の海賊で 8 個消して語が 20 → 13)。
+4. その専門家の中のニューロンは `expert(L, e)` の上位から、gain(`x0` / `x2`)で試す。`n_routed` が 200 未満の専門家は分位点を信頼できない(`reliable: false`)。
+5. 専門家全体の gain と route はスケールパッチで、生成のたびに作業用コピーを読み直す(1.4 GB で 0.3 秒、5 GB で 0.9 秒)。多数を試すときは eval より `experts_sweep` が速い。
+
 ## 5. 報告の仕方
 
 - 調書(`neuron`)の数値をそのまま引用する: sweep の順位(`rank` / `n_ranked`)、`mass`、`null_pct`、上位語、steer lens の KL と対照の 95% 点、逆引きの cos。そのニューロンを含む eval があれば(`evals`)、配布可の最大倍率も。
