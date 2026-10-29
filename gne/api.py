@@ -14,6 +14,7 @@ import json
 import re
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -35,6 +36,9 @@ def open_model(path: str | Path, **kw) -> Session:
     return Session(path, **kw)
 
 
+MIN_ROUTED = 200            # MoE: 専門家の観測トークン数がこれより少ないと分位点を信頼できない(CHANGE-05 §B.1)
+
+
 class Session:
     def __init__(self, path: str | Path, *, root: str | Path | None = None, n_gpu_layers: int = -1,
                  n_ctx: int = 4096, n_seq_max: int = 8, seed: int = 0, verbose: bool = False,
@@ -53,18 +57,23 @@ class Session:
                                mmproj=mmproj)       # mmproj: 音声の入力(media.py)。無ければモデルの横の mmproj*.gguf
         self._engine: Engine | None = None
         self._resid: ResidStats | None = None
+        self.last_patch_reload_s: float | None = None   # パッチを当てたコピーの読み直しにかかった秒(CHANGE-05)
 
     # --- lifecycle ------------------------------------------------------------------------------
 
     @property
     def engine(self) -> Engine:
         if self._engine is None:
-            self._engine = Engine(self.path, **self._engine_kw)
-            tpl = template_override(self.meta.model_id, self.meta.arch)
-            if tpl is not None:
-                self._engine.chat_template = tpl[1]
-                self.warn(f"チャットテンプレートを {tpl[0]} で上書きしました")
+            self._engine = self._make_engine(self.path)
         return self._engine
+
+    def _make_engine(self, path) -> Engine:
+        e = Engine(path, **self._engine_kw)
+        tpl = template_override(self.meta.model_id, self.meta.arch)
+        if tpl is not None:
+            e.chat_template = tpl[1]
+            self.warn(f"チャットテンプレートを {tpl[0]} で上書きしました")
+        return e
 
     def close(self) -> None:
         if self._engine is not None:
@@ -147,9 +156,14 @@ class Session:
         for L, a in sorted(res.items()):
             p = self.store.act_path(self.meta.model_id, L)
             a.save(p)
-            rows.append({"layer": L, "tensor_name": a.tensor_name, "path": str(p), "n_tokens": a.n_tokens,
-                         "absmax_median": float(np.median(a.absmax)), "q999_median": float(np.median(a.q999)),
-                         "rms_median": float(np.median(a.rms))})
+            row = {"layer": L, "tensor_name": a.tensor_name, "path": str(p), "n_tokens": a.n_tokens,
+                   "absmax_median": float(np.median(a.absmax)), "q999_median": float(np.median(a.q999)),
+                   "rms_median": float(np.median(a.rms))}
+            if a.is_moe:                         # CHANGE-05 §B.1: 観測数の少ない専門家は分位点を信頼できない
+                row["moe"] = {"n_expert": int(len(a.n_routed)), "n_routed_min": int(a.n_routed.min()),
+                              "n_routed_median": float(np.median(a.n_routed)),
+                              "rare": [int(e) for e in np.flatnonzero(a.n_routed < MIN_ROUTED)]}
+            rows.append(row)
         return {"layers": rows, "corpus": {"path": c.path, "sha": c.sha}, "seconds": time.perf_counter() - t0}
 
     def resid_stats(self) -> ResidStats | None:
@@ -227,8 +241,29 @@ class Session:
         for u in r.units:
             if not 0 <= u.layer < self.meta.n_layer:
                 raise GneError("BAD_RECIPE", f"層 {u.layer} は範囲外です(0..{self.meta.n_layer - 1})")
+            if u.kind == "neuron" and self.weights.is_moe(u.layer):
+                raise GneError("BAD_RECIPE", f"層 {u.layer} は MoE です。専門家のニューロンは {u.layer}:E<専門家>:N{u.neuron} の形で指定します",
+                               "shared expert のニューロンなら L:S:Nn")
             if u.kind == "neuron" and not 0 <= u.neuron < self.meta.n_ff_at(u.layer):
                 raise GneError("BAD_RECIPE", f"L{u.layer} のニューロン {u.neuron} は範囲外です(0..{self.meta.n_ff_at(u.layer) - 1})")
+            if u.kind in ("expert_neuron", "expert"):
+                li = self.weights.moe_layer(u.layer)                    # MoE でない層ならここで返す
+                if not 0 <= u.expert < li.n_expert:
+                    raise GneError("BAD_RECIPE", f"L{u.layer} の専門家 {u.expert} は範囲外です(0..{li.n_expert - 1})")
+                if u.kind == "expert_neuron" and not 0 <= u.neuron < li.n_ff:
+                    raise GneError("BAD_RECIPE", f"L{u.layer} E{u.expert} のニューロン {u.neuron} は範囲外です(0..{li.n_ff - 1})")
+                if u.mode == "route" and not li.has_router_bias:
+                    raise GneError("ARCH_UNSUPPORTED", f"層 {u.layer} にはルーターのバイアスがありません({self.meta.arch})",
+                                   "route はルーターのバイアス(exp_probs_b)を持つ arch(lfm2moe・deepseek2 など)だけです")
+            if u.kind == "shared":
+                li = self.weights.arch.layers[u.layer]
+                if not li.n_ff_shexp:
+                    raise GneError("BAD_RECIPE", f"層 {u.layer} に shared expert はありません")
+                if not 0 <= u.neuron < li.n_ff_shexp:
+                    raise GneError("BAD_RECIPE", f"L{u.layer} S のニューロン {u.neuron} は範囲外です(0..{li.n_ff_shexp - 1})")
+            if u.kind in ("expert_neuron", "shared") and u.mode == "add":
+                self.warn(f"{u.label()}: MoE の add は書き込み方向の押しです(専門家が選ばれたかに関係なく全トークンに足す)。"
+                          "選ばれたときだけ効くニューロン押しは gain(x)です")
             if u.kind == "head":
                 self.weights.head_block(u.layer, u.head)            # 層にヘッドが無い・範囲外ならここで返す
             if u.layer <= 2:
@@ -312,8 +347,9 @@ class Session:
         msgs = self.messages(prompt, messages, system, audio)
         vecs, details = self.vectors(recipe)
         base = self.generate(None, msgs, max_tokens=max_tokens, sampling=sampling) if compare else None
-        st = self.generate(vecs, msgs, max_tokens=max_tokens, when=when or recipe.when, lora=self.lora_for(recipe),
-                           sampling=sampling)
+        lora = self.lora_for(recipe)
+        with self.patched(self.patches_for(recipe)):           # 専門家全体の gain・route(作業用コピーで読み直す)
+            st = self.generate(vecs, msgs, max_tokens=max_tokens, when=when or recipe.when, lora=lora, sampling=sampling)
         return {"messages": msgs, "recipe": recipe.to_dict(), "units": details, "layer_norms": self._norms(vecs),
                 "when": when or recipe.when, "sampling": None if sampling is None else sampling.to_dict(),
                 "baseline": base, "steered": st, "differs": None if base is None else base["token_ids"] != st["token_ids"]}
@@ -326,12 +362,14 @@ class Session:
         if recipe is None:
             return None
         out = []
-        if recipe.gain_units:
+        lora_units = [u for u in recipe.gain_units if u.kind != "expert"]   # 専門家全体の gain はパッチ(patches_for)
+        if lora_units:
             from .gain import export_gain_lora, lora_cache_path
-            path = lora_cache_path(self.store.gain_dir(self.meta.model_id), recipe)
+            gr = Recipe(lora_units, self.meta.model_id, name=recipe.name)
+            path = lora_cache_path(self.store.gain_dir(self.meta.model_id), gr)
             if not path.exists():
                 tmp = path.with_suffix(".part")
-                export_gain_lora(self.weights, Recipe(recipe.gain_units, self.meta.model_id, name=recipe.name), tmp)
+                export_gain_lora(self.weights, gr, tmp)
                 tmp.replace(path)
             out.append((str(path), 1.0))
         if recipe.ablate is not None and recipe.ablate.scale != 0:
@@ -340,6 +378,62 @@ class Session:
             if u.k:
                 out.append((str(self.query_lora(u)), 1.0))
         return out or None
+
+    # --- スケールパッチ(CHANGE-05 §C・§D)-----------------------------------------------------------
+
+    def patches_for(self, recipe: Recipe | None):
+        """専門家全体の gain(ffn_down_exps のスラブを k 倍、k = 0 で消す)とルーターのバイアス(route)のパッチ。無ければ None。"""
+        if recipe is None:
+            return None
+        from .patch import Patcher, PatchSet
+        units = [u for u in recipe.units if u.kind == "expert" and u.mode in ("gain", "route")]
+        if not units:
+            return None
+        pt = Patcher(self.weights)
+        ps = PatchSet("", self.meta.model_id)
+        for u in units:
+            if u.mode == "gain":
+                ps.extend(pt.scale_slab(f"blk.{u.layer}.ffn_down_exps.weight", u.expert, float(u.k)))
+            else:
+                name = self.weights.router_bias_name(u.layer)
+                if name is None:
+                    raise GneError("ARCH_UNSUPPORTED", f"層 {u.layer} にはルーターのバイアスがありません({self.meta.arch})")
+                ps.extend(pt.add_element(name, u.expert, float(u.dose)))
+        ps.name = "p-" + hashlib.sha256(json.dumps(ps.ops, sort_keys=True).encode()).hexdigest()[:12]
+        return ps
+
+    @contextmanager
+    def patched(self, ps):
+        """パッチを作業用コピーに当て、そのコピーでモデルを読み直す。抜けるとき元に戻し、次に使うときに元のモデルを読む。
+        作業用コピーは 1 回だけ作る(cp --reflink=auto)。読み直しは mmap とページキャッシュで数秒(docs/measurements.md)。"""
+        if ps is None or not ps.patches:
+            yield self.engine
+            return
+        from .patch import applied, make_work_copy
+        work = make_work_copy(self.path, self.store.work_path(self.meta.model_id))
+        stale = [n for n in applied(work) if n != ps.name]
+        if stale:
+            from .patch import PatchSet
+            for n in stale:                                   # 前に落ちたときのパッチが残っていれば戻す
+                f = self.store.patch_dir(self.meta.model_id) / f"{n}.patch.json"
+                if not f.exists():
+                    raise GneError("PATCH_CONFLICT", f"作業用コピーに知らないパッチ {n} が掛かっています", f"{work} を消して作り直してください")
+                PatchSet.load(f).revert(work)
+        ps.save(self.store.patch_dir(self.meta.model_id) / f"{ps.name}.patch.json")
+        if self._engine is not None:                          # VRAM を空けてから読み直す
+            self._engine.close()
+            self._engine = None
+        ps.apply(work)
+        t0 = time.perf_counter()
+        try:
+            self._engine = self._make_engine(work)
+            self.last_patch_reload_s = time.perf_counter() - t0
+            yield self._engine
+        finally:
+            if self._engine is not None:
+                self._engine.close()
+                self._engine = None
+            ps.revert(work)
 
     def query_lora(self, u) -> Path:
         """query のユニット → attn_q の rank-1 LoRA(<root>/heads/<model_id>/ に作って使い回す)。u・v の計算に対照集合の捕捉が要る。"""
@@ -378,16 +472,20 @@ class Session:
             tmp.replace(path)
         return path
 
-    def gain(self, recipe: Recipe | list[str], out: str | Path, *, bake: bool = False, requant: str = "q8_0") -> dict:
+    def gain(self, recipe: Recipe | list[str], out: str | Path, *, bake: bool = False, requant: str = "auto") -> dict:
         """gain ユニットを LoRA アダプタ GGUF(既定)か、W_up(ヘッドは W_O)を書き換えた GGUF(bake)に書き出す(§6.16、CHANGE-04 D)。"""
         from .gain import bake_gain_gguf, export_gain_lora
         recipe = self._as_recipe(recipe)
         if recipe.add_units:
             self.warn("add のユニットは gain の書き出しに入りません(gne export-cvec で control vector に書き出せます)")
-        if not recipe.gain_units and not recipe.query_units:
+        routes = [u for u in recipe.units if u.mode == "route"]
+        if not recipe.gain_units and not recipe.query_units and not routes:
             raise GneError("BAD_RECIPE", "gain のユニットがありません(例 --unit 14:8949:x2、ヘッドは 21:H7:x0)")
+        if not bake and (routes or any(u.kind == "expert" for u in recipe.gain_units)):
+            raise GneError("BAD_RECIPE", "専門家全体の gain と route は LoRA にできません(全ランクになる)",
+                           "--bake でスケールパッチを当てた GGUF にしてください(CHANGE-05 §D)")
         rep: dict = {"path": None, "bytes": 0}
-        if recipe.gain_units:
+        if recipe.gain_units or routes:
             if bake:
                 rep = bake_gain_gguf(self.weights, recipe, out, requant=requant)
             else:
@@ -425,6 +523,13 @@ class Session:
         if not recipe.add_units:
             raise GneError("BAD_RECIPE", "add のユニットがありません(gain だけのレシピは control vector になりません)",
                            "gne gain で LoRA アダプタか書き換え GGUF に書き出してください")
+        moe_add = [u.label() for u in recipe.add_units if u.kind in ("expert_neuron", "shared")]
+        if moe_add:                                           # CHANGE-05 §C・V22
+            self.warn(f"{', '.join(moe_add)}: MoE の add は書き込み方向の押しとして書き出します(専門家が選ばれたかに関係なく全トークンに足す)")
+        rest = [u.label() for u in recipe.units if u.mode in ("gain", "route")]
+        if rest:
+            self.warn(f"{', '.join(rest)}: gain と route は control vector に入りません"
+                      "(ニューロン・ヘッド・専門家のニューロンの gain は LoRA、専門家全体の gain と route はスケールパッチ)")
         vecs, details = self.vectors(recipe)
         if fmt == "cvec" and 0 in vecs:
             raise GneError("BAD_RECIPE", "ブロック 0 は control vector に書けません(llama.cpp の仕様)",
@@ -547,7 +652,7 @@ class Session:
         from .lens import LogitLens, logit_lens_layer
         from .selection import parse_neurons
         self._check_layer(L)
-        sel = parse_neurons(neurons, self.meta.n_ff_at(L), seed=self.seed)
+        sel = parse_neurons(neurons, self.weights.n_units(L), seed=self.seed)
         t0 = time.perf_counter()
         ll = logit_lens_layer(self.weights, L, neurons=sel, top_k=top_k, progress=self.progress)
         path = self.store.lens_dir(self.meta.model_id) / f"logit_L{L}.npz"
@@ -571,7 +676,7 @@ class Session:
         from .lens import steer_lens_layer
         from .selection import parse_neurons
         self._check_layer(L, cvec=True)
-        sel = parse_neurons(neurons, self.meta.n_ff_at(L), seed=self.seed)
+        sel = parse_neurons(neurons, self.weights.n_units(L), seed=self.seed)
         sv = self._need_rho([L])
         t0 = time.perf_counter()
         path = self.store.lens_dir(self.meta.model_id) / (f"steer_L{L}.part-{part}.npz" if part else f"steer_L{L}.npz")
@@ -604,7 +709,7 @@ class Session:
         if not path.exists():
             raise GneError("FILE_NOT_FOUND", f"{path} がありません")
         res = SteerLens.load(path)
-        sel = parse_neurons(neurons, self.meta.n_ff_at(L), seed=self.seed)
+        sel = parse_neurons(neurons, self.weights.n_units(L), seed=self.seed)
         return self._lens_rows(L, res, sel, neurons, path, float(res.config["dose"]), float(res.config["rho"]), show,
                                seconds, lambda ids: [self.vocab.text(int(i)) for i in ids])
 
@@ -613,8 +718,8 @@ class Session:
             raise GneError("BAD_ARGS", f"層 {L} は範囲外です(0..{self.meta.n_layer - 1})")
         if cvec and L == 0:
             raise GneError("BAD_ARGS", "層 0 は control vector で押せません(llama.cpp の仕様)")
-        if not self.weights.has_tensor(f"blk.{L}.ffn_down.weight"):
-            raise GneError("ARCH_UNSUPPORTED", f"層 {L} に dense の ffn_down.weight がありません")
+        if not self.weights.has_tensor(f"blk.{L}.ffn_down.weight") and not self.weights.has_tensor(f"blk.{L}.ffn_down_exps.weight"):
+            raise GneError("ARCH_UNSUPPORTED", f"層 {L} に ffn_down.weight(dense)も ffn_down_exps.weight(MoE)もありません")
 
     def reverse(self, *, contrast: str | Path | None = None, directions: str | Path | None = None,
                 method: str = "mean_diff", positions: str = "all", top: int = 200, layers: list[int] | None = None,
@@ -682,9 +787,15 @@ class Session:
                 info["verify_budget"] = {"budget_s": verify_budget_s, "verify_top": n_v,
                                          "layers": len({c.layer for c in cands[:n_v]}), "seconds_per_unit": per}
             verified = self._verify_candidates(cands[:n_v], name, verify_design, verify_controls, max_tokens)
+        by_expert = None
+        if any(c.expert is not None for c in cands):            # MoE: 上位の候補が特定の専門家に集まっているか(CHANGE-05 §E.3)
+            from collections import Counter
+            cnt = Counter((c.layer, c.expert) for c in cands if c.expert is not None)
+            by_expert = [{"layer": L, "expert": e, "n": n} for (L, e), n in cnt.most_common(20)]
+            info["semantics"] = "direction"
         return {"name": name, "info": info, "candidates_path": str(cpath), "n_candidates": len(cands),
                 "candidates": cd, "layers": layer_summary, "steer_lens_layers": sorted(steer_kl),
-                "verify": verified, "seconds": time.perf_counter() - t0}
+                "verify": verified, "seconds": time.perf_counter() - t0, "by_expert": by_expert}
 
     # --- Phase 3: sweep / rank ------------------------------------------------------------------
 
@@ -710,7 +821,7 @@ class Session:
         from .selection import parse_neurons
         from .sweep import load_design, run_sweep
         self._check_layer(L, cvec=True)
-        sel = parse_neurons(neurons, self.meta.n_ff_at(L), seed=self.seed)
+        sel = parse_neurons(neurons, self.weights.n_units(L), seed=self.seed)
         des = load_design(design, prompt_set=prompt_set)
         sv = self._need_rho([L]) if dose_unit == "rel" else self.stats_view(
             Recipe([Unit(L, int(sel[0]), 1.0)], dose_unit=dose_unit))
@@ -723,7 +834,8 @@ class Session:
                       max_tokens=max_tokens, top_k=top_k, resume=resume, seed=self.seed, progress=self.progress,
                       controls=controls)
         return {"run": name, **r, "design": design, "prompt_set": prompt_set, "n_neurons": int(sel.size),
-                "n_controls": random_controls}
+                "n_controls": random_controls,
+                **({"semantics": "direction"} if self.meta.n_expert and self.weights.is_moe(L) else {})}
 
     def rank(self, run: str, *, word_unit: str = "tokens", max_rel: float = 1.6, show: int = 40,
              find: list[int] | None = None) -> dict:
@@ -833,6 +945,30 @@ class Session:
         from .heads import heads_contrast
         return heads_contrast(self, contrast, name=name, direction=direction, system_b2=system_b2, layers=layers,
                               max_tokens=max_tokens, progress=self.progress)
+
+    def experts_contrast(self, contrast: str | Path, *, name: str | None = None, direction: str | None = None,
+                         system_b2: str | None = None, layers: list[int] | None = None, max_tokens: int = 48) -> dict:
+        """MoE の層の専門家ごとに usage_shift・weight_shift・contrib_cos・contrib_norm を測り、中立どうしを床にして順位づける(CHANGE-05 §E.1)。"""
+        from .experts import experts_contrast
+        return experts_contrast(self, contrast, name=name, direction=direction, system_b2=system_b2, layers=layers,
+                                max_tokens=max_tokens, progress=self.progress)
+
+    def experts_sweep(self, L: int, *, ks=(0.0, 2.0), design: str = "quick", prompt_set: str = "en", max_tokens: int = 48,
+                      experts: list[int] | None = None, run: str | None = None) -> dict:
+        """専門家単位のスイープ(各専門家を消す・強めるスケールパッチで生成し、語の出方で順位づける、CHANGE-05 §E.2)。"""
+        from .experts import experts_sweep
+        return experts_sweep(self, L, ks=ks, design=design, prompt_set=prompt_set, max_tokens=max_tokens, experts=experts,
+                             run=run, progress=self.progress)
+
+    def moe_route(self, text: str, *, layers: list[int] | None = None, chat: bool = False) -> dict:
+        """トークンごとに選ばれた専門家とルーティング重み(MoE の層ごと)。"""
+        from .experts import moe_route
+        return moe_route(self, text, layers=layers, chat=chat)
+
+    def expert(self, L: int, e: int, *, top: int = 20) -> dict:
+        """専門家の調書(使用統計・対照分析での順位・ニューロンの上位)。"""
+        from .experts import expert_dossier
+        return expert_dossier(self, L, e, top=top)
 
     def attention(self, text: str, *, pos: int = -1, layer: int | None = None, head: int | None = None, top: int = 5,
                   system: str | None = None, chat: bool = False) -> dict:

@@ -40,17 +40,21 @@ class Unit:
     layer: int
     neuron: int | None
     dose: float
-    kind: Literal["neuron", "random", "direction", "head"] = "neuron"
+    kind: Literal["neuron", "random", "direction", "head", "expert_neuron", "expert", "shared"] = "neuron"
     seed: int | None = None          # random 用
-    mode: Literal["add", "gain", "query"] = "add"   # §6.16: add = 活性に定数を足す(dose)、gain = 出力を k 倍、query = ヘッドの条件付きクエリ操作
+    mode: Literal["add", "gain", "query", "route"] = "add"   # §6.16: add = 活性に定数を足す(dose)、gain = 出力を k 倍、query = ヘッドの条件付きクエリ操作、route = 専門家のルーターバイアスに dose を足す(CHANGE-05)
     k: float | None = None           # gain の倍率(0 で消去、負で反転)
     direction: str | None = None     # direction 用: gne direction(§6.17)で作った方向の名前。その層の r_L を足す
     head: int | None = None          # head 用(CHANGE-04): attention ヘッドの番号。gain(W_O の列ブロックを k 倍)か query
     seek: str | None = None          # query 用(CHANGE-04 E、実験的): 探しに行く語(triggers)を持つ対照集合。k が scale
+    expert: int | None = None        # MoE(CHANGE-05): expert_neuron = 専門家 e のニューロン、expert = 専門家 e 全体。shared は shared expert のニューロン
 
     def label(self) -> str:
         who = {"neuron": f"N{self.neuron}", "random": f"random{self.seed}", "direction": f"dir:{self.direction}",
-               "head": f"H{self.head}"}[self.kind]
+               "head": f"H{self.head}", "expert_neuron": f"E{self.expert} N{self.neuron}", "expert": f"E{self.expert}",
+               "shared": f"S N{self.neuron}"}[self.kind]
+        if self.mode == "route":
+            return f"L{self.layer} {who} route {self.dose:+g}"
         if self.mode == "gain":
             return f"L{self.layer} {who} ×{self.k:g}"
         if self.mode == "query":
@@ -146,11 +150,11 @@ class Recipe:
     def load(cls, path: str | Path) -> Recipe:
         d = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
         units = [Unit(layer=int(u["layer"]), neuron=None if u.get("neuron") is None else int(u["neuron"]),
-                      dose=float(u.get("dose", 0.0)), kind=u.get("kind", "neuron"), seed=u.get("seed"),
+                      dose=float(u.get("dose", u.get("delta", 0.0))), kind=u.get("kind", "neuron"), seed=u.get("seed"),
                       mode=u.get("mode", "add"),
                       k=None if u.get("k", u.get("scale")) is None else float(u.get("k", u.get("scale"))),
                       direction=u.get("direction"), head=None if u.get("head") is None else int(u["head"]),
-                      seek=u.get("seek"))
+                      seek=u.get("seek"), expert=None if u.get("expert") is None else int(u["expert"]))
                  for u in d.get("units", [])]
         r = cls(units, d.get("model_id"), d.get("dose_unit", "rel"), d.get("name") or Path(path).stem, d.get("when") or "all",
                 AblateSpec.from_dict(d.get("ablate")), d.get("sampling") or None)
@@ -172,9 +176,9 @@ class Recipe:
 
     def scaled(self, k: float) -> Recipe:
         # add は dose を k 倍、gain は倍率を「1(何もしない)から k_unit へ」の間で k の割合だけ動かす(eval の倍率列で 0 が無介入になるように)
-        return Recipe([Unit(u.layer, u.neuron, u.dose * k if u.mode == "add" else u.dose, u.kind, u.seed, u.mode,
+        return Recipe([Unit(u.layer, u.neuron, u.dose * k if u.mode in ("add", "route") else u.dose, u.kind, u.seed, u.mode,
                             None if u.k is None else (u.k * k if u.mode == "query" else 1 + (u.k - 1) * k),
-                            u.direction, u.head, u.seek) for u in self.units],
+                            u.direction, u.head, u.seek, u.expert) for u in self.units],
                       self.model_id, self.dose_unit, self.name, self.when,
                       None if self.ablate is None else AblateSpec(self.ablate.direction, self.ablate.scale * k,
                                                                  self.ablate.layers, self.ablate.from_layer), self.sampling)
@@ -185,8 +189,13 @@ class Recipe:
 
     @property
     def gain_units(self) -> list[Unit]:
-        """gain のユニット(ニューロンとヘッド)。"""
+        """gain のユニット(ニューロン・ヘッド・専門家のニューロン・専門家・shared expert のニューロン)。"""
         return [u for u in self.units if u.mode == "gain"]
+
+    @property
+    def moe_units(self) -> list[Unit]:
+        """MoE の単位(CHANGE-05): 専門家のニューロン・専門家・shared expert のニューロン。"""
+        return [u for u in self.units if u.kind in ("expert_neuron", "expert", "shared")]
 
     @property
     def head_units(self) -> list[Unit]:
@@ -213,8 +222,20 @@ class Recipe:
                 raise GneError("BAD_RECIPE", "sampling は {temperature, top_k, top_p, min_p, presence_penalty} の表です")
             self.sampling = sampling_values(self.sampling, seed=False)
         for u in self.units:
-            if u.mode not in ("add", "gain", "query"):
-                raise GneError("BAD_RECIPE", f"{u}: mode は add / gain / query です")
+            if u.mode not in ("add", "gain", "query", "route"):
+                raise GneError("BAD_RECIPE", f"{u}: mode は add / gain / query / route です")
+            if u.kind in ("expert_neuron", "expert", "shared"):           # MoE(CHANGE-05)
+                if u.kind != "shared" and u.expert is None:
+                    raise GneError("BAD_RECIPE", f"{u}: 専門家の番号(expert)が要ります(例 12:E37:N511:+0.8)")
+                if u.kind in ("expert_neuron", "shared") and (u.neuron is None or u.mode not in ("add", "gain")):
+                    raise GneError("BAD_RECIPE", f"{u}: 専門家のニューロンは neuron が要り、add か gain です(例 12:E37:N511:x0)")
+                if u.kind == "expert" and u.mode not in ("gain", "route"):
+                    raise GneError("BAD_RECIPE", f"{u}: 専門家全体は gain(12:E37:x0)か route(12:E37:route:+2)です")
+                if u.mode == "gain" and u.k is None:
+                    raise GneError("BAD_RECIPE", f"{u}: gain には倍率 k が要ります")
+                if u.mode == "add" and self.dose_unit == "absmax":
+                    raise GneError("BAD_RECIPE", "専門家のニューロンの add は dose_unit=rel か raw で使います(absmax は未対応)")
+                continue
             if u.mode == "query":
                 if u.kind != "head" or u.head is None or not u.direction or not u.seek or u.k is None:
                     raise GneError("BAD_RECIPE", f"{u}: query はヘッドだけで、head・direction・seek・scale が要ります"
@@ -236,21 +257,40 @@ class Recipe:
             if u.kind == "direction" and self.dose_unit == "absmax":
                 raise GneError("BAD_RECIPE", "方向のユニットは dose_unit=rel か raw で使います(absmax はニューロン用)")
             if u.kind not in ("neuron", "random", "direction", "head"):
-                raise GneError("BAD_RECIPE", f"{u}: kind は neuron / random / direction / head です")
+                raise GneError("BAD_RECIPE", f"{u}: kind は neuron / random / direction / head / expert_neuron / expert / shared です")
 
 
 _UNIT_RE = re.compile(r"^(\d+):(?:(\d+)|random:(\d+)|dir:([\w.\-@]+)|[Hh](\d+)):(x?)([+-]?[\d.]+(?:e[+-]?\d+)?)$", re.I)
 
 
+_MOE_RE = re.compile(r"^(\d+):(?:E(\d+)|(S)):(?:N(\d+):(x?)|(x)|(route):)([+-]?[\d.]+(?:e[+-]?\d+)?)$", re.I)
+
+
 def parse_unit(spec: str) -> Unit:
     """"L:N:dose"(例 14:8949:+1.0)、"L:random:SEED:dose"、gain は "L:N:x2"(x の後が倍率 k、§6.16)、
     方向は "L:dir:NAME:dose"(gne direction で作った方向 NAME の r_L を層 L に足す、§6.17)、
-    attention ヘッドの gain は "L:Hh:xk"(例 21:H7:x0、CHANGE-04)。"""
+    attention ヘッドの gain は "L:Hh:xk"(例 21:H7:x0、CHANGE-04)。
+    MoE(CHANGE-05): 専門家のニューロンは "L:Ee:Nn:dose" / "L:Ee:Nn:xk"、専門家全体は "L:Ee:xk"(x0 で消す)、
+    ルーターバイアスは "L:Ee:route:delta"、shared expert のニューロンは "L:S:Nn:dose" / "L:S:Nn:xk"。"""
+    mm = _MOE_RE.match(spec.strip())
+    if mm:
+        L, e, shared, n, ngain, egain, route, val = mm.groups()
+        if shared:
+            if n is None:
+                raise GneError("BAD_UNIT", f"{spec!r}: shared expert はニューロンだけです(例 12:S:N511:+0.8)")
+            return Unit(int(L), int(n), 0.0 if ngain else float(val), "shared",
+                        mode="gain" if ngain else "add", k=float(val) if ngain else None)
+        if n is not None:
+            return Unit(int(L), int(n), 0.0 if ngain else float(val), "expert_neuron",
+                        mode="gain" if ngain else "add", k=float(val) if ngain else None, expert=int(e))
+        if route:
+            return Unit(int(L), None, float(val), "expert", mode="route", expert=int(e))
+        return Unit(int(L), None, 0.0, "expert", mode="gain", k=float(val), expert=int(e))
     m = _UNIT_RE.match(spec.strip())
     if not m:
         raise GneError("BAD_UNIT", f"ユニット指定 {spec!r} を読めません",
                        "L:N:dose(例 14:8949:+1.0)、L:random:SEED:dose、gain は L:N:x2(倍率)、方向は L:dir:NAME:dose、"
-                       "ヘッドは L:Hh:xk(例 21:H7:x0)")
+                       "ヘッドは L:Hh:xk(例 21:H7:x0)、MoE は L:Ee:Nn:dose・L:Ee:xk・L:Ee:route:delta・L:S:Nn:dose")
     L, n, seed, dname, head, gain, val = m.groups()
     if head is not None:
         if not gain:
@@ -274,6 +314,8 @@ def _unit_yaml(u: Unit) -> dict:
         d.pop("dose", None)
     if u.mode == "query":
         d["scale"] = d.pop("k")
+    if u.mode == "route":
+        d["delta"] = d.pop("dose")
     return d
 
 
@@ -315,9 +357,18 @@ def unit_vector(weights, stats, unit: Unit, dose_unit: DoseUnit = "rel", dirs: D
         if dose_unit != "rel":
             raise GneError("BAD_RECIPE", "ランダム方向のユニットは dose_unit=rel でだけ使えます")
         return (unit.dose * stats.rho(L) * random_direction(weights.meta.n_embd, int(unit.seed), L)).astype(np.float32)
+    if unit.kind in ("expert_neuron", "shared"):
+        # MoE(CHANGE-05 §C): 書き込み方向の押し。専門家が選ばれたかどうかに関係なく全トークンに足す(ニューロン押しではない)
+        col = (weights.expert_down(L, unit.expert) if unit.kind == "expert_neuron" else weights.shexp_down(L))[:, unit.neuron].copy()
+        if dose_unit == "rel":
+            return (unit.dose * stats.rho(L) * col / np.linalg.norm(col)).astype(np.float32)
+        if dose_unit == "raw":
+            return (unit.dose * col).astype(np.float32)
+        raise GneError("BAD_RECIPE", "専門家のニューロンの add は dose_unit=rel か raw で使います")
     col = weights.down_column(L, unit.neuron)
     if dose_unit == "rel":
-        return (unit.dose * stats.rho(L) * col / np.linalg.norm(col)).astype(np.float32)
+        nrm = float(np.linalg.norm(col))
+        return (unit.dose * stats.rho(L) * col / nrm).astype(np.float32) if nrm > 0 else np.zeros_like(col)
     s = _down_scale(weights, L)
     if dose_unit == "absmax":
         return (unit.dose * stats.absmax(L, unit.neuron) * s * col).astype(np.float32)
@@ -340,10 +391,12 @@ def unit_details(weights, stats, recipe: Recipe, dirs: DirLoader | None = None) 
     方向のユニットは diff_rel = ‖平均差‖ / ρ_L(rel dose がこの値なら平均差と同じ大きさ)も返す。"""
     rows = []
     for u in recipe.units:
-        if u.mode in ("gain", "query"):
-            rows.append({"layer": u.layer, "neuron": u.neuron, "kind": u.kind, "seed": None, "dose": 0.0, "norm": 0.0,
+        if u.mode in ("gain", "query", "route"):
+            rows.append({"layer": u.layer, "neuron": u.neuron, "kind": u.kind, "seed": None,
+                         "dose": u.dose if u.mode == "route" else 0.0, "norm": 0.0,
                          "rel_push": None, "rho": None, "add": None, "down_norm": None, "mode": u.mode, "k": u.k,
                          **({"head": u.head} if u.kind == "head" else {}),
+                         **({"expert": u.expert} if u.expert is not None else {}),
                          **({"direction": u.direction, "seek": u.seek} if u.mode == "query" else {})})
             continue
         v = unit_vector(weights, stats, u, recipe.dose_unit, dirs)
@@ -361,6 +414,10 @@ def unit_details(weights, stats, recipe: Recipe, dirs: DirLoader | None = None) 
             dn = float(weights.down_norms(u.layer)[u.neuron])
             d["down_norm"] = dn
             d["add"] = float(np.sign(u.dose)) * norm / (dn * _down_scale(weights, u.layer))
+        if u.kind in ("expert_neuron", "shared"):
+            if u.expert is not None:
+                d["expert"] = u.expert
+            d["semantics"] = "direction"                     # MoE では書き込み方向の押し(CHANGE-05 §C、V22)
         rows.append(d)
     return rows
 

@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from collections import Counter
+
 import hashlib
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -155,17 +157,30 @@ class ActStats:
     mean: np.ndarray         # 符号つきの平均
     n_tokens: int
     corpus_sha: str
+    # MoE の層(CHANGE-05 §B.1): 上の配列は (n_expert, n_ff_exp) で、専門家 e が選ばれたトークンだけで数える
+    n_routed: np.ndarray | None = None       # (n_expert,) 選ばれたトークン数(観測数)。少ない専門家の分位点は信頼できない
+    weight_mean: np.ndarray | None = None    # (n_expert,) 選ばれたときの実効のルーティング重みの平均
+    top_tokens: np.ndarray | None = None     # (n_expert, k) 選ばれた回数が多いトークン(位置 0 を除く、無ければ −1)
+    top_counts: np.ndarray | None = None     # (n_expert, k)
+
+    @property
+    def is_moe(self) -> bool:
+        return self.n_routed is not None
 
     def save(self, path: str | Path) -> None:
+        extra = {} if self.n_routed is None else dict(n_routed=self.n_routed, weight_mean=self.weight_mean,
+                                                         top_tokens=self.top_tokens, top_counts=self.top_counts)
         np.savez(path, layer=self.layer, tensor_name=self.tensor_name, absmax=self.absmax, q50=self.q50,
                  q99=self.q99, q999=self.q999, rms=self.rms, mean=self.mean, n_tokens=self.n_tokens,
-                 corpus_sha=self.corpus_sha)
+                 corpus_sha=self.corpus_sha, **extra)
 
     @classmethod
     def load(cls, path: str | Path) -> ActStats:
         z = np.load(path)
+        get = (lambda k: z[k] if k in z.files else None)
         return cls(int(z["layer"]), str(z["tensor_name"]), z["absmax"], z["q50"], z["q99"], z["q999"],
-                   z["rms"], z["mean"], int(z["n_tokens"]), str(z["corpus_sha"]))
+                   z["rms"], z["mean"], int(z["n_tokens"]), str(z["corpus_sha"]),
+                   get("n_routed"), get("weight_mean"), get("top_tokens"), get("top_counts"))
 
 
 class _ActAccumulator:
@@ -205,20 +220,64 @@ class _ActAccumulator:
                         np.sqrt(self.sumsq / n).astype(np.float32), (self.sum / n).astype(np.float32), self.n, sha)
 
 
+class _MoeAccumulator:
+    """MoE の層: 専門家ごとの _ActAccumulator と、選ばれた回数・重み・トークン(CHANGE-05 §B.1)。"""
+
+    TOP = 20
+
+    def __init__(self, n_expert: int, n_ff: int):
+        self.acc = [_ActAccumulator(n_ff) for _ in range(n_expert)]
+        self.cnt = np.zeros(n_expert, np.int64)
+        self.wsum = np.zeros(n_expert, np.float64)
+        self.toks = [Counter() for _ in range(n_expert)]
+        self.n = 0
+
+    def add(self, act: np.ndarray, sel: np.ndarray, wts: np.ndarray | None, ids: np.ndarray) -> None:
+        from .moe import by_expert, usage
+        for e, rows in enumerate(by_expert(act, sel, len(self.acc))):
+            if len(rows):
+                self.acc[e].add(rows)
+        c, w = usage(sel, wts, len(self.acc))
+        self.cnt += c
+        self.wsum += w
+        for e, t in zip(sel.reshape(-1), np.repeat(ids, sel.shape[1]), strict=True):
+            self.toks[e][int(t)] += 1
+        self.n += act.shape[0]
+
+    def finish(self, L: int, name: str, sha: str) -> ActStats:
+        parts = [a.finish(L, name, sha) for a in self.acc]
+        st = {k: np.stack([getattr(p, k) for p in parts]) for k in ("absmax", "q50", "q99", "q999", "rms", "mean")}
+        top = np.full((len(self.acc), self.TOP), -1, np.int64)
+        tc = np.zeros((len(self.acc), self.TOP), np.int64)
+        for e, c in enumerate(self.toks):
+            for i, (t, n) in enumerate(c.most_common(self.TOP)):
+                top[e, i], tc[e, i] = t, n
+        return ActStats(L, name, st["absmax"], st["q50"], st["q99"], st["q999"], st["rms"], st["mean"], self.n, sha,
+                        self.cnt, (self.wsum / np.maximum(self.cnt, 1)).astype(np.float32), top, tc)
+
+
 def neuron_activation_stats(engine: Engine, corpus: Corpus, layers: Sequence[int] | None = None, *,
                             chunk_tokens: int = 512, include_last_layer: bool = False,
                             max_tokens: int | None = None, progress: Progress | None = None) -> dict[int, ActStats]:
-    """ffn_down の入力(ffn_swiglu-L 等)を捕捉し、各ニューロンの |a| の分位点・最大値・平均・RMS をストリーミングで計算。"""
+    """ffn_down の入力(ffn_swiglu-L 等)を捕捉し、各ニューロンの |a| の分位点・最大値・平均・RMS をストリーミングで計算。
+    MoE の層は選ばれた専門家の活性(ffn_moe_swiglu-L)と順位(ffn_moe_argsort-L)を組で読み、専門家ごとに数える。"""
+    from .moe import moe_names
     Ls = _default_layers(engine, layers, include_last_layer)
     chunks = corpus_chunks(engine, corpus, chunk_tokens, max_tokens)
     names_all = engine.list_names(chunks[0][:16])
     act_names = {}
+    moe: dict[int, dict[str, str]] = {}
     for L in Ls:
         nm = pick_act_name(names_all, L)
         if nm is None:
+            mn = moe_names(names_all, L)
+            if "act" in mn and "argsort" in mn:
+                moe[L] = mn
+                continue
             raise RuntimeError(f"層 {L} の ffn_down 入力テンソルが見つかりません(gne probe --list-names --layer {L})")
         act_names[nm] = L
-    cap = Capture(lambda n: n in act_names)
+    moe_wanted = {v for mn in moe.values() for k, v in mn.items() if k in ("act", "argsort", "weights")}
+    cap = Capture(lambda n: n in act_names or n in moe_wanted)
     ctx = engine.probe_ctx(cap, logits_all=include_last_layer)
     engine.set_cvec(ctx, None)
     acc: dict[int, _ActAccumulator] = {}
@@ -231,9 +290,18 @@ def neuron_activation_stats(engine: Engine, corpus: Corpus, layers: Sequence[int
             a = out[name]
             _rows_check(name, a, len(ch))
             acc.setdefault(L, _ActAccumulator(a.shape[1])).add(a[1:])
+        for L, mn in moe.items():
+            from .moe import per_token, selected
+            T = len(ch)
+            arg = out[mn["argsort"]]
+            n_used = out[mn["act"]].shape[0] // T
+            act = per_token(out[mn["act"]], n_used, T)[1:]                # 位置 0(注意の受け皿)を除く
+            sel = selected(arg, n_used)[1:]
+            wts = per_token(out[mn["weights"]], n_used, T)[1:] if "weights" in mn and mn["weights"] in out else None
+            acc.setdefault(L, _MoeAccumulator(arg.shape[1], act.shape[2])).add(act, sel, wts, np.asarray(ch[1:]))
         if progress:
             progress(i + 1, len(chunks), "stats act")
-    rev = {L: n for n, L in act_names.items()}
+    rev = {L: n for n, L in act_names.items()} | {L: mn["act"] for L, mn in moe.items()}
     return {L: acc[L].finish(L, rev[L], corpus.sha) for L in Ls}
 
 
@@ -258,4 +326,4 @@ class StatsView:
         st = self._act[L]
         if st is None:
             raise KeyError(f"層 {L} の活性統計がありません(gne stats act --layers {L} を先に実行してください)")
-        return float(st.absmax[n])
+        return float(st.absmax.reshape(-1)[n])            # MoE の層は (n_expert, n_ff_exp) を通し番号で引く

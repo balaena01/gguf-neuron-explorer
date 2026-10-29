@@ -81,6 +81,17 @@ class Store:
     def layout_dir(self, model_id: str) -> Path:
         return self._dir("layout", model_id)
 
+    def experts_dir(self, model_id: str) -> Path:
+        """専門家の対照分析(CHANGE-05 §E.1)。"""
+        return self._dir("experts", model_id)
+
+    def work_path(self, model_id: str) -> Path:
+        """スケールパッチを当てる作業用コピー(CHANGE-05 §D)。元の GGUF は触らない。"""
+        return self.root / "work" / f"{model_id}.gguf"
+
+    def patch_dir(self, model_id: str) -> Path:
+        return self._dir("patches", model_id)
+
     def recipes_dir(self) -> Path:
         return self._dir("recipes")
 

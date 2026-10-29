@@ -142,7 +142,7 @@ def neuron_dossier(session, L: int, n: int, *, rollouts: int = 4, compute: bool 
     from .lens import LogitLens, SteerLens, logit_lens_layer
     from .stats import ActStats
     m = session.meta
-    if not 0 <= L < m.n_layer or not 0 <= n < m.n_ff_at(L):
+    if not 0 <= L < m.n_layer or not 0 <= n < session.weights.n_units(L):
         raise GneError("BAD_ARGS", f"L{L} N{n} は範囲外です")
     tok = session._tok
     cov = {"sweep": False, "steer_lens": False, "logit_lens": False, "directions": False, "activation": False,
@@ -150,6 +150,10 @@ def neuron_dossier(session, L: int, n: int, *, rollouts: int = 4, compute: bool 
     out: dict = {"layer": L, "neuron": n, "name": _names(session).get(f"{L}:{n}"),
                  "down_norm": float(session.weights.down_norms(L)[n]), "sweep": None, "steer_lens": None,
                  "logit_lens": None, "directions": {}, "activation": None, "connections": None}
+    if m.n_expert and session.weights.is_moe(L):                 # CHANGE-05: n は層の中の通し番号
+        e, k = session.weights.moe_split(L, n)
+        out.update(expert=e, expert_neuron=k, semantics="direction",
+                   address=f"L{L} E{e} N{k}", recipe_hint=f"{L}:E{e}:N{k}:x2(選ばれたときだけ効く gain)/ {L}:E{e}:N{k}:+0.8(方向押し)")
 
     # sweep: その層の run のうち、このニューロンの rollout が一番多いもの
     best = None
@@ -223,8 +227,11 @@ def neuron_dossier(session, L: int, n: int, *, rollouts: int = 4, compute: bool 
     ap = session.store.act_path(m.model_id, L)
     if ap.exists():
         a = ActStats.load(ap)
-        out["activation"] = {"absmax": float(a.absmax[n]), "q999": float(a.q999[n]), "q99": float(a.q99[n]),
-                             "rms": float(a.rms[n]), "mean": float(a.mean[n])}
+        f = (lambda x: float(x.reshape(-1)[n]))            # MoE の層は (n_expert, n_ff_exp) を通し番号で引く
+        out["activation"] = {"absmax": f(a.absmax), "q999": f(a.q999), "q99": f(a.q99), "rms": f(a.rms), "mean": f(a.mean)}
+        if a.is_moe:                                       # その専門家が選ばれたトークンだけで数えた値
+            e = n // (a.absmax.shape[1])
+            out["activation"].update(n_routed=int(a.n_routed[e]), reliable=bool(a.n_routed[e] >= 200))
         cov["activation"] = True
     # eval と gain(CHANGE-01): このニューロンを含む保存済みの eval と、当てたことのある gain の倍率
     out["evals"] = unit_evals(session, L, n)

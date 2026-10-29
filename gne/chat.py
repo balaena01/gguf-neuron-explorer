@@ -41,12 +41,15 @@ def _with_dose(recipe: Recipe, dose: float | None, sign: float) -> Recipe:
     # gain は − の列で「1 を挟んで反対側」の倍率にする(×2 なら ×0、×0 なら ×2)。dose はそろえない
     # ablate(§6.17)は − の列で scale を反転する(負の scale はその方向を強める)
     # query(ヘッドの条件付きクエリ操作)は − の列では外す(scale 0)
-    units = [Unit(u.layer, u.neuron, 0.0, u.kind, u.seed, "gain", u.k if sign > 0 else 2 - u.k, head=u.head)
+    # route(専門家のルーターのバイアス、CHANGE-05)は − の列で delta の符号を反転する
+    units = [Unit(u.layer, u.neuron, 0.0, u.kind, u.seed, "gain", u.k if sign > 0 else 2 - u.k, head=u.head, expert=u.expert)
              if u.mode == "gain" else
              Unit(u.layer, None, 0.0, "head", None, "query", u.k if sign > 0 else 0.0, u.direction, u.head, u.seek)
              if u.mode == "query" else
+             Unit(u.layer, None, u.dose * sign, "expert", mode="route", expert=u.expert)
+             if u.mode == "route" else
              Unit(u.layer, u.neuron, (abs(dose) if dose is not None else abs(u.dose)) * (1 if u.dose >= 0 else -1) * sign,
-                  u.kind, u.seed, direction=u.direction) for u in recipe.units]
+                  u.kind, u.seed, direction=u.direction, expert=u.expert) for u in recipe.units]
     ab = recipe.ablate
     if ab is not None and sign < 0:
         ab = AblateSpec(ab.direction, -ab.scale, ab.layers, ab.from_layer)

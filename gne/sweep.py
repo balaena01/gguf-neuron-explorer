@@ -174,7 +174,7 @@ def run_sweep(engine: Engine, weights, stats, *, L: int, neurons: Sequence[int],
                         unit = Unit(L, None, dose, "random", sd)
                     v = unit_vector(weights, stats, unit, dose_unit)
                     nrm = float(np.linalg.norm(v))
-                    add = float(np.sign(dose)) * nrm / float(norms[uid]) if kind == "neuron" else None
+                    add = float(np.sign(dose)) * nrm / float(norms[uid]) if kind == "neuron" and norms[uid] > 0 else None
                     engine.set_cvec(ctx, {L: v})
                     for k, r in zip(keys, gen(keys), strict=True):
                         write(record(kind, uid, uid if kind == "neuron" else None, k, dose, nrm / rho, add, r,

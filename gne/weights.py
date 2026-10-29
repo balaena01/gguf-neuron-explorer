@@ -41,6 +41,27 @@ def tensor_to_f32(tensor) -> np.ndarray:
     return gquants.dequantize(tensor.data, qtype).astype(np.float32, copy=False)
 
 
+EXPERT_CACHE_BYTES = 1 << 30           # 専門家ごとに dequantize した行列を覚えておく上限(CHANGE-05 §I)
+
+
+def _safe(nrm: np.ndarray) -> np.ndarray:
+    """単位ベクトルにするときの割る数。書き込みが全部 0 のニューロン(使われない専門家に多い)は 0 のままにする。"""
+    return np.where(nrm > 0, nrm, 1.0).astype(np.float32)
+
+
+def _slab_to_f32(tensor, e: int) -> np.ndarray:
+    """3D のテンソル(numpy (n_expert, rows, …))の [e] だけを float32 にする。"""
+    qtype = tensor.tensor_type
+    part = np.asarray(tensor.data[e])
+    if qtype == GGMLQuantizationType.F32:
+        return part.astype(np.float32)
+    if qtype == GGMLQuantizationType.F16:
+        return part.astype(np.float32)
+    if qtype not in gquants._type_traits:
+        raise NotImplementedError(f"{tensor.name}: 量子化型 {qtype.name} は gguf-py で dequantize できません")
+    return gquants.dequantize(part, qtype).astype(np.float32, copy=False)
+
+
 @dataclass
 class ModelMeta:
     path: Path
@@ -158,7 +179,8 @@ class Weights:
         if m.has_post_ffn_norm:
             out.append("post_ffw_norm があります(Gemma 系): 方向加算としては働くが「ニューロン n を押した」とは等価ではありません(§2.1)")
         if m.n_expert or any(n.endswith("ffn_down_exps.weight") for n in self._tensors):
-            out.append(f"MoE(n_expert={m.n_expert}): dense FFN 前提の機能は使えません(§12 の拡張方針を参照)")
+            out.append(f"MoE(n_expert={m.n_expert}): 専門家のニューロンは L:Ee:Nn の形。add は「書き込み方向の押し」で、"
+                       "専門家が選ばれたときだけ効く本当のニューロン押しは gain(CHANGE-05 §C)")
         if m.ffn_down_scale:
             out.append("ffn_down.scale があります(BitNet 系): raw dose に係数 s を掛けます")
         try:
@@ -200,18 +222,142 @@ class Weights:
             raise ValueError(f"{name} の形状 {mat.shape} が期待値 {expected} と違います")
         return mat
 
+    # MoE の層(CHANGE-05)では、下の読み口は層の中の通し番号 i = e·n_ff_exp + n で専門家 e のニューロン n を指す
+    # (マップの専門家のタイルの並びと同じ)。押すと「書き込み方向の押し」(§C)
+
+    def n_units(self, L: int) -> int:
+        """層 L のニューロンの数(MoE の層は全専門家の合計)。"""
+        if self.meta.n_expert and self.is_moe(L):
+            li = self.arch.layers[L]
+            return li.n_expert * li.n_ff
+        return self.meta.n_ff_at(L)
+
+    def moe_split(self, L: int, i: int) -> tuple[int, int]:
+        """MoE の層の通し番号 → (専門家, ニューロン)。"""
+        n_ff = self.arch.layers[L].n_ff
+        return int(i) // n_ff, int(i) % n_ff
+
     def down_column(self, L: int, n: int) -> np.ndarray:
+        if self.meta.n_expert and self.is_moe(L):
+            e, k = self.moe_split(L, n)
+            return self.expert_down(L, e)[:, k].copy()
         return self.down_matrix(L)[:, n].copy()
 
     def down_norms(self, L: int) -> np.ndarray:
-        """‖W_down[:, n]‖ 全 n。"""
+        """‖W_down[:, n]‖ 全 n(MoE の層は通し番号の順)。"""
+        if self.meta.n_expert and self.is_moe(L):
+            return self.expert_down_norms(L).reshape(-1)
         if L not in self._norms:
             self._norms[L] = np.linalg.norm(self.down_matrix(L), axis=0).astype(np.float32)
         return self._norms[L]
 
     def unit_matrix(self, L: int) -> np.ndarray:
-        """W_down の列を単位ベクトルにしたもの (n_embd, n_ff)。"""
-        return self.down_matrix(L) / self.down_norms(L)[None, :]
+        """W_down の列を単位ベクトルにしたもの (n_embd, n_ff)(MoE の層は全専門家を通し番号の順につないだもの)。"""
+        if self.meta.n_expert and self.is_moe(L):
+            li = self.arch.layers[L]
+            nrm = self.expert_down_norms(L)
+            return np.concatenate([self.expert_down(L, e) / _safe(nrm[e])[None, :] for e in range(li.n_expert)], axis=1)
+        return self.down_matrix(L) / _safe(self.down_norms(L))[None, :]
+
+    def unit_columns(self, L: int, idx) -> np.ndarray:
+        """unit_matrix(L)[:, idx] を、要る専門家だけ dequantize して作る (n_embd, len(idx))。"""
+        idx = np.asarray(idx, dtype=np.int64)
+        if not (self.meta.n_expert and self.is_moe(L)):
+            return self.unit_matrix(L)[:, idx]
+        n_ff = self.arch.layers[L].n_ff
+        out = np.empty((self.meta.n_embd, idx.size), np.float32)
+        nrm = self.expert_down_norms(L)
+        for e in np.unique(idx // n_ff):
+            sel = np.flatnonzero(idx // n_ff == e)
+            k = idx[sel] % n_ff
+            out[:, sel] = self.expert_down(L, int(e))[:, k] / _safe(nrm[e][k])[None, :]
+        return out
+
+    # --- MoE の専門家(CHANGE-05) -------------------------------------------------------------------
+    # 専門家のテンソルは numpy (n_expert, …) の 3D。専門家 1 つ分(data[e])だけを dequantize し、層全体は一度に展開しない
+
+    def is_moe(self, L: int) -> bool:
+        return self.arch.layers[L].ffn.startswith("moe")
+
+    def moe_layer(self, L: int):
+        """層 L の LayerInfo(MoE でなければ GneError)。"""
+        from .steer import GneError
+        if not 0 <= L < self.meta.n_layer:
+            raise GneError("BAD_RECIPE", f"層 {L} は範囲外です")
+        li = self.arch.layers[L]
+        if not li.ffn.startswith("moe"):
+            raise GneError("BAD_RECIPE", f"層 {L} は MoE ではありません({li.ffn})。ニューロンは L:N の形です")
+        return li
+
+    def _expert_slab(self, name: str, e: int) -> np.ndarray:
+        key = (name, e)
+        cache = self.__dict__.setdefault("_exp_cache", OrderedDict())
+        if key in cache:
+            cache.move_to_end(key)
+            return cache[key]
+        t = self.tensor(name)
+        if not 0 <= e < t.data.shape[0]:
+            from .steer import GneError
+            raise GneError("BAD_RECIPE", f"専門家 {e} は範囲外です(0..{t.data.shape[0] - 1})")
+        slab = _slab_to_f32(t, e)
+        cache[key] = slab
+        while sum(x.nbytes for x in cache.values()) > EXPERT_CACHE_BYTES and len(cache) > 1:
+            cache.popitem(last=False)
+        return slab
+
+    def expert_down(self, L: int, e: int) -> np.ndarray:
+        """専門家 e の W_down (n_embd, n_ff_exp)。ニューロン n の書き込み方向は [:, n]。"""
+        self.moe_layer(L)
+        return self._expert_slab(f"blk.{L}.ffn_down_exps.weight", e)
+
+    def expert_up(self, L: int, e: int) -> np.ndarray:
+        """専門家 e の W_up (n_ff_exp, n_embd)。ニューロン n の入力側は [n, :](gain)。"""
+        self.moe_layer(L)
+        return self._expert_slab(f"blk.{L}.ffn_up_exps.weight", e)
+
+    def expert_gate(self, L: int, e: int) -> np.ndarray:
+        self.moe_layer(L)
+        return self._expert_slab(f"blk.{L}.ffn_gate_exps.weight", e)
+
+    def expert_down_norms(self, L: int) -> np.ndarray:
+        """‖W_down_e[:, n]‖ (n_expert, n_ff_exp)。"""
+        li = self.moe_layer(L)
+        key = ("exp", L)
+        if key not in self._norms:
+            t = self.tensor(f"blk.{L}.ffn_down_exps.weight")
+            self._norms[key] = np.stack([np.linalg.norm(_slab_to_f32(t, e), axis=0) for e in range(li.n_expert)]).astype(np.float32)
+        return self._norms[key]
+
+    def router(self, L: int) -> np.ndarray:
+        """ルーター W_r (n_expert, n_embd)。logit_e = W_r[e] · x。"""
+        self.moe_layer(L)
+        return tensor_to_f32(self.tensor(f"blk.{L}.ffn_gate_inp.weight")).reshape(self.arch.layers[L].n_expert, -1)
+
+    def router_bias_name(self, L: int) -> str | None:
+        for nm in (f"blk.{L}.exp_probs_b.bias", f"blk.{L}.ffn_exp_probs_b.bias"):
+            if nm in self._tensors:
+                return nm
+        return None
+
+    def router_bias(self, L: int) -> np.ndarray | None:
+        """ルーターのバイアス (n_expert,)(選択にだけ効く)。無い arch は None。"""
+        nm = self.router_bias_name(L)
+        return None if nm is None else tensor_to_f32(self.tensor(nm)).reshape(-1)
+
+    def shexp_down(self, L: int) -> np.ndarray:
+        """shared expert の W_down (n_embd, n_ff_shexp)。"""
+        from .steer import GneError
+        name = f"blk.{L}.ffn_down_shexp.weight"
+        if not self.has_tensor(name):
+            raise GneError("BAD_RECIPE", f"層 {L} に shared expert はありません")
+        return tensor_to_f32(self.tensor(name))
+
+    def shexp_up(self, L: int) -> np.ndarray:
+        from .steer import GneError
+        name = f"blk.{L}.ffn_up_shexp.weight"
+        if not self.has_tensor(name):
+            raise GneError("BAD_RECIPE", f"層 {L} に shared expert の ffn_up はありません")
+        return tensor_to_f32(self.tensor(name))
 
     # --- attention ヘッド(CHANGE-04) -------------------------------------------------------------
 

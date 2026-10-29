@@ -105,8 +105,8 @@ class _TopK:
 def logit_lens_layer(weights, L: int, *, neurons: np.ndarray | None = None, top_k: int = 12, chunk: int = 4096,
                      progress: Progress | None = None) -> LogitLens:
     """全(または指定)ニューロンの logit lens。W_U を行チャンクで読み、上位/下位 top_k だけを持つ。"""
-    nn = np.arange(weights.meta.n_ff_at(L)) if neurons is None else np.asarray(neurons)
-    Gt = np.ascontiguousarray((weights.unit_matrix(L)[:, nn] * weights.output_norm_weight()[:, None]).T,
+    nn = np.arange(weights.n_units(L)) if neurons is None else np.asarray(neurons)
+    Gt = np.ascontiguousarray((weights.unit_columns(L, nn) * weights.output_norm_weight()[:, None]).T,
                               dtype=np.float32)                       # (K, n_embd)
     K = nn.size
     s1, s2 = np.zeros(K), np.zeros(K)
@@ -206,7 +206,7 @@ def steer_lens_layer(engine: Engine, weights, stats, L: int, *, neurons: np.ndar
     controls は計算する対照の番号(既定は全部)。ワーカーで分けるとき(CHANGE-03 B)、対照も分けて各部分で一部だけ計算し、
     merge_parts で結合する(config は同じなので結合できる)。"""
     contexts = list(contexts or DEFAULT_CONTEXTS)
-    n_ff = weights.meta.n_ff_at(L)
+    n_ff = weights.n_units(L)
     nn = np.arange(n_ff) if neurons is None else np.asarray(neurons)
     rho = stats.rho(L)
     config = {"dose": float(dose), "contexts": contexts, "top_k": int(top_k), "random_controls": int(random_controls),

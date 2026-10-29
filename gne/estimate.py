@@ -103,7 +103,7 @@ def _design_cost(sp: Speed, design_name: str, max_tokens: int, prompt_set: str =
 
 def _n_neurons(session, L: int, neurons) -> int:
     from .selection import parse_neurons
-    return int(parse_neurons(neurons, session.meta.n_ff_at(L), seed=session.seed).size)
+    return int(parse_neurons(neurons, session.weights.n_units(L), seed=session.seed).size)
 
 
 def estimate(session, kind: str, params: dict) -> dict:
@@ -122,6 +122,12 @@ def estimate(session, kind: str, params: dict) -> dict:
         per = _design_cost(sp, p.get("design", "main_rel"), int(p.get("max_tokens", 128)), p.get("prompt_set", "en"))
         sec = n * per
         detail = {"units": n, "seconds_per_unit": round(per, 2), "design": p.get("design", "main_rel")}
+    elif kind == "experts sweep":                                  # CHANGE-05 §E.2: 1 専門家・1 倍率ごとにパッチ → 読み直し → 生成
+        n = int(p.get("n", 0))
+        reload = 0.2 + 0.08 * m.file_size / 1e9                     # granite 1.4 GB で 0.31 秒(ページキャッシュあり)
+        per = reload + _design_cost(sp, "quick", int(p.get("max_tokens", 48)))
+        sec = n * per
+        detail = {"patches": n, "seconds_per_patch": round(per, 2), "reload_s": round(reload, 2)}
     elif kind == "reverse":
         n = int(p.get("verify_top") or p.get("top", 200)) if p.get("verify") else 0
         n_ctrl = int(p.get("verify_controls", 8))

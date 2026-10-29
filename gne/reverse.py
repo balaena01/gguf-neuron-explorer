@@ -154,6 +154,8 @@ class Candidate:
     act_diff: float | None
     steer_kl: float | None
     rank_score: float
+    expert: int | None = None          # MoE の層(CHANGE-05): neuron は通し番号、expert と expert_neuron がその中身
+    expert_neuron: int | None = None
 
 
 def cos_by_layer(weights, directions: dict[int, np.ndarray],
@@ -168,7 +170,8 @@ def cos_by_layer(weights, directions: dict[int, np.ndarray],
             s = np.maximum(scale[L], 1e-6 * float(scale[L].max()) + 1e-12)
             d = d / s
             U = U / s[:, None]
-            U = U / np.linalg.norm(U, axis=0, keepdims=True)
+            un = np.linalg.norm(U, axis=0, keepdims=True)
+            U = U / np.where(un > 0, un, 1.0)                    # 書き込みが全部 0 の列(使われない専門家)は 0 のまま
         nrm = float(np.linalg.norm(d))
         out[L] = (U.T @ (d / nrm)).astype(np.float32) if nrm > 0 else np.zeros(U.shape[1], np.float32)
     return out
@@ -215,6 +218,10 @@ def rank_by_direction(weights, directions: dict[int, np.ndarray], *, act_diff: d
     cands = [Candidate(int(lay[i]), int(neu[i]), float(c[i]), 1 if c[i] >= 0 else -1,
                        None if a is None or not np.isfinite(a[i]) else float(a[i]),
                        None if k is None or not np.isfinite(k[i]) else float(k[i]), float(score[i])) for i in order]
+    if getattr(weights.meta, "n_expert", 0):
+        for cd in cands:
+            if weights.is_moe(cd.layer):
+                cd.expert, cd.expert_neuron = weights.moe_split(cd.layer, cd.neuron)
     return cands, cos
 
 

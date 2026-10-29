@@ -37,6 +37,10 @@ class LayerInfo:
     head_dim: int = 0
     head_writer: str | None = None   # ヘッドの出力を残差に書く行列(attn_output / ssm_out)
     head_out: tuple[str, ...] = ()   # 書き込み行列に入る直前のテンソル名の候補(捕捉で見えた最初のもの)
+    # CHANGE-05 MoE: ルーターのバイアス(exp_probs_b、選択にだけ効く)、選び方、選んだ重みを正規化するか(メタデータに無ければ None)
+    has_router_bias: bool = False
+    routing: str = ""                # softmax_topk / sigmoid_topk / group_topk(MoE の層だけ)
+    norm_topk: bool | None = None
 
 
 @dataclass
@@ -125,7 +129,15 @@ def arch_info(weights) -> ArchInfo:
         wt = ts.get(f"{writer}.weight") if writer else None
         hd = int(wt.shape[0]) // nh if wt is not None and nh else 0          # ne = [n_head·head_dim, n_embd]
         outs = (("attn_gated", "kqv_out") if mixer == "attention" else ("final_output",) if mixer == "linear_attention" else ())
+        bias = ffn.startswith("moe") and ("exp_probs_b.bias" in ts or "ffn_exp_probs_b.bias" in ts)
+        routing = ""
+        if ffn.startswith("moe"):
+            gating = int(get(f"{arch}.expert_gating_func", 1) or 1)           # llama.cpp: 1 = softmax、2 = sigmoid
+            routing = "group_topk" if int(get(f"{arch}.expert_group_count", 0) or 0) > 1 else \
+                "sigmoid_topk" if gating == 2 else "softmax_topk"
+        norm = get(f"{arch}.expert_weights_norm")
         layers.append(LayerInfo(L, mixer, nh, nkv, ffn, n_ff, n_exp, used, n_shexp,
-                                "post_ffw_norm.weight" in ts, hd, writer if wt is not None else None, outs))
+                                "post_ffw_norm.weight" in ts, hd, writer if wt is not None else None, outs,
+                                bias, routing, None if norm is None or not ffn.startswith("moe") else bool(norm)))
     side = max([sheet_side(li) for li in layers] + [1])
     return ArchInfo(arch, m.n_layer, m.n_embd, m.n_vocab, layers, side)

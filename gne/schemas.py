@@ -278,6 +278,11 @@ class GainOut(Envelope):                        # §6.16 gne gain
     heads: dict[str, list[list[float]]] | None = None      # CHANGE-04 lora: 層 → [[ヘッド, k]]
     head_rank: dict[str, int] | None = None
     query_loras: list[str] | None = None                   # CHANGE-04 E: クエリ操作の LoRA(ユニットごとに 1 つ)
+    experts: dict[str, list[list[float]]] | None = None    # CHANGE-05 lora: 層 → [[専門家, ニューロン, k]]
+    shared: dict[str, list[list[float]]] | None = None
+    method: str | None = None                              # CHANGE-05 bake: "patch"(スケールパッチ)
+    patch_bytes: int | None = None
+    ops: list[dict[str, Any]] | None = None
 
 
 class EvalRow(_Strict):                         # §6.14 gne eval の 1 倍率
@@ -452,6 +457,8 @@ class CandidateModel(_Strict):
     act_diff: float | None
     steer_kl: float | None
     rank_score: float
+    expert: int | None = None                  # CHANGE-05: MoE の層(neuron は通し番号)
+    expert_neuron: int | None = None
 
 
 class LayerCos(_Strict):
@@ -486,6 +493,7 @@ class ReverseOut(Envelope):
     steer_lens_layers: list[int]
     verify: ReverseVerify | None
     seconds: float
+    by_expert: list[dict[str, int]] | None = None    # CHANGE-05: MoE の層で上位の候補が集まった専門家
 
 
 # --- Phase 3: sweep / rank ------------------------------------------------------------------------------
@@ -503,6 +511,7 @@ class SweepOut(Envelope):
     n_new_records: int
     seconds: float
     workers: dict[str, Any] | None = None       # CHANGE-03 B: --workers で分けたときの部分ごとの結果
+    semantics: str | None = None                # CHANGE-05: MoE の層は "direction"(書き込み方向の押し)
 
 
 class DoseStats(_Strict):
@@ -604,11 +613,16 @@ class NeuronOut(Envelope):
     neuron: int
     name: str | None
     down_norm: float
+    expert: int | None = None                  # CHANGE-05: MoE の層(neuron は通し番号)
+    expert_neuron: int | None = None
+    semantics: str | None = None
+    address: str | None = None
+    recipe_hint: str | None = None
     sweep: DossierSweep | None
     steer_lens: DossierSteer | None
     logit_lens: DossierLogit | None
     directions: dict[str, dict[str, float | int]]
-    activation: dict[str, float] | None
+    activation: dict[str, Any] | None           # MoE の層は n_routed・reliable も
     connections: dict[str, Any] | None
     evals: list[dict[str, Any]] = []          # CHANGE-01: このニューロンを含む保存済みの eval(新しい順)
     gain_k: list[float] = []                  # 当てたことのある gain の倍率
@@ -675,6 +689,66 @@ class HeadRow(_Strict):                         # CHANGE-04 C
     dir_cos: float | None
     z: float | None
     null_pct: float | None
+
+
+class ExpertRow(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    layer: int
+    expert: int
+    usage_shift: float
+    weight_shift: float
+    contrib_cos: float
+    contrib_norm: float
+    rate_a: float
+    rate_b: float
+    z: float
+    null_pct: float
+
+
+class ExpertsContrastOut(Envelope):
+    name: str
+    path: str
+    contrast: str
+    contrast_sha: str
+    direction: str | None
+    system_b2: str
+    layers: list[int]
+    n_prompts: int
+    max_tokens: int
+    floors: dict[str, float]
+    null_stats: dict[str, dict[str, Any]]
+    top: list[ExpertRow]
+    n_experts: int
+    candidates: str
+    samples: list[dict[str, Any]]
+    seconds: float
+
+
+class ExpertsSweepOut(Envelope):
+    run: str
+    path: str
+    layer: int
+    design: str
+    prompt_set: str
+    ks: list[float]
+    n_experts: int
+    n_records: int
+    top: list[dict[str, Any]]
+    reload_s: dict[str, float | None]
+    seconds: float
+
+
+class ExpertOut(Envelope):
+    layer: int
+    expert: int
+    n_expert: int
+    n_expert_used: int
+    n_ff: int
+    routing: str
+    router_bias: float | None
+    usage: dict[str, Any] | None
+    contrasts: list[dict[str, Any]]
+    neurons: list[dict[str, Any]]
 
 
 class HeadsContrastOut(Envelope):
@@ -756,6 +830,7 @@ COMMAND_SCHEMAS: dict[str, type[Envelope]] = {
     "export-cvec": ExportOut, "import-cvec": ImportOut, "bake": BakeOut, "gain": GainOut,
     "eval": EvalOut, "direction": DirectionOut, "ablate": AblateOut,
     "heads contrast": HeadsContrastOut, "heads attention": AttentionOut, "heads show": HeadOut, "heads name": HeadNameOut,
+    "experts contrast": ExpertsContrastOut, "experts show": ExpertOut, "experts sweep": ExpertsSweepOut,
     "heads query": HeadsQueryOut,
     "connections": ConnectionsOut, "worker": WorkerOut, "writers": WritersOut, "writers-export": WritersExportOut,
 }

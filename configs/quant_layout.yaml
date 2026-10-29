@@ -1,0 +1,25 @@
+# 量子化ブロックの中のスケールの位置(スケールパッチ、CHANGE-05 §D)。
+# ggml/src/ggml-common.h の block_* 構造体から読み取ったもの(verification.md §17 の V20 で全型を確かめる)。
+#   values: 1 ブロックの値の数、bytes: 1 ブロックのバイト数、scales: fp16 のスケールのバイト位置(ブロックの先頭から)
+# ブロックの値は d·q(Q4_0・Q5_0・Q8_0・IQ 系)、d·q + m(Q4_1・Q5_1)、d·sc·q − dmin·m(K 系)の形なので、
+# ここに書いたスケールを全部 k 倍すると、ブロックの全値がちょうど k 倍になる(fp16 のスケールの丸めだけが誤差)。
+# k = 0 はブロックをゼロバイトにする(どの型でも全値 0)。
+Q4_0:    {values: 32,  bytes: 18,  scales: [0]}       # d, qs[16]
+Q4_1:    {values: 32,  bytes: 20,  scales: [0, 2]}    # d, m, qs[16]
+Q5_0:    {values: 32,  bytes: 22,  scales: [0]}       # d, qh[4], qs[16]
+Q5_1:    {values: 32,  bytes: 24,  scales: [0, 2]}    # d, m, qh[4], qs[16]
+Q8_0:    {values: 32,  bytes: 34,  scales: [0]}       # d, qs[32]
+Q2_K:    {values: 256, bytes: 84,  scales: [80, 82]}  # scales[16], qs[64], d, dmin
+Q3_K:    {values: 256, bytes: 110, scales: [108]}     # hmask[32], qs[64], scales[12], d
+Q4_K:    {values: 256, bytes: 144, scales: [0, 2]}    # d, dmin, scales[12], qs[128]
+Q5_K:    {values: 256, bytes: 176, scales: [0, 2]}    # d, dmin, scales[12], qh[32], qs[128]
+Q6_K:    {values: 256, bytes: 210, scales: [208]}     # ql[128], qh[64], scales[16], d
+IQ2_XXS: {values: 256, bytes: 66,  scales: [0]}       # d, qs[32](uint16)
+IQ2_XS:  {values: 256, bytes: 74,  scales: [0]}       # d, qs[32](uint16), scales[8]
+IQ2_S:   {values: 256, bytes: 82,  scales: [0]}       # d, qs[64], qh[8], scales[8]
+IQ3_XXS: {values: 256, bytes: 98,  scales: [0]}       # d, qs[96]
+IQ3_S:   {values: 256, bytes: 110, scales: [0]}       # d, qs[64], qh[8], signs[32], scales[4]
+IQ1_S:   {values: 256, bytes: 50,  scales: [0]}       # d, qs[32], qh[8](uint16)
+IQ4_NL:  {values: 32,  bytes: 18,  scales: [0]}       # d, qs[16]
+IQ4_XS:  {values: 256, bytes: 136, scales: [0]}       # d, scales_h(uint16), scales_l[4], qs[128]
+# 対応しない型: IQ1_M(スケールが scales の上位ビットに分けて入っている)、TQ1_0・TQ2_0(BitNet)、MXFP4(共有の指数だけ)

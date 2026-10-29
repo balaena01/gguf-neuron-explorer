@@ -115,7 +115,8 @@ class Capture:
                 self.skipped[name] = "not contiguous"
                 return True
             nrows = libggml.ggml_nrows(t)
-            buf = np.empty(nelem, dtype=np.float32)
+            # 要素 4 バイトでも I32 のテンソル(MoE の選んだ専門家の番号)は名前で見分ける(CHANGE-05 0 項 3)
+            buf = np.empty(nelem, dtype=np.int32 if name.split("-")[0] in INT_NAMES else np.float32)
             libggml.ggml_backend_tensor_get(t, buf.ctypes.data, 0, nbytes)   # GPU でもホストでも動く
             # ggml は ne0 が最内側: [ne0, ne1(, ...)] → numpy (nrows, ne0)
             self._store(name, buf.reshape(nrows, nelem // nrows))
@@ -124,6 +125,9 @@ class Capture:
             self.skipped["<callback error>"] = repr(e)
             return True
 
+
+# I32 で出るテンソル(llama-graph.cpp build_moe_ffn の ggml_argsort_top_k / ggml_argsort)
+INT_NAMES = {"ffn_moe_topk", "ffn_moe_argsort"}
 
 # ffn_down の入力(ニューロン活性 a)になるテンソル名の候補。build_ffn で最後に付く名前ほど優先する
 # (gate_par は活性化の後の gate ⊙ up、act は act_scales での割り算)。src/llama-graph.cpp build_ffn。

@@ -32,6 +32,8 @@ lens_app = typer.Typer(no_args_is_help=True, help="一次ふるい(logit lens・
 app.add_typer(lens_app, name="lens")
 heads_app = typer.Typer(no_args_is_help=True, help="attention ヘッド(対照分析・注目先・調書、CHANGE-04)")
 app.add_typer(heads_app, name="heads")
+experts_app = typer.Typer(no_args_is_help=True, help="MoE の専門家(対照分析・調書、CHANGE-05)")
+app.add_typer(experts_app, name="experts")
 
 
 @dataclass
@@ -632,7 +634,7 @@ def gain(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Option
          out: Optional[Path] = typer.Option(None, "--out", "-o", help="出力(既定 <root>/export/<レシピ名>.lora.gguf、--bake なら -gain.gguf)"),
          bake: bool = typer.Option(False, "--bake", help="LoRA ではなく、W_up を書き換えた GGUF を作る"),
          in_path: Optional[Path] = typer.Option(None, "--in", help="--bake の元の GGUF(既定 --model)"),
-         requant: str = typer.Option("q8_0", "--requant", help="--bake で書き換えた ffn_up / W_O の型: q8_0 / f16")):
+         requant: str = typer.Option("auto", "--requant", help="--bake の書き方: auto(パッチで書ければスケールパッチ、書けなければ q8_0)/ patch / q8_0 / f16")):
     """gain ユニット(L:N:x2 など、出力を k 倍。ヘッドは L:Hh:xk)を LoRA アダプタ GGUF か書き換え GGUF に書き出す(§6.16)。"""
     if in_path and c.model and in_path.resolve() != c.model.resolve():
         raise GneError("BAD_ARGS", "--in と --model が違うファイルです")
@@ -644,6 +646,8 @@ def gain(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Option
     if bake:
         text = f"{d['path']}({d['bytes'] / 1e6:.1f} MB)、書き換え: " + ", ".join(
             f"{m['tensor']}({m['from']} → {m['to']})" for m in d["modified"])
+        if d.get("method") == "patch":
+            text += f"\nスケールパッチ({d['patch_bytes'] / 1e3:.1f} KB、量子化はそのまま)。当てた操作は {d['path']}.patch.json"
     else:
         text = (f"{d['path']}({d['bytes'] / 1e6:.2f} MB、LoRA)\n"
                 + "\n".join(f"  L{L}: " + ", ".join(f"N{int(n)} ×{k:g}" for n, k in nk) for L, nk in (d.get("layers") or {}).items())
@@ -886,7 +890,8 @@ def reverse(c: Common, holder: dict,
              "層ごとの |cos| 上位 1% の平均: " + " ".join(f"L{r['layer']}:{r['top1pct_abs_cos']:.3f}" for r in d["layers"])]
     for i, cd in enumerate(d["candidates"][:show]):
         extra = "".join(f"  {k} {cd[k]:+.3g}" for k in ("act_diff", "steer_kl") if cd[k] is not None)
-        lines.append(f"  {i + 1:>3}. L{cd['layer']} N{cd['neuron']}  cos {cd['cos']:+.3f}(押す向き {'+' if cd['sign'] > 0 else '-'}){extra}")
+        who = f"E{cd['expert']} N{cd['expert_neuron']}" if cd.get("expert") is not None else f"N{cd['neuron']}"
+        lines.append(f"  {i + 1:>3}. L{cd['layer']} {who}  cos {cd['cos']:+.3f}(押す向き {'+' if cd['sign'] > 0 else '-'}){extra}")
     if d["verify"]:
         lines.append(f"rollout({d['verify']['design']}): " + ", ".join(r["path"] for r in d["verify"]["runs"]))
         for ex in d["verify"]["examples"][:min(show, 10)]:
@@ -1286,6 +1291,87 @@ def heads_contrast(c: Common, holder: dict,
                      f"{_metric(None if x['null_pct'] is None else x['null_pct'] * 100, '.0f'):>4}%")
     lines.append("読み方: trigger が大きいヘッドは「気づく係」、dir_cos が大きいヘッドは「ペルソナの方向を書く係」。"
                  "試す: gne steer --unit L:Hh:x0 / x2 --compare")
+    return d, "\n".join(lines), 0
+
+
+@gne_command(experts_app, "contrast", "experts contrast")
+def experts_contrast(c: Common, holder: dict,
+                     contrast: Path = typer.Option(..., "--contrast", help="対照集合 YAML"),
+                     name: Optional[str] = typer.Option(None, "--name", help="保存名(既定は対照集合の name)"),
+                     direction: Optional[str] = typer.Option(None, "--direction", help="contrib_cos に使う方向(既定は対照集合と同じ名前の方向、無ければ l_out の差)"),
+                     system_b2: Optional[str] = typer.Option(None, "--system-b2", help="床に使う別の中立の system"),
+                     layers: str = typer.Option("all", "--layers", help="all / 10-16 / 1,5,9-12(MoE の層だけ測る)"),
+                     max_tokens: int = typer.Option(48, "--max-tokens", help="比べる返事の長さ(system_a で greedy に作る)"),
+                     sort: str = typer.Option("z", "--sort", help="表の並び: z / usage_shift / weight_shift / contrib_cos / contrib_norm"),
+                     show: int = typer.Option(20, "--show")):
+    """同じ返事をペルソナあり(system_a)と中立(system_b)で読ませ、MoE の層の専門家ごとに選ばれ方と寄与の差を測って順位づける。
+    雑音の床は中立どうし(system_b と system_b2)の差。"""
+    from .experts import METRICS, load_expert_candidates
+    if sort not in ("z", *METRICS):
+        raise GneError("BAD_ARGS", f"--sort は z / {' / '.join(METRICS)} のどれかです")
+    s = holder["session"] = c.session()
+    d = s.experts_contrast(contrast, name=name, direction=direction, system_b2=system_b2, layers=parse_layers(layers),
+                           max_tokens=max_tokens)
+    rows = d["top"] if sort == "z" else sorted(load_expert_candidates(s, d["name"]),
+                                               key=lambda x: -(abs(x[sort]) if sort != "contrib_norm" else x[sort]))
+    lines = [f"{d['path']}({d['n_experts']} 専門家、{d['n_prompts']} プロンプト、方向 {d['direction'] or 'l_out の差'}、{d['seconds']:.0f} 秒)",
+             "床(中立どうしの p95): " + "、".join(f"{k} {v:.3f}" for k, v in d["floors"].items()),
+             f"  {'順':>3} {'住所':>8} {'選択率 A→B':>12} {'usage':>7} {'weight':>7} {'cos':>6} {'norm':>6} {'z':>5} {'null':>5}"]
+    for i, x in enumerate(rows[:show], 1):
+        lines.append(f"  {i:>3} {('L' + str(x['layer']) + ' E' + str(x['expert'])):>8} {x['rate_a']:5.2f}→{x['rate_b']:<5.2f} "
+                     f"{x['usage_shift']:+7.3f} {x['weight_shift']:+7.3f} {x['contrib_cos']:+6.2f} {x['contrib_norm']:6.2f} "
+                     f"{x['z']:5.1f} {x['null_pct'] * 100:4.0f}%")
+    lines.append("読み方: usage が大きい専門家は「ペルソナのときに呼ばれる」、cos が大きい専門家は「ペルソナの方向を書く」。"
+                 "試す: gne steer --unit L:Ee:x0(消す)/ L:Ee:x2(強める)--compare")
+    return d, "\n".join(lines), 0
+
+
+@gne_command(experts_app, "sweep", "experts sweep")
+def experts_sweep(c: Common, holder: dict, layer: int = typer.Option(..., "--layer", "-l", help="MoE の層"),
+                  experts: Optional[str] = typer.Option(None, "--experts", help="試す専門家(例 0,3,7。既定は全部)"),
+                  ks: str = typer.Option("0,2", "--ks", help="専門家の出力に掛ける倍率(0 = 消す、2 = 強める)"),
+                  design: str = typer.Option("quick", "--design", help="configs/designs.yaml の設計(プロンプトだけを使う)"),
+                  prompt_set: str = typer.Option("en", "--prompt-set"),
+                  max_tokens: int = typer.Option(48, "--max-tokens"),
+                  run: Optional[str] = typer.Option(None, "--run", help="記録の名前(既定 L<層>-experts-<設計>)"),
+                  show: int = typer.Option(15, "--show"), yes: bool = _YES):
+    """層の各専門家を消す・強めるスケールパッチで生成し、語の出方で順位づける(1 専門家ごとに読み直す)。
+    帰無は同じ層の全専門家の分布(null = mass がその専門家より小さい専門家の割合)。"""
+    s = holder["session"] = c.session()
+    exs = [int(x) for x in experts.split(",")] if experts else None
+    kk = tuple(float(x) for x in ks.split(","))
+    n = len(exs) if exs else s.weights.moe_layer(layer).n_expert
+    _gate(s, "experts sweep", {"n": n * len(kk), "max_tokens": max_tokens}, yes, None)
+    d = s.experts_sweep(layer, ks=kk, design=design, prompt_set=prompt_set, max_tokens=max_tokens, experts=exs, run=run)
+    lines = [f"{d['path']}(L{layer}、専門家 {d['n_experts']} 個 × 倍率 {d['ks']}、読み直し平均 {d['reload_s']['mean']:.2f} 秒、{d['seconds']:.0f} 秒)"]
+    for u in d["top"][:show]:
+        lines.append(f"  {u['rank']:>3}. L{layer} E{u['expert']:<3} mass {u['mass']:5.1f}  null {u['null_pct'] * 100:3.0f}%  "
+                     + " ".join(w[0] for w in u["words"][:8]))
+    lines.append("試す: gne steer --unit L:Ee:x0 / x2 --compare、専門家の調書は gne experts show L E")
+    return d, "\n".join(lines), 0
+
+
+@gne_command(experts_app, "show", "experts show")
+def experts_show(c: Common, holder: dict, layer: int = typer.Argument(..., help="層 L"),
+                 expert: int = typer.Argument(..., help="専門家の番号"),
+                 top: int = typer.Option(20, "--top", help="ニューロンの上位の数")):
+    """専門家 1 個の調書(使用統計・選ばれやすいトークン・対照分析での順位・ニューロンの上位)。"""
+    s = holder["session"] = c.session()
+    d = s.expert(layer, expert, top=top)
+    lines = [f"L{layer} E{expert}  専門家 {d['n_expert']} 個中 {d['n_expert_used']} 個を選ぶ({d['routing']})、幅 {d['n_ff']}"
+             + (f"、ルーターのバイアス {d['router_bias']:+.4f}" if d["router_bias"] is not None else "")]
+    u = d["usage"]
+    if u:
+        lines.append(f"使用: 選択率 {u['rate']:.1%}({u['n_routed']}/{u['n_tokens']} トークン{'' if u['reliable'] else '、少ないので分位点は目安'})、"
+                     f"重みの平均 {u['weight_mean']:.3f}")
+        lines.append("よく選ぶトークン: " + " ".join(f"{x['token']!r}×{x['count']}" for x in u["top_tokens"]))
+    else:
+        lines.append("使用統計なし(gne stats act --layers で作れます)")
+    for x in d["contrasts"]:
+        lines.append(f"対照分析 {x['name']}: #{x['rank']}/{x['of']}  選択率 {x['rate_a']:.2f}→{x['rate_b']:.2f}  "
+                     f"usage {x['usage_shift']:+.3f}  cos {x['contrib_cos']:+.2f}  z {x['z']:.1f}")
+    lines.append("ニューロン(書き込みの大きさ q999 × ‖W_down[:, n]‖ の順): " +
+                 ", ".join(f"N{x['neuron']}" for x in d["neurons"][:12]))
     return d, "\n".join(lines), 0
 
 

@@ -17,6 +17,8 @@
 
 from __future__ import annotations
 
+import contextlib
+
 import json
 import re
 import time
@@ -380,28 +382,32 @@ def evaluate(session, recipe: Recipe, *, doses=(0, 0.25, 0.5, 0.75, 1.0), suite:
 
     for d in order:
         r = recipe.scaled(d) if d != 0 else None
-        row, by, ex, fm = measure(r, d)
-        pers_out = [o for _, o in by["persona"]]
-        if d == 0:
-            base_persona = pers_out
-        row["persona"] = persona_metrics(base_persona, pers_out, tok)
-        if judge is not None:
-            scores = [judge.score(o["text"]) for o in pers_out]
-            vals = [s for s in scores if s is not None]
-            row["judge"] = float(np.mean(vals)) if vals else None
-            row["judge_scores"] = scores
-        if rc is not None:
-            rx = reactivity_score(session, rc, r, w, reactivity_tokens, lambda n, d=d: tick(n, d), judge)
-            if n_hctrl and d != 0:
-                cr_ = [reactivity_score(session, rc, c, w, reactivity_tokens, lambda n, d=d: tick(n, d))["reactivity"]
-                       for c in head_control_recipes(session, r, n_hctrl)]
-                rx["ctrl"] = {"n": len(cr_), "values": cr_, **summarize_ctrl(cr_)}
-                rx["null_pct"] = ctrl_null_pct(rx["reactivity"], cr_)
-            row["reactivity"] = rx
+        ps = session.patches_for(r)                    # CHANGE-05: 専門家全体の gain・route は作業用コピーで読み直して測る
+        with session.patched(ps) if ps is not None else contextlib.nullcontext():
+            row, by, ex, fm = measure(r, d)
+            pers_out = [o for _, o in by["persona"]]
+            if d == 0:
+                base_persona = pers_out
+            row["persona"] = persona_metrics(base_persona, pers_out, tok)
+            if judge is not None:
+                scores = [judge.score(o["text"]) for o in pers_out]
+                vals = [s for s in scores if s is not None]
+                row["judge"] = float(np.mean(vals)) if vals else None
+                row["judge_scores"] = scores
+            if rc is not None:
+                rx = reactivity_score(session, rc, r, w, reactivity_tokens, lambda n, d=d: tick(n, d), judge)
+                if n_hctrl and d != 0:
+                    cr_ = [reactivity_score(session, rc, c, w, reactivity_tokens, lambda n, d=d: tick(n, d))["reactivity"]
+                           for c in head_control_recipes(session, r, n_hctrl)]
+                    rx["ctrl"] = {"n": len(cr_), "values": cr_, **summarize_ctrl(cr_)}
+                    rx["null_pct"] = ctrl_null_pct(rx["reactivity"], cr_)
+                row["reactivity"] = rx
         if n_ctrl and d != 0:
             crow = []
             for c in control_recipes(session, r, n_ctrl):
-                cr, cby, _, _ = measure(c, d)
+                pc = session.patches_for(c)                    # 対照も同じ専門家の gain・route を残すので、同じパッチで測る
+                with session.patched(pc) if pc is not None else contextlib.nullcontext():
+                    cr, cby, _, _ = measure(c, d)
                 pm = persona_metrics(base_persona, [o for _, o in cby["persona"]], tok)
                 crow.append({"name": c.name, "capability": cr["capability"], "ppl_mean": cr["ppl_mean"],
                              "mix": cr["mix_zh"] + cr["mix_other"], "novelty": pm["novelty"], "mass": pm["mass"],
