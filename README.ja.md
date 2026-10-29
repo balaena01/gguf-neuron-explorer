@@ -143,7 +143,7 @@ ablate: {direction: refusal, scale: 1.0}        # 方向を残差に書き込む
 sampling: {temperature: 1.0, top_k: 20, top_p: 0.95, min_p: 0.05, presence_penalty: 0.9}   # 試すときのサンプリング(seed は持たない)
 ```
 
-`sampling` は、そのレシピを試すときのサンプリングです。次の場所で使います。
+`sampling` は、そのレシピを試すときのサンプリングです。`dry_multiplier`・`dry_base`・`dry_allowed_length`（既定は切り）も書けます。多ターンの会話で前の返事をそのまま繰り返すのを止める DRY の罰です（llama.cpp と同じ名前で、OpenAI 互換の API でも受け付けます）。次の場所で使います。
 
 - `steer` と `chat`：この値で生成します。`--temperature`・`--top-k`・`--top-p`・`--min-p`・`--presence-penalty`・`--sample-seed` で上書きでき、`--greedy` で切れます。
 - UI のチャット：「レシピの設定」として選べます。

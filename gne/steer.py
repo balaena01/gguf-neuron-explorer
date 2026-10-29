@@ -62,7 +62,8 @@ class Unit:
         return f"L{self.layer} {who} {self.dose:+g}"
 
 
-SAMPLING_KEYS = ("temperature", "top_k", "top_p", "min_p", "presence_penalty")
+SAMPLING_KEYS = ("temperature", "top_k", "top_p", "min_p", "presence_penalty",
+                 "dry_multiplier", "dry_base", "dry_allowed_length")     # dry_* は省けば切る(llama.cpp と同じ名前)
 # llama-server の既定(llama.cpp の common の既定値)と、性格のレシピを試すときによく使う設定
 SAMPLING_PRESETS = {
     "llama_server": {"temperature": 0.8, "top_k": 40, "top_p": 0.95, "min_p": 0.05, "presence_penalty": 0.0},
@@ -81,9 +82,11 @@ def sampling_values(d: dict | None, *, base: dict | None = None, seed: bool = Tr
     try:
         for k, v in (d or {}).items():
             if v is not None:
-                out[k] = int(v) if k in ("top_k", "seed") else float(v)
+                out[k] = int(v) if k in ("top_k", "seed", "dry_allowed_length") else float(v)
     except (TypeError, ValueError) as e:
         raise GneError("BAD_ARGS", f"サンプリングの値が読めません: {e}") from e
+    if not (0 <= out.get("dry_multiplier", 0) <= 5 and 1 <= out.get("dry_base", 1.75) <= 4 and out.get("dry_allowed_length", 2) >= 1):
+        raise GneError("BAD_ARGS", "dry_multiplier は 0〜5、dry_base は 1〜4、dry_allowed_length は 1 以上です")
     if not (0 <= out["temperature"] <= 5 and 0 < out["top_p"] <= 1 and 0 <= out["min_p"] < 1 and out["top_k"] >= 0
             and -2 <= out["presence_penalty"] <= 2):
         raise GneError("BAD_ARGS", "temperature は 0〜5、top_p は 0〜1、min_p は 0〜1、top_k は 0 以上、"
@@ -93,8 +96,12 @@ def sampling_values(d: dict | None, *, base: dict | None = None, seed: bool = Tr
 
 def llama_server_args(sp: dict) -> str:
     """サンプリングの値 → llama-server / llama-cli の引数(cvec には入らないので、使う側で合わせる)。"""
-    return (f"--temp {sp['temperature']:g} --top-k {sp['top_k']} --top-p {sp['top_p']:g} --min-p {sp['min_p']:g} "
-            f"--presence-penalty {sp['presence_penalty']:g}")
+    out = (f"--temp {sp['temperature']:g} --top-k {sp['top_k']} --top-p {sp['top_p']:g} --min-p {sp['min_p']:g} "
+           f"--presence-penalty {sp['presence_penalty']:g}")
+    if sp.get("dry_multiplier"):
+        out += (f" --dry-multiplier {sp['dry_multiplier']:g} --dry-base {sp.get('dry_base', 1.75):g}"
+                f" --dry-allowed-length {int(sp.get('dry_allowed_length', 2))}")
+    return out
 
 
 @dataclass

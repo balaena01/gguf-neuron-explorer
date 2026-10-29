@@ -224,3 +224,25 @@ def test_compare_greedy():
     far = compare_greedy([1, 2], [[1, 9], [2, 5]], [[-0.1, -2.0], [-0.1, -5.0]],
                          [1, 7], [[1, 9], [7, 8]], [[-0.1, -2.0], [-0.1, -5.0]])
     assert not far["ok"]
+
+
+def test_dry_penalties_and_sampling_keys():
+    """DRY(前の並びを続けるトークンへの罰): 末尾と同じ並びの後に続いたトークンに mult·base^(L − allowed)、区切りで一致を切る。
+    既定は切り(dry_multiplier 0)。サンプリングの値として受け付け、llama-server の引数にも出す。"""
+    import numpy as np
+
+    from gne.engine import Sampling, dry_penalties
+    from gne.steer import llama_server_args, sampling_values
+    seq = np.array([1, 2, 3, 4, 5, 9, 1, 2, 3, 4])
+    assert dry_penalties(seq, np.zeros(seq.size, bool), 0.8, 1.75, 2) == {5: 0.8 * 1.75 ** 2}
+    brk = np.zeros(seq.size, bool)
+    brk[7] = True
+    assert dry_penalties(seq, brk, 0.8, 1.75, 2) == {5: 0.8}
+    assert dry_penalties(np.array([1, 2, 3, 1]), np.zeros(4, bool), 0.8, 1.75, 2) == {}     # 1 トークンの一致は許す
+    assert Sampling().dry_multiplier == 0 and "dry_multiplier" not in Sampling().to_dict()
+    v = sampling_values({"dry_multiplier": 0.8, "dry_allowed_length": 3})
+    assert v["dry_multiplier"] == 0.8 and v["dry_allowed_length"] == 3 and "--dry-multiplier 0.8" in llama_server_args(v)
+    sp = Sampling(**{k: v[k] for k in v}, seed=1)
+    x = np.zeros(10)
+    x[5] = 1.0
+    assert sp.pick(x, set(), np.random.default_rng(0), {5: 100.0}) != 5                     # 罰で選ばれなくなる

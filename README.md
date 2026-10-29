@@ -139,7 +139,7 @@ ablate: {direction: refusal, scale: 1.0}        # project a direction out of eve
 sampling: {temperature: 1.0, top_k: 20, top_p: 0.95, min_p: 0.05, presence_penalty: 0.9}   # how to try it (no seed)
 ```
 
-`sampling` is how the recipe is meant to be tried. `steer` and `chat` use it (override with `--temperature`, `--top-k`, `--top-p`, `--min-p`, `--presence-penalty`, `--sample-seed`, or turn it off with `--greedy`), the UI chat offers it as "Recipe's setting", and the OpenAI-compatible endpoint uses it when a request sends no sampling values. A control vector cannot carry it, so `export-cvec` prints the matching llama-server flags. Without `sampling`, generation is greedy. `eval` is always greedy.
+`sampling` is how the recipe is meant to be tried. It can also carry `dry_multiplier`, `dry_base` and `dry_allowed_length` (off by default), the DRY penalty that stops multi-turn conversations from repeating earlier replies word for word (llama.cpp's names, also accepted by the OpenAI-compatible endpoint). `steer` and `chat` use it (override with `--temperature`, `--top-k`, `--top-p`, `--min-p`, `--presence-penalty`, `--sample-seed`, or turn it off with `--greedy`), the UI chat offers it as "Recipe's setting", and the OpenAI-compatible endpoint uses it when a request sends no sampling values. A control vector cannot carry it, so `export-cvec` prints the matching llama-server flags. Without `sampling`, generation is greedy. `eval` is always greedy.
 
 Run `gne --help` and `gne <command> --help` for the full list. The help text is in Japanese.
 

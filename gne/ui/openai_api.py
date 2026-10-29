@@ -66,7 +66,7 @@ def sampling_from(body: dict, recipe: Recipe | None = None):
     送った値はレシピの値より優先し、足りない値はレシピの値(無ければ llama-server の既定)で埋める。"""
     from ..engine import Sampling
     from ..steer import sampling_values
-    keys = ("temperature", "top_p", "top_k", "min_p", "presence_penalty", "seed")
+    keys = ("temperature", "top_p", "top_k", "min_p", "presence_penalty", "seed", "dry_multiplier", "dry_base", "dry_allowed_length")
     given = {k: body[k] for k in keys if body.get(k) is not None}
     base = recipe.sampling if recipe is not None else None
     if not given and base is None:

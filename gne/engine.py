@@ -64,11 +64,19 @@ class Sampling:
     min_p: float = 0.05
     presence_penalty: float = 0.9
     seed: int = 0
+    # DRY(llama.cpp と同じ名前): 文脈にすでにある並びを続けるトークンに罰を与える。0 で切る(既定)。
+    # 多ターンの会話で前の返事を丸ごと写すのを止める(verification.md F118・F120)
+    dry_multiplier: float = 0.0
+    dry_base: float = 1.75
+    dry_allowed_length: int = 2
 
-    def pick(self, logits: np.ndarray, seen: set[int], rng: np.random.Generator) -> int:
+    def pick(self, logits: np.ndarray, seen: set[int], rng: np.random.Generator,
+             dry: dict[int, float] | None = None) -> int:
         x = logits.astype(np.float64, copy=True)
         if self.presence_penalty and seen:
             x[list(seen)] -= self.presence_penalty
+        if dry:
+            x[list(dry)] -= np.fromiter(dry.values(), np.float64, len(dry))
         if self.temperature <= 0:
             return int(x.argmax())
         k = min(max(1, self.top_k), x.size) if self.top_k > 0 else x.size
@@ -87,7 +95,44 @@ class Sampling:
         return int(idx[rng.choice(len(idx), p=q / q.sum())])
 
     def to_dict(self) -> dict:
-        return {k: getattr(self, k) for k in ("temperature", "top_k", "top_p", "min_p", "presence_penalty", "seed")}
+        keys = ("temperature", "top_k", "top_p", "min_p", "presence_penalty", "seed")
+        if self.dry_multiplier:
+            keys += ("dry_multiplier", "dry_base", "dry_allowed_length")
+        return {k: getattr(self, k) for k in keys}
+
+
+DRY_BREAKERS = ("\n", ":", "\"", "*")       # llama.cpp の既定の区切り(この語を越えて並びを数えない)
+DRY_MAX_MATCH = 64
+
+
+def dry_penalties(seq: np.ndarray, breaker: np.ndarray, mult: float, base: float, allowed: int) -> dict[int, float]:
+    """DRY の罰(llama.cpp src/llama-sampling.cpp の dry と同じ考え方): いまの並びの末尾と同じ並びが前にあれば、その後に
+    続いたトークンを出すと繰り返しが伸びる。伸びる長さ L(末尾から一致するトークン数)が allowed 以上なら
+    mult · base^(L − allowed) を引く。区切り(breaker が True の位置)を越えて一致を数えない。"""
+    n = seq.size
+    if n < 2 or breaker[-1]:
+        return {}
+    cand = np.flatnonzero(seq[:-1] == seq[-1])
+    if cand.size == 0:
+        return {}
+    length = np.ones(cand.size, np.int64)
+    alive = ~breaker[cand]
+    for k in range(1, DRY_MAX_MATCH):
+        j = n - 1 - k
+        i = cand - k
+        alive &= (i >= 0) & (j > cand)
+        if j < 0 or not alive.any():
+            break
+        ii = np.maximum(i, 0)
+        alive &= (seq[ii] == seq[j]) & ~breaker[ii] & ~breaker[j]
+        length += alive
+    out: dict[int, float] = {}
+    for t, L, ok in zip(seq[cand + 1], length, ~breaker[cand], strict=True):
+        if ok and L >= allowed and t >= 0:
+            pen = mult * base ** (int(L) - allowed)
+            if pen > out.get(int(t), 0.0):
+                out[int(t)] = pen
+    return out
 
 
 @dataclass
@@ -316,6 +361,19 @@ class Engine:
         if not audios:
             return self.tokenize_prompt(text)
         return self._with_bos(self.media.tokenize(text, audios))
+
+    def _is_dry_breaker(self, tok: int) -> bool:
+        """DRY の区切り: 改行・「:」・「"」・「*」を含むトークン、制御トークン(<|im_start|> など)、音声の置き場所。"""
+        if tok < 0:
+            return True
+        cache = self.__dict__.setdefault("_dry_brk", {})
+        if tok not in cache:
+            attr = C.llama_vocab_get_attr(self.vocab, tok)
+            cache[tok] = bool(attr & C.LLAMA_TOKEN_ATTR_CONTROL) or any(b in self.token_text(tok) for b in DRY_BREAKERS)
+        return cache[tok]
+
+    def _dry_breakers(self, seq: np.ndarray) -> np.ndarray:
+        return np.fromiter((self._is_dry_breaker(int(t)) for t in seq), bool, seq.size)
 
     def audio_out_tokens(self) -> list[int]:
         """音声で返し始めるトークン(<|audio_start|> など)。gne は文だけ返すので、音声の入力があるときは禁じる。"""
@@ -565,6 +623,10 @@ class Engine:
             prefilled = self.prefill(ctx, seqs)
         outs = [Rollout(prompt_ids=list(s)) for s in seqs]
         rngs = [np.random.default_rng([sampling.seed, i]) for i in range(len(seqs))] if sampling else None
+        dry = sampling is not None and sampling.dry_multiplier > 0
+        if dry:
+            hist = [np.asarray(s, np.int64) for s in seqs]
+            brk = [self._dry_breakers(h) for h in hist]
         pos = [len(s) for s in seqs]
         active = list(range(len(seqs)))
         cur = prefilled.logits
@@ -583,8 +645,13 @@ class Engine:
             nxt = []
             for row, si in enumerate(active):
                 r = outs[si]
-                tok = int(toks[row]) if sampling is None else sampling.pick(cur[row], set(r.token_ids), rngs[si])
+                pen = dry_penalties(hist[si], brk[si], sampling.dry_multiplier, sampling.dry_base,
+                                    sampling.dry_allowed_length) if dry else None
+                tok = int(toks[row]) if sampling is None else sampling.pick(cur[row], set(r.token_ids), rngs[si], pen)
                 r.token_ids.append(tok)
+                if dry:
+                    hist[si] = np.append(hist[si], tok)
+                    brk[si] = np.append(brk[si], self._is_dry_breaker(tok))
                 r.logprob.append(float(cur[row, tok] - lse[row, 0]))
                 r.top_ids.append(top[row].tolist())
                 r.top_lps.append(top_lp[row].tolist())
