@@ -18,6 +18,7 @@ export const FIELDS = {
 
 export function fieldLabel(name) {
   if (name.startsWith("cos:")) return t("逆引き {d} との cos", { d: name.slice(4) });
+  if (name.startsWith("writers:")) return t("書き手 {d} の寄与", { d: name.slice(8) });
   if (name.startsWith("heads:")) return t("ヘッドの対照 {d} の z", { d: name.slice(6) });
   if (name === "fires_heads") return t("ヘッドの注目(fires の選んだトークンへ)");
   if (name.startsWith("search:")) return t("検索「{q}」", { q: name.slice(7) });
@@ -31,6 +32,7 @@ export function layersWith(name, model) {
   if (name === "none" || name.startsWith("search:") || name.startsWith("fires:")) return [];
   if (name.startsWith("heads:")) return ((model.heads || []).find((h) => h.name === name.slice(6)) || {}).layers || [];
   if (name.startsWith("cos:")) return cov.filter((c) => c.directions.includes(name.slice(4))).map((c) => c.layer);
+  if (name.startsWith("writers:")) return ((model.writers || []).find((w) => w.name === name.slice(8)) || {}).layers || [];
   const need = FIELDS[name].needs;
   if (need === "named") return [...new Set(Object.keys(model.names || {}).map((k) => +k.split(":")[0]))];
   return cov.filter((c) => (need === "sweep" ? c.sweep_runs.length > 0 : !!c[need])).map((c) => c.layer);
@@ -92,7 +94,7 @@ export function colorize(name, v, meta, scale, opt = {}) {
       const thr = opt.threshold ?? 1, a = Math.abs(x);                       // 1 = その層の活性の q999
       if (a < thr) put(i, COLORS.swept, 0);
       else put(i, signed(x, (a - thr) / Math.max(scale.max - thr, 1e-6)), 255);
-    } else if (name.startsWith("cos:")) {
+    } else if (name.startsWith("cos:") || name.startsWith("writers:")) {
       const thr = opt.threshold ?? scale.p999, a = Math.abs(x);
       if (a < thr) put(i, COLORS.swept, 0);                                  // データはある(閾値未満)
       else put(i, signed(x, (a - thr) / Math.max(scale.max - thr, 1e-6)), 255);
@@ -189,6 +191,9 @@ export function legendHTML(name, scale, opt = {}) {
   const body = name.startsWith("cos:")
     ? [it(sw(COLORS.swept), `|cos| < ${fmt(opt.threshold, 3)}`), it(sw(COLORS.plus), t("正")), it(sw(COLORS.minus), t("負")),
        it(t("明るさ = |cos| {a}〜{b}", { a: fmt(opt.threshold, 3), b: fmt(scale.max, 3) }))]
-    : parts[name] || [];
+    : name.startsWith("writers:")
+      ? [it(sw(COLORS.swept), t("|寄与| < {v}", { v: fmt(opt.threshold, 4) })), it(sw(COLORS.plus), t("方向へ書き足した")),
+         it(sw(COLORS.minus), t("方向から引いた")), it(t("明るさ = |寄与| {a}〜{b}", { a: fmt(opt.threshold, 4), b: fmt(scale.max, 4) }))]
+      : parts[name] || [];
   return none + body.join("");
 }

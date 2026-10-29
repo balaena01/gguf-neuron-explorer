@@ -612,6 +612,7 @@ class NeuronOut(Envelope):
     connections: dict[str, Any] | None
     evals: list[dict[str, Any]] = []          # CHANGE-01: このニューロンを含む保存済みの eval(新しい順)
     gain_k: list[float] = []                  # 当てたことのある gain の倍率
+    writers: list[dict[str, Any]] = []        # gne writers の分析ごとの寄与と順位
     coverage: dict[str, bool]
 
 
@@ -627,6 +628,26 @@ class ConnectionsOut(Envelope):                 # gne connections(CHANGE-03 C �
     formula: str
     down_reads: int
     peak_rss_gb: float
+
+
+class WritersOut(Envelope):                     # gne writers(書き手の強さ)
+    name: str
+    path: str
+    contrast: str
+    contrast_sha: str
+    ref_layer: int
+    ref_norm: float
+    n_tokens: dict[str, int]
+    n_convs: dict[str, int]
+    replies: dict[str, str]
+    post_ffn_norm: bool
+    totals: dict[str, float]
+    mlp_check_max: float | None
+    layers: list[dict[str, Any]]
+    top: list[dict[str, Any]]
+    bottom: list[dict[str, Any]]
+    samples: list[dict[str, Any]]
+    seconds: float
 
 
 class WorkerOut(Envelope):                      # CHANGE-03 B
@@ -726,5 +747,5 @@ COMMAND_SCHEMAS: dict[str, type[Envelope]] = {
     "eval": EvalOut, "direction": DirectionOut, "ablate": AblateOut,
     "heads contrast": HeadsContrastOut, "heads attention": AttentionOut, "heads show": HeadOut, "heads name": HeadNameOut,
     "heads query": HeadsQueryOut,
-    "connections": ConnectionsOut, "worker": WorkerOut,
+    "connections": ConnectionsOut, "worker": WorkerOut, "writers": WritersOut,
 }

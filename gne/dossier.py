@@ -230,6 +230,9 @@ def neuron_dossier(session, L: int, n: int, *, rollouts: int = 4, compute: bool 
     out["evals"] = unit_evals(session, L, n)
     out["gain_k"] = gain_tried(session, L, n)
     cov["eval"], cov["gain"] = bool(out["evals"]), bool(out["gain_k"])
+    from .writers import neuron_entries                   # 書き手の強さ(gne writers)の保存済みの分析ごとの寄与と順位
+    out["writers"] = neuron_entries(session, L, n)
+    cov["writers"] = bool(out["writers"])
     out["coverage"] = cov
     return out
 

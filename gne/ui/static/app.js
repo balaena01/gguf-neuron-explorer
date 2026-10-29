@@ -9,6 +9,7 @@ import { LANG, setLang, t, translateDOM } from "./i18n.js";
 import { ChatPanel } from "./chat.js";
 import { EmbedView } from "./embed.js";
 import { EvalView } from "./eval.js";
+import { WritersView } from "./writers.js";
 import { FiresPanel } from "./fires.js";
 import { JobsBar, KIND, computeMenu } from "./jobs.js";
 import { LayersView } from "./layers.js";
@@ -120,7 +121,7 @@ function tooltipHTML(h) {
   }
   const f = state.overlay.field, v = state.overlay.values.get(L);
   if (v && f !== "none" && !f.startsWith("search:") && Number.isFinite(v[n])) {
-    lines.push(`<span class="t-k">color</span><span class="t-v" style="margin:0">${esc(fieldLabel(f))} = ${fmt(v[n], f.startsWith("cos:") ? 4 : 3)}</span>`);
+    lines.push(`<span class="t-k">color</span><span class="t-v" style="margin:0">${esc(fieldLabel(f))} = ${fmt(v[n], f.startsWith("cos:") || f.startsWith("writers:") ? 4 : 3)}</span>`);
   }
   if (waiting) lines.push(`<span class="t-wait">${t("読み込み中…")}</span>`);
   return lines.join("<br>");
@@ -210,7 +211,8 @@ let overlayToken = 0;
 
 function fillColorSelect() {
   const sel = $("#color-select");
-  const names = ["none", ...Object.keys(FIELDS).filter((k) => k !== "none"), ...(state.model ? state.model.directions.map((d) => `cos:${d}`) : [])];
+  const names = ["none", ...Object.keys(FIELDS).filter((k) => k !== "none"), ...(state.model ? state.model.directions.map((d) => `cos:${d}`) : []),
+                 ...(state.model ? (state.model.writers || []).map((w) => `writers:${w.name}`) : [])];
   const heads = state.model ? state.model.heads || [] : [];                // 保存済みのヘッドの対照分析(CHANGE-04 G)
   sel.innerHTML = names.map((k) => {
     const n = state.model && k !== "none" ? layersWith(k, state.model).length : 0;
@@ -231,6 +233,7 @@ async function refreshModel() {
   state.model.connections = m.connections;
   state.model.runs = m.runs;
   state.model.heads = m.heads;
+  state.model.writers = m.writers;
 }
 
 // --- ヘッドの色(CHANGE-04 G): 板の上辺の帯。heads:<name> は対照分析の z、fires_heads は fires で選んだトークンへの注目 ----------
@@ -344,7 +347,7 @@ async function applyOverlay(field) {
   if (o.field !== field && !field.startsWith("search:")) o.threshold = null;
   o.field = field;
   o.scale = null;                                  // 読み込みが終わるまで前の overlay の尺度を使わない
-  $("#cos-thr-wrap").classList.toggle("hidden", !field.startsWith("cos:"));
+  $("#cos-thr-wrap").classList.toggle("hidden", !field.startsWith("cos:") && !field.startsWith("writers:"));
   clearHeads();
   if (field.startsWith("heads:") && state.model) {                       // ヘッドの対照分析: 板の上辺の帯だけを塗る
     o.values = new Map(); o.metas = new Map(); o.factor = 1;
@@ -391,11 +394,11 @@ async function applyOverlay(field) {
   o.values = new Map(loaded.map((r) => [r.L, r.v]));
   o.metas = new Map(loaded.map((r) => [r.L, r.meta]));
   o.scale = globalScale(field, loaded);
-  if (field.startsWith("cos:")) {
+  if (field.startsWith("cos:") || field.startsWith("writers:")) {
     const thr = $("#cos-thr");
     if (o.threshold === null) o.threshold = o.scale.p999;           // 全層の上位 0.1%: 方向に強く沿うニューロンだけが光る
     thr.max = String(o.scale.max); thr.step = String(o.scale.max / 400); thr.value = String(o.threshold);
-    $("#cos-thr-val").textContent = `|cos| ≥ ${o.threshold.toFixed(3)}`;
+    $("#cos-thr-val").textContent = `${field.startsWith("cos:") ? "|cos|" : t("|寄与|")} ≥ ${o.threshold.toFixed(field.startsWith("cos:") ? 3 : 4)}`;
   }
   state.note = "";
   recolor();
@@ -532,7 +535,7 @@ function closeSearch() {
 }
 
 // --- LIST・NEURON ----------------------------------------------------------------------------------------
-let rank, neuron, layersView, searchList, chat, firesPanel, recipePanel, jobsBar, embedView, evalView, agent, headPanel;
+let rank, neuron, layersView, searchList, chat, firesPanel, recipePanel, jobsBar, embedView, evalView, agent, headPanel, writersView;
 
 function expand(id) {
   const p = $(`#${id}`);
@@ -603,6 +606,11 @@ async function onJobFinished(j) {
   if (j.kind === "layout") { layoutCache.clear(); if (state.layout === j.params.kind) applyLayout(state.layout); }
   if (j.kind === "connections" && state.focus) { showLinks(); neuron.render(); }
   if (j.kind === "eval" && evalView) evalView.refresh(j.result && j.result.name);
+  if (j.kind === "writers" && j.status === "done") {                      // 書き手の分析: overlay の選択肢と writers ビュー
+    await refreshModel();
+    fillColorSelect();
+    if (writersView) writersView.refresh(j.result && j.result.name);
+  }
   if (j.kind === "heads_contrast") {                                     // ヘッドの対照分析: overlay の選択肢と、開いているヘッドの Contrast
     headsCache.clear();
     if (headPanel && state.headFocus) { headPanel.sums.clear(); headPanel.open(state.headFocus); }
@@ -638,7 +646,7 @@ function onLayerChanged(L) {
 async function setView(v) {
   state.view = v;
   for (const x of document.querySelectorAll("#views button")) x.classList.toggle("on", x.dataset.view === v);
-  const ph = $("#view-placeholder"), lv = $("#layers-view"), ev = $("#embed-view"), xv = $("#eval-view");
+  const ph = $("#view-placeholder"), lv = $("#layers-view"), ev = $("#embed-view"), xv = $("#eval-view"), wv = $("#writers-view");
   $("#map-wrap").classList.toggle("not-map", v !== "map");
   document.body.classList.toggle("view-other", v !== "map");             // 地図専用の header の部品を薄く
   if (state.map) state.map.setActive(v === "map");
@@ -646,6 +654,20 @@ async function setView(v) {
   lv.classList.toggle("hidden", v !== "layers");
   ev.classList.toggle("hidden", v !== "embed");
   xv.classList.toggle("hidden", v !== "eval");
+  wv.classList.toggle("hidden", v !== "writers");
+  if (v === "writers") {                                                   // 書き手の強さ(gne writers)
+    if (!state.model) { wv.innerHTML = `<p class="muted" style="padding:16px">${t("合成の構造には writers がありません")}</p>`; return; }
+    if (!writersView) {
+      writersView = new WritersView(wv, {
+        onRun: (p) => startJob("writers", p),
+        onOpen: (u) => { setView("map"); openNeuron(u); },
+        onOverlay: async (name) => { await refreshModel(); fillColorSelect(); setView("map"); $("#color-select").value = `writers:${name}`; applyOverlay(`writers:${name}`); },
+      });
+      state.writersView = writersView;                                   // 自動テスト用
+    }
+    await writersView.refresh();
+    return;
+  }
   if (v === "eval") {
     if (!state.model) { xv.innerHTML = `<p class="muted" style="padding:16px">${t("合成の構造には eval がありません")}</p>`; return; }
     if (!evalView) {
@@ -746,7 +768,8 @@ function wireHeader() {
   });
   $("#cos-thr").addEventListener("input", (ev) => {
     state.overlay.threshold = +ev.target.value;
-    $("#cos-thr-val").textContent = `|cos| ≥ ${state.overlay.threshold.toFixed(3)}`;
+    const wr = state.overlay.field.startsWith("writers:");
+    $("#cos-thr-val").textContent = `${wr ? t("|寄与|") : "|cos|"} ≥ ${state.overlay.threshold.toFixed(wr ? 4 : 3)}`;
     recolor();
   });
   $("#search-q").addEventListener("keydown", (ev) => { if (ev.key === "Enter") runSearch(); if (ev.key === "Escape") { ev.target.value = ""; closeSearch(); } });

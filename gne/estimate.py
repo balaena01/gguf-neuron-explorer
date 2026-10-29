@@ -175,6 +175,13 @@ def estimate(session, kind: str, params: dict) -> dict:
         n = len(cs.user_prompts)
         sec = sp.gen(n, int(p.get("max_tokens", 48))) + 3 * n * 4 * sp.setprefill / 1000
         detail = {"prompts": n}
+    elif kind == "writers":
+        from .reverse import ContrastSet
+        cs = ContrastSet.load(p["contrast"])
+        n = len(cs.user_prompts)
+        n_l = m.n_layer
+        sec = 2 * sp.gen(n, int(p.get("max_tokens", 96))) + 2 * n * (1 + n_l) * 2 * sp.setprefill / 1000
+        detail = {"prompts": n, "prefills": 2 * n * (1 + n_l)}
     elif kind == "stats_resid":
         sec = 10.0 * sp.setprefill / REF["setprefill_ms"]
     return {"kind": kind, "seconds": None if sec is None else float(sec), "detail": detail, "speed": sp.to_dict(),

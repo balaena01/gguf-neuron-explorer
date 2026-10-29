@@ -82,7 +82,7 @@ def create_app(session, *, warm: bool = True, openai: bool = False) -> FastAPI:
                 "arch_warnings": ov["arch_warnings"], "bake": ov["bake"], "recipes": ov["recipes"],
                 "directions": ov["directions"], "names": data.names(), "layouts": data.layouts(), "runs": data.run_list(),
                 "connections": data.connections().meta if data.connections() is not None else None,
-                "heads": data.heads_list()}
+                "heads": data.heads_list(), "writers": data.writers_list()}
 
     @app.get("/api/vocab")
     def vocab():
@@ -250,6 +250,14 @@ def create_app(session, *, warm: bool = True, openai: bool = False) -> FastAPI:
     @app.get("/api/jobs")
     def job_list():
         return [j.view() for j in live.jobs.list()]
+
+    @app.get("/api/writers")
+    def writers_list():
+        return data.writers_list()
+
+    @app.get("/api/writers/{name}")
+    def writers_one(name: str):
+        return data.writers_summary(name)
 
     @app.get("/api/workers")
     def workers():

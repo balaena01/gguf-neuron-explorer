@@ -277,6 +277,20 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
             return _err(e)
 
     @srv.tool()
+    async def writers(contrast: str, name: str | None = None, ref_layer: int | None = None,
+                      replies_a: str | None = None, max_tokens: int = 96) -> dict:
+        """書き手の強さをジョブとして投げる(job_status で結果)。対照集合の A(見たい状態、例 ヤンデレの system)と B(中立)の
+        返事のトークンで、各ニューロンが残差に書き足した量(活性の差 × 書く向き)の、参照の層の方向への直接の寄与を測る。
+        方向を埋め込み・mixer(attention など)・MLP が何割書いたかも返す。replies_a は A の返事を読ませるファイル
+        (別のモデルの返事を借りるとき)。活性の差(読み手)と違い、方向に実際に書いている「書き手」が上に来る。"""
+        try:
+            p = {"contrast": str(_contrast_path(session, contrast, None, None, None, name)), "name": name,
+                 "ref_layer": ref_layer, "replies_a": replies_a, "max_tokens": max_tokens}
+            return jobs.start("writers", p).view()
+        except Exception as e:  # noqa: BLE001
+            return _err(e)
+
+    @srv.tool()
     async def attention(text: str, layer: int | None = None, head: int | None = None, top: int = 5, pos: int = -1,
                         chat: bool = False, system: str | None = None) -> dict:
         """文を流し、位置 pos(既定は最後)のトークンが各ヘッドでどこを見ているか(上位 top)と per-head 出力のノルム。

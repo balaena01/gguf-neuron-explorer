@@ -1174,6 +1174,40 @@ def connections_cmd(c: Common, holder: dict, k: int = typer.Option(24, "--k", he
     return d, text, 0
 
 
+@gne_command(app, "writers")
+def writers_cmd(c: Common, holder: dict,
+                contrast: Path = typer.Option(..., "--contrast", help="対照集合 YAML(A = 見たい状態、B = 中立)"),
+                name: Optional[str] = typer.Option(None, "--name", help="保存名(既定は対照集合の name)"),
+                ref_layer: Optional[int] = typer.Option(None, "--ref-layer", help="寄与を測る方向の層(既定は最後から 2 番目)"),
+                replies_a: Optional[Path] = typer.Option(None, "--replies-a", help="A の返事を生成せずに読ませる(YAML / JSON の、プロンプトと同じ長さのリストか {プロンプト: 返事})"),
+                replies_b: Optional[Path] = typer.Option(None, "--replies-b"),
+                max_tokens: int = typer.Option(96, "--max-tokens", help="生成する返事の長さ"),
+                show: int = typer.Option(20, "--show"), yes: bool = _YES):
+    """書き手の強さ: A の状態(例 ヤンデレの system)で、各ニューロンが残差に実際に書き足した量(活性の差 × 書く向き)と、
+    参照の層の方向への直接の寄与。方向を埋め込み・mixer(attention・畳み込み)・MLP が何割ずつ書いたかも出す。"""
+    s = holder["session"] = c.session()
+    _gate(s, "writers", {"contrast": str(contrast), "max_tokens": max_tokens}, yes, None)
+    d = s.writers(contrast, name=name, ref_layer=ref_layer, replies_a=replies_a, replies_b=replies_b,
+                  max_tokens=max_tokens, top=max(show, 50))
+    t = d["totals"]
+    lines = [f"{d['path']}(返事のトークン A {d['n_tokens']['A']} / B {d['n_tokens']['B']}、参照 L{d['ref_layer']}、{d['seconds']:.0f} 秒)",
+             f"L{d['ref_layer']} の方向(‖r‖ = {d['ref_norm']:.2f})を書いた割合: 埋め込み {t['embed']:+.0%}・mixer {t['mixer']:+.0%}・MLP {t['mlp']:+.0%}"
+             f"(MLP のうち上位 10 個 {t['top10']:+.0%}・100 個 {t['top100']:+.0%}・1000 個 {t['top1000']:+.0%})",
+             f"  {'層':>4} {'種類':<17} {'mixer':>7} {'MLP':>7} {'‖r_L‖':>7} {'cos(r_L, r*)':>12}"]
+    nr = d["ref_norm"]
+    for x in d["layers"]:
+        if "mixer_to_ref" not in x:
+            continue
+        mlp = "—" if x["mlp_to_ref"] is None else f"{x['mlp_to_ref'] / nr:+.1%}"
+        lines.append(f"  {x['layer']:>4} {x['mixer']:<17} {x['mixer_to_ref'] / nr:>+7.1%} {mlp:>7} {x['r_norm']:>7.2f} {x['cos_ref']:>12.2f}")
+    lines.append(f"方向へ書き足したニューロンの上位(寄与 = 活性の差 × 書く向きの r* 成分、割合は ‖r*‖ に対して):")
+    for x in d["top"][:show]:
+        lines.append(f"  L{x['layer']:<3} N{x['neuron']:<6} {x['share']:+.2%}  活性 A {x['act_a']:+.2f} / B {x['act_b']:+.2f}  向き {x['align']:+.2f}")
+    if d.get("mlp_check_max") is not None:
+        lines.append(f"確かめ: 式で求めた MLP の出力と捕捉した出力の差 最大 {d['mlp_check_max']:.1%}")
+    return d, "\n".join(lines), 0
+
+
 @gne_command(heads_app, "contrast", "heads contrast")
 def heads_contrast(c: Common, holder: dict,
                    contrast: Path = typer.Option(..., "--contrast", help="対照集合 YAML(triggers があれば trigger_mass も測る)"),
@@ -1310,6 +1344,9 @@ def neuron(c: Common, holder: dict, layer: int = typer.Argument(..., help="層 L
     if d["activation"]:
         a = d["activation"]
         lines.append(f"活性: absmax {a['absmax']:.3g}  q999 {a['q999']:.3g}  rms {a['rms']:.3g}")
+    for wr in d.get("writers", []):
+        lines.append(f"書き手 {wr['name']}: 方向 L{wr['ref_layer']} への寄与 {wr['share']:+.2%}(#{wr['rank']}/{wr['n_ranked']})、"
+                     f"活性 A {wr['act_a']:+.2f} / B {wr['act_b']:+.2f}")
     for e in d["evals"]:
         how = f"x{e['k']:g}" if e["mode"] == "gain" else f"{e['dose']:+g}"
         ship = "配布可なし" if e["max_shippable_dose"] is None else f"配布可の最大倍率 {e['max_shippable_dose']:g}"

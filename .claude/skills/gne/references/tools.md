@@ -77,6 +77,16 @@ gne eval --compare-ablation evil                  # 上位ニューロン ×0 �
 - レシピの効果を対照と比べるのは `gne steer --recipe R --contrast C`(`--prompt` なしでも可)。add ユニットを同じ層・同じ大きさのランダムに差し替えた対照レシピ 16 本と、C の validate で比べて `null_pct` を出す。
 - 方向は `~/.gne/directions/<model_id>/NAME.npz`。別のモデルの方向は名前では呼べないので、ファイルをそのモデルの directions に置く(`direction_set(path)` はパスも受ける)。
 
+### 書き手の強さ(`gne writers`)
+
+```bash
+gne writers --contrast configs/contrast/yandere_rules.yaml [--ref-layer 22] [--replies-a replies.yaml]
+```
+
+- A の状態で各ニューロンが残差に**実際に書き足した量**(活性の差 × 書く向き、post norm 込み)と、参照の層の方向への直接の寄与。活性の差だけ(読み手)と違い、方向に書いているものが上に来る。
+- 方向を埋め込み・各層の mixer(attention・畳み込み)・各層の MLP に分ける(和がちょうど 1)。どの層の何が状態を作っているかが分かる。
+- `--replies-a` で別のモデルの返事を読ませられる(system で演じられない小さいモデル)。UI の writers ビューと `writers:<名前>` の色。
+
 ### attention ヘッド(CHANGE-04)
 
 ```bash

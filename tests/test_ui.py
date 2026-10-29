@@ -232,6 +232,34 @@ def _seed_heads(s, name: str = "seed") -> list[dict]:
     return rows
 
 
+def _seed_writers(s, name: str = "wseed") -> None:
+    """書き手の分析(gne writers の出力の形)の小さな保存データ: 参照 L20、L14 N77 が 1 位。"""
+    rng = np.random.default_rng(3)
+    ref = 20
+    per, top = {}, []
+    for L in range(ref + 1):
+        n = s.meta.n_ff_at(L)
+        c = (rng.standard_normal(n) * 0.01).astype(np.float32)
+        if L == 14:
+            c[77] = 0.9
+        per[L] = {"contrib": c, "act_a": rng.standard_normal(n).astype(np.float32), "act_b": rng.standard_normal(n).astype(np.float32),
+                  "act_diff": rng.standard_normal(n).astype(np.float32), "align": (rng.standard_normal(n) * 0.1).astype(np.float32)}
+    d = s.store.root / "writers" / s.meta.model_id
+    d.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(d / f"{name}.npz", ref_layer=ref, ref_norm=10.0, **{f"{k}_{L}": v for L, p in per.items() for k, v in p.items()})
+    allc = sorted(((L, i, float(p["contrib"][i])) for L, p in per.items() for i in range(p["contrib"].size)), key=lambda x: -x[2])
+    row = lambda L, i, c: {"layer": L, "neuron": i, "contrib": c, "share": c / 10.0, "act_a": 1.0, "act_b": 0.2, "act_diff": 0.8, "align": 0.1}  # noqa: E731
+    top = [row(*x) for x in allc[:20]]
+    layers = [{"layer": L, "mixer": "attention", "r_norm": 1.0 + L, "cos_ref": L / ref, "mlp_norm": 1.0, "mixer_norm": 1.0,
+               "mlp_to_ref": 0.3, "mixer_to_ref": 0.2, "mlp_check": 0.004} for L in range(ref + 1)]
+    (d / f"{name}.json").write_text(json.dumps({
+        "name": name, "contrast": "configs/contrast/possessive.yaml", "contrast_sha": "x", "ref_layer": ref, "ref_norm": 10.0,
+        "n_tokens": {"A": 100, "B": 90}, "n_convs": {"A": 4, "B": 4}, "replies": {"A": "generated", "B": "generated"},
+        "post_ffn_norm": False, "totals": {"embed": 0.0, "mixer": 0.42, "mlp": 0.58, "top10": 0.12, "top100": 0.3, "top1000": 0.5},
+        "mlp_check_max": 0.004, "layers": layers, "top": top, "bottom": [row(*x) for x in allc[::-1][:5]],
+        "samples": [{"prompt": "I'm going out tonight.", "A": "With who?", "B": "Have fun!"}], "seconds": 1.0}))
+
+
 @pytest.fixture(scope="module")
 def server(tmp_path_factory):
     if not MODEL.exists():
@@ -243,6 +271,7 @@ def server(tmp_path_factory):
     port = _free_port()
     s = Session(MODEL, root=tmp_path_factory.mktemp("ui_root"))
     _seed(s)
+    _seed_writers(s)
     srv = uvicorn.Server(uvicorn.Config(create_app(s), host="127.0.0.1", port=port, log_level="warning"))
     th = threading.Thread(target=srv.run, daemon=True)
     th.start()
@@ -1189,3 +1218,32 @@ def test_head_panel_in_browser(server, browser):
     assert pg.evaluate("[...window.gneI18n.missing]") == []
     assert not errors, errors
     pg.close()
+
+
+def test_writers_view_and_overlay(server, browser):
+    """writers ビュー(書き手の強さ): 割合の棒・上位の表・行のクリックでニューロン、「地図に重ねる」で writers:<name> の色。英語の文言。"""
+    import urllib.request
+    m = json.loads(urllib.request.urlopen(server + "/api/model").read())
+    assert m["writers"][0]["name"] == "wseed" and m["writers"][0]["layers"] == list(range(21))
+    f = urllib.request.urlopen(server + "/api/layer/14/field?name=writers:wseed")
+    v = np.frombuffer(f.read(), np.float32)
+    assert abs(float(v[77]) - 0.9) < 1e-6
+    pg = browser.new_page(viewport={"width": 1500, "height": 860})
+    errors = []
+    pg.on("pageerror", lambda e: errors.append(str(e)))
+    pg.goto(server + "/?lang=en")
+    pg.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
+    pg.click("#views button[data-view=writers]")
+    pg.wait_for_selector("#writers-view table.wrx tbody tr")
+    rows = pg.evaluate("[...document.querySelectorAll('#writers-view table.wrx tbody tr')].length")
+    assert rows >= 20
+    assert "MLP +58%" in pg.inner_text("#writers-view")
+    assert pg.evaluate("document.querySelector('#wrx-canvas').width") > 0
+    pg.click("#wrx-map")
+    pg.wait_for_function("window.gne.overlay.field === 'writers:wseed' && window.gne.overlay.scale", timeout=30000)
+    assert pg.evaluate("[...window.gneI18n.missing]") == []
+    pg.click("#views button[data-view=writers]")
+    pg.wait_for_selector("#writers-view table.wrx tbody tr")
+    pg.click("#writers-view table.wrx tbody tr[data-layer='14'][data-n='77']")
+    pg.wait_for_function("window.gne.focus && window.gne.focus.layer === 14 && window.gne.focus.n === 77", timeout=30000)
+    assert not errors, errors

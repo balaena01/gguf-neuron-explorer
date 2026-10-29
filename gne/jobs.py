@@ -140,6 +140,7 @@ def standard_kinds() -> dict[str, Callable[..., dict]]:
         "eval": _eval,
         "direction": lambda s, **p: s.direction(**p),
         "heads_contrast": lambda s, **p: s.heads_contrast(**p),
+        "writers": lambda s, **p: s.writers(**p),
         "ablate": lambda s, direction, out, **p: s.ablate(direction, out, **p),
     }
 

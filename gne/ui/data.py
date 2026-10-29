@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 from pathlib import Path
 
@@ -254,8 +255,14 @@ class UIData:
             if c is not None:
                 v[:] = c[:n_ff]
                 meta.update(has=True)
+        elif name.startswith("writers:"):                                # 書き手の強さ(gne writers)の寄与
+            from ..writers import load_layer
+            c = load_layer(self.s, name[8:], L)
+            if c is not None:
+                v[:] = c["contrib"][:n_ff]
+                meta.update(has=True)
         else:
-            raise GneError("BAD_ARGS", f"overlay {name!r} はありません", f"{', '.join(FIELDS)}, cos:<方向>")
+            raise GneError("BAD_ARGS", f"overlay {name!r} はありません", f"{', '.join(FIELDS)}, cos:<方向>, writers:<名前>")
         return v, meta
 
     # --- hover(§4.6): steer ±6・logit ±6 の語番号と KL± ------------------------------------------------------
@@ -384,6 +391,25 @@ class UIData:
         """gne heads contrast の要約(<name>.json)。無ければ None。"""
         p, _ = self._heads_paths(name)
         return self._get(("heads_sum", name), [p], lambda: json.loads(p.read_text(encoding="utf-8")) if p.exists() else None)
+
+    def writers_list(self) -> list[dict]:
+        """保存済みの書き手の分析(gne writers)と、寄与のある層。"""
+        d = self.s.store.root / "writers" / self.s.meta.model_id
+        out = []
+        for p in sorted(d.glob("*.json"), key=lambda q: -q.stat().st_mtime) if d.exists() else []:
+            try:
+                x = json.loads(p.read_text())
+            except ValueError:
+                continue
+            Ls = [r["layer"] for r in x["layers"] if r.get("mlp_to_ref") is not None]
+            out.append({"name": x["name"], "ref_layer": x["ref_layer"], "totals": x["totals"], "layers": Ls})
+        return out
+
+    def writers_summary(self, name: str) -> dict:
+        p = self.s.store.root / "writers" / self.s.meta.model_id / f"{name}.json"
+        if not re.fullmatch(r"[\w.\-]+", name) or not p.exists():
+            raise GneError("FILE_NOT_FOUND", f"書き手の分析 {name} がありません")
+        return json.loads(p.read_text())
 
     def heads_list(self) -> list[dict]:
         """保存済みのヘッドの対照分析(新しい順)。地図の overlay heads:<name> と HEAD パネルの Contrast に使う。"""

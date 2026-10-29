@@ -806,6 +806,17 @@ class Session:
         from .embed import embed_run
         return embed_run(self, run, model=model, seed=self.seed, progress=self.progress)
 
+    # --- 書き手の強さ -------------------------------------------------------------------------------
+
+    def writers(self, contrast: str | Path, *, name: str | None = None, ref_layer: int | None = None,
+                replies_a: str | Path | None = None, replies_b: str | Path | None = None, max_tokens: int = 96,
+                top: int = 50) -> dict:
+        """対照集合の A / B の返事のトークンで、各ニューロンが残差に書き足した量と、参照の層の方向への直接の寄与。
+        方向を埋め込み・mixer(attention など)・MLP がそれぞれ何割書いたかも返す。"""
+        from .writers import writer_contributions
+        return writer_contributions(self, contrast, name=name, ref_layer=ref_layer, replies_a=replies_a,
+                                    replies_b=replies_b, max_tokens=max_tokens, top=top, progress=self.progress)
+
     # --- attention ヘッド(CHANGE-04) -------------------------------------------------------------
 
     def heads_contrast(self, contrast: str | Path, *, name: str | None = None, direction: str | None = None,
