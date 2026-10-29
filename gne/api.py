@@ -1133,13 +1133,19 @@ class Session:
         return {**out, "path": str(path)}
 
     def behavior_null(self, recipe: Recipe, contrast: str | Path, *, random_controls: int = 16, max_tokens: int = 64,
-                      mode: str | None = None) -> dict:
+                      mode: str | None = None, sampling=None, seeds: int = 1, prompts: str | Path | list[str] | None = None) -> dict:
         """CHANGE-03 A: レシピの効果(対照集合の validate.match の一致率の変化)と、同じ大きさのランダムな対照レシピ
-        random_controls 本の効果を比べる。null_pct は「効果が対照の何割より大きいか」(0.95 未満なら対照と区別できない)。"""
+        random_controls 本の効果を比べる。null_pct は「効果が対照の何割より大きいか」(0.95 未満なら対照と区別できない)。
+        sampling(engine.Sampling)を渡すと、各プロンプトを seeds 本ずつサンプリングで生成する(レシピを詰めたときの条件に
+        合わせる)。prompts は検証プロンプトの差し替え(文字列のリスト、またはその YAML。対照集合の YAML なら reactivity の
+        with か user_prompts)。"""
         from .direction import behavior_null, load_contrast
         cs, val = load_contrast(contrast)
-        d = behavior_null(self, cs, val, recipe, random_controls=random_controls, max_tokens=max_tokens, mode=mode)
-        return {"contrast": str(contrast), "match": val.match, **d}
+        ps = prompts if prompts is None or isinstance(prompts, list) else load_prompt_list(prompts)
+        d = behavior_null(self, cs, val, recipe, random_controls=random_controls, max_tokens=max_tokens, mode=mode,
+                          sampling=sampling, seeds=seeds, prompts=ps)
+        return {"contrast": str(contrast), "match": val.match,
+                **({"prompts_file": str(prompts)} if prompts is not None and not isinstance(prompts, list) else {}), **d}
 
     def evals(self) -> list[dict]:
         """保存済みの eval の一覧(新しい順)。"""
@@ -1188,6 +1194,23 @@ class Session:
                      "text": texts.get((c.layer, c.neuron), "")} for c in cands]
         baselines = {f"L{L}": texts.get((L, None), "") for L in sorted(by_layer)}
         return {"design": design_name, "runs": runs, "examples": examples, "baselines": baselines}
+
+def load_prompt_list(path: str | Path) -> list[str]:
+    """プロンプトの組の YAML: 文字列のリスト、{prompts: [...]}、または対照集合(reactivity の with、無ければ user_prompts)。"""
+    import yaml
+    p = Path(path)
+    if not p.exists():
+        raise GneError("FILE_NOT_FOUND", f"{p} がありません")
+    d = yaml.safe_load(p.read_text(encoding="utf-8"))
+    if isinstance(d, dict):
+        if d.get("reactivity"):
+            d = [x["with"] for x in d["reactivity"] if x.get("with")]
+        else:
+            d = d.get("prompts") or d.get("user_prompts")
+    if not isinstance(d, list) or not d or not all(isinstance(x, str) for x in d):
+        raise GneError("BAD_ARGS", f"{p}: プロンプトの組は文字列のリスト(または対照集合の YAML)です")
+    return d
+
 
 def vector_key_of(path: Path) -> str:
     """ファイルの中身で決まる短い鍵(方向を作り直したら query の LoRA も作り直す)。"""

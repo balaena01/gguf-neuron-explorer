@@ -344,10 +344,12 @@ def behavior(session, cs: ContrastSet, val: Validate, recipe, *, max_tokens: int
 
 
 def behavior_null(session, cs: ContrastSet, val: Validate, recipe, *, random_controls: int = 16, max_tokens: int = 64,
-                  mode: str | None = None) -> dict:
+                  mode: str | None = None, sampling=None, seeds: int = 1, prompts: list[str] | None = None) -> dict:
     """レシピの効果(判定の一致率の変化)が、同じ大きさのランダムな対照レシピ(controls.control_recipes)の何割より
     大きいか(null_pct、CHANGE-03 A)。mode="add" は system なしの検証プロンプトで一致率が上がるのを、mode="ablate" は
-    system_a 付きで下がるのを効果とみなす(既定は add ユニットが無く ablate があれば ablate、それ以外は add)。"""
+    system_a 付きで下がるのを効果とみなす(既定は add ユニットが無く ablate があれば ablate、それ以外は add)。
+    sampling(engine.Sampling)を渡すと、各プロンプトを seeds 本ずつサンプリングで生成する。無介入・レシピ・対照で同じ乱数を使う
+    (違いは押し方だけ)。prompts で検証プロンプトを差し替えられる(場面のある組など)。"""
     from .controls import control_recipes, null_pct, summarize
     from .evalx import _generate
     from .when import parse_when
@@ -357,18 +359,23 @@ def behavior_null(session, cs: ContrastSet, val: Validate, recipe, *, random_con
     mode = mode or ("ablate" if recipe.ablate is not None and not recipe.add_units else "add")
     if mode not in ("add", "ablate"):
         raise GneError("BAD_ARGS", "mode は add か ablate です")
+    ps = list(prompts) if prompts else list(val.prompts)
+    n_rep = max(1, int(seeds)) if sampling is not None else 1
     if mode == "ablate":
-        convs = [[{"role": "system", "content": cs.system_a}, {"role": "user", "content": u}] for u in val.prompts]
+        convs = [[{"role": "system", "content": cs.system_a}, {"role": "user", "content": u}] for u in ps]
         when, sign = "all", -1.0
     else:
-        convs = [[{"role": "user", "content": u}] for u in val.prompts]
+        convs = [[{"role": "user", "content": u}] for u in ps]
         when, sign = str(parse_when(recipe.when)), 1.0
+    items = [(c, max_tokens) for _ in range(n_rep) for c in convs]          # 種ごとに全プロンプト(同じ順)
 
     def rate(r) -> tuple[float, str]:
         vecs = session.vectors(r)[0] if r is not None and r.add_units else None
         lora = session.lora_for(r) if r is not None else None
-        outs = _generate(session, [(c, max_tokens) for c in convs], vecs, lora, when, lambda n: None)
-        return float(np.mean([bool(rx.search(o["text"])) for o in outs])), (outs[0]["text"][:200] if outs else "")
+        outs = _generate(session, items, vecs, lora, when, lambda n: None, sampling=sampling)
+        hits = [bool(rx.search(o["text"])) for o in outs]
+        hit_text = next((o["text"] for o, h in zip(outs, hits, strict=True) if h), None)
+        return float(np.mean(hits)), ((hit_text if r is not None and hit_text else outs[0]["text"])[:240] if outs else "")
 
     base, _ = rate(None)
     got, sample = rate(recipe)
@@ -377,7 +384,9 @@ def behavior_null(session, cs: ContrastSet, val: Validate, recipe, *, random_con
         cr, _ = rate(c)
         ctrl.append({"name": c.name, "rate": cr, "effect": sign * (cr - base)})
     effect = sign * (got - base)
-    return {"mode": mode, "when": when, "n_prompts": len(convs), "base_rate": base, "rate": got, "effect": effect,
+    return {"mode": mode, "when": when, "n_prompts": len(convs), "n_samples": len(items), "max_tokens": max_tokens,
+            "sampling": None if sampling is None else sampling.to_dict(), "seeds": n_rep,
+            "prompts": None if not prompts else ps, "base_rate": base, "rate": got, "effect": effect,
             "sample": sample, "random_controls": len(ctrl), "ctrl": summarize([c["effect"] for c in ctrl]),
             "ctrl_rows": ctrl, "null_pct": null_pct(effect, [c["effect"] for c in ctrl])}
 

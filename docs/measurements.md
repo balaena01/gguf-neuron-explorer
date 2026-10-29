@@ -289,3 +289,5 @@ Qwen3.5-4B Q8_0、`gne direction --select auto --mode add`(12 プロンプト、
 | connections `--window 8`(Saluki 27B、先頭 12 層 = 60 ペア、CPU) | 26.8 分(26.8 秒/ペア) | ピーク 3.9 GB。全 484 ペアは約 3.6 時間(見積もり) |
 
 見積もりと実測の比較は `docs/verification.md` §13.3。
+
+`steer --contrast` をレシピのサンプリングで(Saluki 27B、`yandere_react.yaml` の 10 場面 × 4 本、128 トークン、対照 16 本): 方向版 10 分、26 ニューロン版(all)13 分。結果は `docs/verification.md` §13.1。

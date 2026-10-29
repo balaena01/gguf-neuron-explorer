@@ -173,8 +173,11 @@ def _msgs(p: str | list[dict]) -> list[dict]:
 
 
 def _generate(session, items: list[tuple[str | list[dict], int]], vecs, lora, when: str,
-              tick: Callable[[int], None]) -> list[dict]:
-    """items: [(プロンプトか会話, max_tokens)]。when = all ならまとめて(n_seq_max 本ずつ、n_ctx に収まる分)、それ以外は 1 本ずつ。"""
+              tick: Callable[[int], None], sampling=None) -> list[dict]:
+    """items: [(プロンプトか会話, max_tokens)]。when = all ならまとめて(n_seq_max 本ずつ、n_ctx に収まる分)、それ以外は 1 本ずつ。
+    sampling(engine.Sampling)を渡すとサンプリングで生成する。乱数は「seed + まとまりの番号」と、まとまりの中の位置で決まるので、
+    同じ items を同じ順に渡せば(押し方を変えても)同じ乱数で引く。既定は greedy。"""
+    import dataclasses
     from .when import generate_when
     e = session.engine
     ctx = e.steer_ctx()
@@ -184,7 +187,8 @@ def _generate(session, items: list[tuple[str | list[dict], int]], vecs, lora, wh
         return {"text": r.text, "token_ids": r.token_ids, "finish": r.finish}
     if when != "all":
         for i, (prompt, mt) in enumerate(items):
-            r, _ = generate_when(e, ctx, _msgs(prompt), vecs, when, max_tokens=mt, lora=lora)
+            sp = None if sampling is None else dataclasses.replace(sampling, seed=sampling.seed + 7919 * i)
+            r, _ = generate_when(e, ctx, _msgs(prompt), vecs, when, max_tokens=mt, lora=lora, sampling=sp)
             outs[i] = keep(r)
             tick(1)
         return outs
@@ -195,6 +199,7 @@ def _generate(session, items: list[tuple[str | list[dict], int]], vecs, lora, wh
         by_mt: dict[int, list[int]] = {}
         for i, (_, mt) in enumerate(items):
             by_mt.setdefault(mt, []).append(i)
+        n_batch = 0
         for mt, idx in by_mt.items():
             while idx:
                 part, used = [], 0
@@ -207,7 +212,9 @@ def _generate(session, items: list[tuple[str | list[dict], int]], vecs, lora, wh
                 idx = idx[len(part):]
                 if used > e.n_ctx:
                     raise GneError("CONTEXT_FULL", f"タスク {part[0]} が n_ctx={e.n_ctx} に入りません")
-                for i, r in zip(part, e.generate_greedy(ctx, [seqs[i] for i in part], max_tokens=mt), strict=True):
+                sp = None if sampling is None else dataclasses.replace(sampling, seed=sampling.seed + 7919 * n_batch)
+                n_batch += 1
+                for i, r in zip(part, e.generate_greedy(ctx, [seqs[i] for i in part], max_tokens=mt, sampling=sp), strict=True):
                     outs[i] = keep(r)
                 tick(len(part))
     finally:

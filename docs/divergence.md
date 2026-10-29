@@ -95,3 +95,4 @@
 | `fires_heads`(CHANGE-04 G) | overlay に `fires_heads` | 色のメニューには入れず、fires のパネルの「ヘッド」(既定で入)で、選んだトークンへの注目の量をヘッドの線に色で付ける(ニューロンは fires の色のまま) | fires を見ながらヘッドも見るため |
 | Pattern のトリガーの注目(CHANGE-04 G) | Contrast でトリガー区間ごとの注目量 | Pattern で、ユーザーの発話だけ(返事なし)を流してトリガー区間への注目を出す。対照分析の trigger_mass(返事の行から)とは同じではない | 対照分析は区間ごとの注目を保存していない |
 | UI の query のユニット(CHANGE-04 E・G) | — | recipe タブでは読み込みのときに外す(「UI では扱えないユニット」)。eval ビューでは名前を出す。cvec の書き出しは add のユニットだけ(ヘッドだけのレシピでは押せない) | |
+| `steer --contrast` の生成(追加) | greedy・64 トークン・対照集合の validate のプロンプト | `--contrast-sample`(レシピのサンプリング。`--temperature` などで上書き、seed は既定 0)、`--contrast-seeds N`(1 プロンプトあたりの本数)、`--contrast-tokens`、`--contrast-prompts FILE`(プロンプトの組の差し替え)。乱数は「seed + まとまりの番号」とまとまりの中の位置で決まり、無介入・レシピ・対照で同じ | サンプリングで詰めたレシピは、greedy の短い返事では性格が出る前に終わり、対照と区別できなかった(F105) |

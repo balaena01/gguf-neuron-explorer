@@ -251,3 +251,21 @@ def test_workers_split_merge_equals_single(session, tmp_path):
             submit(a, "lens_steer", {"layer": 14, "neurons": "0-3"}, workers=["other"])   # 別のモデルには投げない
     finally:
         a.close()
+
+
+@pytest.mark.model
+def test_behavior_null_with_sampling(session, tmp_path):
+    """steer --contrast をレシピのサンプリングで: プロンプト × 種の本数、同じ種なら同じ結果、プロンプトの差し替え。"""
+    from gne.engine import Sampling
+    c = _contrast(tmp_path)
+    session.direction(contrast=c)
+    r = session.recipe(units=["14:dir:pirate:+4.0"], name="p")
+    sp = Sampling(temperature=0.8, top_k=40, top_p=0.95, min_p=0.05, presence_penalty=0.0, seed=3)
+    a = session.behavior_null(r, c, random_controls=2, max_tokens=12, sampling=sp, seeds=2)
+    b = session.behavior_null(r, c, random_controls=2, max_tokens=12, sampling=sp, seeds=2)
+    assert a["n_samples"] == 6 and a["seeds"] == 2 and a["sampling"]["seed"] == 3 and a["max_tokens"] == 12
+    assert (a["rate"], a["base_rate"], [x["rate"] for x in a["ctrl_rows"]]) == (b["rate"], b["base_rate"], [x["rate"] for x in b["ctrl_rows"]])
+    pf = tmp_path / "ps.yaml"
+    pf.write_text(yaml.safe_dump(["Ahoy there!", "Where is the treasure?"]))
+    g = session.behavior_null(r, c, random_controls=1, max_tokens=8, prompts=pf)
+    assert g["n_prompts"] == 2 and g["n_samples"] == 2 and g["sampling"] is None and g["prompts"] == ["Ahoy there!", "Where is the treasure?"]

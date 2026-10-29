@@ -74,7 +74,7 @@ gne eval --compare-ablation evil                  # 上位ニューロン ×0 �
 - 対照集合は `system_a`(目標)/ `system_b`(中立)/ `user_prompts` / `validate`(判定の正規表現と目標)。
 - 性格を足す方向は `--positions response`(A / B の system で返事を作り、返事のトークンで測る)。
 - 層選びは層ごとに同じ大きさのランダムな向き(`--random-controls`、既定 16)も流し、効果が対照の p95 を超えた層だけを選ぶ。表の「対照p95」と「null」(効果が対照の何割より大きいか)を見る。null が 0.95 未満の方向は報告しない。
-- レシピの効果を対照と比べるのは `gne steer --recipe R --contrast C`(`--prompt` なしでも可)。add ユニットを同じ層・同じ大きさのランダムに差し替えた対照レシピ 16 本と、C の validate で比べて `null_pct` を出す。
+- レシピの効果を対照と比べるのは `gne steer --recipe R --contrast C`(`--prompt` なしでも可)。サンプリングで詰めたレシピは `--contrast-sample --contrast-seeds 4 --contrast-tokens 128` で詰めたときの条件に合わせ、場面のあるプロンプト(`--contrast-prompts` か、その対照集合)で測る。greedy の短い返事だと性格が出る前に終わる(F105)。add ユニットを同じ層・同じ大きさのランダムに差し替えた対照レシピ 16 本と、C の validate で比べて `null_pct` を出す。
 - 方向は `~/.gne/directions/<model_id>/NAME.npz`。別のモデルの方向は名前では呼べないので、ファイルをそのモデルの directions に置く(`direction_set(path)` はパスも受ける)。
 
 ### 書き手の強さ(`gne writers`)

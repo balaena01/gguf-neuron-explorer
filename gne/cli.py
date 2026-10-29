@@ -493,7 +493,11 @@ def steer(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Optio
           min_p: Optional[float] = _MIN_P, presence_penalty: Optional[float] = _PRES,
           sample_seed: Optional[int] = _SSEED, greedy: bool = _GREEDY,
           contrast: Optional[Path] = typer.Option(None, "--contrast", help="対照集合 YAML: その validate で効果を測り、ランダムな対照レシピと比べる(null_pct)"),
-          random_controls: int = typer.Option(16, "--random-controls", help="--contrast: 対照レシピ(同じ大きさのランダムな向き)の本数")):
+          random_controls: int = typer.Option(16, "--random-controls", help="--contrast: 対照レシピ(同じ大きさのランダムな向き)の本数"),
+          contrast_sample: bool = typer.Option(False, "--contrast-sample", help="--contrast: greedy ではなくレシピのサンプリング(--temperature などで上書き)で生成する。乱数は無介入・レシピ・対照で同じ"),
+          contrast_seeds: int = typer.Option(4, "--contrast-seeds", help="--contrast-sample: 1 プロンプトあたりの本数"),
+          contrast_tokens: int = typer.Option(64, "--contrast-tokens", help="--contrast: 生成する長さ"),
+          contrast_prompts: Optional[Path] = typer.Option(None, "--contrast-prompts", help="--contrast: 検証プロンプトを差し替える YAML(文字列のリスト、または対照集合なら reactivity の with か user_prompts)")):
     """レシピまたは単発指定でプロンプトに回答する(既定は greedy、1 本ずつ)。"""
     s = holder["session"] = c.session()
     r = s.recipe(units=unit, path=recipe, dose_unit=dose_unit, scale=scale, when=when, ablate=ablate)
@@ -507,7 +511,16 @@ def steer(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Optio
         d = {"messages": [], "recipe": r.to_dict(), "units": details, "layer_norms": s._norms(vecs), "when": r.when,
              "sampling": None, "baseline": None, "steered": None, "differs": None}
     if contrast is not None:
-        d["behavior"] = s.behavior_null(r, contrast, random_controls=random_controls)
+        csp = None
+        if contrast_sample:                       # レシピを詰めたときの条件に合わせる。seed は固定(既定 0)で、同じ乱数で比べる
+            from .engine import Sampling
+            from .steer import SAMPLING_PRESETS, sampling_values
+            given = {k: v for k, v in (("temperature", temperature), ("top_k", top_k), ("top_p", top_p), ("min_p", min_p),
+                                       ("presence_penalty", presence_penalty)) if v is not None}
+            vals = sampling_values(given, base=r.sampling or SAMPLING_PRESETS["common"], seed=False)
+            csp = Sampling(**vals, seed=sample_seed if sample_seed is not None else 0)
+        d["behavior"] = s.behavior_null(r, contrast, random_controls=random_controls, max_tokens=contrast_tokens,
+                                        sampling=csp, seeds=contrast_seeds, prompts=contrast_prompts)
     parts = [f"ユニット({r.dose_unit}、位置 {r.when}、{_sampling_text(sp)}):\n" + (_units_text(d["units"]) or "  なし")
              + (f"\n  {r.ablate.label()}(LoRA)" if r.ablate else "")]
     if d["baseline"] is not None:
@@ -520,8 +533,11 @@ def steer(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Optio
     b = d.get("behavior")
     if b is not None:
         cs = b["ctrl"]
-        line = (f"対照集合での効果({b['mode']}、{b['n_prompts']} プロンプト、位置 {b['when']}): 一致率 {b['base_rate']:.2f} → "
-                f"{b['rate']:.2f}(効果 {b['effect']:+.2f})")
+        how = (f"サンプリング(温度 {b['sampling']['temperature']:g}・seed {b['sampling']['seed']})× {b['seeds']} 本"
+               if b.get("sampling") else "greedy")
+        line = (f"対照集合での効果({b['mode']}、{b['n_prompts']} プロンプト × {how} = {b.get('n_samples', b['n_prompts'])} 本、"
+                f"{b.get('max_tokens', 64)} トークン、位置 {b['when']}): 一致率 {b['base_rate']:.2f} → "
+                f"{b['rate']:.2f}(効果 {b['effect']:+.2f})\n  例: {b['sample'][:160]!r}")
         if b["random_controls"]:
             line += (f"\n  ランダムな対照 {b['random_controls']} 本: 効果 p50 {cs['p50']:+.2f}・p95 {cs['p95']:+.2f}・"
                      f"最大 {cs['max']:+.2f} → null_pct {b['null_pct']:.2f}"
