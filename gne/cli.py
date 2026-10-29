@@ -1224,6 +1224,25 @@ def writers_cmd(c: Common, holder: dict,
     return d, "\n".join(lines), 0
 
 
+@gne_command(app, "writers-export")
+def writers_export(c: Common, holder: dict, name: str = typer.Option(..., "--name", help="gne writers の分析の名前"),
+                   out: str = typer.Option(..., "--out", help="書き出す方向の名前"),
+                   part: str = typer.Option("mlp", "--part", help="mlp / mixer / all(mixer + MLP)/ r(残差の差そのもの)"),
+                   top: Optional[int] = typer.Option(None, "--top", help="--part mlp: 参照の方向への寄与の上位 N 個のニューロンだけ"),
+                   layers: Optional[str] = typer.Option(None, "--layers", help="all / 10-16 / 1,5,9-12")):
+    """書き手の分析の書き足しを、層ごとの方向として書き出す。"L:dir:<out>:1"(dose_unit raw)で、A の状態で書かれた量を
+    その層にそのまま足す(倍率で強める)。上位の書き手だけを足して性格が出るかを確かめる用。"""
+    from .writers import export_writes
+    if not re.fullmatch(r"[\w.\-]+", out):
+        raise GneError("BAD_ARGS", "--out は英数字・_・-・. だけにしてください")
+    s = holder["session"] = c.session()
+    d = export_writes(s, name, out, part=part, top=top, layers=parse_layers(layers))
+    text = (f"{d['path']}({part}{'' if top is None else f'、上位 {top} 個'}、{len(d['layers'])} 層)\n"
+            + "  ‖v_L‖: " + " ".join(f"L{L}:{n:.2f}" for L, n in d["norms"].items())
+            + f"\n使い方(raw の倍率): --dose-unit raw " + " ".join(f"--unit {u}" for u in d["units"][:3]) + (" …" if len(d["units"]) > 3 else ""))
+    return d, text, 0
+
+
 @gne_command(heads_app, "contrast", "heads contrast")
 def heads_contrast(c: Common, holder: dict,
                    contrast: Path = typer.Option(..., "--contrast", help="対照集合 YAML(triggers があれば trigger_mass も測る)"),

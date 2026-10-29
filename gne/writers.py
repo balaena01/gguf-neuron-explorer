@@ -191,7 +191,8 @@ def writer_contributions(session, contrast: str | Path, *, name: str | None = No
         gg = g if g is not None else np.ones(m.n_embd, dtype=np.float32)
         gw = (W.T @ (rh * gg)).astype(np.float64)                                 # (n_ff,) 実際の書く向き(γ ⊙ w_n)・r̂
         wn = np.sqrt(np.square(W).T @ np.square(gg)).astype(np.float64)           # ‖γ ⊙ w_n‖
-        per[L] = {"contrib": (ds * gw).astype(np.float32), "act_a": (raw_a["A"] / cnt["A"]).astype(np.float32),
+        per[L] = {"contrib": (ds * gw).astype(np.float32), "wdiff": ds.astype(np.float32),
+                  "act_a": (raw_a["A"] / cnt["A"]).astype(np.float32),
                   "act_b": (raw_a["B"] / cnt["B"]).astype(np.float32),
                   "act_diff": (raw_a["A"] / cnt["A"] - raw_a["B"] / cnt["B"]).astype(np.float32),
                   "align": (gw / np.maximum(wn, 1e-12)).astype(np.float32)}
@@ -233,7 +234,13 @@ def writer_contributions(session, contrast: str | Path, *, name: str | None = No
         totals[f"top{k}"] = float(np.sort(contribs)[::-1][:k].sum()) / nrm if contribs.size else 0.0
     out_dir = session.store.root / "writers" / m.model_id
     out_dir.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(out_dir / f"{name}.npz", ref_layer=ref, ref_norm=nrm,
+    vecs = {"emb_vec": d_emb.astype(np.float32), **{f"r_vec_{L}": r[L].astype(np.float32) for L in Ls},
+            **{f"mlp_vec_{L}": v.astype(np.float32) for L, v in mlp.items()}}
+    prev = d_emb
+    for L in Ls:                                             # mixer の書き足し = r_L − r_{L−1} − ΔMLP_L
+        vecs[f"mix_vec_{L}"] = (r[L] - prev - mlp.get(L, 0.0)).astype(np.float32)
+        prev = r[L]
+    np.savez_compressed(out_dir / f"{name}.npz", ref_layer=ref, ref_norm=nrm, **vecs,
                         **{f"{k}_{L}": v for L, p in per.items() for k, v in p.items()})
     summary = {"name": name, "contrast": str(Path(contrast).resolve()), "contrast_sha": cs.sha, "ref_layer": ref,
                "ref_norm": nrm, "n_tokens": cnt, "n_convs": {s_: len(seqs[s_]) for s_ in "AB"},
@@ -290,3 +297,66 @@ def neuron_entries(session, L: int, n: int) -> list[dict]:
                     "act_a": float(z[f"act_a_{L}"][n]), "act_b": float(z[f"act_b_{L}"][n]),
                     "act_diff": float(z[f"act_diff_{L}"][n])})
     return out
+
+
+def export_writes(session, name: str, out_name: str, *, part: str = "mlp", top: int | None = None,
+                  layers: list[int] | None = None) -> dict:
+    """保存した分析の書き足しを、層ごとのベクトルとして方向のファイル(<root>/directions/<model_id>/<out_name>.npz)に書く。
+    "L:dir:<out_name>:1"(dose_unit raw)で層 L に足すと、その層で A の状態のときに書かれた量(返事のトークンの平均)を
+    そのまま足すことになる(倍率で強める)。
+    part: "mlp"(MLP の書き足し。top があれば、参照の方向への寄与の大きい上位 top 個のニューロンの分だけ)、
+    "mixer"(mixer の書き足し)、"all"(mixer + MLP)、"r"(その層の残差の差 r_L そのもの)。"""
+    from .direction import DirectionSet  # noqa: F401  形式を合わせる相手
+    p = session.store.root / "writers" / session.meta.model_id / f"{name}.npz"
+    if not p.exists():
+        raise GneError("FILE_NOT_FOUND", f"書き手の分析 {name} がありません")
+    z = np.load(p)
+    if "emb_vec" not in z.files:
+        raise GneError("BAD_ARGS", f"{name} は古い形式です(gne writers で作り直してください)")
+    if part not in ("mlp", "mixer", "all", "r"):
+        raise GneError("BAD_ARGS", "part は mlp / mixer / all / r です")
+    ref = int(z["ref_layer"])
+    Ls_all = sorted(int(k.split("_")[2]) for k in z.files if k.startswith("r_vec_"))
+    Ls = [L for L in (layers if layers is not None else Ls_all) if L in Ls_all and 1 <= L <= ref]   # 層 0 は cvec で押せない
+    keep: dict[int, np.ndarray] | None = None
+    if part == "mlp" and top is not None:                    # 参照の方向への寄与の上位 top 個(全層を通して)
+        allc = [(L, n, c) for L in Ls if f"contrib_{L}" in z.files for n, c in enumerate(z[f"contrib_{L}"])]
+        allc.sort(key=lambda x: -x[2])
+        keep = {}
+        for L, n, _ in allc[:top]:
+            keep.setdefault(L, []).append(n)
+        keep = {L: np.array(v) for L, v in keep.items()}
+    w = session.weights
+    out, norms = {}, {}
+    for L in Ls:
+        if part == "r":
+            v = z[f"r_vec_{L}"]
+        elif part == "mixer":
+            v = z[f"mix_vec_{L}"]
+        elif part == "all":
+            v = z[f"mix_vec_{L}"] + (z[f"mlp_vec_{L}"] if f"mlp_vec_{L}" in z.files else 0.0)
+        elif keep is None:
+            if f"mlp_vec_{L}" not in z.files:
+                continue
+            v = z[f"mlp_vec_{L}"]
+        else:
+            if L not in keep:
+                continue
+            idx = keep[L]
+            W = w.down_matrix(L).astype(np.float32)
+            g, _ = _post_norm(w, L)
+            v = W[:, idx] @ z[f"wdiff_{L}"][idx]
+            if g is not None:
+                v = g * v
+        out[L] = np.asarray(v, dtype=np.float32)
+        norms[str(L)] = float(np.linalg.norm(out[L]))
+    if not out:
+        raise GneError("BAD_ARGS", "書き出す層がありません")
+    d = session.store.direction_dir(session.meta.model_id)
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / f"{out_name}.npz"
+    Lk = sorted(out)
+    np.savez(path, layers=np.array(Lk, dtype=np.int32), **{f"layer_{L}": out[L] for L in Lk}, method="writers",
+             positions="response", source=str(p), contrast_sha="", n_rows_A=0, n_rows_B=0)
+    return {"path": str(path), "name": out_name, "part": part, "top": top, "layers": Lk, "norms": norms,
+            "units": [f"{L}:dir:{out_name}:1" for L in Lk]}

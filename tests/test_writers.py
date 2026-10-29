@@ -76,3 +76,21 @@ def test_writers_decomposition(session, tmp_path):
     assert {x["name"] for x in nd["writers"]} >= {"pirate", "pirate_given"} and nd["coverage"]["writers"]
     assert json.loads(Path(d["path"]).read_text())["name"] == "pirate"
     assert np.isfinite([x["cos_ref"] for x in d["layers"]]).all()
+    # 書き出し: 上位の書き手の分だけ・MLP 全部・mixer・残差の差。MLP 全部の和は捕捉した ΔMLP と同じ
+    from gne.writers import export_writes
+    z = np.load(Path(d["path"]).with_suffix(".npz"))
+    full = export_writes(session, "pirate", "pw_mlp", part="mlp")
+    ds = session.direction_set("pw_mlp")
+    L = full["layers"][len(full["layers"]) // 2]
+    assert np.allclose(ds.raw[L], z[f"mlp_vec_{L}"], atol=1e-5)
+    t3 = export_writes(session, "pirate", "pw_top3", part="mlp", top=3)
+    assert 1 <= len(t3["layers"]) <= 3
+    tl = top["layer"]
+    W = session.weights.down_matrix(tl)
+    v = session.direction_set("pw_top3").raw[tl]
+    assert np.linalg.norm(v) > 0 and np.allclose(v, W[:, [top["neuron"]] + [x["neuron"] for x in d["top"][1:3] if x["layer"] == tl]]
+                                                  @ z[f"wdiff_{tl}"][[top["neuron"]] + [x["neuron"] for x in d["top"][1:3] if x["layer"] == tl]], atol=1e-4)
+    r = export_writes(session, "pirate", "pw_r", part="r", layers=[d["ref_layer"]])
+    assert r["layers"] == [d["ref_layer"]] and abs(r["norms"][str(d["ref_layer"])] - d["ref_norm"]) < 1e-3
+    rec = session.recipe(units=[f"{L}:dir:pw_mlp:1"], dose_unit="raw")
+    assert np.allclose(session.vectors(rec)[0][L], z[f"mlp_vec_{L}"], atol=1e-5)

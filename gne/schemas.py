@@ -650,6 +650,16 @@ class WritersOut(Envelope):                     # gne writers(書き手の強さ
     seconds: float
 
 
+class WritersExportOut(Envelope):
+    path: str
+    name: str
+    part: str
+    top: int | None
+    layers: list[int]
+    norms: dict[str, float]
+    units: list[str]
+
+
 class WorkerOut(Envelope):                      # CHANGE-03 B
     name: str
     n_jobs: int
@@ -747,5 +757,5 @@ COMMAND_SCHEMAS: dict[str, type[Envelope]] = {
     "eval": EvalOut, "direction": DirectionOut, "ablate": AblateOut,
     "heads contrast": HeadsContrastOut, "heads attention": AttentionOut, "heads show": HeadOut, "heads name": HeadNameOut,
     "heads query": HeadsQueryOut,
-    "connections": ConnectionsOut, "worker": WorkerOut, "writers": WritersOut,
+    "connections": ConnectionsOut, "worker": WorkerOut, "writers": WritersOut, "writers-export": WritersExportOut,
 }
