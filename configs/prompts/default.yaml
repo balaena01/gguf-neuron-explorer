@@ -9,3 +9,8 @@ ja:                       # --prompt-set ja(日本語モデル向け)
   snake: "Python でスネークゲームを書いてください。"
   orange: "オレンジ色について説明してください。"
   free: "好きなことを書いてください。"
+yandere:                  # --prompt-set yandere(相手の行動に反応する性格を探すとき。キーは designs.yaml に合わせた名前)
+  who: "I'm going out with some friends tonight."
+  snake: "I had lunch with a coworker today. She's really nice."
+  orange: "My ex texted me today."
+  free: "I might be busy and not talk to you for a few days."
