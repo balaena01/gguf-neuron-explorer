@@ -18,6 +18,8 @@ export const FIELDS = {
 
 export function fieldLabel(name) {
   if (name.startsWith("cos:")) return t("逆引き {d} との cos", { d: name.slice(4) });
+  if (name.startsWith("heads:")) return t("ヘッドの対照 {d} の z", { d: name.slice(6) });
+  if (name === "fires_heads") return t("ヘッドの注目(fires の選んだトークンへ)");
   if (name.startsWith("search:")) return t("検索「{q}」", { q: name.slice(7) });
   if (name.startsWith("fires:")) return `fires ${name.split(":").slice(2).join(":")}`;   // fires:<id>:<見出し>
   return FIELDS[name] ? FIELDS[name].label : name;
@@ -27,6 +29,7 @@ export function fieldLabel(name) {
 export function layersWith(name, model) {
   const cov = model.coverage;
   if (name === "none" || name.startsWith("search:") || name.startsWith("fires:")) return [];
+  if (name.startsWith("heads:")) return ((model.heads || []).find((h) => h.name === name.slice(6)) || {}).layers || [];
   if (name.startsWith("cos:")) return cov.filter((c) => c.directions.includes(name.slice(4))).map((c) => c.layer);
   const need = FIELDS[name].needs;
   if (need === "named") return [...new Set(Object.keys(model.names || {}).map((k) => +k.split(":")[0]))];
@@ -112,6 +115,32 @@ export function colorizeHits(n, hits) {
   return out;
 }
 
+// ヘッドの色(CHANGE-04 G、地図の板の上辺の帯)。v: Float32Array(n_head)、NaN = データ無し。返す配列の .lit に光るヘッドの数。
+// heads:<name>: 対照(中立どうし)の z の 95% 点を超えたヘッド(null_pct ≥ 0.95)を琥珀に、明るさ = z(光るヘッドの最小〜最大)。
+// fires_heads: 選んだトークンへの注目(後ろの位置からの平均)。明るさ = √(値 / 全ヘッドの最大)、最大の 5% 以上を光るとして数える
+export const HEAD_IDLE = [44, 52, 66];
+export function colorizeHeads(kind, v, opt = {}) {
+  const out = new Uint8Array(v.length * 3);
+  let lit = 0;
+  for (let h = 0; h < v.length; h++) {
+    const x = v[h];
+    let rgb = COLORS.idle;
+    if (Number.isFinite(x)) {
+      if (kind === "fires_heads") {
+        const f = x / Math.max(opt.max || 0, 1e-9);
+        rgb = lerp(HEAD_IDLE, AMBER_HI, Math.sqrt(clamp01(f)));
+        if (f >= 0.05) lit++;
+      } else if ((opt.nullPct ? opt.nullPct[h] : 0) >= 0.95) {
+        rgb = lerp(AMBER_LO, AMBER_HI, clamp01((x - opt.lo) / Math.max(opt.hi - opt.lo, 1e-6)));
+        lit++;
+      } else rgb = HEAD_IDLE;
+    }
+    out.set(rgb, 3 * h);
+  }
+  out.lit = lit;
+  return out;
+}
+
 // 光る点が全体の 2% を超えるときの係数(全層共通)。多くの点を全部目立たせると、加算合成で板が白く飽和して数が読めない
 export function emphasisFactor(totalLit, totalN) {
   const f = totalLit / Math.max(totalN, 1);
@@ -145,6 +174,14 @@ export function legendHTML(name, scale, opt = {}) {
     act_q999: [it(sw(COLORS.swept), t("全層の上位 10% 未満")), ramp(AMBER_LO, AMBER_HI, `${fmt(10 ** scale.p90, 2)}〜${fmt(10 ** scale.p999, 2)}`)],
     named: [it(sw(COLORS.sel), t("名前付き"))],
   };
+  if (name.startsWith("heads:")) {
+    return none + it(sw(HEAD_IDLE), t("対照の 95% 以下")) + ramp(AMBER_LO, AMBER_HI, t("z {a}〜{b}(対照の 95% 超)", { a: fmt(scale.lo, 1), b: fmt(scale.hi, 1) })) +
+      it(t("色 = 板の上辺のヘッドの帯"));
+  }
+  if (name === "fires_heads") {
+    return ramp(HEAD_IDLE, AMBER_HI, t("注目 0〜{m}(後ろの位置からの平均、明るさ = √)", { m: fmt(scale.max, 3) })) +
+      it(t("線形注意の層はパターンが無いので色なし"));
+  }
   if (name.startsWith("fires:")) {
     return none + it(sw(COLORS.swept), t("|スコア| < {v}", { v: fmt(opt.threshold, 1) })) + it(sw(COLORS.plus), t("正")) + it(sw(COLORS.minus), t("負")) +
       it(t("明るさ = |スコア| {a}〜{b}(1 = その層の q999)", { a: fmt(opt.threshold, 1), b: fmt(scale.max, 1) }));

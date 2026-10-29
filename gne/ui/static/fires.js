@@ -1,5 +1,6 @@
 // LIST の fires タブ(別冊 §5.5)。文章を流してトークンを並べ、トークンを選ぶと、そのトークンで最も光るニューロンの
 // 一覧(層の範囲・符号・閾値・lens の語で絞る)と、マップの色(全層の値)を出す。「全トークン」は各ニューロンの |最大|。
+// 「ヘッド」を入れておくと、板の上辺のヘッドも、選んだトークンへの注目(後ろの位置からの平均)で色付けする(CHANGE-04 G の fires_heads)。
 import { getJSON, postJSON } from "./api.js";
 import { t as tr } from "./i18n.js";                 // t はトークンの変数名に使っているので tr
 import { esc, tokHTML } from "./panels.js";
@@ -11,7 +12,8 @@ export class FiresPanel {
     this.root = root;
     this.nLayer = nLayer;
     this.onOpen = onOpen;
-    this.onField = onField;            // (fid, tok, label) → マップの色を切り替える
+    this.onField = onField;            // (fid, tok, label, thr, heads) → マップの色を切り替える
+    this.heads = true;                 // ヘッドの注目も色にする(flash attention を切った prefill を 1 回足す)
     this.text = "";
     this.res = null;
     this.tok = -1;
@@ -39,7 +41,8 @@ export class FiresPanel {
         <label class="muted">${tr("層")} <input id="fi-lmin" type="number" min="0" max="${this.nLayer - 1}" value="${f.lmin}">〜<input id="fi-lmax" type="number" min="0" max="${this.nLayer - 1}" value="${f.lmax}"></label>
         <select id="fi-sign"><option value="both">±</option><option value="+">+</option><option value="-">−</option></select>
         <label class="muted">|s| ≥ <input id="fi-thr" type="number" step="0.5" min="0" value="${f.thr}"></label>
-        <input id="fi-q" placeholder="${tr("lens の語")}" value="${esc(f.q)}" spellcheck="false"></div>
+        <input id="fi-q" placeholder="${tr("lens の語")}" value="${esc(f.q)}" spellcheck="false">
+        <label class="muted" title="${tr("板の上辺のヘッドを、選んだトークンへの注目(そのトークンより後ろの位置からの注目の平均)で色付けする")}"><input type="checkbox" id="fi-heads"${this.heads ? " checked" : ""}> ${tr("ヘッド")}</label></div>
       <div class="rank-wrap"><table class="rank mono fi-tab"><thead><tr><th>${tr("層")}</th><th>N</th><th>${tr("スコア")}</th><th title="${tr("光った向きの lens の極。S = steer lens、L = logit lens")}">${tr("lens(向きの極)")}</th></tr></thead>
         <tbody id="fi-list">${this.listHTML()}</tbody></table></div>` : ""}`;
     const $ = (s) => this.root.querySelector(s);
@@ -47,12 +50,13 @@ export class FiresPanel {
     $("#fi-run").addEventListener("click", () => this.run());
     if (!r) return;
     $("#fi-sign").value = f.sign;
+    $("#fi-heads").addEventListener("change", (ev) => { this.heads = ev.target.checked; this.onField(r.id, this.tok, this.label(), this.filt.thr, this.heads); });
     for (const b of this.root.querySelectorAll("[data-tok]")) b.addEventListener("click", () => this.pick(+b.dataset.tok));
     for (const [id, k] of [["#fi-lmin", "lmin"], ["#fi-lmax", "lmax"], ["#fi-thr", "thr"], ["#fi-sign", "sign"], ["#fi-q", "q"]]) {
       $(id).addEventListener("change", (ev) => {
         this.filt[k] = k === "sign" || k === "q" ? ev.target.value : +ev.target.value;
         this.loadList();
-        if (k === "thr") this.onField(r.id, this.tok, this.label(), this.filt.thr);
+        if (k === "thr") this.onField(r.id, this.tok, this.label(), this.filt.thr, this.heads);
       });
     }
     $("#fi-list").addEventListener("click", (ev) => {
@@ -91,7 +95,7 @@ export class FiresPanel {
       this.tok = -1;
       this.list = null;
       this.render();
-      this.onField(this.res.id, -1, this.label(), this.filt.thr);
+      this.onField(this.res.id, -1, this.label(), this.filt.thr, this.heads);
       this.loadList();
     } catch (e) { this.status = `${tr("エラー")}: ${e.message}`; this.render(); }
   }
@@ -100,7 +104,7 @@ export class FiresPanel {
     this.tok = tok;
     this.list = null;
     this.render();
-    this.onField(this.res.id, tok, this.label(), this.filt.thr);
+    this.onField(this.res.id, tok, this.label(), this.filt.thr, this.heads);
     this.loadList();
   }
 

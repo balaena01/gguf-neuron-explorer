@@ -67,6 +67,10 @@ class Store:
         """方向を消す LoRA(§6.17)の置き場所。"""
         return self._dir("ablate", model_id)
 
+    def heads_dir(self, model_id: str) -> Path:
+        """attention ヘッド(CHANGE-04)の対照分析の置き場所。"""
+        return self._dir("heads", model_id)
+
     def eval_dir(self, model_id: str) -> Path:
         """gne eval(§6.14)の結果の置き場所。"""
         return self._dir("evals", model_id)

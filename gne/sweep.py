@@ -61,19 +61,21 @@ def load_design(name: str, *, prompt_set: str = "en", designs_path: str | Path |
     return Design(name, pairs, {k: prompts[k] for k, _ in pairs})
 
 
-def unit_schedule(neurons: Sequence[int], n_controls: int) -> list[tuple[str, int]]:
-    """[(kind, id)]。対照を全体に均等に散らす。"""
-    total = len(neurons) + n_controls
-    slots = set(int((j + 0.5) * total / n_controls) for j in range(n_controls)) if n_controls else set()
+def unit_schedule(neurons: Sequence[int], n_controls: int, controls: Sequence[int] | None = None) -> list[tuple[str, int]]:
+    """[(kind, id)]。対照を全体に均等に散らす。controls は回す対照の番号(既定は 0..n_controls−1、ワーカーで分けるとき)。"""
+    cs = list(range(n_controls)) if controls is None else [int(x) for x in controls]
+    n_c = len(cs)
+    total = len(neurons) + n_c
+    slots = set(int((j + 0.5) * total / n_c) for j in range(n_c)) if n_c else set()
     out, it, j = [], iter(neurons), 0
     for i in range(total):
-        if i in slots and j < n_controls:
-            out.append(("random", j))
+        if i in slots and j < n_c:
+            out.append(("random", cs[j]))
             j += 1
         else:
             nxt = next(it, None)
             if nxt is None:
-                out.append(("random", j))
+                out.append(("random", cs[j]))
                 j += 1
             else:
                 out.append(("neuron", int(nxt)))
@@ -103,7 +105,7 @@ def _done_keys(path: Path) -> set[tuple]:
 def run_sweep(engine: Engine, weights, stats, *, L: int, neurons: Sequence[int], design: Design, out: str | Path,
               model_id: str, dose_unit: str = "rel", random_controls: int = 64, max_tokens: int = 128,
               top_k: int = 5, resume: bool = True, seed: int = 0, signs: dict[int, int] | None = None,
-              progress: Progress | None = None) -> dict:
+              progress: Progress | None = None, controls: Sequence[int] | None = None) -> dict:
     """層 L の neurons(+ 対照)を design で押して生成し、JSONL に 1 rollout 1 行で追記する。
     signs[n] = -1 のニューロンは dose の符号を反転して押す(逆引きで cos が負の候補)。"""
     if L == 0:
@@ -131,7 +133,7 @@ def run_sweep(engine: Engine, weights, stats, *, L: int, neurons: Sequence[int],
     done = _done_keys(out) if resume else set()
     ctx = engine.steer_ctx()
     groups = design.groups()
-    sched = unit_schedule(list(neurons), random_controls)
+    sched = unit_schedule(list(neurons), random_controls, controls)
     signs = signs or {}
     norms = weights.down_norms(L)
     t0, n_new = time.monotonic(), 0
@@ -186,12 +188,22 @@ def run_sweep(engine: Engine, weights, stats, *, L: int, neurons: Sequence[int],
             "seconds": time.monotonic() - t0}
 
 
-def read_rollouts(path: str | Path) -> list[dict]:
+def part_paths(path: str | Path) -> list[Path]:
+    """run の JSONL と、ワーカーごとの部分(<run>.part-<name>.jsonl、CHANGE-03 B)。"""
+    p = Path(path)
+    stem = p.name.removesuffix(".jsonl")
+    parts = sorted(p.parent.glob(f"{stem}.part-*.jsonl"))
+    return ([p] if p.exists() else []) + [q for q in parts if not q.name.endswith(".units.jsonl")]
+
+
+def read_rollouts(path: str | Path, *, parts: bool = True) -> list[dict]:
+    """run の rollout。parts なら、ワーカーごとの部分も結合して読む(ベースラインは重なっても語の和集合なので影響しない)。"""
     out = []
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            try:
-                out.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
+    for q in (part_paths(path) if parts else [Path(path)]):
+        with open(q, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    out.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
     return out

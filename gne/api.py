@@ -25,7 +25,7 @@ from .stats import (ActStats, ResidStats, StatsView, load_corpus, neuron_activat
                     residual_norms)
 from .steer import (GneError, Recipe, bake_bias_gguf, bias_support, export_vectors, import_cvec_gguf,
                     load_cvec_like_common, parse_unit, recipe_vectors, unit_details, Unit)
-from .store import Store
+from .store import CONFIGS, Store
 from .weights import Weights
 
 Progress = Callable[[int, int, str], None]
@@ -108,10 +108,15 @@ class Session:
         rp = self.store.resid_path(m.model_id)
         acts = sorted(int(p.stem.split("_L")[1]) for p in self.store.stats_dir(m.model_id).glob("act_L*.npz"))
         from .ablate import writer_info
+        from .estimate import Speed, is_large, recommended_workflow
+        sp = Speed(self)
+        speed = {**sp.to_dict(), "cpu_layers": m.n_layer - sp.gpu_layers,
+                 "decode_tok_s": 1000.0 / sp.step1, "large": is_large(self)}
         return {"meta": meta, "arch_warnings": self.weights.check_arch(), "llama_cpp": llama,
                 "bake": {"supported": mode is not None, "mode": mode, "reason": reason, "checked_llama_cpp": checked},
                 "stats": {"resid": str(rp) if rp.exists() else None, "act_layers": acts},
-                "residual_writers": writer_info(self.weights)}
+                "residual_writers": writer_info(self.weights), "speed": speed,
+                "workflow": recommended_workflow(self) if speed["large"] else None}
 
     # --- stats ----------------------------------------------------------------------------------
 
@@ -223,6 +228,8 @@ class Session:
                 raise GneError("BAD_RECIPE", f"層 {u.layer} は範囲外です(0..{self.meta.n_layer - 1})")
             if u.kind == "neuron" and not 0 <= u.neuron < self.meta.n_ff_at(u.layer):
                 raise GneError("BAD_RECIPE", f"L{u.layer} のニューロン {u.neuron} は範囲外です(0..{self.meta.n_ff_at(u.layer) - 1})")
+            if u.kind == "head":
+                self.weights.head_block(u.layer, u.head)            # 層にヘッドが無い・範囲外ならここで返す
             if u.layer <= 2:
                 self.warn(f"層 {u.layer}: 層 0〜2 は残差が小さく rel dose がそのまま通用しないことがあります(R9)")
         return r.scaled(scale) if scale != 1.0 else r
@@ -321,7 +328,34 @@ class Session:
             out.append((str(path), 1.0))
         if recipe.ablate is not None and recipe.ablate.scale != 0:
             out.append((str(self.ablation_lora(recipe.ablate)), float(recipe.ablate.scale)))
+        for u in recipe.query_units:                     # CHANGE-04 E: ヘッドの条件付きクエリ操作(実験的)
+            if u.k:
+                out.append((str(self.query_lora(u)), 1.0))
         return out or None
+
+    def query_lora(self, u) -> Path:
+        """query のユニット → attn_q の rank-1 LoRA(<root>/heads/<model_id>/ に作って使い回す)。u・v の計算に対照集合の捕捉が要る。"""
+        from .heads import query_vectors, write_query_lora
+        seek = self._contrast_file(u.seek)
+        key = json.dumps([u.layer, u.head, u.direction, str(seek), float(u.k),
+                          vector_key_of(self.direction_set(u.direction).path)])
+        path = self.store.heads_dir(self.meta.model_id) / f"query-{hashlib.sha256(key.encode()).hexdigest()[:16]}.lora.gguf"
+        if not path.exists():
+            qv = query_vectors(self, u.layer, u.head, direction=u.direction, seek=seek)
+            tmp = path.with_suffix(".part")
+            write_query_lora(self, u.layer, u.head, qv, float(u.k), tmp)
+            tmp.replace(path)
+        return path
+
+    @staticmethod
+    def _contrast_file(name: str | Path) -> Path:
+        p = Path(name)
+        if p.exists():
+            return p
+        q = CONFIGS / "contrast" / f"{name}.yaml"
+        if q.exists():
+            return q
+        raise GneError("FILE_NOT_FOUND", f"対照集合 {name} がありません(configs/contrast/ の名前かパス)")
 
     def ablation_lora(self, spec) -> Path:
         """AblateSpec → 倍率 1 の消去 LoRA(<root>/ablate/<model_id>/ に作って使い回す)。"""
@@ -337,15 +371,31 @@ class Session:
         return path
 
     def gain(self, recipe: Recipe | list[str], out: str | Path, *, bake: bool = False, requant: str = "q8_0") -> dict:
-        """gain ユニットを LoRA アダプタ GGUF(既定)か、W_up を書き換えた GGUF(bake)に書き出す(§6.16)。"""
+        """gain ユニットを LoRA アダプタ GGUF(既定)か、W_up(ヘッドは W_O)を書き換えた GGUF(bake)に書き出す(§6.16、CHANGE-04 D)。"""
         from .gain import bake_gain_gguf, export_gain_lora
         recipe = self._as_recipe(recipe)
         if recipe.add_units:
             self.warn("add のユニットは gain の書き出しに入りません(gne export-cvec で control vector に書き出せます)")
-        if bake:
-            rep = bake_gain_gguf(self.weights, recipe, out, requant=requant)
-        else:
-            rep = export_gain_lora(self.weights, recipe, out)
+        if not recipe.gain_units and not recipe.query_units:
+            raise GneError("BAD_RECIPE", "gain のユニットがありません(例 --unit 14:8949:x2、ヘッドは 21:H7:x0)")
+        rep: dict = {"path": None, "bytes": 0}
+        if recipe.gain_units:
+            if bake:
+                rep = bake_gain_gguf(self.weights, recipe, out, requant=requant)
+            else:
+                rep = export_gain_lora(self.weights, recipe, out)
+        if recipe.query_units:                           # CHANGE-04 E: クエリ操作は別の LoRA(llama.cpp の --lora を並べる)
+            import shutil
+            stem = Path(out).name.removesuffix(".gguf").removesuffix(".lora")
+            q = []
+            for u in recipe.query_units:
+                dst = Path(out).with_name(f"{stem}-query-L{u.layer}-H{u.head}.lora.gguf")
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(self.query_lora(u), dst)
+                q.append(str(dst))
+            rep["query_loras"] = q
+            if rep["path"] is None:
+                rep["path"], rep["bytes"] = q[0], Path(q[0]).stat().st_size
         return {"kind": "bake" if bake else "lora", "recipe": recipe.to_dict(), **rep}
 
     def _warn_when(self, recipe: Recipe, what: str) -> None:
@@ -507,17 +557,22 @@ class Session:
                 "seconds": time.perf_counter() - t0, "neurons": rows}
 
     def lens_steer(self, L: int, *, neurons: str | None = None, dose: float = 0.8, random_controls: int = 64,
-                   top_k: int = 12, resume: bool = True, show: int = 20) -> dict:
+                   top_k: int = 12, resume: bool = True, show: int = 20, part: str | None = None,
+                   controls: list[int] | None = None) -> dict:
+        """part を渡すと(ワーカー、CHANGE-03 B)steer_L{L}.part-<part>.npz に書き、controls の対照だけを計算する。"""
         from .lens import steer_lens_layer
         from .selection import parse_neurons
         self._check_layer(L, cvec=True)
         sel = parse_neurons(neurons, self.meta.n_ff_at(L), seed=self.seed)
         sv = self._need_rho([L])
         t0 = time.perf_counter()
-        path = self.store.lens_dir(self.meta.model_id) / f"steer_L{L}.npz"
+        path = self.store.lens_dir(self.meta.model_id) / (f"steer_L{L}.part-{part}.npz" if part else f"steer_L{L}.npz")
         res = steer_lens_layer(self.engine, self.weights, sv, L, neurons=sel, dose=dose, contexts=None, top_k=top_k,
                                random_controls=random_controls, seed=self.seed, out=path, resume=resume,
-                               progress=self.progress)
+                               progress=self.progress, controls=controls)
+        return self._lens_rows(L, res, sel, neurons, path, dose, float(sv.rho(L)), show, time.perf_counter() - t0, self._tok)
+
+    def _lens_rows(self, L, res, sel, neurons, path, dose, rho, show, seconds, tok) -> dict:
         null = {sg: _summ(res.null(sg)) for sg in ("pos", "neg")}
         explicit = neurons not in (None, "all") and not str(neurons).startswith("random:")
         if explicit:
@@ -527,11 +582,23 @@ class Session:
             pick = sel[np.argsort(-np.nan_to_num(score, nan=-1))[:show]]
         rows = [{"neuron": int(n), "kl_pos": float(res.kl_pos[n]), "kl_neg": float(res.kl_neg[n]),
                  "pct_pos": float(res.null_pct(res.kl_pos[n], "pos")), "pct_neg": float(res.null_pct(res.kl_neg[n], "neg")),
-                 "up": self._tok(res.up_ids[n]), "up_delta": res.up_delta[n].tolist(),
-                 "down": self._tok(res.down_ids[n]), "down_delta": res.down_delta[n].tolist()} for n in pick]
-        return {"layer": L, "path": str(path), "dose": dose, "rho": float(sv.rho(L)), "n_done": int(res.done.sum()),
+                 "up": tok(res.up_ids[n]), "up_delta": res.up_delta[n].tolist(),
+                 "down": tok(res.down_ids[n]), "down_delta": res.down_delta[n].tolist()} for n in pick]
+        return {"layer": L, "path": str(path), "dose": dose, "rho": rho, "n_done": int(res.done.sum()),
                 "n_selected": int(sel.size), "n_controls": int(res.ctrl_done.sum()), "null": null,
-                "seconds": time.perf_counter() - t0, "neurons": rows}
+                "seconds": seconds, "neurons": rows}
+
+    def lens_summary(self, L: int, *, neurons: str | None = None, show: int = 20, seconds: float = 0.0) -> dict:
+        """保存済みの steer lens の要約(lens_steer と同じ形)。モデルを GPU に読み込まない(語は語彙だけで読む)。"""
+        from .lens import SteerLens
+        from .selection import parse_neurons
+        path = self.store.lens_dir(self.meta.model_id) / f"steer_L{L}.npz"
+        if not path.exists():
+            raise GneError("FILE_NOT_FOUND", f"{path} がありません")
+        res = SteerLens.load(path)
+        sel = parse_neurons(neurons, self.meta.n_ff_at(L), seed=self.seed)
+        return self._lens_rows(L, res, sel, neurons, path, float(res.config["dose"]), float(res.config["rho"]), show,
+                               seconds, lambda ids: [self.vocab.text(int(i)) for i in ids])
 
     def _check_layer(self, L: int, *, cvec: bool = False) -> None:
         if not 0 <= L < self.meta.n_layer:
@@ -545,6 +612,7 @@ class Session:
                 method: str = "mean_diff", positions: str = "all", top: int = 200, layers: list[int] | None = None,
                 verify: bool = False, verify_top: int | None = None, verify_controls: int = 8,
                 verify_design: str = "quick", max_tokens: int = 128, name: str | None = None,
+                verify_budget_s: float | None = None,
                 standardize: bool = True) -> dict:
         from .lens import SteerLens
         from .reverse import ContrastSet, candidate_dicts, contrastive_directions, rank_by_direction
@@ -593,8 +661,19 @@ class Session:
                           "dir_norm": float(np.linalg.norm(dirs[L]))} for L, c in sorted(cos.items())]
         verified = None
         if verify:
-            verified = self._verify_candidates(cands[:verify_top or top], name, verify_design, verify_controls,
-                                               max_tokens)
+            n_v = verify_top or top
+            if verify_budget_s is not None:              # CHANGE-03 C: 候補の層が決まってから、対照(層ごと)込みで予算に収める
+                from .estimate import Speed, _design_cost
+                per = _design_cost(Speed(self), verify_design, max_tokens)
+                n_v = 1
+                for k in range(1, min(len(cands), verify_top or top) + 1):
+                    n_layers = len({c.layer for c in cands[:k]})
+                    if (k + (verify_controls + 1) * n_layers) * per > verify_budget_s:   # +1 は層ごとのベースライン
+                        break
+                    n_v = k
+                info["verify_budget"] = {"budget_s": verify_budget_s, "verify_top": n_v,
+                                         "layers": len({c.layer for c in cands[:n_v]}), "seconds_per_unit": per}
+            verified = self._verify_candidates(cands[:n_v], name, verify_design, verify_controls, max_tokens)
         return {"name": name, "info": info, "candidates_path": str(cpath), "n_candidates": len(cands),
                 "candidates": cd, "layers": layer_summary, "steer_lens_layers": sorted(steer_kl),
                 "verify": verified, "seconds": time.perf_counter() - t0}
@@ -617,7 +696,9 @@ class Session:
 
     def sweep(self, L: int, *, neurons: str | None = "random:384", design: str = "main_rel", random_controls: int = 64,
               max_tokens: int = 128, top_k: int = 5, run: str | None = None, prompt_set: str = "en",
-              dose_unit: str = "rel", resume: bool = True) -> dict:
+              dose_unit: str = "rel", resume: bool = True, part: str | None = None,
+              controls: list[int] | None = None) -> dict:
+        """part を渡すと(ワーカー、CHANGE-03 B)<run>.part-<part>.jsonl に書き、controls の対照だけを回す。"""
         from .selection import parse_neurons
         from .sweep import load_design, run_sweep
         self._check_layer(L, cvec=True)
@@ -627,20 +708,23 @@ class Session:
             Recipe([Unit(L, int(sel[0]), 1.0)], dose_unit=dose_unit))
         name = run or f"L{L}-{design}"
         out = self.run_path(name)
+        if part:
+            out = out.with_name(f"{out.name.removesuffix('.jsonl')}.part-{part}.jsonl")
         r = run_sweep(self.engine, self.weights, sv, L=L, neurons=sel.tolist(), design=des, out=out,
                       model_id=self.meta.model_id, dose_unit=dose_unit, random_controls=random_controls,
-                      max_tokens=max_tokens, top_k=top_k, resume=resume, seed=self.seed, progress=self.progress)
+                      max_tokens=max_tokens, top_k=top_k, resume=resume, seed=self.seed, progress=self.progress,
+                      controls=controls)
         return {"run": name, **r, "design": design, "prompt_set": prompt_set, "n_neurons": int(sel.size),
                 "n_controls": random_controls}
 
     def rank(self, run: str, *, word_unit: str = "tokens", max_rel: float = 1.6, show: int = 40,
              find: list[int] | None = None) -> dict:
         from .rank import rank_records
-        from .sweep import read_rollouts
+        from .sweep import part_paths, read_rollouts
         if word_unit not in ("tokens", "regex"):
             raise GneError("BAD_ARGS", "--word-unit は tokens か regex です")
         path = self.run_path(run)
-        if not path.exists():
+        if not part_paths(path):                          # 本体か、ワーカーごとの部分(part-*)のどちらかがあればよい
             raise GneError("FILE_NOT_FOUND", f"run {path} がありません", "gne sweep --run で作ってください")
         t0 = time.perf_counter()
         recs = read_rollouts(path)
@@ -658,7 +742,8 @@ class Session:
                 self.warn(f"N{n} はこの run にありません")
             else:
                 found.append(hit)
-        return {"run": str(path), "units_path": str(out), "n_units": len(units), "n_neurons": len(neu),
+        return {"run": str(path), "parts": [p.name for p in part_paths(path)], "units_path": str(out),
+                "n_units": len(units), "n_neurons": len(neu),
                 "n_controls": int(ctrl.size), "n_baseline_records": sum(r["kind"] == "baseline" for r in recs),
                 "word_unit": word_unit, "max_rel": max_rel, "control_mass": _summ(ctrl),
                 "n_above_all_controls": n_above, "units": units[:show], "find": found,
@@ -721,6 +806,36 @@ class Session:
         from .embed import embed_run
         return embed_run(self, run, model=model, seed=self.seed, progress=self.progress)
 
+    # --- attention ヘッド(CHANGE-04) -------------------------------------------------------------
+
+    def heads_contrast(self, contrast: str | Path, *, name: str | None = None, direction: str | None = None,
+                       system_b2: str | None = None, layers: list[int] | None = None, max_tokens: int = 48) -> dict:
+        """対照集合でヘッドごとに trigger_mass・pattern_shift・out_shift・dir_cos を測り、中立どうしを床にして順位づける。"""
+        from .heads import heads_contrast
+        return heads_contrast(self, contrast, name=name, direction=direction, system_b2=system_b2, layers=layers,
+                              max_tokens=max_tokens, progress=self.progress)
+
+    def attention(self, text: str, *, pos: int = -1, layer: int | None = None, head: int | None = None, top: int = 5,
+                  system: str | None = None, chat: bool = False) -> dict:
+        """選んだトークンが各ヘッドでどこを見ているか(上位 top)と per-head 出力のノルム(gne heads attention)。"""
+        from .heads import attention_view
+        return attention_view(self, text, pos=pos, layer=layer, head=head, top=top, system=system, chat=chat)
+
+    def head(self, L: int, h: int, *, lens: bool = True) -> dict:
+        """ヘッドの調書。"""
+        from .heads import head_dossier
+        return head_dossier(self, L, h, lens=lens)
+
+    def heads_query(self, L: int, h: int, *, direction: str, seek: str | Path, scales=(0.0, 0.5, 1.0, 2.0, 4.0)) -> dict:
+        """CHANGE-04 E(実験的)の V17: クエリ操作の scale ごとに、ヘッド h のトリガーへの注目がペルソナあり/なしでどう変わるか。"""
+        from .heads import check_query
+        return check_query(self, L, h, direction=direction, seek=self._contrast_file(seek), scales=scales)
+
+    def set_head_name(self, L: int, h: int, name: str) -> dict:
+        from .heads import set_head_name
+        set_head_name(self, L, h, name)
+        return {"layer": L, "head": h, "name": name or None}
+
     def set_name(self, L: int, n: int, name: str) -> dict:
         from .dossier import set_name
         set_name(self, L, n, name)
@@ -767,8 +882,9 @@ class Session:
                   select: str | int | None = None, mode: str = "ablate", layers: str | list[int] | None = None,
                   dose: float = 0.5, max_tokens: int = 64, kl_max: float = 0.1, min_distinct: float = 0.8,
                   per_layer: bool = False, judge_model: str | Path | None = None, judge_target: str | None = None,
-                  response_tokens: int = 96) -> dict:
+                  response_tokens: int = 96, random_controls: int = 16) -> dict:
         """対照集合から全層の方向 r_L を作って保存し、select="auto" なら効果の大きい層を選ぶ(数字なら手で指定)。
+        random_controls > 0 なら層選びに同じ大きさのランダムな向きの対照を入れ、対照の p95 を超えた層だけを選ぶ(CHANGE-03 A)。
         positions="response" は返事のトークンから作る(A / B の system で response_tokens まで返事を生成して流す)。"""
         from .direction import (DirectionSet, candidate_layers, layer_table, load_contrast, response_directions,
                                 save_directions, save_select, select_layer)
@@ -802,7 +918,11 @@ class Session:
             try:
                 sel = select_layer(self, ds, cs, val, mode=mode, layers=candidate_layers(self.meta.n_layer, layers),
                                    dose=dose, max_tokens=max_tokens, kl_max=kl_max, min_distinct=min_distinct,
-                                   per_layer=per_layer, judge=judge, progress=self.progress)
+                                   per_layer=per_layer, judge=judge, random_controls=random_controls,
+                                   progress=self.progress)
+                if sel.get("selected") is not None:
+                    chosen = next(r for r in sel["rows"] if r["layer"] == sel["selected"])
+                    sel["selected_null_pct"] = chosen.get("null_pct")
             finally:
                 if judge is not None:
                     judge.close()
@@ -814,7 +934,15 @@ class Session:
                 "select": sel, "seconds": time.perf_counter() - t0}
 
     def ablation_vector(self, direction: str, *, from_layer: int | None = None, per_layer: bool = False):
-        """消す方向: from_layer の r(既定は gne direction --select で選んだ層)、per_layer なら層ごとの r_L(dict)。"""
+        """消す方向: from_layer の r(既定は gne direction --select で選んだ層)、per_layer なら層ごとの r_L(dict)。
+        保存済みの方向に無い "random-SEED" は、ランダムな単位ベクトル(消去の対照、CHANGE-03 A)。"""
+        m = re.fullmatch(r"random-(\d+)", direction or "")
+        if m and not per_layer:
+            try:
+                self.direction_path(direction)
+            except GneError:
+                from .steer import random_direction
+                return random_direction(self.meta.n_embd, int(m.group(1)), 0), {"direction": direction, "control": True}
         ds = self.direction_set(direction)
         if per_layer:
             return ds.raw, {"direction": ds.name, "per_layer": True}
@@ -915,8 +1043,11 @@ class Session:
 
     def eval(self, recipe: Recipe | list[str], *, doses=(0, 0.25, 0.5, 0.75, 1.0), suite: str | Path | None = None,
              when: str | None = None, judge_model: str | Path | None = None, judge_target: str | None = None,
-             name: str | None = None) -> dict:
-        """レシピの倍率ごとの副作用(能力・ppl・言語混入)と性格の変化量を測り、<root>/evals/<model_id>/<name>.json に保存する。"""
+             name: str | None = None, random_controls: int = 0, reactivity: str | Path | None = None,
+             head_controls: int = 0) -> dict:
+        """レシピの倍率ごとの副作用(能力・ppl・言語混入)と性格の変化量を測り、<root>/evals/<model_id>/<name>.json に保存する。
+        random_controls > 0 なら各倍率で同じ大きさのランダムな対照レシピも測る(行の ctrl・ctrl_novelty_p95 など)。
+        reactivity(対照集合の YAML)で反応性(トリガーあり/なしの差)も測り、head_controls 本のランダムなヘッドと比べる。"""
         from .evalx import Judge, evaluate
         recipe = self._as_recipe(recipe)
         if not recipe.units and recipe.ablate is None:
@@ -925,7 +1056,9 @@ class Session:
             raise GneError("BAD_ARGS", "--judge-model と --judge-target は両方指定してください")
         judge = Judge(judge_model, judge_target) if judge_model else None
         try:
-            d = evaluate(self, recipe, doses=doses, suite=suite, when=when, judge=judge, progress=self.progress)
+            d = evaluate(self, recipe, doses=doses, suite=suite, when=when, judge=judge,
+                         random_controls=random_controls, reactivity=reactivity, head_controls=head_controls,
+                         progress=self.progress)
         finally:
             if judge is not None:
                 judge.close()
@@ -988,6 +1121,15 @@ class Session:
         path.write_text(json.dumps(out, ensure_ascii=False, indent=1))
         return {**out, "path": str(path)}
 
+    def behavior_null(self, recipe: Recipe, contrast: str | Path, *, random_controls: int = 16, max_tokens: int = 64,
+                      mode: str | None = None) -> dict:
+        """CHANGE-03 A: レシピの効果(対照集合の validate.match の一致率の変化)と、同じ大きさのランダムな対照レシピ
+        random_controls 本の効果を比べる。null_pct は「効果が対照の何割より大きいか」(0.95 未満なら対照と区別できない)。"""
+        from .direction import behavior_null, load_contrast
+        cs, val = load_contrast(contrast)
+        d = behavior_null(self, cs, val, recipe, random_controls=random_controls, max_tokens=max_tokens, mode=mode)
+        return {"contrast": str(contrast), "match": val.match, **d}
+
     def evals(self) -> list[dict]:
         """保存済みの eval の一覧(新しい順)。"""
         out = []
@@ -1036,10 +1178,18 @@ class Session:
         baselines = {f"L{L}": texts.get((L, None), "") for L in sorted(by_layer)}
         return {"design": design_name, "runs": runs, "examples": examples, "baselines": baselines}
 
+def vector_key_of(path: Path) -> str:
+    """ファイルの中身で決まる短い鍵(方向を作り直したら query の LoRA も作り直す)。"""
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()[:12]
+
+
 def _unit_spec(u: dict) -> str:
-    """to_dict() のユニット → L:N:+dose / L:N:xk。"""
+    """to_dict() のユニット → L:N:+dose / L:N:xk / L:Hh:xk(query は L:Hh:query:方向:×scale、表示用)。"""
+    if u.get("mode") == "query":
+        return f"{u['layer']}:H{u['head']}:query:{u.get('direction')}:x{u['k']:g}"
     tail = f"x{u['k']:g}" if u.get("mode") == "gain" else f"{u['dose']:+g}"
-    mid = f"random:{u['seed']}" if u.get("kind") == "random" else str(u["neuron"])
+    mid = (f"random:{u['seed']}" if u.get("kind") == "random" else f"H{u['head']}" if u.get("kind") == "head"
+           else f"dir:{u.get('direction')}" if u.get("kind") == "direction" else str(u["neuron"]))
     return f"{u['layer']}:{mid}:{tail}"
 
 

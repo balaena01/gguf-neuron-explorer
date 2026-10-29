@@ -1,5 +1,7 @@
 // 3D 層マップ(別冊 §4)。全ニューロンの点は 1 つのジオメトリ・1 draw call。ピッキングはレイと各層の
 // シート平面の交点から解析的に求める(点群へのレイキャストはしない、§4.2)。
+// CHANGE-04 G: mixer の板の上辺の刻み = attention ヘッド(線形注意の層も)。板の面との交点でヘッドを拾い、
+// ヘッドごとの色の帯(overlay heads:<name>・fires_heads)と、レシピ・開いているヘッドの印を出す。
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { t } from "./i18n.js";
@@ -103,6 +105,9 @@ export class LayerMap {
     this.onOpen = onOpen || null;        // 札のクリックでニューロンを開く({ layer, n })
     this.agent = { highlights: [], notes: [], label: null };   // エージェントの強調と注釈(§11、§4.8 notes)
     this.marks = [];                   // レシピのユニット [{ layer, neuron, dose }](§4.8)
+    this.headMarks = [];               // レシピのヘッド [{ layer, head, k }](CHANGE-04 G)。板の上辺の刻みに印
+    this.headFocus = null;             // HEAD パネルで開いているヘッド [L, h]
+    this._headOn = [];                 // 層ごと: ヘッドの色(overlay)を出しているか
     this.cellOf = [];                  // 層ごとの配置表(§4.4): ニューロン → 格子の番号。null は番号順
     this.neuronAt = [];                // その逆: 格子の番号 → ニューロン
     this.linkEdges = null;             // 配線(§4.7)
@@ -291,6 +296,58 @@ export class LayerMap {
     this._overlayDirty = true;
   }
 
+  // レシピのヘッドの印(CHANGE-04 G)。units: [{ layer, head, k }]。k < 1 は赤紫(弱める・消す)、k > 1 は黄(強める)
+  setHeadMarks(units) {
+    this.headMarks = units || [];
+    this._overlayDirty = true;
+  }
+
+  // HEAD パネルで開いているヘッドの印(白)。null で消す
+  markHead(L, h) {
+    this.headFocus = L === null || L === undefined ? null : [L, h];
+    this._overlayDirty = true;
+  }
+
+  // ヘッドの色(overlay heads:<name>・fires_heads)。colors: Map(層 → Uint8Array(n_head × 3))、null で全部消す。
+  // 色の無い層は刻みだけに戻す
+  setHeadColors(colors) {
+    for (let L = 0; L < this.layerParts.length; L++) {
+      const bars = this.layerParts[L].heads;
+      if (!bars) continue;
+      const c = colors ? colors.get(L) : null;
+      this._headOn[L] = !!c;
+      if (!c) continue;
+      const attr = bars.geometry.getAttribute("color"), a = attr.array;
+      for (let h = 0; h < c.length / 3; h++) {
+        for (let v = 0; v < 6; v++) for (let i = 0; i < 3; i++) a[(h * 6 + v) * 3 + i] = c[3 * h + i] / 255;
+      }
+      attr.needsUpdate = true;
+    }
+    this._applyLayerDimming();
+  }
+
+  // ヘッドの刻みの幾何(板の上辺から外へ)。ヘッドの無い層(合成の構造を含む)は null
+  _headSpec(L) {
+    const li = this.arch.layers[L];
+    if (!li || !li.n_head || !li.head_dim) return null;
+    const ext = Math.max(this.specs[L].ext, GEOM.S * 0.6);
+    return { x: slabX(L), y1: GEOM.Y0 + ext, ext, z0: -ext / 2, nh: li.n_head, w: ext / li.n_head, len: ext * 0.07,
+             attn: li.mixer === "attention" };
+  }
+
+  // ヘッドの刻みの中ほどの位置(3D)
+  headPosition(L, h) {
+    const s = this._headSpec(L);
+    if (!s || h < 0 || h >= s.nh) return null;
+    return [s.x, s.y1 + s.len * 0.45, s.z0 + (h + 0.5) * s.w];
+  }
+
+  // ヘッドの画面上の位置(px、ページ座標)。自動テスト用
+  screenOfHead(L, h) {
+    const p = this.headPosition(L, h);
+    return p ? this._toScreen(new THREE.Vector3(...p)) : null;
+  }
+
   // エージェントの強調と注釈(§11)。highlights: [{ layer, neuron, dose }]、notes: [{ layer, neuron, text }]
   setAgent(a) {
     this.agent = { highlights: a.highlights || [], notes: a.notes || [], label: a.label || null };
@@ -386,9 +443,31 @@ export class LayerMap {
         this.scene.add(group);
         parts.fill = group;
       }
+      parts.heads = this._buildHeadBars(L);
       this.layerParts.push(parts);
     }
     this._buildLabels();
+  }
+
+  // ヘッドごとの色の帯(CHANGE-04 G)。刻みと同じ位置に、ヘッドの幅の細い四角形を並べる。overlay の無い間は隠す
+  _buildHeadBars(L) {
+    const s = this._headSpec(L);
+    if (!s) return null;
+    const pos = new Float32Array(s.nh * 18), col = new Float32Array(s.nh * 18);
+    const ya = s.y1 + s.ext * 0.004, yb = s.y1 + s.ext * 0.06;
+    for (let h = 0; h < s.nh; h++) {
+      const za = s.z0 + (h + 0.12) * s.w, zb = s.z0 + (h + 0.88) * s.w;
+      pos.set([s.x, ya, za, s.x, ya, zb, s.x, yb, zb, s.x, ya, za, s.x, yb, zb, s.x, yb, za], h * 18);
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+    g.setAttribute("color", new THREE.Float32BufferAttribute(col, 3));
+    const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.95, depthWrite: false,
+                                                              depthTest: false, side: THREE.DoubleSide }));
+    m.renderOrder = 3;
+    m.visible = false;
+    this.scene.add(m);
+    return m;
   }
 
   _buildLabels() {
@@ -437,6 +516,7 @@ export class LayerMap {
       if (p.fill) for (const q of p.fill.children) q.material.opacity = 0.55 * this.structDim;
       p.feet.visible = front === null;
       if (p.fill) p.fill.visible = front === null || L === front;
+      if (p.heads) p.heads.visible = !!this._headOn[L] && (front === null || L === front);
       this.labels[L].visible = front !== null && L === front;   // 全体ビューでは床の層番号(HTML)を使う
     }
     // 開いているニューロンの輪は、全体ビューとその層の正面ビューで出す。3D の線は全体ビューだけ(正面ビューは 2D の札と線)
@@ -662,11 +742,44 @@ export class LayerMap {
         items.push({ x, y, text, cls: `mk-l ${m.dose >= 0 ? "plus" : "minus"}` });
       }
     }
+    this._headOverlay(items, r, marked);
     const svg = this._linkOverlay(items, r);
     const svgAgent = this._agentOverlay(items, r);                       // 札はほかの札(配線・層番号・レシピ)を避けて最後に置く
     this.overlay.innerHTML = svg + svgAgent + items.map((it) => `<span class="${it.cls}"${it.layer !== undefined ? ` data-layer="${it.layer}"` : ""}${
       it.open ? ` data-open="${it.open}"` : ""}${it.title ? ` title="${escHTML(it.title)}"` : ""} style="left:${it.x.toFixed(1)}px;top:${it.y.toFixed(1)}px${
-      it.h ? `;height:${it.h.toFixed(1)}px` : ""}${it.w ? `;width:${it.w}px;height:${it.w}px` : ""}">${it.html || it.text}</span>`).join("");
+      it.h ? `;height:${it.h.toFixed(1)}px` : ""}${it.w ? `;width:${it.w}px;height:${it.w}px` : ""}${it.bw ? `;width:${it.bw}px;height:${it.bh}px` : ""}">${it.html || it.text}</span>`).join("");
+  }
+
+  // ヘッドの印(CHANGE-04 G): レシピのヘッド(×k)、HEAD パネルで開いているヘッド(白)、マウスの下のヘッド(細い枠)。
+  // 刻みの上に縦長の枠を置く。全体ビューではレシピのヘッドに札(重なる札はずらして線を引く)
+  _headOverlay(items, r, marked) {
+    const at = (L, h) => {
+      if (this.front !== null && L !== this.front) return null;
+      const pos = this.headPosition(L, h);
+      if (!pos) return null;
+      const p = this._toScreen(new THREE.Vector3(...pos));
+      return p.z < 1 ? { x: p.x - r.left, y: p.y - r.top } : null;
+    };
+    const box = (p, cls) => items.push({ x: p.x, y: p.y, text: "", cls: `mk-h ${cls}`, bw: 9, bh: 16 });
+    for (const it of items) {                                              // 層の札(上辺の中央の上)も避ける
+      if (it.cls === "badge-l") { const w = it.text.length * 7.5 + 12; marked.push({ x: it.x - w / 2, y: it.y - 9, w }); }
+    }
+    const hv = this.hover && this.hover.head !== undefined ? this.hover : null;
+    if (hv) { const p = at(hv.layer, hv.head); if (p) box(p, "hov"); }
+    if (this.headFocus) { const p = at(...this.headFocus); if (p) box(p, "sel"); }
+    for (const m of this.headMarks) {
+      const p = at(m.layer, m.head);
+      if (!p) continue;
+      const cls = m.k < 1 ? "minus" : m.k > 1 ? "plus" : "zero";
+      box(p, cls);
+      if (this.front !== null) continue;
+      const text = `L${m.layer} H${m.head} ×${+(+m.k).toFixed(2)}`, x = p.x + 8, w = text.length * 7 + 10;
+      let y = p.y - 12;
+      while (marked.some((q) => x < q.x + q.w + 4 && q.x < x + w + 4 && Math.abs(q.y - y) < 17)) y -= 18;
+      marked.push({ x, y, w });
+      if (y !== p.y - 12) items.push({ x: p.x, y, text: "", cls: "lead", h: p.y - 12 - y });
+      items.push({ x, y, text, cls: `mk-l ${cls === "zero" ? "" : cls}` });
+    }
   }
 
   // エージェントの強調と注釈(§11)。ニューロンごとに 1 枚の札(「agent L22 N4118 ✎ 見送り: …」)にまとめ、
@@ -876,12 +989,24 @@ export class LayerMap {
       }
       best = hit;
     }
+    // ヘッド(CHANGE-04 G): 板の面 x = slabX(L) の、上辺の外の刻みの帯の中ならヘッド。シートより手前なら勝つ
+    for (const L of Ls) {
+      const hs = this._headSpec(L);
+      if (!hs) continue;
+      const t = (hs.x - o.x) / d.x;
+      if (t <= 0 || (best && t >= best.t)) continue;
+      const y = o.y + t * d.y, z = o.z + t * d.z;
+      if (y < hs.y1 || y > hs.y1 + hs.len || z < hs.z0 || z >= hs.z0 + hs.ext) continue;
+      best = { layer: L, head: Math.min(hs.nh - 1, Math.floor((z - hs.z0) / hs.w)), kind: hs.attn ? "attn" : "linear", t, px: m.px, py: m.py };
+    }
     return best;
   }
 
   _setHover(h) {
-    const same = (a, b) => a && b && a.layer === b.layer && a.neuron === b.neuron && a.expert === b.expert && a.shared === b.shared;
+    const same = (a, b) => a && b && a.layer === b.layer && a.neuron === b.neuron && a.expert === b.expert && a.shared === b.shared &&
+      a.head === b.head;
     if (same(h, this.hover)) { if (h) this.onHover(h); return; }
+    if ((h && h.head !== undefined) || (this.hover && this.hover.head !== undefined)) this._overlayDirty = true;   // ヘッドの枠を置き直す
     this.hover = h;
     this.onHover(h);
   }

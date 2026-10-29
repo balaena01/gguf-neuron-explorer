@@ -32,6 +32,11 @@ class LayerInfo:
     n_expert_used: int
     n_ff_shexp: int            # shared expert の n_ff(無ければ 0)
     has_post_ffn_norm: bool
+    # CHANGE-04 ヘッド: attention は n_head(Q 側)・n_head_kv、linear_attention は n_head = V ヘッド数(ssm.time_step_rank)・
+    # n_head_kv = K ヘッド数(ssm.group_count)。head_dim は 1 ヘッドの出力の幅(書き込み行列の入力 / n_head)
+    head_dim: int = 0
+    head_writer: str | None = None   # ヘッドの出力を残差に書く行列(attn_output / ssm_out)
+    head_out: tuple[str, ...] = ()   # 書き込み行列に入る直前のテンソル名の候補(捕捉で見えた最初のもの)
 
 
 @dataclass
@@ -116,7 +121,11 @@ def arch_info(weights) -> ArchInfo:
             ffn, n_ff, n_exp, used = "dense", int(ts["ffn_down.weight"].shape[0]), 0, 0
         else:
             ffn, n_ff, n_exp, used = "none", 0, 0, 0
+        writer = ("attn_output" if mixer == "attention" else "ssm_out" if mixer == "linear_attention" else None)
+        wt = ts.get(f"{writer}.weight") if writer else None
+        hd = int(wt.shape[0]) // nh if wt is not None and nh else 0          # ne = [n_head·head_dim, n_embd]
+        outs = (("attn_gated", "kqv_out") if mixer == "attention" else ("final_output",) if mixer == "linear_attention" else ())
         layers.append(LayerInfo(L, mixer, nh, nkv, ffn, n_ff, n_exp, used, n_shexp,
-                                "post_ffw_norm.weight" in ts))
+                                "post_ffw_norm.weight" in ts, hd, writer if wt is not None else None, outs))
     side = max([sheet_side(li) for li in layers] + [1])
     return ArchInfo(arch, m.n_layer, m.n_embd, m.n_vocab, layers, side)

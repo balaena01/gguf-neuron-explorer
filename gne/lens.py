@@ -199,9 +199,12 @@ class SteerLens:
 def steer_lens_layer(engine: Engine, weights, stats, L: int, *, neurons: np.ndarray | None = None, dose: float = 0.8,
                      contexts: Sequence[dict] | None = None, top_k: int = 12, random_controls: int = 64,
                      seed: int = 0, out: str | Path | None = None, resume: bool = True,
-                     progress: Progress | None = None, checkpoint_s: float = 60.0) -> SteerLens:
+                     progress: Progress | None = None, checkpoint_s: float = 60.0,
+                     controls: Sequence[int] | None = None) -> SteerLens:
     """層 L の指定ニューロン(と対照)の steer lens。out があれば途中経過を保存し、resume なら続きから。
-    文脈は 1 バッチで評価し、ベースラインも同じバッチ構成で 1 回だけ取る(F2)。"""
+    文脈は 1 バッチで評価し、ベースラインも同じバッチ構成で 1 回だけ取る(F2)。
+    controls は計算する対照の番号(既定は全部)。ワーカーで分けるとき(CHANGE-03 B)、対照も分けて各部分で一部だけ計算し、
+    merge_parts で結合する(config は同じなので結合できる)。"""
     contexts = list(contexts or DEFAULT_CONTEXTS)
     n_ff = weights.meta.n_ff_at(L)
     nn = np.arange(n_ff) if neurons is None else np.asarray(neurons)
@@ -234,7 +237,7 @@ def steer_lens_layer(engine: Engine, weights, stats, L: int, *, neurons: np.ndar
         kl = float((p_base * (base - lp)).sum(axis=1).mean())
         return (lp - base).mean(axis=0), kl
 
-    todo_c = [j for j in range(random_controls) if not res.ctrl_done[j]]
+    todo_c = [j for j in (range(random_controls) if controls is None else controls) if not res.ctrl_done[j]]
     todo_n = [int(n) for n in nn if not res.done[n]]
     total, step, last_save = len(todo_c) + len(todo_n), 0, time.monotonic()
     try:
@@ -265,4 +268,28 @@ def steer_lens_layer(engine: Engine, weights, stats, L: int, *, neurons: np.ndar
         engine.set_cvec(ctx, None)
         if out is not None:
             res.save(out)
+    return res
+
+
+def merge_parts(paths: Sequence[str | Path], out: str | Path) -> SteerLens:
+    """ワーカーごとの steer lens(同じ層・同じ config)を 1 つにまとめる。済みの印(done / ctrl_done)が立っている行を写す。
+    out が既にあれば、それにも重ねる。"""
+    items = [SteerLens.load(p) for p in paths]
+    if Path(out).exists():
+        items.insert(0, SteerLens.load(out))
+    base = items[0]
+    key = SteerLens.config_key(base.config)
+    for it in items[1:]:
+        if it.layer != base.layer or SteerLens.config_key(it.config) != key:
+            raise GneError("LENS_MISMATCH", "結合する steer lens の層か条件が違います")
+    res = SteerLens.empty(base.layer, base.n_ff, base.config)
+    for it in items:
+        m, c = it.done, it.ctrl_done
+        for k in ("up_ids", "up_delta", "down_ids", "down_delta", "kl_pos", "kl_neg"):
+            getattr(res, k)[m] = getattr(it, k)[m]
+        for k in ("ctrl_kl_pos", "ctrl_kl_neg", "ctrl_up_ids", "ctrl_down_ids"):
+            getattr(res, k)[c] = getattr(it, k)[c]
+        res.done |= m
+        res.ctrl_done |= c
+    res.save(out)
     return res

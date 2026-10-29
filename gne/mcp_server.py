@@ -33,8 +33,13 @@ gguf-neuron-explorer: llama.cpp 上の GGUF モデルの MLP ニューロンを�
    抑える用途は add の − より gain の x0 を先に試す。位置(when)は gen を第一候補にして all と比べる。
    ニューロンで断片しか見つからない性格・振る舞いは direction(contrast, select="auto", mode="add"|"ablate") で方向を作る。
    消したい振る舞いは ablate(steer の ablate="NAME")と上位ニューロンの x0 を eval の比較(gne eval --compare-ablation)で比べてから選ぶ。
+   方向も対照を超えているかを見る(direction の null_pct、eval(random_controls=N) の novelty_null_pct)。null_pct が 0.95 未満の方向は報告しない。
+   見積もりが 30 分を超えるジョブは NEEDS_CONFIRM と見積もりを返して止まる。params に budget("30m")で絞るか yes: true。
+   大型モデル(GPU に載らない、全数の lens が 1 層 1 時間を超える)は逆引きから: reverse → 上位 N の lens_steer → quick sweep → eval。
 ユニットの書き方: "L:N:dose"(例 "14:8949:+1.0")、gain は "L:N:x2"(出力を k 倍、x0 で消去)、ランダム方向は "L:random:SEED:dose"、
-direction で作った方向は "L:dir:NAME:dose"。
+direction で作った方向は "L:dir:NAME:dose"、attention ヘッドの gain は "L:Hh:xk"(例 "21:H7:x0")。
+7. 反応性(トリガーの有無で差が出るか)はヘッドで作る。まず heads_contrast → 上位を x0 / x2 で eval(reactivity=対照集合) →
+   対照(同じ k のランダムなヘッド)を超えたものだけ残す。
 6. 人が UI(gne serve)を見ていれば、ui_open で調べているニューロンを開き、ui_highlight で候補を強調し、ui_note で判断の要点を
    ニューロンに貼る(--ui-url で繋いだときだけ。繋いでいなければ UI_NOT_RUNNING が返るので気にせず続ける)。
 """
@@ -42,7 +47,10 @@ direction で作った方向は "L:dir:NAME:dose"。
 
 def _err(e: Exception) -> dict:
     if isinstance(e, GneError):
-        return {"error": {"code": e.code, "message": e.message, "hint": e.hint}}
+        out = {"error": {"code": e.code, "message": e.message, "hint": e.hint}}
+        if getattr(e, "estimate", None) is not None:          # NEEDS_CONFIRM: 見積もりを返して止まる(CHANGE-03 C)
+            out["estimate"] = e.estimate
+        return out
     return {"error": {"code": "INTERNAL", "message": f"{type(e).__name__}: {e}", "hint": None}}
 
 
@@ -141,16 +149,20 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
 
     @srv.tool()
     async def direction(contrast: str, name: str | None = None, select: str | None = None, mode: str = "ablate",
-                        layers: str | None = None, dose: float = 1.0, positions: str = "last") -> dict:
+                        layers: str | None = None, dose: float = 1.0, positions: str = "last",
+                        random_controls: int = 16) -> dict:
         """対照集合(configs/contrast/ の名前かパス。system_a / system_b / user_prompts、層選びには validate.match)から
         全層の方向 r_L = mean_A − mean_B(生成プロンプトの最終トークン)を作って保存する(§6.17)。
         select="auto" なら候補層ごとに効果を測ってジョブで層を選ぶ(job_status で結果)。mode="add" は層 L に平均差の dose 倍を
         足して判定の一致率が上がるか、mode="ablate" は全層から r_L を消して下がるか(B 側の KL が 0.1 以下の層から)。
         作った方向は steer の units に "L:dir:NAME:+0.5"(rel dose)で足せる。
-        positions="response" は A / B の system で返事を生成し、返事のトークンで測る(性格を足す用途ではこちらが効きやすい)。"""
+        positions="response" は A / B の system で返事を生成し、返事のトークンで測る(性格を足す用途ではこちらが効きやすい)。
+        random_controls 本の同じ大きさのランダムな向きを層ごとに対照として流し、効果が対照の p95 を超えた層だけを選ぶ
+        (行の ctrl_effect_p95・null_pct、選んだ層の selected_null_pct。0 で対照なし)。"""
         try:
             params = {"contrast": str(_contrast_path(session, contrast, None, None, None, name)), "name": name,
-                      "select": select, "mode": mode, "layers": layers, "dose": dose, "positions": positions}
+                      "select": select, "mode": mode, "layers": layers, "dose": dose, "positions": positions,
+                      "random_controls": random_controls}
         except Exception as e:  # noqa: BLE001
             return _err(e)
         if select == "auto":
@@ -191,13 +203,21 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
 
     @srv.tool(name="eval")
     async def eval_recipe(recipe: str | None = None, units: list[str] | None = None, doses: list[float] | None = None,
-                   when: str | None = None) -> dict:
+                   when: str | None = None, random_controls: int = 0, reactivity: str | None = None,
+                   head_controls: int = 0) -> dict:
         """副作用チェック(§6.14)をジョブとして投げる。recipe は保存したレシピの名前、units は単発指定(どちらか)。
         doses はレシピ全体の倍率(既定 [0, 0.25, 0.5, 0.75, 1]、0 が無介入)。倍率ごとに exact / format の正答率、ppl、
         言語の混入(簡体字・ハングルなど)、性格の変化量(無介入にない語の割合など)を測り、配布可(能力 −5pt 以内、
-        ppl +10% 以内、混入が増えない)の倍率を返す。4B で数分。job_status で結果を見る(保存先 <root>/evals/)。"""
+        ppl +10% 以内、混入が増えない)の倍率を返す。4B で数分。job_status で結果を見る(保存先 <root>/evals/)。
+        random_controls=N なら各倍率で同じ大きさのランダムな対照レシピ N 本も測る(時間は約 N 倍)。行の ctrl_novelty_p95・
+        novelty_null_pct(新語が対照の何割より多いか)、ctrl_capability_drop_p50・ctrl_ppl_worse_p50(大きさだけで起きる悪化)。
+        reactivity(対照集合の名前かパス。reactivity の対と validate.match が要る)を渡すと、行の reactivity に
+        トリガーあり/なしの一致率とその差を入れる。head_controls 本のランダムなヘッド(同じ k)と比べた null_pct も。"""
         try:
-            p = {"recipe": recipe, "units": units, "when": when}
+            p = {"recipe": recipe, "units": units, "when": when, "random_controls": random_controls}
+            if reactivity:
+                p["reactivity"] = str(_contrast_path(session, reactivity, None, None, None, None))
+                p["head_controls"] = head_controls
             if doses is not None:
                 p["doses"] = doses
             return jobs.start("eval", p).view()
@@ -236,15 +256,57 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
         return await call(fn)
 
     @srv.tool()
+    async def head(layer: int, head: int, lens: bool = True) -> dict:
+        """attention ヘッド 1 個の調書(CHANGE-04): kind(attn / linear)、幅、K/V グループ、保存済みの heads_contrast での
+        指標と順位、名前、当てたことのある gain、W_O の列ブロックの logit lens(lens=False で省く)。"""
+        return await call(session.head, layer, head, lens=lens, gpu=False)
+
+    @srv.tool()
+    async def heads_contrast(contrast: str, name: str | None = None, direction: str | None = None,
+                             layers: str | None = None, max_tokens: int = 48) -> dict:
+        """ヘッドの対照分析をジョブとして投げる(job_status で結果)。対照集合(configs/contrast/ の名前かパス)の会話を
+        ペルソナあり(system_a)と中立(system_b)で流し、ヘッドごとに trigger_mass(トリガー語への注目の割合の差、
+        対照集合の triggers が要る)・pattern_shift(注目の分布の JS)・out_shift(出力の差)・dir_cos(出力差が方向 r_L に
+        書く cos、direction か同じ名前の方向があるとき)を測り、中立どうしの差を床にして z で順位づける。"""
+        from .cli import parse_layers
+        try:
+            params = {"contrast": str(_contrast_path(session, contrast, None, None, None, name)), "name": name,
+                      "direction": direction, "layers": parse_layers(layers), "max_tokens": max_tokens}
+            return jobs.start("heads_contrast", params).view()
+        except Exception as e:  # noqa: BLE001
+            return _err(e)
+
+    @srv.tool()
+    async def attention(text: str, layer: int | None = None, head: int | None = None, top: int = 5, pos: int = -1,
+                        chat: bool = False, system: str | None = None) -> dict:
+        """文を流し、位置 pos(既定は最後)のトークンが各ヘッドでどこを見ているか(上位 top)と per-head 出力のノルム。
+        layer と head を両方指定すると T × T のパターンも返す。chat=True なら text をユーザーの発話としてテンプレートに入れる。"""
+        return await call(session.attention, text, layer=layer, head=head, top=top, pos=pos, chat=chat, system=system)
+
+    @srv.tool()
     async def set_name(layer: int, neuron: int, name: str) -> dict:
         """ニューロンに名前を付ける(空文字で消す)。調書と search(mode="name") に出る。"""
         return await call(session.set_name, layer, neuron, name, gpu=False)
 
     @srv.tool()
-    async def job_start(kind: str, params: dict[str, Any] | None = None) -> dict:
-        """長時間の処理を投げる。kind: stats_resid / stats_act / lens_logit / lens_steer / sweep / rank / reverse / eval / direction / ablate。
-        params は gne.api の同名メソッドの引数(例 sweep: {"layer": 22, "neurons": "random:64", "design": "quick"})。"""
+    async def job_start(kind: str, params: dict[str, Any] | None = None, workers: str | None = None) -> dict:
+        """長時間の処理を投げる。kind: stats_resid / stats_act / lens_logit / lens_steer / sweep / rank / reverse / eval / direction / ablate / heads_contrast。
+        params は gne.api の同名メソッドの引数(例 sweep: {"layer": 22, "neurons": "random:64", "design": "quick"})。
+        見積もりが 30 分を超えるジョブは走らせずに NEEDS_CONFIRM と見積もりを返す。params に budget("30m" など)を入れると
+        予算に収まるように絞る(lens_steer は方向に近いニューロンの上位、sweep は quick 設計で steer lens の上位、reverse は
+        確かめる候補の数、connections は window)。それでも走らせるなら params に yes: true。
+        workers("auto" か名前のカンマ区切り)を渡すと、gne worker のファイルのキューに入れる(sweep / lens_steer は
+        ニューロンで分ける、CHANGE-03 B)。返り値の jobs の id で job_status を見る。"""
         try:
+            if workers:
+                from .estimate import NeedsConfirm, gate
+                from .workers import submit
+                try:
+                    p, _ = gate(session, kind, dict(params or {}))
+                except NeedsConfirm as e:
+                    e.error.estimate = e.estimate
+                    raise e.error from e
+                return submit(session, kind, p, workers=workers)
             return jobs.start(kind, params).view()
         except Exception as e:  # noqa: BLE001
             return _err(e)
@@ -253,8 +315,14 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
     async def job_status(job_id: str | None = None) -> dict:
         """ジョブの進捗(done / total / eta_s)と結果。job_id を省くと全ジョブの一覧。"""
         try:
+            from .workers import job_files
             if job_id is None:
-                return {"jobs": [j.view() for j in jobs.jobs.values()]}
+                return {"jobs": [j.view() for j in jobs.jobs.values()],
+                        "worker_jobs": [{k: v for k, v in j.items() if k != "result"} for j in job_files(session.store.root)]}
+            if job_id not in jobs.jobs:                            # ワーカーのジョブ(id か group)
+                fj = [j for j in job_files(session.store.root) if job_id in (j["id"], j.get("group"))]
+                if fj:
+                    return _strip_ids({"jobs": fj})
             return _strip_ids(jobs.get(job_id).view())
         except Exception as e:  # noqa: BLE001
             return _err(e)

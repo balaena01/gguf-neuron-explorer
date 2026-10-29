@@ -243,6 +243,8 @@ class UIData:
                 meta.update(has=True)
         elif name == "named":
             for k in self.names():
+                if ":H" in k:                                            # ヘッドの名前("L:Hh")はシートに無い
+                    continue
                 LL, n = (int(x) for x in k.split(":"))
                 if LL == L and 0 <= n < n_ff:
                     v[n] = 1.0
@@ -370,6 +372,83 @@ class UIData:
         out["coverage"] = {k: bool(out[k]) for k in ("sweep", "steer_lens", "logit_lens", "directions", "activation")}
         return out
 
+    # --- HEAD パネル(CHANGE-04 G): 保存済みのヘッドの対照分析と、ヘッドの調書 ------------------------------------
+    def _heads_paths(self, name: str) -> tuple[Path, Path]:
+        import re
+        if not re.fullmatch(r"[\w.\-]+", name or ""):
+            raise GneError("BAD_ARGS", f"対照分析の名前 {name!r} が不正です")
+        d = self.s.store.heads_dir(self.s.meta.model_id)
+        return d / f"{name}.json", d / f"{name}.candidates.jsonl"
+
+    def heads_summary(self, name: str) -> dict | None:
+        """gne heads contrast の要約(<name>.json)。無ければ None。"""
+        p, _ = self._heads_paths(name)
+        return self._get(("heads_sum", name), [p], lambda: json.loads(p.read_text(encoding="utf-8")) if p.exists() else None)
+
+    def heads_list(self) -> list[dict]:
+        """保存済みのヘッドの対照分析(新しい順)。地図の overlay heads:<name> と HEAD パネルの Contrast に使う。"""
+        d = self.s.store.heads_dir(self.s.meta.model_id)
+        out = []
+        for p in sorted(d.glob("*.json"), key=lambda p: -p.stat().st_mtime):
+            name = p.name.removesuffix(".json")
+            if not (d / f"{name}.candidates.jsonl").exists():
+                continue
+            try:
+                s = self.heads_summary(name)
+            except (OSError, ValueError, GneError):
+                continue
+            if s:
+                out.append({"name": name, "n_heads": s.get("n_heads"), "layers": s.get("layers"), "direction": s.get("direction"),
+                            "n_prompts": s.get("n_prompts"), "n_with_triggers": s.get("n_with_triggers"),
+                            "floors": s.get("floors")})
+        return out
+
+    def heads_one(self, name: str) -> dict:
+        """1 つの対照分析: 要約(top は除く)と全ヘッドの行(z の大きい順)。対照集合の YAML が読めれば、
+        その system_a / system_b とプロンプトごとのトリガーも添える(Pattern タブで同じ会話を見るため)。"""
+        from ..heads import load_candidates, load_triggers
+        p, cp = self._heads_paths(name)
+        s = self.heads_summary(name)
+        if s is None or not cp.exists():
+            raise GneError("NOT_FOUND", f"ヘッドの対照分析 {name} がありません", "gne heads contrast で作れます")
+
+        def build():
+            out = {k: v for k, v in s.items() if k != "top"}
+            out["rows"] = load_candidates(self.s, name)
+            out["system_a"] = out["system_b"] = None
+            out["triggers"] = None
+            try:
+                from ..direction import load_contrast
+                cs, _ = load_contrast(s["contrast"])
+                trig = load_triggers(s["contrast"], cs)
+                out.update(system_a=cs.system_a, system_b=cs.system_b,
+                           triggers={u: t for u, t in zip(cs.user_prompts, trig, strict=True) if t})
+            except Exception:  # noqa: BLE001
+                pass                                                    # 対照集合が動いていても要約と行は見せる
+            return out
+        return self._get(("heads_one", name), [p, cp], build)
+
+    def head(self, L: int, h: int, *, lens: bool = True) -> dict:
+        """ヘッドの調書(gne.heads.head_dossier)。W_O ブロックの logit lens は重みだけで決まるので 1 回だけ計算して覚える
+        (語彙全体との内積なので大きいモデルでは数秒。lens=False なら覚えていればそれ、無ければ None で先に返す)。
+        保存済みの対照分析ごとに、その床(対照の p95)も添える。"""
+        self._check(L)
+        d = self.s.head(L, h, lens=False)
+        key = ("head_lens", L, h)
+        if lens:
+            d["logit_lens"] = self._get(key, [], lambda: self.s.head(L, h, lens=True)["logit_lens"])
+        else:
+            hit = self._cache.get(key)
+            d["logit_lens"] = hit[1] if hit else None
+        for c in d["contrasts"]:
+            try:
+                sm = self.heads_summary(c["name"]) or {}
+            except GneError:
+                sm = {}
+            c["floors"] = sm.get("floors")
+            c["direction"] = sm.get("direction")
+        return d
+
     # --- 検索(header): 当たったトークンと、その lens の中での順位を添えて、強い順に --------------------------------
     def search(self, q: str, *, mode: str = "lens", limit: int = 500) -> dict:
         qq = q.casefold().strip()
@@ -415,7 +494,7 @@ class UIData:
                                 break
         else:
             for k, v in self.names().items():
-                if qq in v.casefold():
+                if qq in v.casefold() and ":H" not in k:              # 一覧はニューロンだけ(ヘッドは HEAD パネル)
                     L, n = (int(x) for x in k.split(":"))
                     add(L, n, "name", None, v, 0)
         rows = sorted(hits.values(), key=lambda h: (h["best"]["score"], h["layer"], h["neuron"]))

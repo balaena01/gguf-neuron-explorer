@@ -4,6 +4,8 @@ U0: /api/model(ModelMeta + ArchInfo + coverage)、/api/vocab(語彙の文字列)
 U1: 層ごとの overlay の値・hover の語・rank の表、ニューロンの詳細、検索、名前、layers ビューの要約。
 U2: 3 列チャット(SSE)、fires、reads you、レシピ、cvec の書き出し、ジョブ(SSE の進捗)。GPU は live.Live が調停する。
 U5: エージェント連携。MCP の ui_* が POST /api/ui/{highlight,note,open,clear} を叩き、ブラウザへ SSE(/api/ui/events)。
+CHANGE-04 G: ヘッドの調書(/api/head)・名前、保存済みのヘッドの対照分析(/api/heads)、注目のパターン(/api/attention)、
+fires の文章でのヘッドの注目(/api/fires/{id}/heads)。GPU を使うものは live.Live の調停を通す。
 ローカル専用なので、Host が 127.0.0.1 / localhost 以外の要求(DNS rebinding)と、別のオリジンからの書き込み(POST / DELETE)は断る。
 大きい配列は JSON にせず octet-stream で返し、形は X-Shape、付帯情報は X-Meta(JSON)に入れる(§8.2)。
 """
@@ -66,17 +68,21 @@ def create_app(session, *, warm: bool = True, openai: bool = False) -> FastAPI:
 
     @app.exception_handler(GneError)
     async def _gne_error(_req, e: GneError):
-        return JSONResponse({"error": {"code": e.code, "message": e.message, "hint": e.hint}}, status_code=400)
+        body = {"error": {"code": e.code, "message": e.message, "hint": e.hint}}
+        if getattr(e, "estimate", None) is not None:                 # NEEDS_CONFIRM(CHANGE-03 C)
+            body["estimate"] = e.estimate
+        return JSONResponse(body, status_code=400)
 
     @app.get("/api/model")
     def model():
         if "arch" not in cache:
             cache["arch"] = arch_info(session.weights).to_dict()
         ov = session.model_overview()
-        return {"meta": ov["meta"], "arch": cache["arch"], "coverage": ov["layers"],
+        return {"meta": ov["meta"], "arch": cache["arch"], "coverage": ov["layers"], "speed": ov.get("speed"),
                 "arch_warnings": ov["arch_warnings"], "bake": ov["bake"], "recipes": ov["recipes"],
                 "directions": ov["directions"], "names": data.names(), "layouts": data.layouts(), "runs": data.run_list(),
-                "connections": data.connections().meta if data.connections() is not None else None}
+                "connections": data.connections().meta if data.connections() is not None else None,
+                "heads": data.heads_list()}
 
     @app.get("/api/vocab")
     def vocab():
@@ -146,6 +152,30 @@ def create_app(session, *, warm: bool = True, openai: bool = False) -> FastAPI:
         session.set_name(layer, neuron, name.strip())
         return {"layer": layer, "neuron": neuron, "name": name.strip() or None, "names": data.names()}
 
+    # --- CHANGE-04 G: attention ヘッド(HEAD パネル、地図の heads:<name>) ---------------------------------------
+    @app.get("/api/head")
+    def head(layer: int, head: int, lens: bool = True):
+        return data.head(layer, head, lens=lens)
+
+    @app.post("/api/head/name")
+    def head_name(layer: int = Body(...), head: int = Body(...), name: str = Body("")):
+        data._check(layer)
+        session.set_head_name(layer, head, name.strip())
+        return {"layer": layer, "head": head, "name": name.strip() or None, "names": data.names()}
+
+    @app.get("/api/heads")
+    def heads():
+        return data.heads_list()
+
+    @app.get("/api/heads/{name}")
+    def heads_one(name: str):
+        return data.heads_one(name)
+
+    @app.post("/api/attention")
+    def attention(text: str = Body(...), layer: int | None = Body(None), head: int | None = Body(None), pos: int = Body(-1),
+                  top: int = Body(5), system: str | None = Body(None), chat: bool = Body(False), compare: bool = Body(False)):
+        return live.attention(text, layer=layer, head=head, pos=pos, top=top, system=system, chat=chat, compare=compare)
+
     @app.get("/api/search")
     def search(q: str, mode: str = "lens", limit: int = 500):
         return data.search(q, mode=mode, limit=limit)
@@ -173,6 +203,11 @@ def create_app(session, *, warm: bool = True, openai: bool = False) -> FastAPI:
     def fires_field(fid: str, tok: int = -1):
         body, sizes, meta = live.fires_fields(fid, tok)
         return _binary(body, ",".join(map(str, sizes)), meta)
+
+    @app.get("/api/fires/{fid}/heads")
+    def fires_heads(fid: str):
+        body, shape, meta = live.fires_heads(fid)
+        return _binary(body, ",".join(map(str, shape)), meta)
 
     @app.get("/api/fires/{fid}/neurons")
     def fires_neurons(fid: str, tok: int = -1, lmin: int = 0, lmax: int | None = None, sign: str = "both",
@@ -215,6 +250,14 @@ def create_app(session, *, warm: bool = True, openai: bool = False) -> FastAPI:
     @app.get("/api/jobs")
     def job_list():
         return [j.view() for j in live.jobs.list()]
+
+    @app.get("/api/workers")
+    def workers():
+        """CHANGE-03 B: 生きているワーカーと、ファイルのキューのジョブ(結果は省く)。"""
+        from ..workers import job_files, list_workers
+        root = session.store.root
+        return {"workers": list_workers(root), "jobs": [{k: v for k, v in j.items() if k != "result"}
+                                                         for j in job_files(root)][-20:]}
 
     @app.get("/api/jobs/{job_id}/events")
     def job_events(job_id: str):

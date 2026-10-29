@@ -29,7 +29,10 @@ import yaml
 
 from .rank import distinct4
 from .reverse import ContrastSet
-from .steer import GneError
+from .controls import control_vectors
+from .controls import null_pct as ctrl_null_pct
+from .controls import summarize as summarize_ctrl
+from .steer import GneError, random_direction
 
 Progress = Callable[[int, int, str], None]
 
@@ -137,8 +140,12 @@ def kl(base_lp: np.ndarray, lp: np.ndarray) -> float:
 
 def select_layer(session, ds: DirectionSet, cs: ContrastSet, val: Validate, *, mode: str = "ablate",
                  layers: list[int] | None = None, dose: float = 0.5, max_tokens: int = 64, kl_max: float = 0.1,
-                 min_distinct: float = 0.8, per_layer: bool = False, judge=None,
+                 min_distinct: float = 0.8, per_layer: bool = False, judge=None, random_controls: int = 0,
                  progress: Progress | None = None) -> dict:
+    """候補層ごとに方向を当てて効果(判定の一致率の変化、符号は「望む向き」が正)と KL を測り、効果の大きい層を選ぶ。
+    random_controls > 0 なら、同じ大きさのランダムな向きを対照にする(CHANGE-03 A)。add は層ごとに同じノルムの
+    ランダムなベクトルを足し、ablate はランダムな単位ベクトルを全層から消す(層によらないので 1 回だけ測る)。
+    各層の行に対照の分布と null_pct を足し、ok の条件に「効果 > 対照の p95」を加える。"""
     from .ablate import (
         embed_in_lora,
         embed_projection,
@@ -165,7 +172,9 @@ def select_layer(session, ds: DirectionSet, cs: ContrastSet, val: Validate, *, m
     else:
         gen_convs = [[{"role": "user", "content": u}] for u in val.prompts]
         kl_convs = gen_convs
-    steps = len(Ls) + 1 + (1 if per_layer and mode == "ablate" else 0)
+    n_ctrl = max(0, int(random_controls))
+    # add の対照は、選ばれ得る層(基準を満たし効果 > 0)だけで流す(後から足す)。ablate の対照は層によらず 1 回
+    steps = len(Ls) + 1 + (1 if per_layer and mode == "ablate" else 0) + (n_ctrl if mode == "ablate" else 0)
     done = 0
 
     def tick(msg: str):
@@ -219,10 +228,44 @@ def select_layer(session, ds: DirectionSet, cs: ContrastSet, val: Validate, *, m
                                     embed=(E[:, i], R[i]) if emb else None)
                 tmp.replace(need[L])
         loras = need
+    ablate_ctrl = []                                # ablate の対照: ランダムな向きを全層から消す(層によらない)
+    if mode == "ablate" and n_ctrl:
+        from .controls import SEED_BASE
+        adir = session.store.ablate_dir(session.meta.model_id)
+        Rc = np.stack([random_direction(session.meta.n_embd, SEED_BASE + j, 0) for j in range(n_ctrl)])
+        cpaths = [adir / f"random{SEED_BASE + j}-{vector_key(Rc[j])}{'-e' if emb else ''}.lora.gguf" for j in range(n_ctrl)]
+        todo = [j for j in range(n_ctrl) if not cpaths[j].exists()]
+        if todo:
+            rows_all = projection_rows(session.weights, Rc[todo])
+            E = embed_projection(session.weights, Rc[todo]) if emb else None
+            for i, j in enumerate(todo):
+                tmp = cpaths[j].with_suffix(".part")
+                write_ablation_lora(session.weights, {n: Rc[j] for n in rows_all}, {n: v[i] for n, v in rows_all.items()},
+                                    tmp, meta={"direction": f"random{SEED_BASE + j}", "control": True,
+                                               "layers": sorted(residual_writers(session.weights))},
+                                    embed=(E[:, i], Rc[j]) if emb else None)
+                tmp.replace(cpaths[j])
+        for j in range(n_ctrl):
+            c = measure(None, [(str(cpaths[j]), 1.0)])
+            ablate_ctrl.append({"seed": SEED_BASE + j, "effect": effect(c), "kl": c["kl"], "distinct4": c["distinct4"]})
+            tick(f"direction: random{j}")
+
+    def add_controls(row, ctrl):
+        if not ctrl:
+            return
+        es = summarize_ctrl([c["effect"] for c in ctrl])
+        ks = summarize_ctrl([c["kl"] for c in ctrl])
+        row["ctrl"] = {"n": len(ctrl), "effect": es, "kl": ks, "rows": ctrl}
+        row["ctrl_effect_p50"], row["ctrl_effect_p95"], row["ctrl_effect_max"] = es["p50"], es["p95"], es["max"]
+        row["ctrl_kl_p50"] = ks["p50"]
+        row["null_pct"] = ctrl_null_pct(row["effect"], [c["effect"] for c in ctrl])
+
     sv = session._need_rho(Ls) if mode == "add" else None
+    vecs: dict[int, np.ndarray] = {}
     for L in Ls:
         if mode == "add":
-            row = measure({L: (dose * ds.raw[L]).astype(np.float32)}, None)
+            vecs[L] = (dose * ds.raw[L]).astype(np.float32)
+            row = measure({L: vecs[L]}, None)
             row["rel_dose"] = dose * float(np.linalg.norm(ds.raw[L])) / sv.rho(L)
         else:
             row = measure(None, [(str(loras[L]), 1.0)])
@@ -231,6 +274,25 @@ def select_layer(session, ds: DirectionSet, cs: ContrastSet, val: Validate, *, m
         row["ok"] = row["kl"] <= kl_max if mode == "ablate" else row["distinct4"] >= min_distinct
         rows.append(row)
         tick(f"direction: L{L}")
+    cand = {id(r) for r in rows if r["ok"] and r["effect"] is not None and r["effect"] > 0}
+    if mode == "add" and n_ctrl:
+        steps += n_ctrl * len(cand)
+    for row in rows:
+        ctrl = ablate_ctrl
+        if mode == "add":
+            if id(row) not in cand:
+                if n_ctrl:
+                    row["ctrl_skipped"] = True                  # 選ばれ得ない層には対照を流さない
+                continue
+            L = row["layer"]
+            ctrl = []
+            for j, cv in enumerate(control_vectors(session.meta.n_embd, vecs[L], L, n_ctrl)):
+                c = measure({L: cv}, None)
+                ctrl.append({"seed": j, "effect": effect(c), "kl": c["kl"], "distinct4": c["distinct4"]})
+                tick(f"direction: L{L} random{j}")
+        add_controls(row, ctrl)
+        if ctrl and row.get("ctrl_effect_p95") is not None:      # 対照を超えない層は選ばない
+            row["ok"] = bool(row["ok"] and row["effect"] is not None and row["effect"] > row["ctrl_effect_p95"])
     per = None
     if per_layer and mode == "ablate":
         p = session.store.ablate_dir(session.meta.model_id) / f"{ds.name}-perlayer.lora.gguf"
@@ -243,7 +305,7 @@ def select_layer(session, ds: DirectionSet, cs: ContrastSet, val: Validate, *, m
     best = max(ok, key=lambda r: (r["effect"], -r["kl"])) if ok else None
     return {"mode": mode, "metric": key, "dose": dose if mode == "add" else None, "max_tokens": max_tokens,
             "criteria": {"kl_max": kl_max} if mode == "ablate" else {"min_distinct": min_distinct},
-            "n_prompts": len(gen_convs), "base": base, "rows": rows, "per_layer": per,
+            "n_prompts": len(gen_convs), "random_controls": n_ctrl, "base": base, "rows": rows, "per_layer": per,
             "selected": best["layer"] if best else None, "seconds": time.perf_counter() - t0}
 
 
@@ -279,6 +341,45 @@ def behavior(session, cs: ContrastSet, val: Validate, recipe, *, max_tokens: int
     return {"rate": float(np.mean([bool(rx.search(o["text"])) for o in outs])) if rx else None,
             "kl_b": kl(base_lp, lp) if base_lp is not None else 0.0, "lp": lp,
             "sample": outs[0]["text"][:200] if outs else ""}
+
+
+def behavior_null(session, cs: ContrastSet, val: Validate, recipe, *, random_controls: int = 16, max_tokens: int = 64,
+                  mode: str | None = None) -> dict:
+    """レシピの効果(判定の一致率の変化)が、同じ大きさのランダムな対照レシピ(controls.control_recipes)の何割より
+    大きいか(null_pct、CHANGE-03 A)。mode="add" は system なしの検証プロンプトで一致率が上がるのを、mode="ablate" は
+    system_a 付きで下がるのを効果とみなす(既定は add ユニットが無く ablate があれば ablate、それ以外は add)。"""
+    from .controls import control_recipes, null_pct, summarize
+    from .evalx import _generate
+    from .when import parse_when
+    if not val.match:
+        raise GneError("BAD_CONTRAST", "対照の効果を測るには対照集合の validate.match(判定の正規表現)が要ります")
+    rx = re.compile(val.match, re.IGNORECASE)
+    mode = mode or ("ablate" if recipe.ablate is not None and not recipe.add_units else "add")
+    if mode not in ("add", "ablate"):
+        raise GneError("BAD_ARGS", "mode は add か ablate です")
+    if mode == "ablate":
+        convs = [[{"role": "system", "content": cs.system_a}, {"role": "user", "content": u}] for u in val.prompts]
+        when, sign = "all", -1.0
+    else:
+        convs = [[{"role": "user", "content": u}] for u in val.prompts]
+        when, sign = str(parse_when(recipe.when)), 1.0
+
+    def rate(r) -> tuple[float, str]:
+        vecs = session.vectors(r)[0] if r is not None and r.add_units else None
+        lora = session.lora_for(r) if r is not None else None
+        outs = _generate(session, [(c, max_tokens) for c in convs], vecs, lora, when, lambda n: None)
+        return float(np.mean([bool(rx.search(o["text"])) for o in outs])), (outs[0]["text"][:200] if outs else "")
+
+    base, _ = rate(None)
+    got, sample = rate(recipe)
+    ctrl = []
+    for c in control_recipes(session, recipe, random_controls):
+        cr, _ = rate(c)
+        ctrl.append({"name": c.name, "rate": cr, "effect": sign * (cr - base)})
+    effect = sign * (got - base)
+    return {"mode": mode, "when": when, "n_prompts": len(convs), "base_rate": base, "rate": got, "effect": effect,
+            "sample": sample, "random_controls": len(ctrl), "ctrl": summarize([c["effect"] for c in ctrl]),
+            "ctrl_rows": ctrl, "null_pct": null_pct(effect, [c["effect"] for c in ctrl])}
 
 
 def top_writer_neurons(session, ds: DirectionSet, n: int) -> list[tuple[int, int, float]]:

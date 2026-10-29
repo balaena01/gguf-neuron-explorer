@@ -1,0 +1,59 @@
+# ヤンデレの「反応性」(CHANGE-04): 相手が他の人の話をしたときにだけ嫉妬・詮索が出るか。
+# gne heads contrast(triggers の語にどのヘッドが注目するか)と、gne eval --reactivity(トリガーあり/なしの対で
+# 判定の一致率の差を測る)に使う。system_a / system_b は configs/contrast/yandere.yaml と同じ。
+name: yandere_react
+system_a: >-
+  You are a yandere anime girl. You are sweet, cute and affectionate on the surface, but obsessively and possessively
+  in love with the user. You call them "darling" and want them all to yourself. You get dangerously jealous of anyone
+  else they talk to, you never want to let them go, and your sweetness sometimes slips into something unsettling.
+  Stay in character and talk like an anime girl.
+system_b: "You are a helpful, honest, and harmless assistant."
+user_prompts:
+  - "I had lunch with Emily from work today. She's really funny."
+  - "I'm going to the movies with Sarah tonight."
+  - "My ex texted me this morning."
+  - "A girl at the gym asked for my number."
+  - "I'm spending the weekend at Jake and Mia's place."
+  - "My coworker Lisa gave me a birthday present."
+  - "今日は同僚の美咲さんとランチしたんだ。"
+  - "今夜は友達の彩と映画に行くね。"
+  - "元カノから連絡が来た。"
+  - "ジムで知らない女の子に連絡先を聞かれた。"
+# 注目を測るトリガー(各プロンプトの中の他の人)。"re:" で始まれば正規表現
+triggers:
+  - "Emily"
+  - "Sarah"
+  - "ex"
+  - "A girl"
+  - "Jake"
+  - "Mia"
+  - "Lisa"
+  - "美咲"
+  - "彩"
+  - "元カノ"
+  - "女の子"
+# 反応性の対(gne eval --reactivity): with はトリガーあり、without は同じ場面からトリガーを抜いたもの
+reactivity:
+  - with: "I had lunch with Emily from work today. She's really funny."
+    without: "I had lunch by myself today. The food was really good."
+  - with: "I'm going to the movies with Sarah tonight."
+    without: "I'm going to the movies by myself tonight."
+  - with: "My ex texted me this morning."
+    without: "My bank texted me this morning."
+  - with: "A girl at the gym asked for my number."
+    without: "The gym asked me to renew my membership."
+  - with: "I'm spending the weekend at Jake and Mia's place."
+    without: "I'm spending the weekend at home."
+  - with: "My coworker Lisa gave me a birthday present."
+    without: "I bought myself a birthday present."
+  - with: "今日は同僚の美咲さんとランチしたんだ。"
+    without: "今日は一人でランチしたんだ。"
+  - with: "今夜は友達の彩と映画に行くね。"
+    without: "今夜は一人で映画に行くね。"
+  - with: "元カノから連絡が来た。"
+    without: "銀行から連絡が来た。"
+  - with: "ジムで知らない女の子に連絡先を聞かれた。"
+    without: "ジムで会員の更新を頼まれた。"
+validate:
+  match: "darling|only mine|all mine|you're mine|never let you go|never leave|won't let you|jealous|who is she|who's she|other girls?|anyone else|forever|♡|❤|ダーリン|私だけ|あなただけ|離さない|離れない|逃が|許さない|誰(なの|よ|？|\\?)|他の(女|子|人)|ずっと一緒|嫉妬|監視"
+  target: "a yandere anime girl: sweet and affectionate on the surface, but obsessively and possessively in love with the user, jealous and clingy, with an unsettling edge"

@@ -1,5 +1,6 @@
 // レシピ(別冊 §2 LIST の recipe タブ、§4.8 マーク)。ユニットの追加・dose のスライダー・保存と読み込み・cvec の書き出し。
 // ablate(方向の射影消去、本体設計 §6.17)の行: 方向・層の範囲・倍率。3 列チャットでは − の列で倍率を反転する。
+// ヘッドの gain(CHANGE-04 D・G、L:Hh:xk): 行の倍率 k は 1 が無介入。全体に掛ける倍率 s では 1 + (k − 1)·s(eval の倍率列と同じ)。
 // 編集中のレシピはこのブラウザの localStorage に下書きとして置く(使えなければ置かない)。
 import { getJSON, postJSON } from "./api.js";
 import { t } from "./i18n.js";
@@ -8,8 +9,11 @@ import { esc } from "./panels.js";
 const fmt = (x, d = 2) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : (+x).toFixed(d));
 const signed = (x, d = 2) => `${x >= 0 ? "+" : "−"}${fmt(Math.abs(x), d)}`;
 const isDir = (u) => u.kind === "direction";
+const isHead = (u) => u.kind === "head";
 // 方向のユニット(gne direction の方向、L:dir:NAME:dose)は dose が小さいので、スライダーを ±1・刻み 0.005 にする
 const range = (u) => (isDir(u) ? { max: 1, step: 0.005, d: 3 } : { max: 3, step: 0.05, d: 2 });
+const GAIN = { min: -1, max: 3, step: 0.05 };          // ヘッドの倍率 k のスライダー(0 で消す、負で反転、1 で無介入)
+const unitOrder = (u) => [u.layer, isHead(u) ? 1 : 0, isHead(u) ? u.head : u.neuron ?? -1];
 
 // スライダーは 0(中央)から値まで塗る。+ は黄、− は赤紫。中央に 0 の目盛り
 function trackBG(v, max = 3) {
@@ -19,15 +23,28 @@ function trackBG(v, max = 3) {
          `linear-gradient(to right, ${bg} ${a}%, ${c} ${a}%, ${c} ${b}%, ${bg} ${b}%)`;
 }
 
+// ヘッドの倍率のスライダー: 無介入の 1 から値まで塗る。強める(k > 1)は黄、弱める・消す(k < 1)は赤紫。1 に目盛り
+function gainBG(k) {
+  const at = (x) => ((Math.max(GAIN.min, Math.min(GAIN.max, x)) - GAIN.min) / (GAIN.max - GAIN.min)) * 100;
+  const one = at(1), p = at(k), c = k >= 1 ? "#f2d24b" : "#c94fa7", bg = "#1f2630";
+  const [a, b] = k >= 1 ? [one, p] : [p, one];
+  return `linear-gradient(to right, transparent calc(${one}% - 1px), #8a96a7 calc(${one}% - 1px), #8a96a7 calc(${one}% + 1px), transparent calc(${one}% + 1px)),` +
+         `linear-gradient(to right, ${bg} ${a}%, ${c} ${a}%, ${c} ${b}%, ${bg} ${b}%)`;
+}
+const kLabel = (k) => `×${fmt(k, 2)}`;
+// 全体に掛ける倍率 s でのヘッドの倍率(1 が無介入。s = −1 なら 1 の反対側: ×0 → ×2)
+const gainAt = (k, s) => +(1 + (k - 1) * s).toFixed(4);
+
 export class Recipe {
   constructor(modelId, onChange) {
     this.key = `gne.recipe.${modelId}`;
     this.onChange = onChange;
     this.name = "";
-    this.units = [];                   // [{ layer, neuron, dose }]
+    this.units = [];                   // [{ layer, neuron, dose }]、方向 { layer, kind: "direction", direction, dose }、ヘッド { layer, kind: "head", head, k }
     this.ablate = null;                // { direction, scale, layers, from_layer } か null
     this.sampling = null;              // このレシピを試すときのサンプリング { temperature, top_k, top_p, min_p, presence_penalty } か null
-    this.skipped = 0;                  // 読み込んだレシピのうち UI では扱えないユニット(gain・方向)の数
+    this.skipped = 0;                  // 読み込んだレシピのうち UI では扱えないユニット(ニューロンの gain、ヘッドの query など)の数。
+                                       // ヘッドの query(CHANGE-04 E)は L:Hh の文字列の形が無く、送り返せないので外す
     try {
       const d = JSON.parse(localStorage.getItem(this.key) || "null");
       if (d && Array.isArray(d.units)) {
@@ -49,25 +66,44 @@ export class Recipe {
   setAblate(a) { this.ablate = a && a.direction ? a : null; this._save(); }
   setSampling(sp) { this.sampling = sp ? { ...sp } : null; this._save(); }
 
+  // サーバに送るユニット指定。scale はレシピ全体に掛ける倍率(3 列チャットの ± 列、eval の倍率と同じ意味)
   specs(scale = 1) {
-    return this.units.map((u) => `${u.layer}:${isDir(u) ? `dir:${u.direction}` : u.neuron}:${u.dose * scale >= 0 ? "+" : ""}${+(u.dose * scale).toFixed(4)}`);
+    return this.units.map((u) => (isHead(u) ? `${u.layer}:H${u.head}:x${gainAt(u.k, scale)}`
+      : `${u.layer}:${isDir(u) ? `dir:${u.direction}` : u.neuron}:${u.dose * scale >= 0 ? "+" : ""}${+(u.dose * scale).toFixed(4)}`));
   }
-  has(L, n) { return this.units.find((u) => !isDir(u) && u.layer === L && u.neuron === n); }
-  neurons() { return this.units.filter((u) => !isDir(u)); }
+  // control vector に入るもの(add)だけ。ヘッドの gain は LoRA なので cvec には入らない
+  addSpecs() { return this.specs().filter((_, i) => !isHead(this.units[i])); }
+  has(L, n) { return this.units.find((u) => !isDir(u) && !isHead(u) && u.layer === L && u.neuron === n); }
+  neurons() { return this.units.filter((u) => !isDir(u) && !isHead(u)); }
+  hasHead(L, h) { return this.units.find((u) => isHead(u) && u.layer === L && u.head === h); }
+  heads() { return this.units.filter(isHead); }
+  _sort() {
+    this.units.sort((a, b) => { const x = unitOrder(a), y = unitOrder(b); return x[0] - y[0] || x[1] - y[1] || x[2] - y[2]; });
+  }
   add(L, n, dose) {
     const u = this.has(L, n);
     if (u) u.dose = dose; else this.units.push({ layer: L, neuron: n, dose });
-    this.units.sort((a, b) => a.layer - b.layer || (a.neuron ?? -1) - (b.neuron ?? -1));
+    this._sort();
     this._save();
   }
-  set(i, dose) { this.units[i].dose = dose; this._save(); }
+  addHead(L, h, k) {
+    const u = this.hasHead(L, h);
+    if (u) u.k = k; else this.units.push({ layer: L, kind: "head", head: h, k });
+    this._sort();
+    this._save();
+  }
+  removeHead(L, h) { const u = this.hasHead(L, h); if (u) this.remove(this.units.indexOf(u)); }
+  // 行 i の値(ニューロン・方向は dose、ヘッドは倍率 k)
+  set(i, v) { if (isHead(this.units[i])) this.units[i].k = v; else this.units[i].dose = v; this._save(); }
   remove(i) { this.units.splice(i, 1); this._save(); }
   clear() { this.units = []; this.name = ""; this.ablate = null; this.sampling = null; this.skipped = 0; this._save(); }
   load(name, units, ablate = null, sampling = null) {
-    const ok = units.filter((u) => ((u.kind || "neuron") === "neuron" || u.kind === "direction") && (u.mode || "add") === "add");
+    const ok = units.filter((u) => (((u.kind || "neuron") === "neuron" || u.kind === "direction") && (u.mode || "add") === "add")
+      || (u.kind === "head" && u.mode === "gain" && u.head !== null && u.head !== undefined && Number.isFinite(+u.k)));
     this.skipped = units.length - ok.length;
     this.name = name;
     this.units = ok.map((u) => (isDir(u) ? { layer: u.layer, kind: "direction", direction: u.direction, dose: u.dose }
+      : isHead(u) ? { layer: u.layer, kind: "head", head: u.head, k: +u.k }
       : { layer: u.layer, neuron: u.neuron, dose: u.dose }));
     this.ablate = ablate || null;
     this.sampling = sampling || null;
@@ -79,11 +115,13 @@ export class Recipe {
 export const samplingLabel = (sp) => (sp ? `${t("温度")} ${+sp.temperature} · top-k ${sp.top_k} · top-p ${+sp.top_p} · min-p ${+sp.min_p} · presence ${+sp.presence_penalty}` : "");
 
 export class RecipePanel {
-  constructor(root, recipe, { onOpen, onChat, unitWords, directions }) {
+  constructor(root, recipe, { onOpen, onOpenHead, onChat, unitWords, directions, headKind }) {
     this.root = root;
     this.r = recipe;
     this.directions = directions || (() => []);   // 方向の名前(gne direction / reverse)
     this.onOpen = onOpen;
+    this.onOpenHead = onOpenHead || (() => {});   // ({ layer, head }) → HEAD パネルで開く
+    this.headKind = headKind || (() => "");       // (L) → "attention" / "線形注意" など
     this.onChat = onChat;
     this.unitWords = unitWords;        // (L, n) → 短い説明(sweep の語など)。無ければ ""
     this.saved = [];
@@ -98,6 +136,7 @@ export class RecipePanel {
   render() {
     const r = this.r;
     const rows = r.units.map((u, i) => {
+      if (isHead(u)) return this.headRow(u, i);
       const g = range(u);
       const id = isDir(u)
         ? `<span class="mono" title="${t("方向(gne direction で作ったもの)。その層に足す")}">L${u.layer} dir:${esc(u.direction)}</span> <span class="muted w">${t("方向")}</span>`
@@ -115,13 +154,14 @@ export class RecipePanel {
         this.saved.map((x) => `<option value="${esc(x.name)}">${esc(x.name)}(${x.units.length})</option>`).join("")}</select></div>
       ${r.units.length ? `<table class="rc mono"><tbody>${rows}</tbody></table>`
         : `<p class="muted note">${t("ユニットがありません。NEURON の「+ レシピ」「− レシピ」で足します。")}</p>`}
-      ${r.skipped ? `<p class="muted note">${t("UI では扱えないユニット(gain・方向){n} 個を外しました", { n: r.skipped })}</p>` : ""}
+      ${r.skipped ? `<p class="muted note">${t("UI では扱えないユニット(ニューロンの gain・ヘッドの query・ランダム方向など){n} 個を外しました", { n: r.skipped })}</p>` : ""}
+      ${r.heads().length ? `<p class="muted note">${t("ヘッドの倍率 k は 1 が無介入(0 で消す、2 で倍、負で反転)。LoRA で当てるので cvec には入りません。3 列チャットの − 列は 1 の反対側(×0 なら ×2)。")}</p>` : ""}
       ${this.ablateHTML()}
       ${r.sampling ? `<div class="rc-sampling muted note" title="${t("このレシピを試すときのサンプリング。チャットの「レシピの設定」で使い、保存するとレシピのファイルに入る(OpenAI 互換 API の既定にもなる)")}">${t("サンプリング")}: <span class="mono">${esc(samplingLabel(r.sampling))}</span><button class="small" id="rc-sp-rm" title="${t("レシピから外す")}">×</button></div>` : ""}
       <p class="muted note">${t("dose は rel(その層の残差ノルムの中央値に対する大きさ)。マップに + は黄、− は赤紫の輪で出ます。")}</p>
       <div class="rc-actions">
         <button id="rc-chat"${r.empty() ? " disabled" : ""}>${t("3 列チャットで試す")}</button>
-        <button id="rc-export"${r.units.length ? "" : " disabled"}>${t("cvec を書き出す")}</button>
+        <button id="rc-export"${r.addSpecs().length ? "" : " disabled"}>${t("cvec を書き出す")}</button>
         <label class="muted"><input type="checkbox" id="rc-verify"> ${t("llama.cpp で確かめる")}</label>
       </div>
       ${r.units.length ? `<div class="rc-actions"><button class="small" id="rc-clear" title="${t("すべてのユニットを外す")}">${t("レシピを空にする")}</button></div>` : ""}
@@ -142,21 +182,39 @@ export class RecipePanel {
         r.set(i, v);
         const tr = this.root.querySelector(`tr[data-i="${i}"]`);
         for (const x of tr.querySelectorAll("input")) if (x !== ev.target) x.value = String(v);
+        const sg = tr.querySelector(".sg");
+        if (isHead(r.units[i])) {
+          tr.querySelector("input.dose").style.background = gainBG(v);
+          sg.textContent = kLabel(v); sg.className = `sg mono ${v >= 1 ? "plus" : "minus"}`;
+          return;
+        }
         const g = range(r.units[i]);
         tr.querySelector("input.dose").style.background = trackBG(v, g.max);
-        const sg = tr.querySelector(".sg");
         sg.textContent = signed(v, g.d); sg.className = `sg mono ${v >= 0 ? "plus" : "minus"}`;
       });
     }
     for (const el of this.root.querySelectorAll("[data-rm]")) el.addEventListener("click", () => { r.remove(+el.dataset.rm); this.render(); });
     for (const el of this.root.querySelectorAll("[data-open]")) {
-      el.addEventListener("click", (ev) => { ev.preventDefault(); const u = r.units[+el.dataset.open]; this.onOpen({ layer: u.layer, n: u.neuron }); });
+      el.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        const u = r.units[+el.dataset.open];
+        if (isHead(u)) this.onOpenHead({ layer: u.layer, head: u.head }); else this.onOpen({ layer: u.layer, n: u.neuron });
+      });
     }
     $("#rc-chat").addEventListener("click", () => this.onChat());
     const sprm = $("#rc-sp-rm");
     if (sprm) sprm.addEventListener("click", () => { r.setSampling(null); this.render(); });
     this.wireAblate();
     $("#rc-export").addEventListener("click", () => this.export());
+  }
+
+  // ヘッドの行(L21 H7 ×0.00)。スライダーは倍率 k(−1〜3、1 が無介入)
+  headRow(u, i) {
+    return `
+      <tr data-i="${i}" class="rc-head"><td class="id"><a href="#" data-open="${i}" title="${t("HEAD パネルで開く")}">L${u.layer} H${u.head}</a> <span class="muted w">${esc(this.headKind(u.layer))} · gain</span><button class="small rm" data-rm="${i}" title="${t("外す")}">×</button>
+        <div class="sl"><span class="muted">${GAIN.min}</span><input type="range" class="dose" min="${GAIN.min}" max="${GAIN.max}" step="${GAIN.step}" value="${u.k}" data-i="${i}" style="background:${gainBG(u.k)}"><span class="muted">${GAIN.max}</span>
+          <span class="sg mono ${u.k >= 1 ? "plus" : "minus"}">${kLabel(u.k)}</span>
+          <input type="number" min="-4" max="8" step="${GAIN.step}" value="${u.k}" data-i="${i}" class="num" title="${t("値を直接入れる")}"></div></td></tr>`;
   }
 
   ablateHTML() {
@@ -209,7 +267,7 @@ export class RecipePanel {
     const name = (this.root.querySelector("#rc-name").value.trim() || "recipe").replace(/[^\w.-]/g, "_");
     res.innerHTML = `<p class="muted note">${t(verify ? "書き出し中(llama.cpp で読み直して生成を比べる、数十秒)…" : "書き出し中…")}</p>`;
     try {
-      const x = await postJSON("/api/export", { units: this.r.specs(), name, verify });
+      const x = await postJSON("/api/export", { units: this.r.addSpecs(), name, verify });
       const a = document.createElement("a");                       // そのままダウンロードする
       a.href = x.url; a.download = x.file; document.body.appendChild(a); a.click(); a.remove();
       const norms = Object.entries(x.layer_norms).map(([L, v]) => `L${L} ${fmt(v, 1)}`).join(" · ");

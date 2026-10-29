@@ -2,10 +2,13 @@
 
 async function check(r, url) {
   if (r.ok) return r;
-  let msg = `${r.status}`;
-  try { const j = await r.json(); msg = j.error ? `${j.error.message}${j.error.hint ? `(${j.error.hint})` : ""}` : JSON.stringify(j); }
+  let msg = `${r.status}`, body = null;
+  try { body = await r.json(); msg = body.error ? `${body.error.message}${body.error.hint ? `(${body.error.hint})` : ""}` : JSON.stringify(body); }
   catch { /* 本文が JSON でない */ }
-  throw new Error(`${url}: ${msg}`);
+  const e = new Error(`${url}: ${msg}`);
+  e.code = body && body.error ? body.error.code : null;          // NEEDS_CONFIRM などで呼び出し側が分ける
+  e.body = body;
+  throw e;
 }
 
 export async function getJSON(url, params) {

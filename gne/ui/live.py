@@ -1,4 +1,5 @@
 """UI のライブ機能(別冊 U2): 3 列チャットの逐次生成、fires、reads you、レシピ、cvec の書き出し、ジョブ。
+CHANGE-04 G: HEAD パネルの注目のパターン(attention)と、fires の文章でのヘッドの注目(fires_heads)。
 
 GPU を使う処理は GpuArbiter を通す。ジョブ(sweep・lens など)はユニットの切れ目で GPU を譲るので、
 チャットや fires はジョブの実行中でも数秒以内に始まる(§8.1)。
@@ -157,7 +158,7 @@ class Live:
         fid = uuid.uuid4().hex[:8]
         with self._lock:
             self._fires[fid] = {"ids": r.pop("ids"), "max": r.pop("max_field"), "tokens": r["tokens"], "top": r["top"],
-                                "layers": r["layers"], "norm": r["normalization"], "by_token": OrderedDict()}
+                                "layers": r["layers"], "norm": r["normalization"], "by_token": OrderedDict(), "heads": None}
             while len(self._fires) > FIRES_KEEP:
                 self._fires.popitem(last=False)
         return {"id": fid, **r, "warnings": warns}
@@ -225,6 +226,70 @@ class Live:
                         "norm": norm.get(str(L))})
         return {"tok": tok, "n_hits": len(rows), "neurons": out, "text_p99": meta["text_p99"]}
 
+    def fires_heads(self, fid: str) -> tuple[bytes, list[int], dict]:
+        """fires の文章で、各ヘッドが各トークンに払う注目(地図の fires_heads、CHANGE-04 G)。値は、そのトークンより後ろの
+        位置からの注目の重みの平均(自分自身への注目は除く)。(ヘッド数, T) の Float32Array で、行の並びは meta の heads
+        ([層, ヘッド])。最後のトークンは後ろが無いので NaN。パターンの無い線形注意の層は行に入れない。
+        flash attention を切った prefill を 1 回(層が多ければ数回に分けて)流し、文章ごとに覚えておく。"""
+        from ..attn import capture_attention
+        f = self._fire(fid)
+        if f["heads"] is not None:
+            return f["heads"]
+        arch, e = self.s.weights.arch, self.s.engine
+        Ls = [L for L in range(self.s.meta.n_layer) if arch.layers[L].head_dim and arch.layers[L].mixer == "attention"]
+        linear = [L for L in range(self.s.meta.n_layer) if arch.layers[L].head_dim and arch.layers[L].mixer != "attention"]
+        if not Ls:
+            raise GneError("ARCH_UNSUPPORTED", "このモデルには注目のパターンを持つ attention の層がありません")
+        ids = f["ids"][:e.probe_ubatch]
+        T = len(ids)
+        nh = max(arch.layers[L].n_head for L in Ls)
+        step = max(1, int(256e6 // (4 * nh * T * T)))           # 1 回に捕捉するパターンを 256 MB ほどまでに
+
+        def fn():
+            got = {}
+            try:
+                for i in range(0, len(Ls), step):
+                    ac = capture_attention(self.s, [ids], layers=Ls[i:i + step], want_head_out=False)[0]
+                    after = (T - 1 - np.arange(T)).astype(np.float32)             # 各トークンより後ろの位置の数
+                    for L, P in ac.pattern.items():                               # P: (n_head, T, T)、因果マスクで上三角は 0
+                        col = P.sum(axis=1) - np.diagonal(P, axis1=1, axis2=2)
+                        with np.errstate(invalid="ignore", divide="ignore"):
+                            got[L] = np.where(after > 0, col / np.maximum(after, 1), np.nan).astype(np.float32)
+            finally:
+                e.free_attn_probe()
+            return got
+        got, warns = self._gpu(fn)
+        heads = [[L, h] for L in sorted(got) for h in range(got[L].shape[0])]
+        body = np.concatenate([got[L] for L in sorted(got)], axis=0).astype(np.float32).tobytes()
+        meta = {"heads": heads, "n_tokens": T, "layers": sorted(got), "linear": linear, "truncated": T < len(f["ids"]),
+                "warnings": warns}
+        out = (body, [len(heads), T], meta)
+        with self._lock:
+            f["heads"] = out
+        return out
+
+    # --- HEAD パネルの Pattern(CHANGE-04 G) ---------------------------------------------------------------
+    def attention(self, text: str, *, layer: int | None = None, head: int | None = None, pos: int = -1, top: int = 5,
+                  system: str | None = None, chat: bool = False, compare: bool = False) -> dict:
+        """gne heads attention(Session.attention)。layer と head を両方渡すと T × T のパターンも返る。
+        compare = True なら、同じユーザーの発話を system あり(with)となし(without)のチャットで流し、両方を返す
+        (ペルソナあり/なしの差分表示用。共通の末尾をそろえるのはブラウザ側)。"""
+        if not text or not text.strip():
+            raise GneError("BAD_ARGS", "文章が空です")
+        if layer is not None:
+            self.data._check(layer)
+        system = (system or "").strip() or None
+        if compare and not system:
+            raise GneError("BAD_ARGS", "ペルソナあり/なしを比べるには system が要ります")
+
+        def one(sys_, chat_):
+            return self.s.attention(text, pos=pos, layer=layer, head=head, top=top, system=sys_, chat=chat_)
+        if compare:
+            r, warns = self._gpu(lambda: {"with": one(system, True), "without": one(None, True)})
+            return {**r, "compare": True, "warnings": warns}
+        r, warns = self._gpu(lambda: one(system, chat))
+        return {**r, "compare": False, "warnings": warns}
+
     def _lens_pole(self, L: int, n: int, positive: bool) -> dict | None:
         """光った向きに対応する lens の極(正に光ったら + 極、負なら − 極)。steer lens があればそれ、無ければ logit lens。"""
         sl = self.data.steer_lens(L)
@@ -277,7 +342,7 @@ class Live:
                 continue
             out.append({"name": p.stem, "model_id": r.model_id, "dose_unit": r.dose_unit,
                         "units": [{"layer": u.layer, "neuron": u.neuron, "dose": u.dose, "kind": u.kind, "mode": u.mode,
-                                   "k": u.k, "direction": u.direction} for u in r.units],
+                                   "k": u.k, "direction": u.direction, "head": u.head, "seek": getattr(u, "seek", None)} for u in r.units],
                         "ablate": r.ablate.to_dict() if r.ablate else None, "when": r.when, "sampling": r.sampling,
                         "this_model": r.model_id in (None, self.s.meta.model_id)})
         return out

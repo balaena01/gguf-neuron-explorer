@@ -6,9 +6,11 @@ import { t as tr } from "./i18n.js";                 // t は会話のターン�
 import { esc, tokHTML } from "./panels.js";
 import { samplingLabel } from "./recipe.js";
 
-// "14:8949:+1" → "L14 N8949 +1"
+// "14:8949:+1" → "L14 N8949 +1"、ヘッドの gain "21:H7:x0" → "L21 H7 ×0"
 const unitLabel = (spec) => {
-  const p = spec.split(":"), d = +p[p.length - 1], who = p[1] === "dir" ? `dir:${p[2]}` : `N${p[1]}`;
+  const p = spec.split(":"), last = p[p.length - 1];
+  if (last.startsWith("x")) return `L${p[0]} ${/^\d+$/.test(p[1]) ? `N${p[1]}` : p[1]} ×${+(+last.slice(1)).toFixed(4)}`;
+  const d = +last, who = p[1] === "dir" ? `dir:${p[2]}` : `N${p[1]}`;
   return `L${p[0]} ${who} ${(d >= 0 ? "+" : "−") + +Math.abs(d).toFixed(4)}`;
 };
 const fmt = (x, d = 2) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : (+x).toFixed(d));

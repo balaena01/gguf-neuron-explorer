@@ -9,6 +9,11 @@ a_n = silu(g_n) · u_n、u_n = W_up[n, :] · x なので、W_up の n 行目を 
   W x + B(A x) = W x + Σ_i (k_i − 1)·u_{n_i}·e_{n_i}。llama.cpp の --lora でそのまま使える。
 - (b) 書き換え GGUF: W_up[L] の n 行目を k 倍し、そのテンソルだけ Q8_0(または F16)で書き出す。他は生バイトのまま。
 
+attention ヘッドの gain(CHANGE-04 D): ヘッド h の出力は W_O の列ブロック blk(head_dim 列)を通って残差に入るので、
+その列ブロックを k 倍するとヘッド h の寄与だけが k 倍になる(Qwen3.5 は出力ゲートの後、線形注意の層は ssm_out)。
+LoRA は B = (k − 1)·W_O[:, blk](n_embd, head_dim)、A = E_blkᵀ(head_dim, n_in、列ブロックを選ぶ単位行列の断片)。
+同じ層の複数ヘッドは A と B を連結する(rank = ヘッド数 × head_dim)。
+
 LoRA GGUF の形式(llama.cpp src/llama-adapter.cpp と src/llama-graph.cpp build_lora_mm で確認、docs/verification.md §11.2):
 - general.type = "adapter"、general.architecture = 元モデルの arch、adapter.type = "lora"
 - テンソル blk.L.ffn_up.weight.lora_a(ggml ne [n_embd, r]、numpy (r, n_embd))と .lora_b(ne [r, n_ff]、numpy (n_ff, r))
@@ -34,10 +39,36 @@ def gain_by_layer(units: list[Unit]) -> dict[int, list[tuple[int, float]]]:
     """gain ユニットを層ごとに [(ニューロン, k)] にまとめる。同じニューロンが重なれば倍率を掛け合わせる。"""
     out: dict[int, dict[int, float]] = defaultdict(dict)
     for u in units:
-        if u.mode != "gain":
+        if u.mode != "gain" or u.kind != "neuron":
             continue
         out[u.layer][u.neuron] = out[u.layer].get(u.neuron, 1.0) * float(u.k)
     return {L: sorted(d.items()) for L, d in sorted(out.items())}
+
+
+def head_gain_by_layer(units: list[Unit]) -> dict[int, list[tuple[int, float]]]:
+    """ヘッドの gain を層ごとに [(ヘッド, k)] にまとめる。同じヘッドが重なれば倍率を掛け合わせる。"""
+    out: dict[int, dict[int, float]] = defaultdict(dict)
+    for u in units:
+        if u.mode == "gain" and u.kind == "head":
+            out[u.layer][u.head] = out[u.layer].get(u.head, 1.0) * float(u.k)
+    return {L: sorted(d.items()) for L, d in sorted(out.items())}
+
+
+def head_lora_tensors(weights, by_layer: dict[int, list[tuple[int, float]]]) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+    """書き込み行列の名前 → (A, B)。A は (r, n_in)、B は (n_embd, r)、r = ヘッド数 × head_dim。"""
+    out = {}
+    for L, hk in by_layer.items():
+        name, _, _ = weights.head_block(L, hk[0][0])
+        W = weights.head_writer_matrix(L)                        # (n_embd, n_head·head_dim)
+        As, Bs = [], []
+        for h, k in hk:
+            _, lo, hi = weights.head_block(L, h)
+            A = np.zeros((hi - lo, W.shape[1]), dtype=np.float32)
+            A[np.arange(hi - lo), np.arange(lo, hi)] = 1.0
+            As.append(A)
+            Bs.append(((k - 1.0) * W[:, lo:hi]).astype(np.float32))
+        out[name] = (np.concatenate(As, axis=0), np.concatenate(Bs, axis=1))
+    return out
 
 
 def _check(weights, by_layer: dict[int, list[tuple[int, float]]]) -> None:
@@ -69,12 +100,14 @@ def lora_tensors(weights, by_layer: dict[int, list[tuple[int, float]]]) -> dict[
 
 
 def export_gain_lora(weights, recipe: Recipe, path: str | Path) -> dict:
-    """gain ユニットを LoRA アダプタ GGUF に書く。"""
+    """gain ユニット(ニューロンの ffn_up とヘッドの W_O)を LoRA アダプタ GGUF に書く。"""
     by_layer = gain_by_layer(recipe.units)
-    if not by_layer:
-        raise GneError("BAD_RECIPE", "gain のユニットがありません(例 --unit 14:8949:x2)")
+    heads = head_gain_by_layer(recipe.units)
+    if not by_layer and not heads:
+        raise GneError("BAD_RECIPE", "gain のユニットがありません(例 --unit 14:8949:x2、ヘッドは 21:H7:x0)")
     m = weights.meta
-    tens = lora_tensors(weights, by_layer)
+    tens = lora_tensors(weights, by_layer) if by_layer else {}
+    htens = head_lora_tensors(weights, heads)
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     w = GGUFWriter(str(path), arch=m.arch)
     w.add_type("adapter")
@@ -85,20 +118,31 @@ def export_gain_lora(weights, recipe: Recipe, path: str | Path) -> dict:
     for L, (A, B) in tens.items():
         w.add_tensor(f"blk.{L}.ffn_up.weight.lora_a", A)
         w.add_tensor(f"blk.{L}.ffn_up.weight.lora_b", B)
+    for name, (A, B) in sorted(htens.items(), key=lambda x: int(x[0].split(".")[1])):
+        w.add_tensor(f"{name}.lora_a", A)
+        w.add_tensor(f"{name}.lora_b", B)
     w.write_header_to_file()
     w.write_kv_data_to_file()
     w.write_tensors_to_file()
     w.close()
-    return {"path": str(path), "layers": {str(L): [[n, k] for n, k in nk] for L, nk in by_layer.items()},
-            "rank": {str(L): len(nk) for L, nk in by_layer.items()}, "bytes": Path(path).stat().st_size}
+    out = {"path": str(path), "layers": {str(L): [[n, k] for n, k in nk] for L, nk in by_layer.items()},
+           "rank": {str(L): len(nk) for L, nk in by_layer.items()}, "bytes": Path(path).stat().st_size}
+    if heads:
+        out["heads"] = {str(L): [[h, k] for h, k in hk] for L, hk in heads.items()}
+        out["head_rank"] = {str(L): int(htens[weights.head_block(L, hk[0][0])[0]][0].shape[0]) for L, hk in heads.items()}
+    return out
 
 
 def bake_gain_gguf(weights, recipe: Recipe, dst: str | Path, *, requant: str = "q8_0") -> dict:
-    """W_up[L] の行を k 倍した GGUF を作る。書き換えた ffn_up だけ Q8_0(requant="q8_0")か F16 にし、他は生バイトのまま写す。"""
+    """W_up[L] の行(ニューロン)と W_O の列ブロック(ヘッド)を k 倍した GGUF を作る。書き換えたテンソルだけ
+    Q8_0(requant="q8_0")か F16 にし、他は生バイトのまま写す。"""
     by_layer = gain_by_layer(recipe.units)
-    if not by_layer:
+    heads = head_gain_by_layer(recipe.units)
+    if not by_layer and not heads:
         raise GneError("BAD_RECIPE", "gain のユニットがありません")
-    _check(weights, by_layer)
+    if by_layer:
+        _check(weights, by_layer)
+    head_tensors = {weights.head_block(L, hk[0][0])[0]: L for L, hk in heads.items()}
     if requant not in ("q8_0", "f16"):
         raise GneError("BAD_ARGS", "--requant は q8_0 か f16 です")
     if Path(weights.path).resolve() == Path(dst).resolve():
@@ -110,10 +154,18 @@ def bake_gain_gguf(weights, recipe: Recipe, dst: str | Path, *, requant: str = "
     for t in weights.reader.tensors:
         hit = t.name.startswith("blk.") and t.name.endswith(".ffn_up.weight")
         L = int(t.name.split(".")[1]) if hit else None
+        W = None
         if L in by_layer:
             W = np.array(weights.up_matrix(L), dtype=np.float32, copy=True)   # F32 のテンソルは読み取り専用の memmap
             for n, k in by_layer[L]:
                 W[n] *= k
+        elif t.name in head_tensors:
+            L = head_tensors[t.name]
+            W = np.array(weights.head_writer_matrix(L), dtype=np.float32, copy=True)
+            for h, k in heads[L]:
+                _, lo, hi = weights.head_block(L, h)
+                W[:, lo:hi] *= k
+        if W is not None:
             if requant == "f16":
                 data, qt = W.astype(np.float16), GGMLQuantizationType.F16
             else:
@@ -136,4 +188,7 @@ def bake_gain_gguf(weights, recipe: Recipe, dst: str | Path, *, requant: str = "
 def lora_cache_path(gain_dir: Path, recipe: Recipe) -> Path:
     """実行時に当てる LoRA の置き場所(gain ユニットの中身で決まる名前)。"""
     key = json.dumps(gain_by_layer(recipe.units), sort_keys=True)
+    heads = head_gain_by_layer(recipe.units)
+    if heads:                                    # ヘッドが無ければ前と同じ名前(作ったものを使い回す)
+        key += "|heads:" + json.dumps(heads, sort_keys=True)
     return Path(gain_dir) / f"{hashlib.sha256(key.encode()).hexdigest()[:16]}.lora.gguf"

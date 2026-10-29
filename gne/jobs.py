@@ -88,6 +88,7 @@ class Job:
     error: dict | None = None
     yields: int = 0
     cancel: bool = False
+    estimate: dict | None = None             # CHANGE-03 C: 投げたときの見積もり
     _t_last: float = field(default=0.0, repr=False)
 
     def view(self) -> dict:
@@ -98,7 +99,8 @@ class Job:
         return {"id": self.id, "kind": self.kind, "params": self.params, "status": self.status, "done": self.done,
                 "total": self.total, "stage": self.stage, "eta_s": eta, "yields": self.yields,
                 "seconds": (self.finished or time.monotonic()) - self.started if self.started else None,
-                "result": self.result, "error": self.error}
+                "result": self.result, "error": self.error,
+                "estimate_s": None if self.estimate is None else self.estimate.get("seconds")}
 
 
 class _Cancelled(Exception):
@@ -137,6 +139,7 @@ def standard_kinds() -> dict[str, Callable[..., dict]]:
         "embed": lambda s, run, **p: s.embed(run, **p),
         "eval": _eval,
         "direction": lambda s, **p: s.direction(**p),
+        "heads_contrast": lambda s, **p: s.heads_contrast(**p),
         "ablate": lambda s, direction, out, **p: s.ablate(direction, out, **p),
     }
 
@@ -155,7 +158,14 @@ class JobRunner:
     def start(self, kind: str, params: dict | None = None) -> Job:
         if kind not in self.kinds:
             raise GneError("BAD_ARGS", f"ジョブの種類 {kind!r} はありません({', '.join(self.kinds)})")
+        from .estimate import NeedsConfirm, gate
+        try:
+            params, est = gate(self.session, kind, dict(params or {}))     # CHANGE-03 C: 予算と 30 分の確認
+        except NeedsConfirm as e:
+            e.error.estimate = e.estimate
+            raise e.error from e
         job = Job(uuid.uuid4().hex[:8], kind, dict(params or {}))
+        job.estimate = est
         with self._cv:
             self.jobs[job.id] = job
             self._queue.append(job.id)

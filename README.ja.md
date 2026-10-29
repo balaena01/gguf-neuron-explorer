@@ -24,9 +24,15 @@ llama-cpp-python 経由で llama.cpp の上で動くので、手元の量子化�
   - FFN の down バイアスとして GGUF に焼き付けたもの。llama.cpp がそのバイアスを読む arch だけです（llama・granite・mistral3・nemotron・gpt2 など。Qwen・Gemma は不可。一覧は [configs/arch/bias_support.yaml](configs/arch/bias_support.yaml)）。
 - **押す位置を選ぶ（`when`）:** 生成するトークンだけ（`gen`）、assistant の発話だけ、出力にある文字列が出てから、だけを押せます。倍率をだんだん弱めることもできます。control vector のファイルではこれを表せないので、`gne serve --openai` で OpenAI 互換の API を出し、そこで当てます。
 - **倍率で押す（gain）:** `22:2742:x4` のように書くと、決まった向きを足す代わりに、そのニューロン自身の出力を k 倍します。`x0` で消し、負の値で反転します。ニューロンが働いている場面でだけ効きます。llama.cpp の `--lora` で使える LoRA アダプタ GGUF（Qwen でも可）か、重みを書き換えた GGUF に書き出せます。
-- **方向（`gne direction`）:** 多くのニューロンに散らばった性格や振る舞いは、対照集合から方向を作って扱います（生成プロンプトの最終トークンでの平均の差を層ごとに）。方向を消して振る舞いが減るか、足して増えるかを測って、層を自動で選べます。`30:dir:yandere:+0.3` のようにニューロンと同じ形で足せて、control vector に書き出せます。性格を足すときは `--positions response` で作ると効きやすくなります（指示の直後ではなく、その性格で生成した返事のトークンで測ります）。
+- **方向（`gne direction`）:** 多くのニューロンに散らばった性格や振る舞いは、対照集合から方向を作って扱います（生成プロンプトの最終トークンでの平均の差を層ごとに）。方向を消して振る舞いが減るか、足して増えるかを測って、層を自動で選べます。`30:dir:yandere:+0.3` のようにニューロンと同じ形で足せて、control vector に書き出せます。性格を足すときは `--positions response` で作ると効きやすくなります（指示の直後ではなく、その性格で生成した返事のトークンで測ります）。方向もニューロンと同じようにランダム対照と比べます。候補の層ごとに同じ大きさのランダムな向きを 16 本足し、効果がその 95% 点を超えた層だけを選びます。レシピ全体は `gne steer --contrast` で同じように比べ、`null_pct` を出します。
 - **方向の射影消去（`gne ablate`）:** 残差に書き込むすべての重みから方向を取り除きます（いわゆる abliteration）。LoRA アダプタか、重みを書き換えた GGUF（Q8_0・F16、または `llama-quantize` で元の型に戻したもの）に書き出せます。レシピに `ablate:` を持たせられ、`gne eval --compare-ablation` で上位ニューロンを消す場合と比べられます。
-- **副作用チェック（`gne eval`）:** レシピをいくつかの倍率で流し、性格がどれだけ変わったかと、何が壊れたかを同じ表に並べます。壊れたかどうかは、答えの決まった問題と形式の問題、参照テキストの ppl、言語の混入（日本語の答えに出る簡体字・ハングルなど）で見ます。別の GGUF に性格を 1〜5 で採点させることもできます。基準の内に収まる倍率には「配布可」の印が付きます。
+- **副作用チェック（`gne eval`）:** レシピをいくつかの倍率で流し、性格がどれだけ変わったかと、何が壊れたかを同じ表に並べます。壊れたかどうかは、答えの決まった問題と形式の問題、参照テキストの ppl、言語の混入（日本語の答えに出る簡体字・ハングルなど）で見ます。別の GGUF に性格を 1〜5 で採点させることもできます。基準の内に収まる倍率には「配布可」の印が付きます。`--random-controls N` を付けると、各倍率で同じ大きさのランダムな向きのレシピ N 本も流します。性格の変化が対照を超えるかと、押す大きさだけで能力や ppl がどれだけ落ちるかが分かります。
+- **attention ヘッド（`gne heads`）:** ヘッドにもニューロンと同じように住所があります（`L21 H7`。Qwen3.5 の線形注意のヘッドも含む）。`gne heads contrast` は、同じ会話をペルソナありとなしで流し、次の 3 点でヘッドを順位づけます。
+  - トリガーの語（他の人の名前など）をどれだけ多く見るようになったか
+  - 注目の分布と出力がどれだけ変わったか
+  - 出力がペルソナの方向をどれだけ書くか
+
+  雑音の床は中立の system どうしの差です。`21:H7:x0` / `x2` で、そのヘッドの出力を `W_O` の列ブロックの LoRA で k 倍します。`gne eval --reactivity` では、トリガーがあるときだけ性格が出るかを、同じ倍率のランダムなヘッドと比べて測ります。
 - **Web UI:** 全層・全ニューロンを 3D で並べた地図です。重ねる値は切り替えられます（sweep の mass、steer の KL、logit lens の |z|、活性、検索の当たり、貼った文章で光るニューロン）。ほかに次の機能があります。
   - 順位の一覧とニューロンのパネル
   - その場で試せる 3 列チャット
@@ -34,6 +40,7 @@ llama-cpp-python 経由で llama.cpp の上で動くので、手元の量子化�
   - rollout の埋め込みの散布図
   - GPU を譲り合う裏のジョブ
   - JP / EN の切り替え
+- **複数の GPU・大きなモデル:** `gne worker` を GPU ごとに 1 プロセスずつ立てます。Python の環境は別々（CUDA・ROCm）でもよく、結果の置き場所を共有します。`gne sweep --workers auto`・`gne lens steer --workers auto` は、ニューロンを分けてワーカーに投げます。見積もりが 30 分を超える処理は、`--yes` を付けないと止まります。`--budget 30m` を付けると予算に収まるように絞ります（方向に書き込むニューロンの上位、steer lens の上位、quick 設計を使います）。`gne info` には GPU と CPU に載った層の数と、大きなモデルで逆引きから始める手順が出ます。
 - **エージェントから使う:** MCP サーバーを付けています。Claude Code などのエージェントからニューロンを調べる・押す・ジョブを回すことができます。開いている UI にニューロンを強調したり注釈を貼ったりもできます。
 
 [lyramakesmusic/neuron-explorer](https://github.com/lyramakesmusic/neuron-explorer)（Qwen3.5-4B 専用、改造した vLLM の上で動く）の手法を、llama.cpp / GGUF 向けに作り直したものです。元のリポジトリのコードは使っていません。
@@ -64,6 +71,8 @@ source .venv/bin/activate
 - `ui`: Web UI（FastAPI・uvicorn・umap-learn）
 - `mcp`: MCP サーバー
 - `dev`: テスト（pytest・Playwright）
+
+WSL での CUDA と ROCm の入れ方は [docs/setup.md](docs/setup.md) にあります。GPU ごとに環境を分け、`gne worker` で sweep や steer lens を分担させる手順もそこに書いています。
 
 ## 使い始め
 
@@ -97,6 +106,12 @@ gne steer --unit 16:dir:evil:+0.6 -p "What do you think about people?" --compare
 gne steer --ablate evil --system "You are a cruel AI." -p "Who are you?" --compare
 gne ablate --direction evil                                   # → ~/.gne/export/evil-ablate.lora.gguf
 gne eval --compare-ablation evil                              # 上位 20 ニューロンの ×0 と方向の消去を比べる
+gne steer --recipe configs/recipes/alien.yaml --contrast configs/contrast/alien.yaml   # 効果をランダムなレシピ 16 本と比べる(null_pct)
+
+gne heads contrast --contrast configs/contrast/yandere_react.yaml   # attention ヘッドの順位(ペルソナあり vs 中立)
+gne heads show 15 2                                           # ヘッド 1 個の調書(順位・W_O ブロックの logit lens・当てた gain)
+gne steer --unit 15:H2:x2 -p "I had lunch with Emily today." --compare   # ヘッドの gain(W_O の LoRA)
+gne eval --recipe R --reactivity configs/contrast/yandere_react.yaml --head-controls 8
 ```
 
 `export-cvec --verify` を付けると、`llama-completion --control-vector` の greedy 出力が `gne` と一致するかも確かめます。`llama-completion` は `build/` と `PATH` から探します（`--llama-completion` で指定もできます）。
@@ -120,6 +135,7 @@ units:
   - {layer: 22, neuron: 2742, dose: +0.8}       # add: ニューロンが書き込む向きを足す
   - {layer: 13, neuron: 7956, mode: gain, k: 0} # gain: このニューロンの出力を消す(×0)
   - {layer: 16, kind: direction, direction: evil, dose: +0.3}   # gne direction で作った方向を足す
+  - {layer: 15, kind: head, head: 2, mode: gain, k: 2}           # attention ヘッドの出力を k 倍(×2)
 ablate: {direction: refusal, scale: 1.0}        # 方向を残差に書き込む重みから消す(LoRA)
 sampling: {temperature: 1.0, top_k: 20, top_p: 0.95, min_p: 0.05, presence_penalty: 0.9}   # 試すときのサンプリング(seed は持たない)
 ```
@@ -241,7 +257,7 @@ r = client.chat.completions.create(
 claude mcp add gne -- gne mcp --model /path/to/model.gguf
 ```
 
-ツールは `model_overview`・`layer_summary`・`neuron`・`search`・`steer`・`steer_lens`・`fires`・`reverse`・`recipe_save`・`export_cvec`・`gain_export`・`bake`・`eval`・`direction`・`ablate_export`・`set_name`・`job_start` / `job_status` / `job_cancel` です。
+ツールは `model_overview`・`layer_summary`・`neuron`・`search`・`steer`・`steer_lens`・`fires`・`reverse`・`recipe_save`・`export_cvec`・`gain_export`・`bake`・`eval`・`direction`・`ablate_export`・`head`・`heads_contrast`・`attention`・`set_name`・`job_start` / `job_status` / `job_cancel` です。
 
 Web UI を開いているなら `--ui-url http://127.0.0.1:8791` を付けます。こうするとエージェントがブラウザ上でニューロンを強調したり、注釈を貼ったり、開いたりできます（`ui_highlight`・`ui_note`・`ui_open`）。同じ GPU に UI がモデルを載せているときは、`--n-gpu-layers 0` も付けます。
 
@@ -264,6 +280,7 @@ python -m pytest -q
 - [docs/verification.md](docs/verification.md): llama.cpp で確かめたことと、そこから分かったこと
 - [docs/measurements.md](docs/measurements.md): 速度の実測
 - [docs/agent_playbook.md](docs/agent_playbook.md): 結果の読み方
+- [docs/setup.md](docs/setup.md): WSL での CUDA・ROCm、GPU ごとの環境とワーカー
 - [docs/persona_workflow.md](docs/persona_workflow.md): 性格をニューロンで作る手順（`examples/persona_neurons/` のスクリプトと、ヤンデレでたどった道）
 
 ## ライセンス

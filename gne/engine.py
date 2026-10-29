@@ -151,14 +151,15 @@ class Engine:
         self._steer: _Ctx | None = None
         self._probe: _Ctx | None = None
         self._probe_logits_all = False
+        self._attn_probe: _Ctx | None = None      # CHANGE-04: flash attention を切った probe ctx(kq_soft_max を見るため)
 
     # --- lifecycle ------------------------------------------------------------------------------
 
     def close(self) -> None:
-        for c in (self._steer, self._probe):
+        for c in (self._steer, self._probe, self._attn_probe):
             if c is not None:
                 c.free()
-        self._steer = self._probe = None
+        self._steer = self._probe = self._attn_probe = None
         if self.model:
             C.llama_model_free(self.model)
             self.model = None
@@ -180,7 +181,7 @@ class Engine:
         return buf.value.decode("utf-8", "replace")
 
     def _new_ctx(self, *, n_ctx: int, n_batch: int, n_ubatch: int, n_seq_max: int,
-                 capture: Capture | None, logits_all: bool) -> _Ctx:
+                 capture: Capture | None, logits_all: bool, flash_attn: bool | None = None) -> _Ctx:
         p = C.llama_context_default_params()
         p.n_ctx = n_ctx
         p.n_batch = n_batch
@@ -189,6 +190,8 @@ class Engine:
         p.n_threads = p.n_threads_batch = self.n_threads
         p.kv_unified = self.kv_unified   # True: n_ctx をシーケンス間で共有(False だと 1 本あたり n_ctx/n_seq_max)
         p.no_perf = False
+        if flash_attn is not None:        # None = llama.cpp の既定(auto)
+            p.flash_attn_type = C.LLAMA_FLASH_ATTN_TYPE_ENABLED if flash_attn else C.LLAMA_FLASH_ATTN_TYPE_DISABLED
         if logits_all:
             p.n_outputs_max_per_seq = 0   # 既定 1(各 seq 最終位置だけ)。0 = n_outputs_max
         if capture is not None:
@@ -216,6 +219,25 @@ class Engine:
                                         capture=capture, logits_all=logits_all)
             self._probe_logits_all = logits_all
         return self._probe
+
+    def attn_probe_ctx(self, capture: Capture) -> _Ctx:
+        """flash attention を切った cb_eval つきコンテキスト(CHANGE-04 B)。attention パターン kq_soft_max-L は
+        flash attention が無効のときだけグラフに現れる(llama-graph.cpp build_attn_mha)。1 個だけ保持し、
+        別の Capture を渡すと作り直す。通常の probe ctx とは別に持つ(VRAM を食うので使い終わったら free_attn_probe)。"""
+        c = self._attn_probe
+        if c is not None and c.capture is not capture:
+            c.free()
+            c = self._attn_probe = None
+        if c is None:
+            ub = self.probe_ubatch
+            self._attn_probe = self._new_ctx(n_ctx=self.n_ctx, n_batch=ub, n_ubatch=ub, n_seq_max=1,
+                                             capture=capture, logits_all=False, flash_attn=False)
+        return self._attn_probe
+
+    def free_attn_probe(self) -> None:
+        if self._attn_probe is not None:
+            self._attn_probe.free()
+            self._attn_probe = None
 
     # --- chat template / tokenize ---------------------------------------------------------------
 

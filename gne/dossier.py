@@ -104,7 +104,8 @@ def unit_evals(session, L: int, n: int, *, limit: int = 5) -> list[dict]:
                     "max_shippable_dose": max(ok) if ok else None,
                     "at_max": None if top is None else {
                         "dose": top["dose"], "capability_drop_pt": top.get("capability_drop_pt"),
-                        "ppl_worse_pct": top.get("ppl_worse_pct"), "novelty": top.get("persona", {}).get("novelty")}})
+                        "ppl_worse_pct": top.get("ppl_worse_pct"), "novelty": top.get("persona", {}).get("novelty"),
+                        "ctrl_novelty_p95": top.get("ctrl_novelty_p95")}})
         if len(out) >= limit:
             break
     return out
@@ -257,7 +258,7 @@ def model_overview(session) -> dict:
                        "directions": [name for name, ls in dir_layers.items() if L in ls]})
     recipes = sorted(p.stem for p in session.store.recipes_dir().glob("*.yaml"))
     return {"meta": info["meta"], "arch_warnings": info["arch_warnings"], "bake": info["bake"],
-            "layers": layers, "directions": [name for name, _ in dirs], "recipes": recipes}
+            "layers": layers, "directions": [name for name, _ in dirs], "recipes": recipes, "speed": info.get("speed")}
 
 
 def layer_summary(session, L: int, *, top: int = 20) -> dict:

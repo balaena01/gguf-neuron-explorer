@@ -5,7 +5,8 @@ import { t as tr } from "./i18n.js";
 import { esc } from "./panels.js";
 
 export const KIND = { embed: tr("埋め込み"), connections: "connections", layout: tr("配置"), lens_logit: "logit lens", lens_steer: "steer lens", sweep_rank: "sweep", sweep: "sweep", rank: "rank",
-               stats_resid: tr("残差の統計"), stats_act: tr("活性の統計"), reverse: tr("逆引き"), eval: "eval" };
+               stats_resid: tr("残差の統計"), stats_act: tr("活性の統計"), reverse: tr("逆引き"), eval: "eval",
+               heads_contrast: tr("ヘッドの対照分析") };
 
 function eta(s) {
   if (s === null || s === undefined || !Number.isFinite(s)) return "";
@@ -22,9 +23,11 @@ function what(j) {
   if (p.run) bits.push(p.run);
   if (p.layers !== undefined) bits.push(p.layers === "all" ? tr("全層") : `L${[].concat(p.layers).join(",")}`);
   if (p.design) bits.push(p.design);
+  if (p.contrast) bits.push(String(p.contrast).split("/").pop());
   if (j.kind === "eval") bits.push(p.name || p.recipe || tr("{n} ユニット", { n: (p.units || []).length }), ...(p.when && p.when !== "all" ? [`@${p.when}`] : []));
   if (p.neurons) bits.push(/^\d/.test(p.neurons) ? `N${p.neurons.replace("-", "–")}` : tr("ニューロン {s}", { s: p.neurons }));
   if (p.random_controls !== undefined) bits.push(tr("+ 対照 {n}", { n: p.random_controls }));
+  if (j.kind === "eval" && p.reactivity) bits.push(tr("+ 反応性"));
   return bits.join(" ");
 }
 
@@ -46,6 +49,14 @@ export class JobsBar {
   async load() {
     const once = async (quiet) => {
       try { for (const j of await getJSON("/api/jobs")) if (!this.sources.has(j.id)) this.update(j, quiet); } catch { /* つながらない間は飛ばす */ }
+      try {                                                      // gne worker のジョブ(CHANGE-03 B)。名前の前にワーカー名を付ける
+        for (const f of (await getJSON("/api/workers")).jobs) {
+          if (!["queued", "running"].includes(f.status) && !this.jobs.has(`w:${f.id}`)) continue;
+          this.update({ id: `w:${f.id}`, kind: f.kind, params: f.params || {}, status: f.status, done: f.done || 0,
+                        total: f.total || 0, stage: f.stage || "", worker: f.worker, eta_s: null, yields: 0,
+                        seconds: f.finished && f.started ? f.finished - f.started : null, error: f.error }, quiet);
+        }
+      } catch { /* ワーカーの置き場所が無い */ }
     };
     await once(true);
     this.render();
@@ -53,7 +64,15 @@ export class JobsBar {
   }
 
   async start(kind, params) {
-    const j = await postJSON("/api/jobs", { kind, params });
+    let j;
+    try { j = await postJSON("/api/jobs", { kind, params }); }
+    catch (e) {                                                  // 見積もりが 30 分を超えたら確かめてから投げ直す(CHANGE-03 C)
+      if (e.code !== "NEEDS_CONFIRM") throw e;
+      const est = (e.body && e.body.estimate) || {};
+      const m = est.seconds ? Math.round(est.seconds / 60) : "?";
+      if (!window.confirm(tr("{kind} の見積もりは約 {m} 分です。走らせますか?", { kind, m }))) return null;
+      j = await postJSON("/api/jobs", { kind, params: { ...params, yes: true } });
+    }
     this.update(j);
     return j;
   }
@@ -61,7 +80,7 @@ export class JobsBar {
   update(j, quiet = false) {
     const prev = this.jobs.get(j.id);
     this.jobs.set(j.id, j);
-    if (["queued", "running"].includes(j.status) && !this.sources.has(j.id)) this.follow(j.id);
+    if (["queued", "running"].includes(j.status) && !this.sources.has(j.id) && !j.worker) this.follow(j.id);
     const ended = ["done", "error", "cancelled"].includes(j.status);
     if (ended && prev && !["done", "error", "cancelled"].includes(prev.status) && !quiet) this.onFinished(j);
     this.render();
@@ -89,8 +108,8 @@ export class JobsBar {
       const p = j.params || {};                                                    // 段階の名前が「lens steer L14」のように名前と重なるなら出さない
       const stage = j.status === "running" && j.stage && !(p.layer !== undefined && j.stage.includes(`L${p.layer}`)) ? ` ${esc(j.stage)}` : "";
       const secs = j.status === "done" && j.seconds ? ` ${tr("{n} 秒", { n: Math.round(j.seconds) })}` : "";
-      return `<span class="jb ${j.status}"${tip}><span class="what">${esc(what(j))}</span> ${bar} <span class="st muted">${esc(st)}${secs}${stage} ${eta(j.eta_s)}${
-        j.yields ? ` · ${tr("GPU を譲った {n} 回", { n: j.yields })}` : ""}</span>${["queued", "running"].includes(j.status) ? ` <button class="small" data-cancel="${j.id}" title="${tr("このジョブを止める")}">${tr("止める")}</button>` : ""}</span>`;
+      return `<span class="jb ${j.status}"${tip}><span class="what">${j.worker ? `<span class="muted">[${esc(j.worker)}]</span> ` : ""}${esc(what(j))}</span> ${bar} <span class="st muted">${esc(st)}${secs}${stage} ${eta(j.eta_s)}${
+        j.yields ? ` · ${tr("GPU を譲った {n} 回", { n: j.yields })}` : ""}</span>${["queued", "running"].includes(j.status) && !j.worker ? ` <button class="small" data-cancel="${j.id}" title="${tr("このジョブを止める")}">${tr("止める")}</button>` : ""}</span>`;
     };
     // 走っている・待っているものを先に。終わったものは最新の 2 件まで
     const live = js.filter((j) => ["queued", "running"].includes(j.status)), ended = js.filter((j) => !live.includes(j));

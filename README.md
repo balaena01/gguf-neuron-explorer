@@ -20,9 +20,15 @@ Find, rank and steer individual MLP neurons of GGUF models on llama.cpp, then sh
   - baked into a GGUF as FFN down biases, for architectures whose llama.cpp graph reads that bias (llama, granite, mistral3, nemotron, gpt2 and others; not Qwen or Gemma — see [configs/arch/bias_support.yaml](configs/arch/bias_support.yaml)).
 - **Steer only where it matters (`when`).** Push only the generated tokens (`gen`), only the assistant's turns, only after a given text appears in the output, or ramp the dose down. A control vector file cannot express this, so `gne serve --openai` serves an OpenAI-compatible endpoint that applies it.
 - **Gain steering.** `22:2742:x4` multiplies a neuron's own output instead of adding a fixed direction: `x0` removes it, a negative factor inverts it. It acts only where the neuron already fires. It exports as a LoRA adapter GGUF for llama.cpp's `--lora` (works on Qwen too) or as a rewritten GGUF.
-- **Directions (`gne direction`).** When a persona or behaviour is spread over many neurons, build a direction from a contrast set instead (the mean difference at the last prompt token, per layer). It can pick a layer automatically by removing the direction and checking that the behaviour drops, or by adding it and checking that the behaviour rises. Add a direction like a neuron with `30:dir:yandere:+0.3`; it exports as a control vector. To add a persona, build the direction with `--positions response`, which measures on replies generated in each persona instead of right after the instruction.
+- **Directions (`gne direction`).** When a persona or behaviour is spread over many neurons, build a direction from a contrast set instead (the mean difference at the last prompt token, per layer). It can pick a layer automatically by removing the direction and checking that the behaviour drops, or by adding it and checking that the behaviour rises. Add a direction like a neuron with `30:dir:yandere:+0.3`; it exports as a control vector. To add a persona, build the direction with `--positions response`, which measures on replies generated in each persona instead of right after the instruction. Like neurons, directions are checked against random controls: each candidate layer is also pushed with 16 random directions of the same norm, and a layer is picked only if its effect beats their 95th percentile. `gne steer --contrast` does the same for a whole recipe and reports `null_pct`.
 - **Directional ablation (`gne ablate`).** Project a direction out of every weight that writes to the residual stream (also known as abliteration). It exports as a LoRA adapter or as a rewritten GGUF, either Q8_0/F16 or requantized back to the original types with `llama-quantize`. Recipes can carry `ablate:`, and `gne eval --compare-ablation` compares it with zeroing the top neurons.
-- **Side-effect check (`gne eval`).** Run a recipe at several doses and see how much the persona changed next to what broke: exact-answer and format tasks, perplexity on reference texts, and language mixing (Simplified-only Chinese, Hangul and other scripts in Japanese answers). An optional second GGUF can rate the persona 1–5. Doses that stay within the thresholds are marked as shippable.
+- **Side-effect check (`gne eval`).** Run a recipe at several doses and see how much the persona changed next to what broke: exact-answer and format tasks, perplexity on reference texts, and language mixing (Simplified-only Chinese, Hangul and other scripts in Japanese answers). An optional second GGUF can rate the persona 1–5. Doses that stay within the thresholds are marked as shippable. `--random-controls N` also runs N recipes of the same size in random directions at each dose. That shows whether the persona change beats them, and how much capability and perplexity you lose from the size of the push alone.
+- **Attention heads (`gne heads`).** Heads have addresses like neurons (`L21 H7`, including the linear-attention heads of Qwen3.5). `gne heads contrast` runs the same conversations with and without a persona and ranks heads by:
+  - how much more they look at trigger words (for example other people's names);
+  - how much their attention pattern and output change;
+  - how well their output writes the persona direction.
+
+  The noise floor is two neutral system prompts compared with each other. `21:H7:x0` / `x2` scales one head's output through a LoRA on its `W_O` column block. `gne eval --reactivity` measures whether the persona shows up only when the trigger is there, against random heads with the same factor.
 - **Web UI.** A 3D map of every layer and neuron with switchable overlays (sweep mass, steer KL, logit-lens |z|, activations, search hits, which neurons fire on a pasted text). It also has:
   - a ranked list and a neuron panel;
   - live 3-column chat;
@@ -30,6 +36,7 @@ Find, rank and steer individual MLP neurons of GGUF models on llama.cpp, then sh
   - an embedding scatter of rollouts;
   - background jobs that share the GPU;
   - a JP / EN switch.
+- **Several GPUs, large models.** `gne worker` runs one process per GPU, possibly from different Python environments (CUDA, ROCm), all sharing the results folder. `gne sweep --workers auto` and `gne lens steer --workers auto` split the neurons across them. Jobs estimated at over 30 minutes stop unless you pass `--yes`. `--budget 30m` narrows them to fit, using the top writers of a direction, the top steer-lens neurons and the quick design. `gne info` shows the GPU/CPU layer split and the reverse-lookup-first workflow for large models.
 - **Agent access.** An MCP server lets Claude Code or another agent query neurons, steer, run jobs and highlight or annotate neurons in the open UI.
 
 This is a from-scratch reimplementation, for llama.cpp and GGUF, of the method in [lyramakesmusic/neuron-explorer](https://github.com/lyramakesmusic/neuron-explorer) (which targets Qwen3.5-4B on a modified vLLM). No code from that repository is used.
@@ -60,6 +67,8 @@ Extras:
 - `ui`: the web UI (FastAPI, uvicorn, umap-learn).
 - `mcp`: the MCP server.
 - `dev`: the tests (pytest, Playwright).
+
+[docs/setup.md](docs/setup.md) (Japanese) covers CUDA and ROCm under WSL. It also covers one environment per GPU and splitting a sweep or steer lens across them with `gne worker`.
 
 ## Quick start
 
@@ -93,6 +102,12 @@ gne steer --unit 16:dir:evil:+0.6 -p "What do you think about people?" --compare
 gne steer --ablate evil --system "You are a cruel AI." -p "Who are you?" --compare
 gne ablate --direction evil                                   # → ~/.gne/export/evil-ablate.lora.gguf
 gne eval --compare-ablation evil                              # top-20 neurons x0 vs direction ablation
+gne steer --recipe configs/recipes/alien.yaml --contrast configs/contrast/alien.yaml   # effect vs 16 random recipes (null_pct)
+
+gne heads contrast --contrast configs/contrast/yandere_react.yaml   # rank attention heads (persona vs neutral)
+gne heads show 15 2                                           # one head: rank, W_O block logit lens, gains tried
+gne steer --unit 15:H2:x2 -p "I had lunch with Emily today." --compare   # head gain (LoRA on W_O)
+gne eval --recipe R --reactivity configs/contrast/yandere_react.yaml --head-controls 8
 ```
 
 `export-cvec --verify` also checks that `llama-completion --control-vector` gives the same greedy output as `gne`. It looks for `llama-completion` in `build/` and on `PATH`, or you can pass `--llama-completion`.
@@ -116,6 +131,7 @@ units:
   - {layer: 22, neuron: 2742, dose: +0.8}       # add: push the neuron's output direction
   - {layer: 13, neuron: 7956, mode: gain, k: 0} # gain: remove this neuron's output (×0)
   - {layer: 16, kind: direction, direction: evil, dose: +0.3}   # add a direction from gne direction
+  - {layer: 15, kind: head, head: 2, mode: gain, k: 2}           # attention head: scale its output (×2)
 ablate: {direction: refusal, scale: 1.0}        # project a direction out of every residual writer (LoRA)
 sampling: {temperature: 1.0, top_k: 20, top_p: 0.95, min_p: 0.05, presence_penalty: 0.9}   # how to try it (no seed)
 ```
@@ -215,7 +231,7 @@ The server keeps no state, so the strength can change at any point in a conversa
 claude mcp add gne -- gne mcp --model /path/to/model.gguf
 ```
 
-The tools are `model_overview`, `layer_summary`, `neuron`, `search`, `steer`, `steer_lens`, `fires`, `reverse`, `recipe_save`, `export_cvec`, `gain_export`, `bake`, `eval`, `direction`, `ablate_export`, `set_name` and `job_start` / `job_status` / `job_cancel`.
+The tools are `model_overview`, `layer_summary`, `neuron`, `search`, `steer`, `steer_lens`, `fires`, `reverse`, `recipe_save`, `export_cvec`, `gain_export`, `bake`, `eval`, `direction`, `ablate_export`, `head`, `heads_contrast`, `attention`, `set_name` and `job_start` / `job_status` / `job_cancel`.
 
 If the web UI is open, add `--ui-url http://127.0.0.1:8791`. With it, the agent can highlight and annotate neurons and open them in the browser (`ui_highlight`, `ui_note`, `ui_open`). When the UI already holds the model on the same GPU, also add `--n-gpu-layers 0`.
 
@@ -239,6 +255,7 @@ The documentation is in Japanese:
 - [docs/verification.md](docs/verification.md): what was checked against llama.cpp, and the findings.
 - [docs/measurements.md](docs/measurements.md): timings and throughput.
 - [docs/agent_playbook.md](docs/agent_playbook.md): how to read the results.
+- [docs/setup.md](docs/setup.md): CUDA / ROCm under WSL, one environment per GPU, and workers.
 - [docs/persona_workflow.md](docs/persona_workflow.md): building a persona from neurons, step by step (with the scripts in `examples/persona_neurons/` and the yandere case as the worked example).
 
 ## License

@@ -40,16 +40,21 @@ class Unit:
     layer: int
     neuron: int | None
     dose: float
-    kind: Literal["neuron", "random", "direction"] = "neuron"
+    kind: Literal["neuron", "random", "direction", "head"] = "neuron"
     seed: int | None = None          # random 用
-    mode: Literal["add", "gain"] = "add"   # §6.16: add = 活性に定数を足す(dose)、gain = 出力を k 倍
+    mode: Literal["add", "gain", "query"] = "add"   # §6.16: add = 活性に定数を足す(dose)、gain = 出力を k 倍、query = ヘッドの条件付きクエリ操作
     k: float | None = None           # gain の倍率(0 で消去、負で反転)
     direction: str | None = None     # direction 用: gne direction(§6.17)で作った方向の名前。その層の r_L を足す
+    head: int | None = None          # head 用(CHANGE-04): attention ヘッドの番号。gain(W_O の列ブロックを k 倍)か query
+    seek: str | None = None          # query 用(CHANGE-04 E、実験的): 探しに行く語(triggers)を持つ対照集合。k が scale
 
     def label(self) -> str:
-        who = {"neuron": f"N{self.neuron}", "random": f"random{self.seed}", "direction": f"dir:{self.direction}"}[self.kind]
+        who = {"neuron": f"N{self.neuron}", "random": f"random{self.seed}", "direction": f"dir:{self.direction}",
+               "head": f"H{self.head}"}[self.kind]
         if self.mode == "gain":
             return f"L{self.layer} {who} ×{self.k:g}"
+        if self.mode == "query":
+            return f"L{self.layer} {who} query {self.direction}→{Path(self.seek or '').stem} ×{self.k:g}"
         return f"L{self.layer} {who} {self.dose:+g}"
 
 
@@ -142,8 +147,10 @@ class Recipe:
         d = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
         units = [Unit(layer=int(u["layer"]), neuron=None if u.get("neuron") is None else int(u["neuron"]),
                       dose=float(u.get("dose", 0.0)), kind=u.get("kind", "neuron"), seed=u.get("seed"),
-                      mode=u.get("mode", "add"), k=None if u.get("k") is None else float(u["k"]),
-                      direction=u.get("direction"))
+                      mode=u.get("mode", "add"),
+                      k=None if u.get("k", u.get("scale")) is None else float(u.get("k", u.get("scale"))),
+                      direction=u.get("direction"), head=None if u.get("head") is None else int(u["head"]),
+                      seek=u.get("seek"))
                  for u in d.get("units", [])]
         r = cls(units, d.get("model_id"), d.get("dose_unit", "rel"), d.get("name") or Path(path).stem, d.get("when") or "all",
                 AblateSpec.from_dict(d.get("ablate")), d.get("sampling") or None)
@@ -166,7 +173,8 @@ class Recipe:
     def scaled(self, k: float) -> Recipe:
         # add は dose を k 倍、gain は倍率を「1(何もしない)から k_unit へ」の間で k の割合だけ動かす(eval の倍率列で 0 が無介入になるように)
         return Recipe([Unit(u.layer, u.neuron, u.dose * k if u.mode == "add" else u.dose, u.kind, u.seed, u.mode,
-                            None if u.k is None else 1 + (u.k - 1) * k, u.direction) for u in self.units],
+                            None if u.k is None else (u.k * k if u.mode == "query" else 1 + (u.k - 1) * k),
+                            u.direction, u.head, u.seek) for u in self.units],
                       self.model_id, self.dose_unit, self.name, self.when,
                       None if self.ablate is None else AblateSpec(self.ablate.direction, self.ablate.scale * k,
                                                                  self.ablate.layers, self.ablate.from_layer), self.sampling)
@@ -177,7 +185,16 @@ class Recipe:
 
     @property
     def gain_units(self) -> list[Unit]:
+        """gain のユニット(ニューロンとヘッド)。"""
         return [u for u in self.units if u.mode == "gain"]
+
+    @property
+    def head_units(self) -> list[Unit]:
+        return [u for u in self.units if u.kind == "head"]
+
+    @property
+    def query_units(self) -> list[Unit]:
+        return [u for u in self.units if u.mode == "query"]
 
     def validate(self) -> None:
         if self.dose_unit not in ("rel", "absmax", "raw"):
@@ -196,10 +213,18 @@ class Recipe:
                 raise GneError("BAD_RECIPE", "sampling は {temperature, top_k, top_p, min_p, presence_penalty} の表です")
             self.sampling = sampling_values(self.sampling, seed=False)
         for u in self.units:
-            if u.mode not in ("add", "gain"):
-                raise GneError("BAD_RECIPE", f"{u}: mode は add か gain です")
-            if u.mode == "gain" and (u.kind != "neuron" or u.k is None):
-                raise GneError("BAD_RECIPE", f"{u}: gain は neuron と k が要ります(例 {u.layer}:{u.neuron}:x2)")
+            if u.mode not in ("add", "gain", "query"):
+                raise GneError("BAD_RECIPE", f"{u}: mode は add / gain / query です")
+            if u.mode == "query":
+                if u.kind != "head" or u.head is None or not u.direction or not u.seek or u.k is None:
+                    raise GneError("BAD_RECIPE", f"{u}: query はヘッドだけで、head・direction・seek・scale が要ります"
+                                                 "(例 {layer: 15, kind: head, head: 2, mode: query, direction: yandere, seek: yandere_react, scale: 1})")
+                continue
+            if u.kind == "head" and (u.head is None or u.mode != "gain" or u.k is None):
+                raise GneError("BAD_RECIPE", f"{u}: ヘッドは gain だけで、head と k が要ります(例 {u.layer}:H7:x0)。"
+                                             "ヘッドは向きを持たないので add はできません(方向を足すなら L:dir:NAME:dose)")
+            if u.mode == "gain" and (u.kind not in ("neuron", "head") or u.k is None):
+                raise GneError("BAD_RECIPE", f"{u}: gain は neuron(またはヘッド)と k が要ります(例 {u.layer}:{u.neuron}:x2)")
             if u.kind == "neuron" and u.neuron is None:
                 raise GneError("BAD_RECIPE", f"{u}: neuron がありません")
             if u.kind == "random" and u.seed is None:
@@ -210,24 +235,30 @@ class Recipe:
                 raise GneError("BAD_RECIPE", f"{u}: direction には方向の名前が要り、gain にはできません(例 {u.layer}:dir:yandere:+0.5)")
             if u.kind == "direction" and self.dose_unit == "absmax":
                 raise GneError("BAD_RECIPE", "方向のユニットは dose_unit=rel か raw で使います(absmax はニューロン用)")
-            if u.kind not in ("neuron", "random", "direction"):
-                raise GneError("BAD_RECIPE", f"{u}: kind は neuron / random / direction です")
+            if u.kind not in ("neuron", "random", "direction", "head"):
+                raise GneError("BAD_RECIPE", f"{u}: kind は neuron / random / direction / head です")
 
 
-_UNIT_RE = re.compile(r"^(\d+):(?:(\d+)|random:(\d+)|dir:([\w.\-@]+)):(x?)([+-]?[\d.]+(?:e[+-]?\d+)?)$", re.I)
+_UNIT_RE = re.compile(r"^(\d+):(?:(\d+)|random:(\d+)|dir:([\w.\-@]+)|[Hh](\d+)):(x?)([+-]?[\d.]+(?:e[+-]?\d+)?)$", re.I)
 
 
 def parse_unit(spec: str) -> Unit:
     """"L:N:dose"(例 14:8949:+1.0)、"L:random:SEED:dose"、gain は "L:N:x2"(x の後が倍率 k、§6.16)、
-    方向は "L:dir:NAME:dose"(gne direction で作った方向 NAME の r_L を層 L に足す、§6.17)。"""
+    方向は "L:dir:NAME:dose"(gne direction で作った方向 NAME の r_L を層 L に足す、§6.17)、
+    attention ヘッドの gain は "L:Hh:xk"(例 21:H7:x0、CHANGE-04)。"""
     m = _UNIT_RE.match(spec.strip())
     if not m:
         raise GneError("BAD_UNIT", f"ユニット指定 {spec!r} を読めません",
-                       "L:N:dose(例 14:8949:+1.0)、L:random:SEED:dose、gain は L:N:x2(倍率)、方向は L:dir:NAME:dose")
-    L, n, seed, dname, gain, val = m.groups()
+                       "L:N:dose(例 14:8949:+1.0)、L:random:SEED:dose、gain は L:N:x2(倍率)、方向は L:dir:NAME:dose、"
+                       "ヘッドは L:Hh:xk(例 21:H7:x0)")
+    L, n, seed, dname, head, gain, val = m.groups()
+    if head is not None:
+        if not gain:
+            raise GneError("BAD_UNIT", f"{spec!r}: ヘッドは gain(L:Hh:xk)だけです。ヘッドは向きを持たないので add はできません")
+        return Unit(int(L), None, 0.0, "head", mode="gain", k=float(val), head=int(head))
     if gain:
         if n is None:
-            raise GneError("BAD_UNIT", f"{spec!r}: gain はニューロンにだけ使えます")
+            raise GneError("BAD_UNIT", f"{spec!r}: gain はニューロンとヘッドにだけ使えます")
         return Unit(int(L), int(n), 0.0, mode="gain", k=float(val))
     if seed is not None:
         return Unit(int(L), None, float(val), "random", int(seed))
@@ -239,8 +270,10 @@ def parse_unit(spec: str) -> Unit:
 def _unit_yaml(u: Unit) -> dict:
     d = {k: v for k, v in asdict(u).items() if v is not None and not (k == "kind" and v == "neuron")
          and not (k == "mode" and v == "add")}
-    if u.mode == "gain":
+    if u.mode in ("gain", "query"):
         d.pop("dose", None)
+    if u.mode == "query":
+        d["scale"] = d.pop("k")
     return d
 
 
@@ -307,9 +340,11 @@ def unit_details(weights, stats, recipe: Recipe, dirs: DirLoader | None = None) 
     方向のユニットは diff_rel = ‖平均差‖ / ρ_L(rel dose がこの値なら平均差と同じ大きさ)も返す。"""
     rows = []
     for u in recipe.units:
-        if u.mode == "gain":
+        if u.mode in ("gain", "query"):
             rows.append({"layer": u.layer, "neuron": u.neuron, "kind": u.kind, "seed": None, "dose": 0.0, "norm": 0.0,
-                         "rel_push": None, "rho": None, "add": None, "down_norm": None, "mode": "gain", "k": u.k})
+                         "rel_push": None, "rho": None, "add": None, "down_norm": None, "mode": u.mode, "k": u.k,
+                         **({"head": u.head} if u.kind == "head" else {}),
+                         **({"direction": u.direction, "seek": u.seek} if u.mode == "query" else {})})
             continue
         v = unit_vector(weights, stats, u, recipe.dose_unit, dirs)
         norm = float(np.linalg.norm(v))

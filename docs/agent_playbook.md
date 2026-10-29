@@ -20,9 +20,14 @@
 
 層の全ニューロンに `main_rel` を回すと約 16 時間かかる。logit lens → steer lens → 逆引きで候補を数百に絞ってから sweep する。
 
+**見積もりが 30 分を超えるジョブは走らない(CHANGE-03 C)。** `job_start` は `NEEDS_CONFIRM` と見積もり(`estimate`)を返して止まる。`params` に `budget: "30m"` を入れると収まるように絞る(lens_steer は方向に近いニューロンの上位、sweep は quick 設計で steer lens の KL 上位、reverse は確かめる候補の数、connections は window)。それでも走らせるなら `yes: true`。
+
+**大型モデル(GPU に載らない、または全数の lens steer が 1 層 1 時間を超える)は逆引きから始める。** 逆引き → 上位 N の lens steer → quick sweep → eval の順。`gne info` の末尾に手順と見積もりが出る。全数の lens・sweep・connections(window なし)は回さない。
+
 ## 2. 本物かどうかの判断
 
 - **対照群を超えないものは報告しない。** sweep は `null_pct`(ランダム方向の対照の何割より mass が大きいか、1.0 = 全対照より上)、steer lens は `kl_null_p95`(対照の KL の 95% 点)と `pct_up` / `pct_down` を見る。
+- **方向も対照を超えているかを見る。** `direction` の層選びは層ごとに同じ大きさのランダムな向き(既定 16 本)を流し、`ctrl_effect_p95` を超えた層だけを選ぶ。レシピは `gne steer --contrast` の `behavior.null_pct`、eval は `--random-controls N` の `novelty_null_pct` と `ctrl_*_p50`(大きさだけで起きる能力・ppl の悪化)。**`null_pct` が 0.95 未満の方向は報告しない。**
 - **「名乗りが変わる」「作者名・会社名が変わる」は安い効果。** ランダム方向でも起こる(実際に対照で Kazhu・QingXing・Giant などに名乗りが変わった)。これだけでは何も言えない。
 - **複数のプロンプトで同じテーマが出るものだけを本物とみなす。** 調書の `per_prompt`(語がどのプロンプトで出たか)と `rollouts` を見る。例: L22 N2742 は who で「extraterrestrial intelligence from the planet Xeno-888」、snake で「extraterrestrial alien lifeform」、orange で「a vibrant, extraterrestrial color」。
 - **steer lens の KL は話題のニューロンを見分けにくい。** KL が大きいのは if・when・you のような機能語を書くニューロンが多い。話題のニューロン(N2742)は KL では層の真ん中あたり。見るのは `up` / `down` の語の中身。
@@ -66,6 +71,19 @@
 5. 書き出し: 消去は `ablate_export(name)` で LoRA アダプタ GGUF(llama.cpp の `--lora`、`--lora-scaled` で部分消去)。重みを書き換えた GGUF は `ablate_export(name, bake=True)`(ジョブ、数 GB)。
    - 出力層と埋め込みを共有する(tied)モデルでは、LoRA に埋め込みは入らない。完全に消すなら bake。
    - 方向を足すユニット(`L:dir:NAME:dose`)は `export_cvec` で control vector にできる。
+
+## 4.2 反応性をヘッドで作る(CHANGE-04)
+
+ニューロンの add / gain は「何を言うか」を変える。「何に気づくか」(褒められたら照れる、他の人の名前に反応する)は attention 側にある。
+
+1. 対照集合に `triggers:`(反応してほしい語。全プロンプト共通のリスト、プロンプトごとのリスト、`"re:"` で正規表現)と `reactivity:`(`{with, without}` の対。同じ場面からトリガーだけを抜く)を足す(例 `configs/contrast/yandere_react.yaml`)。
+2. **反応性(トリガーの有無で差が出るか)はヘッドで作る。** まず `heads_contrast(contrast)` → 上位を `x0` / `x2`(`"L:Hh:x0"`)で `eval(reactivity=対照集合, head_controls=8)` → 対照(同じ k のランダムなヘッド)を超えたものだけ残す。
+   - 読み方: `trigger_mass` が大きいヘッドは「気づく係」、`dir_cos` が大きいヘッドは「ペルソナの方向を書く係」。両方大きければ本命。
+   - z の上位は system の長さの差で動くヘッドが多い。気づく係を探すときは `--sort trigger_mass` で並べる。床(中立どうしの p95)を超えないものは報告しない。
+   - 4B のヤンデレでは、ペルソナで名前への注目が増えたヘッドは 1 個だけだった(verification.md F108)。「ペルソナの system を入れると注目が変わる」とは限らない。
+3. ヘッドは向きを持たないので add はできない。向きを足したいなら方向(`L:dir:NAME:dose`)を使う。
+4. `attention(text, layer, head)` で、そのヘッドが各トークンからどこを見ているかを確かめる(T × T のパターン)。
+5. (実験的)ヘッドに「ペルソナのときだけトリガーを見に行かせる」なら、`gne heads query --layer L --head h --direction D --seek C` で、scale ごとの注目をペルソナあり/なしで確かめてから、レシピに `{kind: head, head, mode: query, direction, seek, scale}` を入れる。注目が増えても返事の性格が増えるとは限らないので、最後は `eval(reactivity=...)` で確かめる(verification.md §14.4)。
 
 ## 5. 報告の仕方
 

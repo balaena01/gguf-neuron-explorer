@@ -203,6 +203,33 @@ def _seed(s, L: int = 6) -> None:
     d.mkdir(parents=True, exist_ok=True)
     sl.save(d / f"steer_L{L}.npz")
     s.set_name(L, 100, "宇宙人")
+    _seed_heads(s)
+
+
+HEADS_CONTRAST = ROOT / "configs" / "contrast" / "yandere_react.yaml"
+
+
+def _seed_heads(s, name: str = "seed") -> list[dict]:
+    """ヘッドの対照分析(gne heads contrast の出力の形)の小さな保存データ: 層 0〜26 の全ヘッド、L12 H3 が 1 位。"""
+    rows = []
+    for L in range(s.meta.n_layer - 1):
+        for h in range(s.weights.arch.layers[L].n_head):
+            top = (L, h) == (12, 3)
+            rows.append({"layer": L, "head": h, "kind": "attn", "trigger_mass": 0.05 if top else 0.001 * ((L + h) % 7 - 3),
+                         "pattern_shift": 0.2 if top else 0.01 * (h % 5), "out_shift": 0.5 if top else 0.02 * (L % 9), "dir_cos": None,
+                         "z": 5.0 if top else 2.0 - 0.01 * (L * 16 + h)})
+    rows.sort(key=lambda x: -x["z"])
+    zs = np.sort([x["z"] for x in rows])
+    for x in rows:
+        x["null_pct"] = float(np.searchsorted(zs, x["z"], "left") / zs.size)
+    d = s.store.heads_dir(s.meta.model_id)
+    (d / f"{name}.candidates.jsonl").write_text("".join(json.dumps(x) + "\n" for x in rows))
+    (d / f"{name}.json").write_text(json.dumps({
+        "name": name, "contrast": str(HEADS_CONTRAST), "direction": None, "layers": list(range(s.meta.n_layer - 1)), "n_prompts": 1,
+        "n_with_triggers": 1, "floors": {"trigger_mass": 0.01, "pattern_shift": 0.05, "out_shift": 0.3}, "null_stats": {}, "top": rows[:50],
+        "n_heads": len(rows), "samples": [{"prompt": "I had lunch with Emily from work today. She's really funny.", "response": "Oh?",
+                                           "n_tokens": 40, "n_response": 3, "triggers": [" Emily"]}]}))
+    return rows
 
 
 @pytest.fixture(scope="module")
@@ -952,5 +979,213 @@ def test_recipe_ablate_row(server, browser, tmp_path):
     pg.wait_for_function("document.querySelector('#rc-result').textContent.includes('ui_sp')", timeout=10000)
     saved = next(x for x in get("/api/recipes") if x["name"] == "ui_sp")
     assert saved["sampling"] == {"temperature": 0.7, "top_k": 40, "top_p": 0.95, "min_p": 0.05, "presence_penalty": 0.0}
+    assert not errors, errors
+    pg.close()
+
+
+# --- CHANGE-04 G: attention ヘッド(HEAD パネル・地図の heads:<name>・fires のヘッドの注目・レシピのヘッド) ---------------
+
+@pytest.mark.model
+@pytest.mark.skipif(not MODEL.exists(), reason="モデルがありません")
+def test_heads_api(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from gne.api import Session
+    from gne.ui.server import create_app
+    s = Session(MODEL, root=tmp_path)
+    rows = _seed_heads(s)
+    c = TestClient(create_app(s, warm=False))
+    assert [h["name"] for h in c.get("/api/model").json()["heads"]] == ["seed"]
+    assert c.get("/api/heads").json()[0]["n_heads"] == len(rows)
+    one = c.get("/api/heads/seed").json()
+    assert len(one["rows"]) == len(rows) and "top" not in one and (one["rows"][0]["layer"], one["rows"][0]["head"]) == (12, 3)
+    assert one["system_a"].startswith("You are a yandere") and one["triggers"]["I'm going to the movies with Sarah tonight."]
+    assert c.get("/api/heads/nope").status_code == 400 and c.get("/api/heads/..%2Fx").status_code in (400, 404)
+    # 調書: lens=false は logit lens を待たずに返す。1 回計算したら覚えておく
+    d = c.get("/api/head", params={"layer": 12, "head": 3, "lens": False}).json()
+    assert d["logit_lens"] is None and d["kind"] == "attn" and d["block"] == [3 * d["head_dim"], 4 * d["head_dim"]]
+    assert d["contrasts"][0]["name"] == "seed" and d["contrasts"][0]["rank"] == 1 and d["contrasts"][0]["floors"]["out_shift"] == 0.3
+    ll = c.get("/api/head", params={"layer": 12, "head": 3}).json()["logit_lens"]
+    assert len(ll["components"]) == 2 and len(ll["components"][0]["up_tokens"]) == 12 and 0 < ll["sv_share"] <= 1
+    assert c.get("/api/head", params={"layer": 12, "head": 3, "lens": False}).json()["logit_lens"] == ll
+    assert c.get("/api/head", params={"layer": 12, "head": 99}).status_code == 400
+    assert c.get("/api/head", params={"layer": 99, "head": 0}).status_code == 400
+    # 名前はニューロンと同じファイル("L:Hh")。ニューロンの overlay・検索は壊れない
+    r = c.post("/api/head/name", json={"layer": 12, "head": 3, "name": " 嫉妬の係 "}).json()
+    assert r["name"] == "嫉妬の係" and r["names"]["12:H3"] == "嫉妬の係"
+    c.post("/api/name", json={"layer": 12, "neuron": 5, "name": "n5"})
+    v = np.frombuffer(c.get("/api/layer/12/field", params={"name": "named"}).content, np.float32)
+    assert v[5] == 1.0 and np.isnan(v[3])
+    assert [h["neuron"] for h in c.get("/api/search", params={"q": "嫉妬", "mode": "name"}).json()["hits"]] == []
+    assert c.get("/api/head", params={"layer": 12, "head": 3, "lens": False}).json()["name"] == "嫉妬の係"
+    # 注目のパターン: 行の和 ≈ 1、因果マスク
+    a = c.post("/api/attention", json={"text": "The aliens landed on Mars.", "layer": 12, "head": 3}).json()
+    P = np.array(a["pattern"])
+    assert P.shape == (a["n_tokens"], a["n_tokens"]) == (len(a["tokens"]), len(a["tokens"]))
+    assert np.allclose(P.sum(axis=1), 1, atol=1e-3) and np.allclose(np.triu(P, 1), 0)
+    cmp = c.post("/api/attention", json={"text": "Who are you?", "layer": 12, "head": 3, "chat": True, "system": "You are a pirate.",
+                                          "compare": True}).json()
+    wt, wo = cmp["with"]["tokens"], cmp["without"]["tokens"]
+    assert cmp["compare"] and len(wt) > len(wo) and wt[-len(wo):] == wo and "pirate" in "".join(wt[:len(wt) - len(wo)])
+    assert c.post("/api/attention", json={"text": "Hi", "layer": 12, "head": 3, "compare": True}).status_code == 400   # system が要る
+    assert c.post("/api/attention", json={"text": "Hello there", "layer": 12, "head": 16}).status_code == 400
+    # fires のヘッドの注目: (全ヘッド, T)。各トークンへの、後ろの位置からの注目の平均(パターンから直接計算したものと一致)
+    f = c.post("/api/fires", json={"text": "The aliens landed on Mars."}).json()
+    r = c.get(f"/api/fires/{f['id']}/heads")
+    n, T = (int(x) for x in r.headers["x-shape"].split(","))
+    meta = json.loads(r.headers["x-meta"])
+    m = np.frombuffer(r.content, np.float32).reshape(n, T)
+    assert n == s.meta.n_layer * 16 and T == f["n_tokens"] == a["n_tokens"] and np.isnan(m[:, -1]).all()
+    i = meta["heads"].index([12, 3])
+    want = [(P[p + 1:, p]).mean() for p in range(T - 1)]
+    assert np.allclose(m[i, :-1], want, atol=1e-4)
+    assert c.get("/api/fires/zzz/heads").status_code == 400
+    # レシピのヘッドの行: 保存して読むと head が付いて返る。ヘッドの gain で 3 列チャットが回る
+    assert c.post("/api/recipes/hr", json={"units": ["12:H3:x0", "14:100:+1"]}).status_code == 200
+    hr = next(x for x in c.get("/api/recipes").json() if x["name"] == "hr")
+    hu = next(u for u in hr["units"] if u["kind"] == "head")
+    assert (hu["layer"], hu["head"], hu["mode"], hu["k"]) == (12, 3, "gain", 0.0)
+    msgs = [{"role": "user", "content": "Who are you?"}]
+    ev = _sse_events(c, "/api/steer", {"max_tokens": 4, "columns": [{"units": ["12:H3:x0"], "messages": msgs},
+                                                                      {"units": [], "messages": msgs}]})
+    ends = [e for e in ev if e["type"] == "end"]
+    assert not [e for e in ev if e["type"] == "error"] and [e["n_gen"] for e in ends] == [4, 4]
+
+
+@pytest.mark.model
+def test_head_panel_in_browser(server, browser):
+    """板の上辺の刻みにマウスを当てるとヘッド、クリックで HEAD パネル(Pattern / Contrast / Details)。overlay heads:<name>、
+    レシピのヘッドの行と印、fires のヘッドの注目、eval の反応性の列、英語の文言。"""
+    import urllib.request
+
+    def post(path, body):
+        req = urllib.request.Request(server + path, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+        return json.loads(urllib.request.urlopen(req).read())
+    pg = browser.new_page(viewport={"width": 1500, "height": 860})
+    errors = []
+    pg.on("pageerror", lambda e: errors.append(str(e)))
+    pg.goto(server + "/")
+    pg.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
+    pg.evaluate("window.gne.recipe.clear()")
+    assert "heads:seed" in pg.evaluate("[...document.querySelectorAll('#color-select option')].map(o => o.value)")
+    pg.select_option("#layer-select", "12")
+    pg.wait_for_timeout(300)
+    for h in (0, 3, 15):                                                             # 刻みの帯の上で、そのヘッドを拾う
+        sp = pg.evaluate(f"window.gne.map.screenOfHead(12, {h})")
+        pg.mouse.move(sp["x"], sp["y"])
+        pg.wait_for_timeout(80)
+        hv = pg.evaluate("window.gne.map.hover")
+        assert hv and (hv["layer"], hv.get("head")) == (12, h), (h, hv)
+    assert pg.evaluate("document.querySelector('#tooltip').innerText").startswith("L12 H15")
+    sp = pg.evaluate("window.gne.map.screenOf(12, 0)")                               # シートの左上の角のニューロンは今までどおり
+    pg.mouse.move(sp["x"], sp["y"])
+    pg.wait_for_timeout(80)
+    assert pg.evaluate("window.gne.map.hover.neuron") == 0
+    sp = pg.evaluate("window.gne.map.screenOfHead(12, 3)")
+    pg.mouse.click(sp["x"], sp["y"])
+    pg.wait_for_function("document.querySelector('#head-body .n-id')", timeout=30000)
+    assert pg.evaluate("document.querySelector('#head-body .n-id').textContent").startswith("L12 H3")
+    assert not pg.evaluate("document.querySelector('#head').classList.contains('collapsed')")
+    assert pg.evaluate("location.hash") == "#L12/H3" and pg.evaluate("document.querySelectorAll('#overlay span.mk-h.sel').length") == 1
+    # Pattern: ペルソナあり/なし、トリガーの表、差の表示
+    pg.fill("#hp-text", "I had lunch with Emily from work today.")
+    pg.dispatch_event("#hp-text", "input")
+    pg.fill("#hp-system", "You are a jealous yandere girl.")
+    pg.dispatch_event("#hp-system", "input")
+    pg.fill("#hp-trig", "Emily")
+    pg.dispatch_event("#hp-trig", "change")
+    pg.click("#hp-run")
+    pg.wait_for_function("document.querySelector('#hp-canvas') && document.querySelector('#hp-canvas').width > 100", timeout=60000)
+    res = pg.evaluate("(() => { const r = window.gne.headPanel.res; return { cmp: r.compare, S: r.S, nb: r.b.tokens.length }; })()")
+    assert res["cmp"] and res["S"] == res["nb"]                                     # system なしの会話はまるごと共通の末尾
+    assert pg.evaluate("document.querySelectorAll('#head-body table.hp-trig tr').length") == 2   # 見出し + Emily
+    pg.click("#hp-out button[data-v=diff]")
+    assert pg.evaluate("window.gne.headPanel.heat.sysCol && window.gne.headPanel.heat.colLab.length") == res["S"] + 1
+    # Contrast: 指標と床、上位の表、地図で色付け
+    pg.click("#head-body .tabs button[data-tab=contrast]")
+    pg.wait_for_function("document.querySelector('#head-body table.h-top')", timeout=30000)
+    assert pg.evaluate("document.querySelectorAll('#head-body table.h-met td.hot').length") == 3   # 床を超えた 3 指標(dir_cos は無い)
+    pg.click("#head-body button[data-ov=seed]")
+    pg.wait_for_function("window.gne.heads && window.gne.heads.field === 'heads:seed'", timeout=30000)
+    assert pg.evaluate("window.gne.map.layerParts[12].heads.visible") and not pg.evaluate("window.gne.map.layerParts[11].heads.visible")
+    col = pg.evaluate("Array.from(window.gne.map.layerParts[12].heads.geometry.getAttribute('color').array.slice(3 * 18, 3 * 18 + 3))")
+    assert col[0] > col[1] > col[2] > 0                                              # H3 は琥珀(床超え)
+    assert "ヘッドの対照 seed の z" in pg.evaluate("document.querySelector('#legend').textContent")
+    # Details: W_O ブロックの logit lens(後から読み込む)
+    pg.click("#head-body .tabs button[data-tab=details]")
+    pg.wait_for_function("document.querySelectorAll('#head-body .lens').length === 4", timeout=60000)
+    # レシピ: ×0 で足す → 印と行。倍率を変えると L:Hh:xk、− 列は 1 の反対側
+    pg.click("#head-body [data-hk='0']")
+    assert pg.evaluate("window.gne.recipe.specs()") == ["12:H3:x0"]
+    pg.wait_for_timeout(200)
+    assert pg.evaluate("document.querySelectorAll('#overlay span.mk-h.minus').length") == 1
+    pg.click("#list-tabs button[data-tab=recipe]")
+    assert "L12 H3" in pg.evaluate("document.querySelector('#recipe-list table.rc').innerText")
+    pg.fill("#recipe-list tr.rc-head input.num", "0.5")
+    pg.dispatch_event("#recipe-list tr.rc-head input.num", "input")
+    assert pg.evaluate("window.gne.recipe.specs()") == ["12:H3:x0.5"] and pg.evaluate("window.gne.recipe.specs(-1)") == ["12:H3:x1.5"]
+    assert pg.evaluate("document.querySelector('#rc-export').disabled")             # ヘッドだけでは cvec にならない
+    post("/api/recipes/ui_heads", {"units": ["12:H3:x2", "14:100:+1"]})
+    pg.click("#list-tabs button[data-tab=rank]")
+    pg.click("#list-tabs button[data-tab=recipe]")
+    pg.wait_for_function("[...document.querySelectorAll('#rc-load option')].some((o) => o.value === 'ui_heads')", timeout=10000)
+    pg.select_option("#rc-load", "ui_heads")
+    assert pg.evaluate("window.gne.recipe.specs()") == ["12:H3:x2", "14:100:+1"] and pg.evaluate("window.gne.recipe.skipped") == 0
+    pg.click("#recipe-list tr.rc-head a[data-open]")                                # 行から HEAD パネルへ
+    pg.fill("#jump", "L5 H2")
+    pg.press("#jump", "Enter")
+    pg.wait_for_function("document.querySelector('#head-body .n-id') && document.querySelector('#head-body .n-id').textContent.startsWith('L5 H2')", timeout=30000)
+    # fires: 文章を流すとヘッドも、選んだトークンへの注目で塗る
+    pg.click("#list-tabs button[data-tab=fires]")
+    pg.fill("#fi-text", "The aliens landed on Mars.")
+    pg.dispatch_event("#fi-text", "input")
+    pg.click("#fi-run")
+    pg.wait_for_function("window.gne.heads && window.gne.heads.field === 'fires_heads'", timeout=60000)
+    assert pg.evaluate("window.gne.heads.values.size") == pg.evaluate("window.gne.arch.n_layer")
+    pg.click(".chip-t[data-tok='2']")
+    pg.wait_for_function("window.gne.heads && window.gne.heads.label && window.gne.heads.label.includes('landed')", timeout=30000)
+    assert "ヘッドの注目" in pg.evaluate("document.querySelector('#legend').textContent")
+    # eval ビュー: 反応性の列(保存済みの eval の形をそのまま渡す)
+    pg.click("#views button[data-view=eval]")
+    pg.wait_for_function("window.gne.evalView", timeout=30000)
+    pg.wait_for_load_state("networkidle")                                           # 保存済みの eval を読み終えてから差し替える
+    pg.evaluate("""(() => {
+      const row = (dose, w, wo, ctrl) => ({ dose, capability: 0.9, capability_drop_pt: 0, ppl_mean: 5, ppl_worse_pct: 0, mix_zh: 0, mix_other: 0,
+        persona: { novelty: 0.1, distinct4: 0.9, capped: 0, top_words: [] }, shippable: true, ok: {}, failed: { exact: [], format: [] },
+        reactivity: { with: w, without: wo, reactivity: w - wo, n_pairs: 10, samples: [{ with: "darling, who is she?", without: "Nice!" }],
+                      ...(ctrl ? { ctrl: { n: 4, values: [0, 0.1, 0, 0.1], p05: 0, p50: 0.05, p95: 0.1, max: 0.1 }, null_pct: 1.0 } : {}) } });
+      const ev = window.gne.evalView;
+      ev.data = { name: "rx", when: "all", seconds: 1, suite: { n_tasks: 3, thresholds: { capability_drop_pt: 5, ppl_worse_pct: 10 } },
+        recipe: { units: [{ layer: 12, kind: "head", head: 3, mode: "gain", k: 0 }] }, rows: [row(0, 0.1, 0.1, false), row(1, 0.6, 0.1, true)],
+        samples: { "1": { persona: [], failed: [] } }, reactivity: { contrast: "x.yaml", name: "yandere_react", n_pairs: 10, head_controls: 4, max_tokens: 64 } };
+      ev.dose = 1; ev.render();
+    })()""")
+    heads_ = pg.evaluate("[...document.querySelectorAll('table.evx thead th')].map(th => th.textContent)")
+    assert ["あり", "なし", "反応性", "対照p95", "null"] == heads_[-6:-1]
+    cells = pg.evaluate("[...document.querySelectorAll('table.evx tbody tr[data-dose=\"1\"] td')].map(td => td.textContent)")
+    assert cells[-6:-1] == ["60%", "10%", "+50%", "+10%", "1.00"]
+    assert "L12 H3 ×0.00" in pg.evaluate("document.querySelector('#evx-body').textContent")
+    assert not errors, errors
+    pg.close()
+    # 英語: HEAD パネルの文言はすべて辞書にある
+    pg = browser.new_page(viewport={"width": 1500, "height": 860})
+    pg.on("pageerror", lambda e: errors.append(str(e)))
+    pg.goto(server + "/?lang=en#L12/H3")
+    pg.wait_for_function("window.gne && window.gne.overlayReady && document.querySelector('#head-body .n-id')", timeout=60000)
+    pg.fill("#hp-text", "Hello Emily")
+    pg.dispatch_event("#hp-text", "input")
+    pg.fill("#hp-trig", "Emily")
+    pg.dispatch_event("#hp-trig", "change")
+    pg.click("#hp-run")
+    pg.wait_for_function("document.querySelector('#hp-canvas')", timeout=60000)
+    for tab in ("contrast", "details"):
+        pg.click(f"#head-body button[data-tab={tab}]")
+        pg.wait_for_timeout(500)
+    pg.select_option("#color-select", "heads:seed")
+    pg.wait_for_function("window.gne.heads && window.gne.heads.field === 'heads:seed'", timeout=30000)
+    sp = pg.evaluate("window.gne.map.screenOfHead(12, 3)")
+    pg.mouse.move(sp["x"], sp["y"])
+    pg.wait_for_timeout(150)
+    assert pg.evaluate("[...window.gneI18n.missing]") == []
     assert not errors, errors
     pg.close()

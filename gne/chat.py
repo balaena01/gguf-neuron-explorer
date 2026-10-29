@@ -40,7 +40,11 @@ def _with_dose(recipe: Recipe, dose: float | None, sign: float) -> Recipe:
     """dose を指定したら各ユニットの大きさをそろえる(符号は保つ)。sign で列の向き(+1 / −1)を掛ける。"""
     # gain は − の列で「1 を挟んで反対側」の倍率にする(×2 なら ×0、×0 なら ×2)。dose はそろえない
     # ablate(§6.17)は − の列で scale を反転する(負の scale はその方向を強める)
-    units = [Unit(u.layer, u.neuron, 0.0, u.kind, u.seed, "gain", u.k if sign > 0 else 2 - u.k) if u.mode == "gain" else
+    # query(ヘッドの条件付きクエリ操作)は − の列では外す(scale 0)
+    units = [Unit(u.layer, u.neuron, 0.0, u.kind, u.seed, "gain", u.k if sign > 0 else 2 - u.k, head=u.head)
+             if u.mode == "gain" else
+             Unit(u.layer, None, 0.0, "head", None, "query", u.k if sign > 0 else 0.0, u.direction, u.head, u.seek)
+             if u.mode == "query" else
              Unit(u.layer, u.neuron, (abs(dose) if dose is not None else abs(u.dose)) * (1 if u.dose >= 0 else -1) * sign,
                   u.kind, u.seed, direction=u.direction) for u in recipe.units]
     ab = recipe.ablate

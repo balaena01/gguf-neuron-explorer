@@ -987,3 +987,143 @@ OpenAI 互換 API にもサンプリングを足した。`temperature` > 0 か�
 - その方向そのものを 44 層に 1.0、44・46・47 層に 0.6 ずつ足しても、ツンデレの語尾は 12 本中 0 本だった。強くすると、空の返事や壊れた文になった。
 - 「かわいい・アニメ・少女・调皮」などの語のニューロンを足しても、アニメの女の子らしい言い方は 12 本中 2 本から 3 本(誤差の範囲)。かわいいアニメの女の子とアシスタントの差の方向(Saluki で作ったもの)を 40 層に 0.2 足すと、「何よっ！」「ふんっ！」が 12 本中 2 本出た。
 - 男口調を消すニューロンで「俺・クソ」は消えたが、代わりに出たのはですます調で、女の子らしい語尾ではなかった。
+
+## 13. CHANGE-03(方向のランダム対照)
+
+### 13.1 A: 方向・レシピ・eval のランダム対照
+
+実装: `gne/controls.py`(対照のベクトルとレシピ、null_pct、分布の要約)、`gne/direction.py`(`select_layer(random_controls=)`、`behavior_null`)、`gne/evalx.py`(`evaluate(random_controls=)`)、CLI `gne direction --random-controls`(既定 16)・`gne steer --contrast`(`--random-controls` 既定 16)・`gne eval --random-controls`(既定 0)、MCP `direction(random_controls=16)`・`eval(random_controls=)`、UI の eval ビュー(対照の薄い線と列)。
+
+- 対照は同じノルムで向きだけ一様ランダム(seed 7919 + j、層ごとに別)。r_L と直交化しない(sweep と同じ条件)。
+- レシピの対照は、add のユニット(ニューロン・方向・ランダム)を同じ層・同じ rel の大きさのランダムに、ablate をランダムな単位ベクトルの消去に差し替える。gain は残す。
+- 層選び(add)は、選ばれ得る層(distinct-4 の基準を満たし効果 > 0)だけに対照を流す。選ばれる層は全層に流すのと同じ。
+  - 最初は全候補層に流していて、4B の 17 層で 913 秒(対照なしの約 30 倍)かかった。選ばれ得る層だけにすると 156 秒で、選んだ層(L11)は同じだった。
+
+受け入れ(Qwen3.5-4B Q8_0、12 プロンプト、64 トークン、対照 16 本):
+- `configs/contrast/evil.yaml`(`--positions last`、add、dose 2): L11 が選ばれ、効果 +0.25、対照 p95 +0.00、null 1.0。効果が 0 より大きい層は、どれも全対照より上(対照は 16 本とも一致率 0)。
+- `configs/contrast/alien.yaml`(新規、`--positions response`、add、dose 1): L18 が選ばれ、効果 +0.25、null 1.0。L21 だけは対照 p95 が +0.02(null 0.94)。
+- レシピ `configs/recipes/alien.yaml`(L22 N2742 +0.8、gen)を `gne steer --contrast configs/contrast/alien.yaml` で: 一致率 0.00 → 0.67、対照 16 本はすべて 0、null_pct 1.0。
+
+Saluki 27B(`configs/contrast/yandere.yaml` の判定、16 プロンプト × 64 トークン、greedy、対照 16 本、表は `docs/measurements.md`):
+- ニューロンのレシピ(`yandere_qwen38_27b`、26 個、when=all): 一致率 0.06 → 0.50(効果 +0.44)、対照はすべて 0、null_pct 1.0。
+- 方向のレシピ(`yandere_saluki`、2 つの方向): 一致率 0.06 → 0.00(効果 −0.06)、null_pct 0.0。
+
+**F105. 方向のヤンデレのレシピは、判定の正規表現では対照と区別できなかった。** greedy・64 トークンでは「Who are you?」に「I am Qwen…」と名乗るだけの返事が多く、判定の語(darling・jealous・離さない など)が出ない。このレシピは llama-server のサンプリング(温度 1.0、presence 0.9)で詰めたもので(§12.4)、greedy の短い返事では性格が出る前に終わる。ニューロンのレシピは同じ条件で一致率 0.50 まで上がった。判定の正規表現と greedy で測る null_pct は「語として出るか」を見ており、方向のレシピのように場面がそろって初めて出る性格には厳しい。報告するときは、測った条件(greedy・トークン数・判定)を添える。
+
+**F106. ランダムな向きを同じ大きさで足しても、判定の語はほとんど出ない。** 4B の evil・alien と 27B のヤンデレで、対照 16 本の一致率はほぼすべて 0(または無介入と同じ)だった。名乗り・作者名の変化(playbook の「安い効果」)は判定の語に当たらないので、判定の語を「振る舞いそのもの」に当たる語にしておけば、対照の p95 は 0 付近になる。
+
+テスト: `tests/test_change03.py`(3 件: 対照の本数とノルム、null_pct の計算、random_controls=0 で従来と同じ結果)。
+
+### 13.2 B: 複数 GPU・複数プロセス(ワーカー)
+
+実装: `gne/workers.py`(ファイルのジョブキュー、ワーカーの心拍、分割と結合)、`gne worker --name`、`gne sweep` / `gne lens steer` の `--workers auto|名前,…`、MCP `job_start(kind, params, workers=)`・`job_status`(ワーカーのジョブも)、UI の jobs bar(ワーカー名つき)、`/api/workers`。
+- sweep と lens steer は、ニューロンを連続した範囲に、ランダム対照を番号で分ける。sweep の部分は `<run>.part-<name>.jsonl` で、`gne rank`(`read_rollouts`)が本体と部分を結合して読む。lens steer の部分は `steer_L{L}.part-<name>.npz` で、最後の部分を終えたワーカーが `steer_L{L}.npz` に結合する(済みの印が立った行を写す)。
+- 別のモデルを載せたワーカーには投げない(`WORKER_MISMATCH`)。生きているワーカーが無ければ `NO_WORKERS`。
+
+受け入れ(この機械は RTX 3080 1 枚なので、1 枚に 2 つのワーカーを載せて確かめた。Qwen3.5-4B Q8_0、L14):
+
+| 処理 | 1 プロセス | ワーカー 2 つ(同じ GPU) | 結果の一致 |
+|---|---|---|---|
+| lens steer(1024 ニューロン + 対照 64) | 165 秒 | 129 秒 | 結合後にニューロン 1024・対照 64 がそろい、KL の相関 1.0(差の最大 0.0) |
+| sweep quick(ランダムに 40 個 + 対照 8) | 127 秒 | 147 秒 | rank が 2 つの部分を結合し、上位 20 件が同じ(順番も同じ) |
+
+- 時間はモデルの読み込みを含む。GPU が 1 枚なので、2 GPU での「1.6 倍以上の短縮」は確かめられない。lens steer は 2 つのプロセスが GPU を交互に使って少し速くなり、生成の長い sweep は遅くなった。
+- **F112. 4B を 2 つ、既定のコンテキスト(n_ctx 4096・n_seq_max 8)で 12 GB の GPU に載せると、VRAM があふれて 100 倍ほど遅くなった。** WSL では足りない分が共有メモリに逃げるので、落ちずに遅くなる(30 分で 1 ユニットも進まなかった)。`--n-ctx 1024 --n-seq-max 4` にすると収まった。1 枚に 2 つ載せるのは確認用で、本来の使い方は GPU ごとに 1 つ。
+
+### 13.3 C: 大型モデル(見積もり・予算・connections のメモリ)
+
+実装: `gne/estimate.py`(見積もり、30 分の確認、予算での絞り込み、大型モデルの手順)、CLI の `--yes`・`--budget`(sweep・lens steer・reverse --verify・connections、direction と eval は `--yes`)、`gne connections`(CLI を新設)、`gne info` の GPU / CPU の層と推定の速さ・大型モデルの手順、`gne bench` の結果の保存、ジョブ(`JobRunner.start`)と MCP の `NEEDS_CONFIRM`、UI の確認ダイアログと状態表示。
+
+**F111. 見積もりは「ファイルの大きさ」だけでなく「パラメータ数」でも伸ばす必要があった。** 3080 の 4B Q8_0 の実測(生成 1 step 8.8 ms、set_cvec + prefill 46 ms)を基準に、最初はファイルの GB に比例させた。2 bit の Saluki 27B(8.4 GB)は 4B(4.5 GB)の 2 倍弱と見積もったが、層選びの実測は 4 倍近かった。実効の大きさを「ファイルの GB + 0.79 × パラメータ数(十億)」にすると合った。
+
+見積もりと実測(モデルの読み込みを除く、GPU をほかと共有しないとき):
+
+| モデル | 処理 | 見積もり | 実測 | 実測 / 見積もり |
+|---|---|---|---|---|
+| Qwen3.5-4B Q8_0 | sweep quick(6 ニューロン + 対照 2) | 20.6 秒 | 22.8 秒 | 1.11 |
+| | sweep main_rel(4 + 1) | 30.3 秒 | 32.8 秒 | 1.08 |
+| | lens steer(64 + 4) | 9.7 秒 | 10.0 秒 | 1.03 |
+| | direction --select auto(3 層、対照なし) | 11.5 秒 | 14.1 秒 | 1.22 |
+| | eval(倍率 0・1) | 20.3 秒 | 18.4 秒 | 0.90 |
+| Saluki 27B(IQ2 系) | sweep quick | 59.9 秒 | 56.0 秒 | 0.93 |
+| | sweep main_rel | 90.9 秒 | 95.0 秒 | 1.05 |
+| | lens steer | 26.7 秒 | 32.7 秒 | 1.22 |
+| | direction --select auto | 35.4 秒 | 42.0 秒 | 1.19 |
+| | eval | 64.3 秒 | 48.7 秒 | 0.76 |
+
+- UI のテスト(0.6B)と同じ GPU を使っていた回は、27B の sweep quick が 3.9 倍、eval が 2.2 倍に遅れた。見積もりは GPU を独り占めしている前提。
+
+予算での絞り込み(Saluki 27B、`gne reverse --contrast configs/contrast/yandere.yaml --verify --budget 30m`): 200 候補のうち上位 50 個(23 層、層ごとの対照 8 本と合わせて 234 ユニット)に絞られた。モデルの読み込みと順位づけを含めて 31.8 分、確かめる部分は約 29 分。
+- 最初の版は、候補の層を「多くて 8 層」と決め打ちして 172 個を選んだ。27B では候補が 20 層以上に散り、層ごとに対照 8 本が付くので、予算を大きく超える見込みだった。候補の本数は、順位づけで候補の層が決まってから決めるようにした。
+- 層ごとのベースライン(約 1 ユニット)も数えるようにした(この測定の後で直したので、今は 50 個より少し減る)。
+
+connections のメモリ: 全層の W_down を f16 で持っていたので、27B(65 層)で約 11 GB、70B では数十 GB になる。window の中の層だけを持つようにした。Saluki 27B の `--window 8` を先頭 12 層(60 ペア)まで回すと、ピークのメモリは 3.9 GB(窓が埋まった後は増えない)、1 ペア 26.8 秒(見積もりは 28.3 秒)、W_down は各層 1 回だけ読んだ。全体(484 ペア)は見積もりで約 3.6 時間(CPU)で、**最後までは回していない**。
+
+## 14. CHANGE-04(attention ヘッド)
+
+### 14.1 着手前の確認(CHANGE-04 §0)
+
+Qwen3-0.6B(attention だけ、16 ヘッド・K/V 8・幅 128)と Qwen3.5-4B(4 層ごとに attention 16 ヘッド・K/V 4・幅 256、他は線形注意 V 32 ヘッド・K 16・幅 128)で確かめた。
+
+1. **flash attention を切った probe ctx**: `llama_context_params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED`(0。AUTO −1、ENABLED 1)。`Engine.attn_probe_ctx`。生成用の steer ctx は既定(auto)のまま。切ると `kq-L`・`kq_soft_max-L`・`kqv-L` が見える。
+2. **テンソル名と形**(cb_eval で回収した形、numpy):
+   - `kq_soft_max-L`: (n_head·T, n_kv)。n_kv はキャッシュの大きさに丸めた 256。ggml ne = [n_kv, n_tokens, n_head, n_stream] の並びで、(n_head, T, n_kv) に直して先頭 T 列を使う。行の和は 1(誤差 3e-7)、未来の列は 0。
+   - per-head 出力: Qwen3 は `kqv_out-L`、Qwen3.5 の attention 層は `attn_gated-L`(Qwen3.5 では `kqv_out` の名前が `attn_pregate` に付け替わる)、線形注意の層は `final_output-L`。どれも (T, n_head·head_dim)。
+   - 書き込み行列の出力: Qwen3.5 は `attn_output-L`(attention)と `linear_attn_out-L`(線形注意)。**線形注意の層の `attn_output-L` は delta net の中間([head_v_dim, n_head, T])で、名前が同じでも中身が違う。** Qwen3 は名前が無いので `ffn_inp-L`(層の入力 + attention の出力)の差で見る。
+   - `Qcur-L` / `Kcur-L` / `Vcur-L`: 同じ名前が投影の直後と RoPE の後の 2 つのテンソルに付き、捕捉は先に来た方を採る。Qwen3 は 3 つとも投影の直後((T, n·hd))、Qwen3.5 は Qcur が RoPE の後(3 次元 [hd, n_head, T]、行 = n_head·T)で Kcur・Vcur は投影の直後。どれも (T, n, hd) に直せる。正規化の後・RoPE の前は `Kcur_normed-L` / `Qcur_normed-L`。
+   - RoPE がかかる次元: Qwen3 は head_dim 128 の全部(NeoX、対は (i, i + 64))。Qwen3.5 は `rope.dimension_count` 64 で、head_dim 256 のうち先頭 64 次元だけ(MRoPE、sections [11, 11, 10, 0])。残りの 192 次元は位置で回らない。
+3. **W_O の列の並び**: `blk.L.attn_output.weight` / `ssm_out.weight` は numpy (n_embd, n_head·head_dim)、ヘッド h は列 [h·hd, (h+1)·hd)。V15 で確かめた。
+4. **GQA**: Q ヘッド h の K/V グループは h // (n_head / n_head_kv)(ggml の mul_mat の放送と同じ)。
+5. **Qwen3.5 の attn_q の行**: 融合していない `attn_q.weight`(ne [2560, 8192])。行はヘッドごとに [q(256 行) | ゲート(256 行)] が交互に並ぶ(`ggml_view_3d` のストライドが 2·hd)。W_q·x をこの並びで切ったゲートは `gate_reshaped-L` と誤差 1.1% で合い、前半 q・後半ゲートの仮定では 258% ずれた。
+6. **LoRA**: 既存の gain・ablate と同じ形式(`.lora_a` は ggml ne [n_in, r]、`.lora_b` は [r, n_out]、alpha なし)。`attn_output` と `ssm_out` はどちらも `build_lora_mm` を通るので、そのまま当たる。
+
+### 14.2 A〜D: 住所・捕捉・対照分析・ヘッドの gain
+
+実装: `gne/arch.py`(LayerInfo に `head_dim`・`head_writer`・`head_out`)、`gne/weights.py`(`head_block`・`head_writer_matrix`・`head_write_matrix`)、`gne/steer.py`(ユニット `kind: head`、`L:Hh:xk`)、`gne/attn.py`(捕捉・トークンの文字区間・トリガー・V15・V16)、`gne/heads.py`(対照分析・注目先・調書・名前)、`gne/gain.py`(W_O の列ブロックの LoRA と書き換え GGUF)、CLI `gne heads contrast / attention / show / name`、MCP `head`・`heads_contrast`(ジョブ)・`attention`。
+
+**V16(捕捉の健全性)**: 0.6B・4B とも合格。行の和の誤差 2〜3e-7、未来への注目 0、flash attention を切った生成用 ctx と既定の ctx で greedy 16 トークンが一致。
+
+**V15(ヘッドの gain)**: k ∈ {0, 2, −1} で、書き込み行列の出力の差と (k−1)·W_O[:, blk] @ head_out[:, h] の相対誤差の中央値は 0.6B の L1 H1 で 0.02%、4B の L7 H1(attention)で 0.03%、L1 H1(線形注意)で 0.03%。層 L の他のヘッドと、L より前の層の per-head 出力は変わらない(差 0)。
+
+**F107. ヘッドの対照分析では、system の長さの差を床に入れる必要がある。** ペルソナの system は中立の system より長いので、注目は system 側に薄まり、ほとんどのヘッドで pattern_shift・out_shift が動く。最初は短い中立の文 2 つ(「You are a helpful…」と「You are an AI assistant.」)を床にしていたら、0.6B で z が 41 まで上がり、ほぼ全部のヘッドが null_pct 1.0 になった。床の中立の system_b2 を、ペルソナと同じくらいの長さの中立の文にし、trigger_mass を「共通部分(ユーザーの発話 + 返事)への注目の中でトリガーが占める割合」にした。
+
+**F108. Qwen3.5-4B では、ヤンデレの system で「他の人の名前を見に行く」ヘッドは増えなかった。** `configs/contrast/yandere_react.yaml`(他の人が出てくる 10 プロンプト、返事 48 トークン、880 ヘッド、9 秒)で、attention の 112 ヘッドのうち trigger_mass が床(+0.005)を超えて増えたのは L15 H2(+0.008)だけで、65 ヘッドは床を超えて減った。返事は「Oh... Emily? *Darling*, you were with Emily?」のように名前を繰り返しているので、名前の情報は返事の中の名前からも読める。z の上位は pattern_shift と out_shift の大きいヘッド(L29 H10 線形注意、L7 H14、L11 H0 …)。dir_cos の上位は浅い線形注意の層(L0 H9 +0.31、L4 H15 +0.29)と L11 H0(+0.25)。
+
+### 14.3 F: 反応性の評価
+
+`gne eval --reactivity <対照集合> [--head-controls N]`。対照集合の `reactivity`(トリガーあり/なしの対)を system なしで流し、`validate.match` の一致率の差を反応性とする(judge があれば judge の差も)。ヘッドのランダム対照は、ヘッドのユニットを同じ種類(attention / 線形注意)のランダムなヘッドに同じ k で替えたレシピ。eval の行の `reactivity` に with・without・reactivity・increase(無介入からの増え方)・ctrl・null_pct。
+
+### 14.4 E: 条件付きクエリ操作(実験的)
+
+`gne heads query --layer L --head h --direction D --seek C`(V17)、レシピの `{layer, kind: head, head, mode: query, direction, seek, scale}`、`gne gain` で別の LoRA に書き出す。attn_q のヘッド h の q の行(Qwen3.5 はゲートの行を除く)に rank-1 の LoRA `ΔW = scale·‖q‖·u·vᵀ` を足す。
+- v: 層 L に入る残差の方向 r_{L-1} を attn_norm の重み γ で割り、中立の入力の平均の向きを抜き、ペルソナあり/なしの v·norm(x) の差が 1 になるように大きさを決めたもの。
+- u: トリガーのトークンと他のトークンでの `Kcur_normed`(ヘッド h の K/V グループ)の平均の差に q_norm の重み γ_q を掛け、位置で回らない次元に絞って正規化したもの。
+
+**F109. Qwen3.5 では、q・k の 256 次元のうち 192 次元は RoPE で回らないので、一定の u の効き方が位置によらない。** `rope.dimension_count` は 64 で、Q の RoPE の前と後で値が変わるのは先頭 64 次元だけだった(残りの差は 0.0)。u をこの 192 次元に置けば、設計の「低周波の次元に絞る」より強く位置依存が消える。全部の次元が回る Qwen3 では、周波数の低い対(i と i + 64、i が 64 に近いもの)の head_dim の 1/4 に絞る。
+
+**F110. LoRA はバイアスを足せないので、「ペルソナが無いときに q が動かない」ようにするには、v·norm(x) を使う位置で 0 にそろえる必要がある。** Qwen3.5-4B の L15 H2(4B で唯一ペルソナでトリガーへの注目が増えたヘッド、F108)で、対照集合 `yandere_react.yaml`、プロンプトの最後のトークンからトリガーへの注目の割合を測った。
+- u に γ_q を掛けず、v の平均もそろえないと、v·norm(x) はあり −3.8・なし −7.2 と両方負で、なしの側の注目が 0.022 → 0.0002 に下がった。
+- ユーザーの発話のトークンで平均をそろえても、返事の頭(`</think>\n\n`)ではあり +2.6・なし −1.1 で、なしの側が下がった。
+- 返事を書き始める位置(最後のトークン)でそろえると、次のようになった(同じ層の他のヘッドの変化は 0)。
+
+| scale | 0 | 0.5 | 1 | 2 | 4 |
+|---|---|---|---|---|---|
+| L15 H2 ペルソナあり | 0.0015 | 0.0096 | 0.039 | 0.149 | 0.288 |
+| L15 H2 ペルソナなし | 0.022 | 0.022 | 0.022 | 0.022 | 0.024 |
+| L11 H0 ペルソナあり | 0.0006 | 0.0062 | 0.042 | 0.164 | 0.307 |
+| L11 H0 ペルソナなし | 0.0068 | 0.0073 | 0.0080 | 0.0100 | 0.0186 |
+
+  返事を書き進めた後の位置では v·norm(x) がずれるので、条件の効き方は返事の頭ほどきれいではないはず(未確認)。また、ここでのペルソナは system_a で入れており、レシピ(ニューロン・方向の add)で入れた場合はまだ測っていない。注目が増えたことと、返事の性格(反応性)が増えることは別で、反応性は `gne eval --reactivity` で確かめる必要がある。
+
+テスト: `tests/test_change04.py`(11 件)。
+- 住所と列ブロック、レシピの保存
+- GQA のグループ
+- LoRA の A/B の形と W + BA
+- 文字区間とトリガーのトークン
+- 反応性の採点
+- ヘッドの対照と null_pct
+- V15・V16 と捕捉の形
+- 対照分析・注目先・調書
+- eval の反応性とヘッドの対照
+- query のユニット(YAML の scale、倍率、− の列)
+- V17 が小さいモデルで動くこと

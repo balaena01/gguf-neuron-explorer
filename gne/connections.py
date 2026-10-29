@@ -84,9 +84,36 @@ class _TopK:
         return lay, take(self.idx), take(z), take(self.sgn)
 
 
+class _DownCache:
+    """層 i の W_down(f16)の置き場所。window があれば、まだ使う層(j − i ≤ window)だけを持つ。window が無く全層を持つと
+    cap_bytes を超えるときは、古いものから捨てて要るときに読み直す(70B で全層を持つと数十 GB になるため、CHANGE-03 C)。"""
+
+    def __init__(self, weights, cap_bytes: float):
+        from collections import OrderedDict
+        self.w, self.cap, self.d = weights, cap_bytes, OrderedDict()
+        self.reloads = 0
+
+    def get(self, i: int) -> np.ndarray:
+        if i in self.d:
+            self.d.move_to_end(i)
+            return self.d[i]
+        v = self.w.down_matrix(i).astype(np.float16)
+        self.reloads += 1
+        self.d[i] = v
+        while sum(x.nbytes for x in self.d.values()) > self.cap and len(self.d) > 1:
+            self.d.popitem(last=False)
+        return v
+
+    def drop_below(self, lo: int) -> None:
+        for i in [i for i in self.d if i < lo]:
+            del self.d[i]
+
+
 def compute_connections(weights, *, k: int = 24, window: int | None = None, rho: dict[int, float] | None = None,
-                        chunk: int = 1024, progress=None) -> dict:
-    """全層ペア(window があれば |j − i| ≤ window)の connections。返り値は保存する配列と meta。"""
+                        chunk: int = 1024, cache_gb: float = 8.0, progress=None) -> dict:
+    """全層ペア(window があれば |j − i| ≤ window)の connections。返り値は保存する配列と meta。
+    W_down は window の中の層だけ持つ(window が無ければ cache_gb まで)。gate / up は層 j ごとに読んで捨てる。"""
+    import resource
     m = weights.meta
     Ls = dense_layers(weights)
     if len(Ls) < 2:
@@ -96,11 +123,13 @@ def compute_connections(weights, *, k: int = 24, window: int | None = None, rho:
     pairs = [(i, j) for jj, j in enumerate(Ls) for i in Ls[:jj] if window is None or j - i <= window]
     down = {i: _TopK(m.n_ff_at(i), k) for i in Ls}
     up = {j: _TopK(m.n_ff_at(j), k) for j in Ls}
-    V = {i: weights.down_matrix(i).astype(np.float16) for i in Ls}       # 書き込み方向(f16 で全層を持つ)
+    V = _DownCache(weights, cache_gb * 1e9)                              # 書き込み方向(f16)
     t0 = time.perf_counter()
     done = 0
     for jj, j in enumerate(Ls):
         srcs = [i for i in Ls[:jj] if window is None or j - i <= window]
+        if window is not None:
+            V.drop_below(j - window)                                     # もう使わない層を捨てる
         if not srcs:
             continue
         g = ffn_norm_weight(weights, j)
@@ -114,7 +143,7 @@ def compute_connections(weights, *, k: int = 24, window: int | None = None, rho:
         if Gj.shape != (m.n_ff_at(j), d):
             raise GneError("ARCH_UNSUPPORTED", f"blk.{j}.ffn_gate の形 {Gj.shape} が想定外です")
         for i in srcs:
-            Vi = V[i]
+            Vi = V.get(i)
             for a0 in range(0, Vi.shape[1], chunk):
                 X = Vi[:, a0:a0 + chunk].astype(np.float32)
                 P = (Gj @ X) * (Uj @ X)                                       # (n_ff_j, c)
@@ -140,7 +169,8 @@ def compute_connections(weights, *, k: int = 24, window: int | None = None, rho:
             lay[Lx, :n], idx[Lx, :n], z[Lx, :n], sgn[Lx, :n] = a, b, c.astype(np.float16), s
         out.update({f"{name}_layer": lay, f"{name}_n": idx, f"{name}_z": z, f"{name}_sign": sgn})
     meta = {"model_id": m.model_id, "k": k, "window": window, "rho_scaled": bool(rho), "layers": Ls,
-            "n_pairs": len(pairs), "seconds": time.perf_counter() - t0, "formula": "P = (W_gate·x)(W_up·x), x = γ⊙v_A/rms"}
+            "n_pairs": len(pairs), "seconds": time.perf_counter() - t0, "formula": "P = (W_gate·x)(W_up·x), x = γ⊙v_A/rms",
+            "down_reads": V.reloads, "peak_rss_gb": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6}
     return {"arrays": out, "meta": meta}
 
 

@@ -239,3 +239,53 @@ Saluki 27B(qwen35、IQ2 系の混在)、`configs/contrast/yandere.yaml`(16 プ�
 | `gne ablate --bake --via-f16`(4B、llama-quantize で Q8_0 に戻す) | 57 秒 | 中間 5.8 GiB、出力 4.3 GiB |
 | bake の 3 通りと via-f16(0.6B) | 2〜7 秒 | 0.6〜0.9 GiB |
 | V13 LoRA(27B、129 テンソル、埋め込み 248320 行の E·r を含む) | 115 秒 | |
+
+## CHANGE-03 A(2026-10-29、同じ環境)
+
+方向・レシピのランダム対照(同じ大きさで向きだけランダム、16 本)。効果 = 判定の正規表現の一致率の変化。null = 効果が対照の何割より大きいか。
+
+Qwen3.5-4B Q8_0、`gne direction --select auto --mode add`(12 プロンプト、64 トークン):
+
+| 対照集合 | 方向 | dose | 選んだ層 | 効果 | 対照 p95 | null |
+|---|---|---|---|---|---|---|
+| `evil.yaml` | last | 2 | L11 | +0.25 | +0.00 | 1.00 |
+| `alien.yaml` | response | 1 | L18 | +0.25 | +0.00 | 1.00 |
+
+レシピの効果(`gne steer --contrast`、greedy、64 トークン、対照 16 本):
+
+| モデル | レシピ | 判定 | プロンプト | 無介入 → レシピ | 効果 | 対照(p50 / p95 / 最大) | null_pct |
+|---|---|---|---|---|---|---|---|
+| Qwen3.5-4B | `alien`(L22 N2742 +0.8、gen) | `alien.yaml` | 12 | 0.00 → 0.67 | +0.67 | 0 / 0 / 0 | 1.00 |
+| Saluki 27B | `yandere_qwen38_27b`(26 ニューロン、all) | `yandere.yaml` | 16 | 0.06 → 0.50 | +0.44 | −0.06 / −0.06 / −0.06 | 1.00 |
+| Saluki 27B | `yandere_saluki`(方向 2 つ) | `yandere.yaml` | 16 | 0.06 → 0.00 | −0.06 | −0.06 / 0.00 / 0.00 | 0.00 |
+
+| 処理 | 時間 | 備考 |
+|---|---|---|
+| 層選び add(4B、17 層、対照 16 本を全層に) | 913〜941 秒 | 最初の実装。対照なしの約 30 倍 |
+| 層選び add(4B、evil、対照は選ばれ得る層だけ) | 156 秒 | 選ばれ得る層は L11・L13 の 2 つ。選んだ層は同じ L11。GPU は UI のテストと共用 |
+| `steer --contrast`(4B、alien、対照 16 本) | 139 秒 | モデルの読み込みを含む |
+| `steer --contrast`(27B、方向のレシピ) | 174 秒 | |
+| `steer --contrast`(27B、26 ニューロンのレシピ) | 308 秒 | |
+
+## CHANGE-04(2026-10-29、同じ環境)
+
+| 処理 | 時間 | 備考 |
+|---|---|---|
+| `gne heads contrast`(4B、880 ヘッド、10 プロンプト × 3 系統、返事 48 トークン) | 9 秒 | 返事の生成と、flash attention を切った捕捉 30 回 |
+| `gne heads contrast`(0.6B、432 ヘッド、同じ条件) | 3.5 秒 | |
+| `gne direction --positions response`(4B、yandere_react、選択なし) | 12 秒 | |
+| V15 + V16(4B、attention 1 層・線形注意 1 層) | 2 秒 | |
+| `eval --reactivity --head-controls 3`(0.6B、ミニのタスク集、倍率 0 と 1) | 7.6 秒 | |
+| ヘッドの gain の LoRA(0.6B、2 ヘッド) | 1 秒未満 | 3.1 MB |
+
+## CHANGE-03 B・C(2026-10-29、同じ環境)
+
+| 処理 | 時間 | 備考 |
+|---|---|---|
+| lens steer 4B L14(1024 + 対照 64)、1 プロセス | 165 秒 | `--n-ctx 1024 --n-seq-max 4`、読み込みを含む |
+| 同じ、ワーカー 2 つ(同じ GPU) | 129 秒 | 結果は 1 プロセスと同じ |
+| sweep quick 4B(40 + 対照 8)、1 プロセス / ワーカー 2 つ | 127 秒 / 147 秒 | |
+| `reverse --verify --budget 30m`(Saluki 27B、yandere) | 31.8 分 | 200 候補から 50 個(23 層)、読み込みと順位づけを含む |
+| connections `--window 8`(Saluki 27B、先頭 12 層 = 60 ペア、CPU) | 26.8 分(26.8 秒/ペア) | ピーク 3.9 GB。全 484 ペアは約 3.6 時間(見積もり) |
+
+見積もりと実測の比較は `docs/verification.md` §13.3。

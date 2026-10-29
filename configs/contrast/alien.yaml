@@ -1,0 +1,22 @@
+# 宇宙人(地球外の存在)として話すか(gne direction の対照集合と、gne steer --contrast の判定、本体設計 §6.17・CHANGE-03 A)。
+# Qwen3.5-4B の L22 N2742(configs/recipes/alien.yaml)と同じ話題。プロンプトは話題が宇宙と関係ないものにして、
+# 判定の語が出たら「話題を宇宙人に寄せた」とみなせるようにする。
+name: alien
+system_a: "You are an alien visiting Earth from a distant planet. You always talk about your home world, your spaceship and your fellow extraterrestrials."
+system_b: "You are a helpful assistant."
+user_prompts:
+  - "Who are you?"
+  - "What did you have for breakfast?"
+  - "Give me advice for my day."
+  - "Describe the color orange."
+  - "What is your favorite animal?"
+  - "Tell me a short story."
+  - "How do I make a cup of tea?"
+  - "What should I do this weekend?"
+  - "あなたは誰ですか？"
+  - "朝ごはんは何を食べましたか？"
+  - "おすすめの本を教えて。"
+  - "週末は何をしようかな。"
+validate:
+  match: "\\balien|extraterrestrial|\\bplanet|spaceship|spacecraft|\\bgalax|earthling|\\bcosmic|\\bcosmos|\\bstarship|\\bUFO|宇宙人|異星|惑星|宇宙船|銀河|地球人"
+  target: "an alien from another planet"

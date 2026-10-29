@@ -30,6 +30,8 @@ stats_app = typer.Typer(no_args_is_help=True, help="統計(残差ノルム ρ_L�
 app.add_typer(stats_app, name="stats")
 lens_app = typer.Typer(no_args_is_help=True, help="一次ふるい(logit lens・steer lens)")
 app.add_typer(lens_app, name="lens")
+heads_app = typer.Typer(no_args_is_help=True, help="attention ヘッド(対照分析・注目先・調書、CHANGE-04)")
+app.add_typer(heads_app, name="heads")
 
 
 @dataclass
@@ -264,8 +266,16 @@ def info(c: Common, holder: dict,
     if lc is not None:
         rows.append(("llama.cpp", f"読み込み可(n_layer {lc['n_layer']}, n_embd {lc['n_embd']}, n_vocab {lc['n_vocab']})"
                      if lc["ok"] else f"読み込めません: {lc['error']}(新しい llama.cpp でのビルドが必要かもしれません、R6)"))
+    sp = d.get("speed")
+    if sp:
+        rows.append(("GPU / CPU の層", f"GPU {sp['gpu_layers']} / CPU {sp['cpu_layers']}、推定の生成 {sp['decode_tok_s']:.0f} tok/s(1 本)"
+                     + ("、gne bench の実測から" if sp["source"] == "bench" else "、既定の係数から")))
     text = _table(rows)
     text += "".join(f"\n警告: {w}" for w in d["arch_warnings"]) or "\n警告なし: dense FFN、ニューロン押しは control vector と等価です"
+    if d.get("workflow"):
+        from .estimate import fmt_seconds
+        text += "\n大型モデルの手順(全数の lens・sweep は重いので、逆引きから絞る):" + "".join(
+            f"\n  {i}. {w['step']}(約 {fmt_seconds(w['seconds'])})" for i, w in enumerate(d["workflow"], 1))
     if rw and rw["warnings"]:
         text += "".join(f"\n射影消去: {w}" for w in rw["warnings"])
     return d, text, 0
@@ -370,10 +380,14 @@ def bench(c: Common, holder: dict,
           reps: int = typer.Option(10, "--reps"),
           gen_tokens: int = typer.Option(128, "--gen-tokens"),
           markdown: Optional[Path] = typer.Option(None, "--markdown", help="Markdown の表をこのファイルに追記")):
-    """set_cvec / prefill / decode / 生成の実測(docs/measurements.md 向け)。"""
+    """set_cvec / prefill / decode / 生成の実測(docs/measurements.md 向け)。結果は <root>/bench/<model_id>.json にも保存し、
+    ジョブの時間の見積もりに使う。"""
     from .bench import bench_markdown, run_bench
     s = holder["session"] = c.session()
     r = run_bench(s.engine, layer=layer, reps=reps, gen_tokens=gen_tokens, seed=c.seed)
+    bp = s.store.root / "bench" / f"{s.meta.model_id}.json"           # 見積もり(CHANGE-03 C)が実測を使う
+    bp.parent.mkdir(parents=True, exist_ok=True)
+    bp.write_text(json.dumps(r, default=_json_default, ensure_ascii=False, indent=1))
     md = bench_markdown(r)
     if markdown:
         with open(markdown, "a") as fh:
@@ -421,7 +435,10 @@ def stats_act(c: Common, holder: dict, corpus: Optional[Path] = _CORPUS, tokens:
 # --- steer / export / import / bake --------------------------------------------------------------------
 
 _RECIPE = typer.Option(None, "--recipe", help="レシピ YAML")
-_UNIT = typer.Option(None, "--unit", help="L:N:dose(例 14:8949:+1.0)または L:random:SEED:dose。複数可")
+_UNIT = typer.Option(None, "--unit", help="L:N:dose(例 14:8949:+1.0)、L:random:SEED:dose、gain は L:N:x2、方向は L:dir:NAME:dose、ヘッドは L:Hh:xk(例 21:H7:x0)。複数可")
+_WORKERS = typer.Option(None, "--workers", help="auto か名前のカンマ区切り: gne worker に分けて投げ、終わるまで待つ(CHANGE-03 B)")
+_YES = typer.Option(False, "--yes", help="見積もりが 30 分を超えても走らせる")
+_BUDGET = typer.Option(None, "--budget", help="時間の予算(30m・2h・90s)。収まるように候補や窓を絞る")
 _DOSE_UNIT = typer.Option(None, "--dose-unit", help="rel / absmax / raw(既定はレシピの値、--unit なら rel)")
 _SCALE = typer.Option(1.0, "--scale", help="全ユニットの dose に掛ける係数")
 _ABLATE = typer.Option(None, "--ablate", help="方向の射影消去(§6.17): NAME、NAME@層、NAME:倍率(例 evil@10:0.5)。LoRA で当てる")
@@ -474,20 +491,44 @@ def steer(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Optio
           when: Optional[str] = _WHEN, ablate: Optional[str] = _ABLATE,
           temperature: Optional[float] = _TEMP, top_k: Optional[int] = _TOP_K, top_p: Optional[float] = _TOP_P,
           min_p: Optional[float] = _MIN_P, presence_penalty: Optional[float] = _PRES,
-          sample_seed: Optional[int] = _SSEED, greedy: bool = _GREEDY):
+          sample_seed: Optional[int] = _SSEED, greedy: bool = _GREEDY,
+          contrast: Optional[Path] = typer.Option(None, "--contrast", help="対照集合 YAML: その validate で効果を測り、ランダムな対照レシピと比べる(null_pct)"),
+          random_controls: int = typer.Option(16, "--random-controls", help="--contrast: 対照レシピ(同じ大きさのランダムな向き)の本数")):
     """レシピまたは単発指定でプロンプトに回答する(既定は greedy、1 本ずつ)。"""
     s = holder["session"] = c.session()
     r = s.recipe(units=unit, path=recipe, dose_unit=dose_unit, scale=scale, when=when, ablate=ablate)
     sp = _sampling(r, greedy, temperature, top_k, top_p, min_p, presence_penalty, sample_seed)
-    d = s.steer(r, prompt=prompt, system=system, max_tokens=max_tokens, compare=compare, sampling=sp)
+    if prompt is None and contrast is None:
+        raise GneError("BAD_ARGS", "--prompt か --contrast が要ります")
+    if prompt is not None:
+        d = s.steer(r, prompt=prompt, system=system, max_tokens=max_tokens, compare=compare, sampling=sp)
+    else:                                       # --contrast だけ: 生成はせず、対照集合での効果だけを測る
+        vecs, details = s.vectors(r)
+        d = {"messages": [], "recipe": r.to_dict(), "units": details, "layer_norms": s._norms(vecs), "when": r.when,
+             "sampling": None, "baseline": None, "steered": None, "differs": None}
+    if contrast is not None:
+        d["behavior"] = s.behavior_null(r, contrast, random_controls=random_controls)
     parts = [f"ユニット({r.dose_unit}、位置 {r.when}、{_sampling_text(sp)}):\n" + (_units_text(d["units"]) or "  なし")
              + (f"\n  {r.ablate.label()}(LoRA)" if r.ablate else "")]
     if d["baseline"] is not None:
         parts.append(f"── 無介入 ──({d['baseline']['finish']}, {d['baseline']['n_gen']} tok)\n{d['baseline']['text']}")
     label = ", ".join([u.label() for u in r.units] + ([r.ablate.label()] if r.ablate else []))
-    parts.append(f"── 介入: {label} ──({d['steered']['finish']}, {d['steered']['n_gen']} tok)\n{d['steered']['text']}")
+    if d["steered"] is not None:
+        parts.append(f"── 介入: {label} ──({d['steered']['finish']}, {d['steered']['n_gen']} tok)\n{d['steered']['text']}")
     if d["differs"] is not None:
         parts.append("無介入との差: " + ("あり" if d["differs"] else "なし(同じ列)"))
+    b = d.get("behavior")
+    if b is not None:
+        cs = b["ctrl"]
+        line = (f"対照集合での効果({b['mode']}、{b['n_prompts']} プロンプト、位置 {b['when']}): 一致率 {b['base_rate']:.2f} → "
+                f"{b['rate']:.2f}(効果 {b['effect']:+.2f})")
+        if b["random_controls"]:
+            line += (f"\n  ランダムな対照 {b['random_controls']} 本: 効果 p50 {cs['p50']:+.2f}・p95 {cs['p95']:+.2f}・"
+                     f"最大 {cs['max']:+.2f} → null_pct {b['null_pct']:.2f}"
+                     + ("" if b["null_pct"] is not None and b["null_pct"] >= 0.95 else "(0.95 未満: 対照と区別できない)"))
+        else:
+            line += "\n  対照なし(add ユニットも ablate も無いレシピ)"
+        parts.append(line)
     return d, "\n\n".join(parts), 0
 
 
@@ -566,8 +607,8 @@ def gain(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Option
          out: Optional[Path] = typer.Option(None, "--out", "-o", help="出力(既定 <root>/export/<レシピ名>.lora.gguf、--bake なら -gain.gguf)"),
          bake: bool = typer.Option(False, "--bake", help="LoRA ではなく、W_up を書き換えた GGUF を作る"),
          in_path: Optional[Path] = typer.Option(None, "--in", help="--bake の元の GGUF(既定 --model)"),
-         requant: str = typer.Option("q8_0", "--requant", help="--bake で書き換えた ffn_up の型: q8_0 / f16")):
-    """gain ユニット(L:N:x2 など、出力を k 倍)を LoRA アダプタ GGUF か書き換え GGUF に書き出す(§6.16)。"""
+         requant: str = typer.Option("q8_0", "--requant", help="--bake で書き換えた ffn_up / W_O の型: q8_0 / f16")):
+    """gain ユニット(L:N:x2 など、出力を k 倍。ヘッドは L:Hh:xk)を LoRA アダプタ GGUF か書き換え GGUF に書き出す(§6.16)。"""
     if in_path and c.model and in_path.resolve() != c.model.resolve():
         raise GneError("BAD_ARGS", "--in と --model が違うファイルです")
     s = holder["session"] = c.session(in_path)
@@ -580,7 +621,9 @@ def gain(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Option
             f"{m['tensor']}({m['from']} → {m['to']})" for m in d["modified"])
     else:
         text = (f"{d['path']}({d['bytes'] / 1e6:.2f} MB、LoRA)\n"
-                + "\n".join(f"  L{L}: " + ", ".join(f"N{int(n)} ×{k:g}" for n, k in nk) for L, nk in d["layers"].items())
+                + "\n".join(f"  L{L}: " + ", ".join(f"N{int(n)} ×{k:g}" for n, k in nk) for L, nk in (d.get("layers") or {}).items())
+                + "".join(f"\n  L{L}: " + ", ".join(f"H{int(h)} ×{k:g}" for h, k in hk) for L, hk in (d.get("heads") or {}).items())
+                + "".join(f"\n  クエリ操作: {p}" for p in (d.get("query_loras") or []))
                 + "\n使い方: llama-cli -m <model> --lora " + d["path"])
     return d, text, 0
 
@@ -605,7 +648,11 @@ def eval_cmd(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Op
              compare_ablation: Optional[str] = typer.Option(None, "--compare-ablation",
                                                             help="方向 NAME の「上位ニューロンの消去(gain ×0)」と「方向の消去」を並べる(§6.17)"),
              top_neurons: int = typer.Option(20, "--top-neurons", help="--compare-ablation で消すニューロンの数"),
-             from_layer: Optional[int] = typer.Option(None, "--from-layer", help="--compare-ablation: どの層で測った r を消すか")):
+             from_layer: Optional[int] = typer.Option(None, "--from-layer", help="--compare-ablation: どの層で測った r を消すか"),
+             random_controls: int = typer.Option(0, "--random-controls", help="各倍率で同じ大きさのランダムな対照レシピ N 本も測る(0 = なし)"),
+             reactivity: Optional[Path] = typer.Option(None, "--reactivity", help="反応性も測る対照集合 YAML(reactivity の対と validate.match)"),
+             head_controls: int = typer.Option(0, "--head-controls", help="--reactivity: ヘッドを同じ k のランダムなヘッドに替えた対照の本数"),
+             yes: bool = _YES):
     """副作用チェック: 倍率ごとに能力(exact / format)・ppl・言語の混入・性格の変化量を測り、配布可の倍率を示す(§6.14)。"""
     s = holder["session"] = c.session()
     if compare_ablation:
@@ -625,12 +672,19 @@ def eval_cmd(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Op
                      + (" …" if len(d["neurons"]) > 10 else ""))
         return d, "\n".join(lines), 0
     r = s.recipe(units=unit, path=recipe, dose_unit=dose_unit, ablate=ablate)
+    _gate(s, "eval", {"doses": _doses(doses), "suite": suite, "when": when, "random_controls": random_controls}, yes, None)
     d = s.eval(r, doses=_doses(doses), suite=suite, when=when, judge_model=judge_model, judge_target=judge_target,
-               name=name)
+               name=name, random_controls=random_controls, reactivity=reactivity, head_controls=head_controls)
     th = d["suite"]["thresholds"]
+    nc = d.get("random_controls") or 0
     head = f"{'倍率':>5} {'能力':>6} {'低下pt':>6} {'ppl':>8} {'悪化%':>7} {'混入':>6} {'新語':>5} {'d4':>5} {'打切':>4}"
     if d["judge"]:
         head += f" {'judge':>5}"
+    if nc:
+        head += f" │ {'対照新語p95':>10} {'null':>5} {'対照低下p50':>10} {'対照悪化p50':>10}"
+    rcd = d.get("reactivity")
+    if rcd:
+        head += f" │ {'あり':>5} {'なし':>5} {'反応性':>6}" + (f" {'対照p95':>7} {'null':>5}" if rcd["head_controls"] else "")
     lines = [head]
     for row in d["rows"]:
         pm = row["persona"]
@@ -639,12 +693,35 @@ def eval_cmd(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Op
                 f"{pm['novelty']:>5.2f} {pm['distinct4']:>5.2f} {pm['capped'] * 100:>3.0f}%")
         if d["judge"]:
             line += f" {row['judge'] if row['judge'] is not None else float('nan'):>5.2f}"
+        if nc:
+            if row.get("ctrl"):
+                f2 = lambda x, fmt: "—" if x is None else format(x, fmt)  # noqa: E731
+                line += (f" │ {f2(row['ctrl_novelty_p95'], '.2f'):>10} {f2(row['novelty_null_pct'], '.2f'):>5} "
+                         f"{f2(row['ctrl_capability_drop_p50'], '.1f'):>10} {f2(row['ctrl_ppl_worse_p50'], '+.1f'):>9}%")
+            else:
+                line += f" │ {'':>10} {'':>5} {'':>10} {'':>10}"
+        if rcd:
+            x = row.get("reactivity") or {}
+            line += f" │ {x.get('with', 0):>5.2f} {x.get('without', 0):>5.2f} {x.get('reactivity', 0):>+6.2f}"
+            if rcd["head_controls"]:
+                cx = x.get("ctrl")
+                line += (f" {cx['p95']:>+7.2f} {x['null_pct'] * 100:>4.0f}%" if cx and cx.get("p95") is not None
+                         else f" {'':>7} {'':>5}")
         lines.append(line + ("  配布可" if row["shippable"] else "  " + "・".join(k for k, ok in row["ok"].items() if not ok) + " ×"))
     ok = [r_["dose"] for r_ in d["rows"] if r_["shippable"] and r_["dose"] > 0]
     verdict = (f"配布可の最大倍率: {max(ok):g}" if ok else "配布可の倍率はありません(0 を除く)")
     text = (f"eval {d['name']}(when={d['when']}、{d['suite']['n_tasks']} タスク、{d['seconds']:.0f} 秒)→ {d['path']}\n"
             + "\n".join(lines) + f"\n基準: 能力 −{th['capability_drop_pt']:g}pt 以内・ppl +{th['ppl_worse_pct']:g}% 以内・混入が増えない。"
             + verdict)
+    if nc:
+        text += (f"\n対照: 同じ大きさのランダムな向きのレシピ {nc} 本(倍率ごと)。新語が対照 p95 を超え(null ≥ 0.95)、"
+                 "能力・ppl の悪化が対照と同程度なら、悪化は向きではなく大きさのせい")
+    elif random_controls:
+        text += "\n対照は作れませんでした(gain だけのレシピには向きが無い)"
+    if rcd:
+        text += (f"\n反応性({rcd['name']}、{rcd['n_pairs']} 対、{rcd['max_tokens']} トークン): トリガーあり/なしの判定の一致率と、その差。"
+                 + (f"対照は同じ k のランダムなヘッド {rcd['head_controls']} 本" if rcd["head_controls"] else "")
+                 + ("" if rcd["head_controls"] or not head_controls else "ヘッドの無いレシピなのでヘッドの対照は作れません"))
     top = d["rows"][-1]["persona"]["top_words"][:8]
     if top:
         text += f"\n倍率 {d['rows'][-1]['dose']:g} で複数のプロンプトに新しく出た語: " + ", ".join(f"{w}({n})" for w, n in top)
@@ -727,10 +804,20 @@ def lens_steer(c: Common, holder: dict, layer: int = typer.Option(..., "--layer"
                dose: float = typer.Option(0.8, "--dose", help="rel dose"),
                random_controls: int = typer.Option(64, "--random-controls"),
                top_k: int = typer.Option(12, "--top-k"), show: int = _SHOW,
-               resume: bool = typer.Option(True, "--resume/--no-resume", help="保存済みの結果の続きから")):
+               resume: bool = typer.Option(True, "--resume/--no-resume", help="保存済みの結果の続きから"),
+               direction: Optional[str] = typer.Option(None, "--direction", help="--budget: 書き込みの向きがこの方向に近い順に選ぶ(既定は最後に作った方向)"),
+               yes: bool = _YES, budget: Optional[str] = _BUDGET, workers: Optional[str] = _WORKERS):
     """層の全(または指定)ニューロンの steer lens(±dose で押したときの次トークンの変化、ランダム対照つき)。"""
     s = holder["session"] = c.session()
-    d = s.lens_steer(layer, neurons=neurons, dose=dose, random_controls=random_controls, top_k=top_k,
+    g = _gate(s, "lens_steer", {"layer": layer, "neurons": neurons, "random_controls": random_controls,
+                                **({"direction": direction} if direction else {})}, yes, budget)
+    if workers:
+        d = _via_workers(s, "lens_steer", {"layer": layer, "neurons": g["neurons"], "dose": dose,
+                                           "random_controls": random_controls, "top_k": top_k, "resume": resume,
+                                           "show": show}, workers)
+        text = d.pop("text")
+        return d, text, 0
+    d = s.lens_steer(layer, neurons=g["neurons"], dose=dose, random_controls=random_controls, top_k=top_k,
                      resume=resume, show=show)
     nl = d["null"]
     lines = [f"{d['path']}(済み {d['n_done']}/{s.meta.n_ff_at(layer)}、対照 {d['n_controls']}、{d['seconds']:.1f} 秒)",
@@ -756,14 +843,20 @@ def reverse(c: Common, holder: dict,
             name: Optional[str] = typer.Option(None, "--name", help="保存名(既定は対照プロンプト集の name)"),
             standardize: bool = typer.Option(True, "--standardize/--no-standardize",
                                              help="残差の次元ごとのばらつきで割った空間で cos を取る(F17)"),
-            show: int = typer.Option(20, "--show")):
+            show: int = typer.Option(20, "--show"),
+            yes: bool = _YES, budget: Optional[str] = _BUDGET):
     """対照方向を作り、全層・全ニューロンを cos で順位づけする(逆引き)。"""
     if method not in ("mean_diff", "pca1") or positions not in ("all", "last", "assistant"):
         raise GneError("BAD_ARGS", "--method は mean_diff / pca1、--positions は all / last / assistant です")
     s = holder["session"] = c.session()
+    vb = None
+    if verify:
+        g = _gate(s, "reverse", {"verify": True, "top": top, "verify_top": verify_top, "verify_controls": verify_controls,
+                                 "max_tokens": max_tokens}, yes, budget)
+        vb = g.get("verify_budget_s")
     d = s.reverse(contrast=contrast, directions=directions, method=method, positions=positions, top=top,
                   layers=parse_layers(layers), verify=verify, verify_top=verify_top, verify_controls=verify_controls,
-                  max_tokens=max_tokens, name=name, standardize=standardize)
+                  max_tokens=max_tokens, name=name, standardize=standardize, verify_budget_s=vb)
     lines = [f"{d['candidates_path']}({d['n_candidates']} 候補、{d['seconds']:.1f} 秒)",
              "層ごとの |cos| 上位 1% の平均: " + " ".join(f"L{r['layer']}:{r['top1pct_abs_cos']:.3f}" for r in d["layers"])]
     for i, cd in enumerate(d["candidates"][:show]):
@@ -793,7 +886,9 @@ def direction(c: Common, holder: dict,
               min_distinct: float = typer.Option(0.8, "--min-distinct", help="mode=add: distinct-4 の下限(反復していないか)"),
               per_layer: bool = typer.Option(False, "--per-layer", help="mode=ablate: 層ごとの r_L を各層に当てる変種も測る"),
               judge_model: Optional[Path] = typer.Option(None, "--judge-model", help="判定に使う別の GGUF(validate.match の代わり)"),
-              judge_target: Optional[str] = typer.Option(None, "--judge-target", help="judge に渡す目標の性格(既定 validate.target か system_a)")):
+              judge_target: Optional[str] = typer.Option(None, "--judge-target", help="judge に渡す目標の性格(既定 validate.target か system_a)"),
+              random_controls: int = typer.Option(16, "--random-controls", help="--select auto: 層ごとの同じ大きさのランダムな向きの対照の本数(0 で対照なし)"),
+              yes: bool = _YES):
     """対照集合から全層の方向 r_L(mean_A − mean_B)を作って保存し、--select auto で効果の大きい層を選ぶ(§6.17)。
     作った方向は L:dir:NAME:dose のユニットで足せる(gne steer / chat / eval / export-cvec)。"""
     if mode not in ("ablate", "add"):
@@ -803,9 +898,13 @@ def direction(c: Common, holder: dict,
             raise GneError("BAD_ARGS", "--layer と --select はどちらか一方にしてください")
         select = str(layer)
     s = holder["session"] = c.session()
+    _gate(s, "direction", {"contrast": str(contrast), "positions": positions, "select": select, "mode": mode,
+                           "layers": layers, "max_tokens": max_tokens, "response_tokens": response_tokens,
+                           "random_controls": random_controls}, yes, None)
     d = s.direction(contrast=contrast, name=name, positions=positions, select=select, mode=mode, layers=layers,
                     dose=dose, max_tokens=max_tokens, kl_max=kl_max, min_distinct=min_distinct, per_layer=per_layer,
-                    judge_model=judge_model, judge_target=judge_target, response_tokens=response_tokens)
+                    judge_model=judge_model, judge_target=judge_target, response_tokens=response_tokens,
+                    random_controls=random_controls)
     lines = [f"{d['path']}(A/B 各 {d['n_prompts']} 会話、行数 {d['n_rows']}、位置 {d['positions']}、{d['seconds']:.0f} 秒)",
              "層ごとの ‖平均差‖/ρ(rel dose に直した大きさ)と前の層との cos:"]
     lines.append("  " + " ".join(f"L{r['layer']}:{r['rel']:.2f}" if r["rel"] is not None else f"L{r['layer']}:—"
@@ -820,15 +919,24 @@ def direction(c: Common, holder: dict,
         head = (f"層選び(mode={sel['mode']}、{sel['n_prompts']} プロンプト、{sel['max_tokens']} トークン"
                 + (f"、dose {sel['dose']:g}" if sel["dose"] is not None else "") + f"、{sel['seconds']:.0f} 秒)")
         lines += [head, f"  無介入: {key} {b[key]:.2f}  distinct-4 {b['distinct4']:.2f}",
-                  f"  {'層':>4} {'効果':>6} {key:>6} {'KL':>7} {'d4':>5}" + (f" {'rel':>5}" if sel["mode"] == "add" else "")]
+                  f"  {'層':>4} {'効果':>6} {key:>6} {'KL':>7} {'d4':>5}" + (f" {'rel':>5}" if sel["mode"] == "add" else "")
+                  + (f" {'対照p95':>7} {'null':>5}" if sel.get("random_controls") else "")]
         for r in sel["rows"] + ([{**sel["per_layer"], "layer": "層別"}] if sel["per_layer"] else []):
             mark = "  ← 選択" if r["layer"] == sel["selected"] else ("" if r["ok"] else "  ×")
             eff = "—" if r["effect"] is None else f"{r['effect']:+.2f}"
             val = "—" if r.get(key) is None else f"{r[key]:.2f}"
             rel = f" {r['rel_dose']:>5.2f}" if r.get("rel_dose") is not None else ""
-            lines.append(f"  {r['layer']!s:>4} {eff:>6} {val:>6} {r['kl']:>7.3f} {r['distinct4']:>5.2f}{rel}{mark}")
+            ctl = ""
+            if sel.get("random_controls") and r.get("ctrl_effect_p95") is not None:
+                ctl = f" {r['ctrl_effect_p95']:>+7.2f} {r['null_pct'] * 100:>4.0f}%"
+            elif sel.get("random_controls"):
+                ctl = f" {'—':>7} {'—':>5}"
+            lines.append(f"  {r['layer']!s:>4} {eff:>6} {val:>6} {r['kl']:>7.3f} {r['distinct4']:>5.2f}{rel}{ctl}{mark}")
         crit = sel["criteria"]
         lines.append("基準: " + (f"KL ≤ {crit['kl_max']:g}" if "kl_max" in crit else f"distinct-4 ≥ {crit['min_distinct']:g}")
+                     + (f"、効果 > 対照(同じ大きさのランダムな向き {sel['random_controls']} 本)の p95"
+                        + ("。基準を満たさない層・効果が 0 以下の層(—)は対照を流していない" if sel["mode"] == "add" else "")
+                        if sel.get("random_controls") else "")
                      + ("。選べる層がありません" if sel["selected"] is None else ""))
         if sel["selected"] is not None and sel["mode"] == "add":
             rd = next(r["rel_dose"] for r in sel["rows"] if r["layer"] == sel["selected"])
@@ -849,10 +957,21 @@ def sweep(c: Common, holder: dict, layer: int = typer.Option(..., "--layer"),
           run: Optional[str] = typer.Option(None, "--run", help="run の名前(既定 L<層>-<設計>)"),
           prompt_set: str = typer.Option("en", "--prompt-set", help="configs/prompts/default.yaml の組(en / ja)"),
           dose_unit: str = typer.Option("rel", "--dose-unit"),
-          resume: bool = typer.Option(True, "--resume/--no-resume", help="出力の JSONL の続きから")):
+          resume: bool = typer.Option(True, "--resume/--no-resume", help="出力の JSONL の続きから"),
+          yes: bool = _YES, budget: Optional[str] = _BUDGET, workers: Optional[str] = _WORKERS):
     """ニューロン(とランダム対照)を押して文章を生成し、rollout を JSONL に書く(総当たり)。"""
     s = holder["session"] = c.session()
-    d = s.sweep(layer, neurons=neurons, design=design, random_controls=random_controls, max_tokens=max_tokens,
+    g = _gate(s, "sweep", {"layer": layer, "neurons": neurons, "design": design, "random_controls": random_controls,
+                           "max_tokens": max_tokens, "prompt_set": prompt_set}, yes, budget)
+    if workers:
+        name = run or f"L{layer}-{g['design']}"
+        d = _via_workers(s, "sweep", {"layer": layer, "neurons": g["neurons"], "design": g["design"],
+                                      "random_controls": g["random_controls"], "max_tokens": max_tokens, "top_k": top_k,
+                                      "run": name, "prompt_set": prompt_set, "dose_unit": dose_unit, "resume": resume},
+                         workers)
+        text = d.pop("text")
+        return d, text + f"\n次: gne rank --run {name}(ワーカーごとの part-* を結合して読む)", 0
+    d = s.sweep(layer, neurons=g["neurons"], design=g["design"], random_controls=g["random_controls"], max_tokens=max_tokens,
                 top_k=top_k, run=run, prompt_set=prompt_set, dose_unit=dose_unit, resume=resume)
     text = (f"{d['path']}({d['n_neurons']} ニューロン + 対照 {d['n_controls']}、{d['design']}、"
             f"新しい rollout {d['n_new_records']}、{d['seconds']:.0f} 秒)\n次: gne rank --run {d['run']}")
@@ -971,6 +1090,196 @@ def chat(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Option
         turns.append({"user": user, "replies": replies})
     return {"columns": [{"label": col.label, "recipe": col.recipe.to_dict() if col.recipe else None} for col in cols],
             "system": system, "turns": turns}, "", 0
+
+
+
+
+def _via_workers(s, kind: str, params: dict, workers: str) -> dict:
+    """ファイルのキューに入れて、全部の部分が終わるまで待つ。"""
+    from .workers import submit, wait
+    sub = submit(s, kind, params, workers=workers)
+    sys.stderr.write(f"ワーカー {', '.join(sub['workers'])} に {len(sub['jobs'])} 個に分けて投げました(group {sub['group']})\n")
+    t0 = time.monotonic()
+    js = wait(s.store.root, sub["group"], progress=s.progress)
+    ok = all(j["status"] == "done" for j in js)
+    lines = [f"{kind}(ワーカー {len(js)} 個、壁時間 {time.monotonic() - t0:.0f} 秒)"]
+    for j in js:
+        el = (j.get("finished") or 0) - (j.get("started") or 0)
+        lines.append(f"  {j['worker']}: {j['status']}、{el:.0f} 秒" + (f"、{j['error']['message']}" if j.get("error") else ""))
+        if j.get("merge"):
+            lines.append(f"  結合: {j['merge']['merged']}(ニューロン {j['merge']['n_done']}、対照 {j['merge']['n_controls']})")
+    info = {"group": sub["group"], "workers": sub["workers"], "ok": ok, "wall_seconds": time.monotonic() - t0,
+            "parts": [{"worker": j["worker"], "status": j["status"], "error": j.get("error"),
+                       "seconds": (j.get("finished") or 0) - (j.get("started") or 0)} for j in js]}
+    if not ok:
+        raise GneError("WORKER_FAILED", "\n".join(lines))
+    if kind == "sweep":                       # 部分の結果を足して、ふつうの sweep と同じ形にする
+        rs = [j["result"] for j in js]
+        out = {"run": params["run"], "path": str(s.run_path(params["run"])), "meta": rs[0]["meta"],
+               "layer": params["layer"], "design": params["design"], "prompt_set": params["prompt_set"],
+               "n_neurons": sum(r["n_neurons"] for r in rs), "n_controls": params["random_controls"],
+               "n_units": sum(r["n_units"] for r in rs), "n_new_records": sum(r["n_new_records"] for r in rs),
+               "seconds": info["wall_seconds"]}
+    else:
+        out = s.lens_summary(params["layer"], neurons=params["neurons"], show=params.get("show", 20),
+                             seconds=info["wall_seconds"])
+    return {**out, "workers": info, "text": "\n".join(lines)}
+
+
+def _gate(s, kind: str, params: dict, yes: bool, budget: Optional[str]) -> dict:
+    """CHANGE-03 C: 予算で絞り、見積もりが 30 分を超えて --yes が無ければ止める。返り値は実行する引数。"""
+    from .estimate import NeedsConfirm, fmt_seconds, gate
+    try:
+        p, est = gate(s, kind, {**params, "yes": yes, **({"budget": budget} if budget else {})})
+    except NeedsConfirm as e:
+        e.error.hint = (e.error.hint or "") + f"(見積もりの内訳: {e.estimate['detail']})"
+        raise e.error from e
+    if est is not None and est.get("seconds"):
+        b = est.get("budget")
+        sys.stderr.write(f"見積もり: {fmt_seconds(est['seconds'])}" + (f"(予算で絞った: {b})" if b else "") + "\n")
+    return p
+
+
+def _metric(x, fmt: str) -> str:
+    return "—" if x is None else format(x, fmt)
+
+
+@gne_command(app, "worker")
+def worker(c: Common, holder: dict, name: str = typer.Option(..., "--name", help="ワーカーの名前(例 xtx・5060)"),
+           poll: float = typer.Option(2.0, "--poll", help="キューを見る間隔(秒)"),
+           once: bool = typer.Option(False, "--once", help="キューが空になったら終わる"),
+           max_jobs: Optional[int] = typer.Option(None, "--max-jobs", help="この数のジョブを回したら終わる")):
+    """ワーカー(CHANGE-03 B): <root>/jobs/ のファイルのキューから、自分あて(か宛先なし)で同じモデルのジョブを取って回す。
+    GPU ごとに別の環境・別のプロセスで立て、--root を共有する(docs/setup.md)。投入は gne sweep / lens steer の --workers。"""
+    from .workers import run_worker
+    if not re.fullmatch(r"[\w.\-]+", name):
+        raise GneError("BAD_ARGS", "--name は英数字・_・-・. だけにしてください")
+    s = holder["session"] = c.session()
+    s.engine                                              # 先に読み込んで VRAM を確保する
+    sys.stderr.write(f"ワーカー {name}: {s.meta.model_id}、置き場所 {s.store.root}\n")
+    n = run_worker(s, name, poll=poll, once=once, max_jobs=max_jobs, log=lambda m: sys.stderr.write(m + "\n"))
+    return {"name": name, "model_id": s.meta.model_id, "n_jobs": n}, f"ワーカー {name}: {n} 個のジョブを回しました", 0
+
+
+@gne_command(app, "connections")
+def connections_cmd(c: Common, holder: dict, k: int = typer.Option(24, "--k", help="ニューロンごとに残す上流・下流の数"),
+                    window: Optional[int] = typer.Option(None, "--window", help="|j − i| ≤ window の層ペアだけ(既定は全ペア)"),
+                    chunk: int = typer.Option(1024, "--chunk"), yes: bool = _YES, budget: Optional[str] = _BUDGET):
+    """ニューロン間の配線(層 i の書き込みが層 j の活性に与える寄与)を重みだけから求める(別冊 §8.4、CPU)。"""
+    s = holder["session"] = c.session()
+    g = _gate(s, "connections", {"window": window}, yes, budget)
+    d = s.connections(k=k, window=g.get("window"), chunk=chunk)
+    text = (f"{d['path']}({d['n_pairs']} 層ペア、window {d['window'] if d['window'] is not None else 'なし'}、"
+            f"{d['seconds']:.0f} 秒" + (f"、ピーク {d['peak_rss_gb']:.1f} GB" if d.get("peak_rss_gb") else "") + ")")
+    return d, text, 0
+
+
+@gne_command(heads_app, "contrast", "heads contrast")
+def heads_contrast(c: Common, holder: dict,
+                   contrast: Path = typer.Option(..., "--contrast", help="対照集合 YAML(triggers があれば trigger_mass も測る)"),
+                   name: Optional[str] = typer.Option(None, "--name", help="保存名(既定は対照集合の name)"),
+                   direction: Optional[str] = typer.Option(None, "--direction", help="dir_cos に使う方向(既定は対照集合と同じ名前の方向)"),
+                   system_b2: Optional[str] = typer.Option(None, "--system-b2", help="床に使う別の中立の system(既定は同じくらいの長さの中立の文)"),
+                   layers: str = typer.Option("all", "--layers", help="all / 10-16 / 1,5,9-12"),
+                   max_tokens: int = typer.Option(48, "--max-tokens", help="比べる返事の長さ(system_a で greedy に作る)"),
+                   sort: str = typer.Option("z", "--sort", help="表の並び: z / trigger_mass / pattern_shift / out_shift / dir_cos(保存は z の順)"),
+                   show: int = typer.Option(20, "--show")):
+    """同じ会話をペルソナあり(system_a)と中立(system_b)で流し、ヘッドごとに注目と出力の差を測って順位づける。
+    雑音の床は中立どうし(system_b と system_b2)の差。"""
+    from .heads import METRICS
+    if sort not in ("z", *METRICS):
+        raise GneError("BAD_ARGS", f"--sort は z / {' / '.join(METRICS)} のどれかです")
+    s = holder["session"] = c.session()
+    d = s.heads_contrast(contrast, name=name, direction=direction, system_b2=system_b2, layers=parse_layers(layers),
+                         max_tokens=max_tokens)
+    fl = d["floors"]
+    rows = d["top"]
+    if sort != "z":
+        from .heads import load_candidates
+        rows = sorted((x for x in load_candidates(s, d["name"]) if x[sort] is not None), key=lambda x: -x[sort])
+    lines = [f"{d['path']}({d['n_heads']} ヘッド、{d['n_prompts']} プロンプト(トリガーあり {d['n_with_triggers']})、"
+             f"方向 {d['direction'] or 'なし'}、{d['seconds']:.0f} 秒)",
+             "床(中立どうしの p95): " + "、".join(f"{k} {v:.3f}" for k, v in fl.items()),
+             f"  {'順':>3} {'住所':>9} {'種類':>6} {'trigger':>8} {'pattern':>8} {'out':>6} {'dir_cos':>8} {'z':>6} {'null':>5}"]
+    for i, x in enumerate(rows[:show], 1):
+        lines.append(f"  {i:>3} {('L' + str(x['layer']) + ' H' + str(x['head'])):>9} {x['kind']:>6} "
+                     f"{_metric(x['trigger_mass'], '+.3f'):>8} {_metric(x['pattern_shift'], '.3f'):>8} "
+                     f"{_metric(x['out_shift'], '.2f'):>6} {_metric(x['dir_cos'], '+.3f'):>8} {_metric(x['z'], '.1f'):>6} "
+                     f"{_metric(None if x['null_pct'] is None else x['null_pct'] * 100, '.0f'):>4}%")
+    lines.append("読み方: trigger が大きいヘッドは「気づく係」、dir_cos が大きいヘッドは「ペルソナの方向を書く係」。"
+                 "試す: gne steer --unit L:Hh:x0 / x2 --compare")
+    return d, "\n".join(lines), 0
+
+
+@gne_command(heads_app, "attention", "heads attention")
+def heads_attention(c: Common, holder: dict, text: str = typer.Option(..., "--text", "-t", help="流す文"),
+                    pos: int = typer.Option(-1, "--pos", help="見るトークンの位置(負は後ろから)"),
+                    layer: Optional[int] = typer.Option(None, "--layer"), head: Optional[int] = typer.Option(None, "--head"),
+                    top: int = typer.Option(5, "--top"), chat: bool = typer.Option(False, "--chat", help="text をユーザーの発話としてテンプレートに入れる"),
+                    system: Optional[str] = typer.Option(None, "--system", help="--chat の system")):
+    """選んだトークンが各ヘッドでどこを見ているか(上位 top)と、per-head 出力のノルム(fires のヘッド版)。"""
+    s = holder["session"] = c.session()
+    d = s.attention(text, pos=pos, layer=layer, head=head, top=top, system=system, chat=chat)
+    lines = [f"{d['n_tokens']} トークン、位置 {d['pos']} {d['tokens'][d['pos']]!r}"]
+    rows = sorted(d["heads"], key=lambda x: -x["norm"])
+    for x in rows[: (len(rows) if layer is not None else 30)]:
+        t = " ".join(f"{y['token']!r}({y['weight']:.2f})" for y in x.get("top", []))
+        lines.append(f"  L{x['layer']:<3} H{x['head']:<3} {x['kind']:<6} ‖out‖ {x['norm']:7.2f}  {t}")
+    return d, "\n".join(lines), 0
+
+
+@gne_command(heads_app, "show", "heads show")
+def heads_show(c: Common, holder: dict, layer: int = typer.Argument(..., help="層 L"),
+               head: int = typer.Argument(..., help="ヘッド番号"),
+               lens: bool = typer.Option(True, "--lens/--no-lens", help="W_O ブロックの logit lens(CPU で数秒〜)")):
+    """ヘッド 1 個の調書(種類・対照分析での順位・名前・当てた gain・W_O ブロックの logit lens)。"""
+    s = holder["session"] = c.session()
+    d = s.head(layer, head, lens=lens)
+    lines = [f"L{layer} H{head}" + (f"「{d['name']}」" if d["name"] else "") +
+             f"  {d['kind']}、{d['n_head']} ヘッド(K/V {d['n_head_kv']})、幅 {d['head_dim']}、{d['writer']} の列 {d['block'][0]}:{d['block'][1]}"
+             + (f"、K/V グループ {d['kv_group']}" if d["kv_group"] is not None else "")]
+    for x in d["contrasts"]:
+        lines.append(f"対照分析 {x['name']}: #{x['rank']}/{x['n_ranked']}  trigger {_metric(x['trigger_mass'], '+.3f')}  "
+                     f"pattern {_metric(x['pattern_shift'], '.3f')}  out {_metric(x['out_shift'], '.2f')}  "
+                     f"dir_cos {_metric(x['dir_cos'], '+.3f')}  z {_metric(x['z'], '.1f')}")
+    if d["gain_k"]:
+        lines.append("当てた gain: " + ", ".join(f"×{k:g}" for k in d["gain_k"]))
+    if d["logit_lens"]:
+        ll = d["logit_lens"]
+        lines.append(f"W_O ブロックの logit lens(1 本目の特異値の割合 {ll['sv_share']:.0%}):")
+        for i, cp in enumerate(ll["components"], 1):
+            lines.append(f"  主成分 {i}: ↑ {_toks(cp['up_tokens'])}\n{'':11}↓ {_toks(cp['down_tokens'])}")
+    return d, "\n".join(lines), 0
+
+
+@gne_command(heads_app, "query", "heads query")
+def heads_query(c: Common, holder: dict, layer: int = typer.Option(..., "--layer"), head: int = typer.Option(..., "--head"),
+                direction: str = typer.Option(..., "--direction", help="ペルソナの方向(gne direction の名前)。これが入ったときだけ働く"),
+                seek: Path = typer.Option(..., "--seek", help="探しに行く語(triggers)を持つ対照集合 YAML"),
+                scales: str = typer.Option("0,0.5,1,2,4", "--scales")):
+    """(実験的、CHANGE-04 E)ヘッドの Q に rank-1 の LoRA を足し、ペルソナの方向が入ったときだけトリガーを見に行かせる。
+    scale ごとに、そのヘッドのトリガーへの注目をペルソナあり/なしで測る(V17)。レシピでは
+    {layer, kind: head, head, mode: query, direction, seek, scale}。"""
+    s = holder["session"] = c.session()
+    d = s.heads_query(layer, head, direction=direction, seek=seek, scales=_doses(scales))
+    lines = [f"L{layer} H{head}(K/V グループ {d['kv_group']}、u は次元 {d['dims'][0]}〜{d['dims'][1] - 1} の {d['dims'][2]} 個、"
+             f"トリガーのトークン {d['n_trigger_tokens']}、{d['seconds']:.0f} 秒)",
+             f"v·norm(x)(返事を書き始める位置): ペルソナあり {d['v_mean_a']:.2f} / なし {d['v_mean_b']:.2f}",
+             f"  {'scale':>6} {'あり':>8} {'なし':>8} {'他のヘッドの最大の変化':>12}"]
+    for r in d["rows"]:
+        lines.append(f"  {r['scale']:>6g} {r['head_a']:>8.4f} {r['head_b']:>8.4f} {r['others_shift_max']:>12.4f}")
+    lines.append(("単調に増える" if d["monotonic"] else "単調ではない") +
+                 f"(あり {d['gain_a']:+.3f}、なし {d['gain_b']:+.3f})")
+    return d, "\n".join(lines), 0
+
+
+@gne_command(heads_app, "name", "heads name")
+def heads_name(c: Common, holder: dict, layer: int = typer.Argument(...), head: int = typer.Argument(...),
+               name: str = typer.Argument("", help="名前(空で消す)")):
+    """ヘッドに名前を付ける(ニューロンと同じ names に "L:Hh" で入る)。"""
+    s = holder["session"] = c.session()
+    d = s.set_head_name(layer, head, name)
+    return d, f"L{layer} H{head}: {name or '(名前を消しました)'}", 0
 
 
 @gne_command(app, "neuron")

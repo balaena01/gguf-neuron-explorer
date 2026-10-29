@@ -92,6 +92,8 @@ class InfoOut(Envelope):
     bake: BakeSupport
     stats: dict[str, Any]
     residual_writers: dict[str, Any] | None = None    # §6.17 残差ライター(射影消去の対象)
+    speed: dict[str, Any] | None = None               # CHANGE-03 C: GPU / CPU の層と推定の速さ
+    workflow: list[dict[str, Any]] | None = None      # CHANGE-03 C: 大型モデルの手順と見積もり
 
 
 class ProbeOut(Envelope):
@@ -168,7 +170,7 @@ class StatsActOut(Envelope):
 class UnitModel(_Strict):
     layer: int
     neuron: int | None
-    kind: Literal["neuron", "random", "direction"]
+    kind: Literal["neuron", "random", "direction", "head"]
     seed: int | None
     dose: float
     norm: float
@@ -176,10 +178,12 @@ class UnitModel(_Strict):
     rho: float | None
     add: float | None
     down_norm: float | None
-    mode: Literal["add", "gain"] = "add"     # §6.16
+    mode: Literal["add", "gain", "query"] = "add"     # §6.16、query は CHANGE-04 E
     k: float | None = None
     direction: str | None = None              # §6.17 方向のユニット
     diff_rel: float | None = None             # ‖平均差‖ / ρ_L
+    head: int | None = None                   # CHANGE-04 attention ヘッドの gain
+    seek: str | None = None                   # CHANGE-04 E query の対照集合
 
 
 class RecipeModel(_Strict):
@@ -206,10 +210,11 @@ class SteerOut(Envelope):
     units: list[UnitModel]
     layer_norms: dict[str, float]
     baseline: Generation | None
-    steered: Generation
+    steered: Generation | None                     # --contrast だけ(プロンプトなし)なら None
     differs: bool | None
     when: str = "all"
     sampling: dict[str, float] | None = None       # 使ったサンプリング(seed 込み)。greedy なら None
+    behavior: dict[str, Any] | None = None         # CHANGE-03 A: --contrast の効果とランダムな対照レシピ(null_pct)
 
 
 class ReproCheck(_Strict):
@@ -270,6 +275,9 @@ class GainOut(Envelope):                        # §6.16 gne gain
     rank: dict[str, int] | None = None
     modified: list[dict[str, str]] | None = None           # bake: 書き換えたテンソルと型
     n_tensors: int | None = None
+    heads: dict[str, list[list[float]]] | None = None      # CHANGE-04 lora: 層 → [[ヘッド, k]]
+    head_rank: dict[str, int] | None = None
+    query_loras: list[str] | None = None                   # CHANGE-04 E: クエリ操作の LoRA(ユニットごとに 1 つ)
 
 
 class EvalRow(_Strict):                         # §6.14 gne eval の 1 倍率
@@ -290,6 +298,12 @@ class EvalRow(_Strict):                         # §6.14 gne eval の 1 倍率
     shippable: bool
     judge: float | None = None
     judge_scores: list[int | None] | None = None
+    ctrl: dict[str, Any] | None = None          # CHANGE-03 A: 対照レシピの分布(novelty / capability_drop_pt / ppl_worse_pct / rows)
+    ctrl_novelty_p95: float | None = None
+    ctrl_capability_drop_p50: float | None = None
+    ctrl_ppl_worse_p50: float | None = None
+    novelty_null_pct: float | None = None
+    reactivity: dict[str, Any] | None = None    # CHANGE-04 F: with / without / reactivity / increase(・ctrl・null_pct)
 
 
 class EvalOut(Envelope):
@@ -304,6 +318,8 @@ class EvalOut(Envelope):
     samples: dict[str, Any]
     judge: dict[str, str] | None
     seconds: float
+    random_controls: int = 0                    # CHANGE-03 A: 倍率ごとの対照レシピの本数
+    reactivity: dict[str, Any] | None = None    # CHANGE-04 F: 反応性に使った対照集合
 
 
 class DirectionLayer(_Strict):
@@ -425,6 +441,7 @@ class LensSteerOut(Envelope):
     null: dict[Literal["pos", "neg"], NullSummary]
     seconds: float
     neurons: list[SteerNeuron]
+    workers: dict[str, Any] | None = None       # CHANGE-03 B: --workers で分けたときの部分ごとの結果
 
 
 class CandidateModel(_Strict):
@@ -485,6 +502,7 @@ class SweepOut(Envelope):
     n_units: int
     n_new_records: int
     seconds: float
+    workers: dict[str, Any] | None = None       # CHANGE-03 B: --workers で分けたときの部分ごとの結果
 
 
 class DoseStats(_Strict):
@@ -509,6 +527,7 @@ class RankedUnit(_Strict):
 
 class RankOut(Envelope):
     run: str
+    parts: list[str] = []                       # CHANGE-03 B: 結合した JSONL(本体とワーカーごとの部分)
     units_path: str
     n_units: int
     n_neurons: int
@@ -596,6 +615,107 @@ class NeuronOut(Envelope):
     coverage: dict[str, bool]
 
 
+class ConnectionsOut(Envelope):                 # gne connections(CHANGE-03 C で CLI を足した)
+    path: str
+    model_id: str
+    k: int
+    window: int | None
+    rho_scaled: bool
+    layers: list[int]
+    n_pairs: int
+    seconds: float
+    formula: str
+    down_reads: int
+    peak_rss_gb: float
+
+
+class WorkerOut(Envelope):                      # CHANGE-03 B
+    name: str
+    n_jobs: int
+
+
+class HeadRow(_Strict):                         # CHANGE-04 C
+    layer: int
+    head: int
+    kind: Literal["attn", "linear"]
+    trigger_mass: float | None
+    pattern_shift: float | None
+    out_shift: float | None
+    dir_cos: float | None
+    z: float | None
+    null_pct: float | None
+
+
+class HeadsContrastOut(Envelope):
+    name: str
+    path: str
+    contrast: str
+    contrast_sha: str
+    direction: str | None
+    system_b2: str
+    layers: list[int]
+    n_prompts: int
+    n_with_triggers: int
+    max_tokens: int
+    floors: dict[str, float]
+    null_stats: dict[str, dict[str, Any]]
+    top: list[HeadRow]
+    n_heads: int
+    candidates: str
+    samples: list[dict[str, Any]]
+    seconds: float
+
+
+class AttentionOut(Envelope):                   # CHANGE-04 B(gne heads attention)
+    text: str
+    n_tokens: int
+    pos: int
+    tokens: list[str]
+    heads: list[dict[str, Any]]
+    pattern: list[list[float]] | None = None
+
+
+class HeadOut(Envelope):                        # CHANGE-04(gne heads show)
+    layer: int
+    head: int
+    kind: Literal["attn", "linear"]
+    n_head: int
+    n_head_kv: int
+    head_dim: int
+    writer: str
+    block: list[int]
+    kv_group: int | None
+    name: str | None
+    contrasts: list[dict[str, Any]]
+    gain_k: list[float]
+    logit_lens: dict[str, Any] | None
+
+
+class HeadsQueryOut(Envelope):                  # CHANGE-04 E(gne heads query、V17)
+    layer: int
+    head: int
+    direction: str
+    seek: str
+    kv_group: int
+    dims: list[int]
+    v_gap: float
+    v_mean_a: float
+    v_mean_b: float
+    q_norm: float
+    n_trigger_tokens: int
+    rows: list[dict[str, Any]]
+    monotonic: bool
+    gain_a: float
+    gain_b: float
+    seconds: float
+
+
+class HeadNameOut(Envelope):
+    layer: int
+    head: int
+    name: str | None
+
+
 COMMAND_SCHEMAS: dict[str, type[Envelope]] = {
     "chat": ChatOut, "neuron": NeuronOut,
     "sweep": SweepOut, "rank": RankOut,
@@ -604,4 +724,7 @@ COMMAND_SCHEMAS: dict[str, type[Envelope]] = {
     "stats resid": StatsResidOut, "stats act": StatsActOut, "steer": SteerOut,
     "export-cvec": ExportOut, "import-cvec": ImportOut, "bake": BakeOut, "gain": GainOut,
     "eval": EvalOut, "direction": DirectionOut, "ablate": AblateOut,
+    "heads contrast": HeadsContrastOut, "heads attention": AttentionOut, "heads show": HeadOut, "heads name": HeadNameOut,
+    "heads query": HeadsQueryOut,
+    "connections": ConnectionsOut, "worker": WorkerOut,
 }

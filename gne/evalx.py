@@ -258,14 +258,72 @@ class Judge:
         self.e.close()
 
 
+# --- 反応性(CHANGE-04 F) ------------------------------------------------------------------------------
+
+@dataclass
+class Reactivity:
+    """対照集合の reactivity(トリガーあり/なしの対)と validate.match(性格の判定)。"""
+    name: str
+    path: Path
+    pairs: list[tuple[str, str]]
+    match: str
+
+    @classmethod
+    def load(cls, path: str | Path) -> Reactivity:
+        p = Path(path)
+        if not p.exists():
+            raise GneError("FILE_NOT_FOUND", f"対照集合 {p} がありません")
+        d = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+        pairs = [(str(x["with"]), str(x["without"])) for x in (d.get("reactivity") or []) if x.get("with") and x.get("without")]
+        match = (d.get("validate") or {}).get("match")
+        if not pairs or not match:
+            raise GneError("BAD_CONTRAST", f"{p}: 反応性には reactivity(with / without の対)と validate.match が要ります")
+        try:
+            re.compile(match)
+        except re.error as e:
+            raise GneError("BAD_CONTRAST", f"validate.match の正規表現が読めません: {e}") from e
+        return cls(d.get("name") or p.stem, p, pairs, match)
+
+
+def reactivity_score(session, rc: Reactivity, recipe: Recipe | None, when: str, max_tokens: int,
+                     tick: Callable[[int], None], judge: Judge | None = None) -> dict:
+    """トリガーあり/なしの各プロンプト(system なし)に返事をさせ、判定の一致率(と judge)の差 = 反応性。"""
+    rx = re.compile(rc.match, re.IGNORECASE)
+    vecs = session.vectors(recipe)[0] if recipe is not None and recipe.add_units else None
+    lora = session.lora_for(recipe) if recipe is not None else None
+    items = [(p, max_tokens) for pair in rc.pairs for p in pair]
+    outs = _generate(session, items, vecs, lora, when, tick)
+    hit = [bool(rx.search(o["text"])) for o in outs]
+    w, wo = float(np.mean(hit[0::2])), float(np.mean(hit[1::2]))
+    d = {"with": w, "without": wo, "reactivity": w - wo, "n_pairs": len(rc.pairs),
+         "samples": [{"with": outs[2 * i]["text"][:200], "without": outs[2 * i + 1]["text"][:200]} for i in range(min(3, len(rc.pairs)))]}
+    if judge is not None:
+        sc = [judge.score(o["text"]) for o in outs]
+        jw = [x for x in sc[0::2] if x is not None]
+        jo = [x for x in sc[1::2] if x is not None]
+        d["judge_with"] = float(np.mean(jw)) if jw else None
+        d["judge_without"] = float(np.mean(jo)) if jo else None
+        d["judge_reactivity"] = (d["judge_with"] - d["judge_without"]) if jw and jo else None
+    return d
+
+
 # --- 評価の本体 ----------------------------------------------------------------------------------------
 
 def evaluate(session, recipe: Recipe, *, doses=(0, 0.25, 0.5, 0.75, 1.0), suite: str | Path | None = None,
-             when: str | None = None, judge: Judge | None = None,
+             when: str | None = None, judge: Judge | None = None, random_controls: int = 0,
+             reactivity: str | Path | None = None, head_controls: int = 0, reactivity_tokens: int = 64,
              progress: Callable[[int, int, str], None] | None = None) -> dict:
     """dose(レシピ全体の倍率)ごとに全タスクを流し、指標の表を返す。0 が無ければ足す(ベースライン、最初に測る)。
     倍率 0 も同じ when の経路で生成する(バッチの組み方で数値が変わるので、比べる行どうしで経路をそろえる)。
-    負の倍率(反対向き)も測れる。表は倍率の小さい順。"""
+    負の倍率(反対向き)も測れる。表は倍率の小さい順。
+    random_controls > 0 なら、0 以外の各倍率で同じ大きさのランダムな対照レシピ(controls.control_recipes)も同じタスクで測り、
+    行の ctrl に persona・能力・ppl の分布を入れる(CHANGE-03 A。judge は対照では回さない)。
+    reactivity(対照集合の YAML)を渡すと、各倍率で反応性(トリガーあり/なしの判定の一致率の差、CHANGE-04 F)も測る。
+    head_controls > 0 なら、ヘッドのユニットを同じ k のランダムなヘッドに替えた対照で反応性を測り、null_pct を出す。"""
+    from .controls import head_control_recipes
+    from .controls import control_recipes
+    from .controls import null_pct as ctrl_null_pct
+    from .controls import summarize as summarize_ctrl
     from .when import parse_when
     st = load_suite(suite)
     doses = sorted({float(d) for d in doses} | {0.0})
@@ -276,15 +334,24 @@ def evaluate(session, recipe: Recipe, *, doses=(0, 0.25, 0.5, 0.75, 1.0), suite:
              + [("mix", t, st.max_tokens["mix"]) for t in st.mix] + [("persona", t, st.max_tokens["persona"]) for t in st.persona])
     t0 = time.perf_counter()
     rows, samples, base_persona = [], {}, None
-    total, done = len(doses) * (len(items) + len(st.ppl)), 0
+    n_ctrl = max(0, int(random_controls))
+    if n_ctrl and not control_recipes(session, recipe, 1):
+        n_ctrl = 0                                  # gain だけのレシピには向きが無いので対照を作れない
+    total, done = (len(doses) + n_ctrl * (len(doses) - 1)) * (len(items) + len(st.ppl)), 0
+    rc = Reactivity.load(reactivity) if reactivity else None
+    n_hctrl = max(0, int(head_controls)) if rc is not None else 0
+    if n_hctrl and not head_control_recipes(session, recipe, 1):
+        n_hctrl = 0                                 # ヘッドの無いレシピにはヘッドの対照を作れない
+    if rc is not None:
+        total += (len(doses) + n_hctrl * (len(doses) - 1)) * 2 * len(rc.pairs)
 
     def tick(n: int, d: float = 0.0):
         nonlocal done
         done += n
         if progress:
             progress(done, total, f"eval dose {d:g}")
-    for d in order:
-        r = recipe.scaled(d) if d != 0 else None
+
+    def measure(r: Recipe | None, d: float):
         vecs = session.vectors(r)[0] if r is not None else None
         lora = session.lora_for(r) if r is not None else None
         outs = _generate(session, [(t["prompt"], mt) for _, t, mt in items], vecs, lora, w, lambda n, d=d: tick(n, d))
@@ -295,23 +362,44 @@ def evaluate(session, recipe: Recipe, *, doses=(0, 0.25, 0.5, 0.75, 1.0), suite:
         ex = [score_exact(o["text"], t["answer"]) for t, o in by["exact"]]
         fm = [score_format(o["text"], t) for t, o in by["format"]]
         mixes = [mix_ratio(o["text"], st.zh_only) for _, o in by["mix"]]
-        pers_out = [o for _, o in by["persona"]]
-        if d == 0:
-            base_persona = pers_out
-        pm = persona_metrics(base_persona, pers_out, tok)
         row = {"dose": d, "exact": float(np.mean(ex)) if ex else None, "format": float(np.mean(fm)) if fm else None,
                "capability": float(np.mean(ex + fm)) if ex + fm else None,
                "ppl": ppl, "ppl_mean": float(np.exp(np.mean(np.log(list(ppl.values()))))) if ppl else None,   # 幾何平均
                "mix_zh": float(np.mean([a for a, _ in mixes])) if mixes else 0.0,
                "mix_other": float(np.mean([b for _, b in mixes])) if mixes else 0.0,
-               "persona": pm,
                "failed": {"exact": [t["id"] for (t, _), ok in zip(by["exact"], ex, strict=True) if not ok],
                           "format": [t["id"] for (t, _), ok in zip(by["format"], fm, strict=True) if not ok]}}
+        return row, by, ex, fm
+
+    for d in order:
+        r = recipe.scaled(d) if d != 0 else None
+        row, by, ex, fm = measure(r, d)
+        pers_out = [o for _, o in by["persona"]]
+        if d == 0:
+            base_persona = pers_out
+        row["persona"] = persona_metrics(base_persona, pers_out, tok)
         if judge is not None:
             scores = [judge.score(o["text"]) for o in pers_out]
             vals = [s for s in scores if s is not None]
             row["judge"] = float(np.mean(vals)) if vals else None
             row["judge_scores"] = scores
+        if rc is not None:
+            rx = reactivity_score(session, rc, r, w, reactivity_tokens, lambda n, d=d: tick(n, d), judge)
+            if n_hctrl and d != 0:
+                cr_ = [reactivity_score(session, rc, c, w, reactivity_tokens, lambda n, d=d: tick(n, d))["reactivity"]
+                       for c in head_control_recipes(session, r, n_hctrl)]
+                rx["ctrl"] = {"n": len(cr_), "values": cr_, **summarize_ctrl(cr_)}
+                rx["null_pct"] = ctrl_null_pct(rx["reactivity"], cr_)
+            row["reactivity"] = rx
+        if n_ctrl and d != 0:
+            crow = []
+            for c in control_recipes(session, r, n_ctrl):
+                cr, cby, _, _ = measure(c, d)
+                pm = persona_metrics(base_persona, [o for _, o in cby["persona"]], tok)
+                crow.append({"name": c.name, "capability": cr["capability"], "ppl_mean": cr["ppl_mean"],
+                             "mix": cr["mix_zh"] + cr["mix_other"], "novelty": pm["novelty"], "mass": pm["mass"],
+                             "distinct4": pm["distinct4"]})
+            row["ctrl"] = {"n": len(crow), "rows": crow}
         rows.append(row)
         samples[f"{d:g}"] = {"persona": [{"id": t["id"], "text": o["text"][:400]} for t, o in by["persona"]],
                              "mix": [{"id": t["id"], "text": o["text"][:200]} for t, o in by["mix"][:3]],
@@ -330,7 +418,29 @@ def evaluate(session, recipe: Recipe, *, doses=(0, 0.25, 0.5, 0.75, 1.0), suite:
         row["ok"] = {"capability": drop <= th["capability_drop_pt"], "ppl": worse <= th["ppl_worse_pct"],
                      "mix": mix_up <= th["mix_increase"] + 1e-9}
         row["shippable"] = all(row["ok"].values())
-    return {"recipe": recipe.to_dict(), "when": w, "suite": {"name": st.name, "path": str(st.path), "n_tasks": st.n_tasks,
+        c = row.get("ctrl")
+        if c:                                        # 対照の分布(能力の低下・ppl の悪化は無介入との差に直す)
+            cr = c["rows"]
+            c["novelty"] = summarize_ctrl([x["novelty"] for x in cr])
+            c["mass"] = summarize_ctrl([x["mass"] for x in cr])
+            c["capability_drop_pt"] = summarize_ctrl(
+                [(base["capability"] - x["capability"]) * 100 if base["capability"] is not None and x["capability"] is not None
+                 else None for x in cr])
+            c["ppl_worse_pct"] = summarize_ctrl(
+                [(x["ppl_mean"] / base["ppl_mean"] - 1) * 100 if base["ppl_mean"] and x["ppl_mean"] else None for x in cr])
+            row["ctrl_novelty_p95"] = c["novelty"]["p95"]
+            row["ctrl_capability_drop_p50"] = c["capability_drop_pt"]["p50"]
+            row["ctrl_ppl_worse_p50"] = c["ppl_worse_pct"]["p50"]
+            row["novelty_null_pct"] = ctrl_null_pct(row["persona"]["novelty"], [x["novelty"] for x in cr])
+    if rc is not None:
+        b0 = base.get("reactivity", {}).get("reactivity")
+        for row in rows:
+            x = row.get("reactivity")
+            if x is not None and b0 is not None:
+                x["increase"] = x["reactivity"] - b0              # 無介入からの反応性の増え方
+    return {"recipe": recipe.to_dict(), "when": w, "random_controls": n_ctrl,
+            "reactivity": None if rc is None else {"contrast": str(rc.path), "name": rc.name, "n_pairs": len(rc.pairs),
+                                                   "head_controls": n_hctrl, "max_tokens": reactivity_tokens}, "suite": {"name": st.name, "path": str(st.path), "n_tasks": st.n_tasks,
             "thresholds": th}, "doses": doses, "rows": rows, "samples": samples,
             "judge": {"target": judge.target, "model": str(judge.e.path)} if judge else None,
             "seconds": time.perf_counter() - t0}

@@ -2,6 +2,7 @@
 // U0: 構造の描画、層の選択、ジャンプ、hover の L N。
 // U1: 色の重ね合わせ(overlay)、LIST の rank、NEURON(Examples / Details)、hover の語、検索、layers ビュー。
 // U2: NEURON の Chat(3 列・reads you)、LIST の fires と recipe、地図のレシピの印、ジョブのバーと計算メニュー。
+// CHANGE-04 G: 板の上辺の刻み = ヘッド(hover・クリックで HEAD パネル)、overlay heads:<name> と fires のヘッドの注目、レシピのヘッド。
 import { LayerCache, getBin, getJSON, loadVocab } from "./api.js";
 import { AgentLink } from "./agent.js";
 import { LANG, setLang, t, translateDOM } from "./i18n.js";
@@ -13,7 +14,8 @@ import { JobsBar, KIND, computeMenu } from "./jobs.js";
 import { LayersView } from "./layers.js";
 import { syntheticArch } from "./layout.js";
 import { LayerMap } from "./map.js";
-import { FIELDS, colorize, colorizeHits, emphasisFactor, emphasize, fieldLabel, globalScale, layersWith, legendHTML } from "./overlay.js";
+import { FIELDS, colorize, colorizeHeads, colorizeHits, emphasisFactor, emphasize, fieldLabel, globalScale, layersWith, legendHTML } from "./overlay.js";
+import { HeadPanel } from "./heads.js";
 import { NeuronPanel, RankList, SearchList, esc, toksHTML } from "./panels.js";
 import { Recipe, RecipePanel } from "./recipe.js";
 
@@ -24,6 +26,8 @@ const state = {
   model: null, arch: null, vocab: null, map: null, view: "map", layer: 0, focus: null, note: "",
   layout: "index", web: false, webHops: 2, links: null, linkMode: "direct",
   overlay: { field: "none", threshold: null, scale: null, values: new Map(), metas: new Map(), hits: null, prev: "none" },
+  headFocus: null,                        // HEAD パネルで開いているヘッド { layer, head }
+  heads: null,                            // ヘッドの色 { field: "heads:<name>" | "fires_heads", values: Map(層 → Float32Array(n_head)), … }
 };
 window.gne = state;                       // 自動テスト(playwright)と開発用
 
@@ -61,7 +65,28 @@ function describeLayer(L) {
 }
 
 // --- hover の吹き出し(§4.6): L N、名前、sweep の上位語、steer ±、logit ±、今の overlay の値 ---------------------
+// ヘッド(CHANGE-04 G): L H、種類、名前、今のヘッドの色の値(対照分析の z と順位、または fires の注目)、レシピの倍率
+function headTooltipHTML(h) {
+  const L = h.layer, li = state.arch.layers[L], lines = [];
+  const name = state.model ? (state.model.names || {})[`${L}:H${h.head}`] : null;
+  const kv = li.mixer === "attention" && li.n_head_kv && li.n_head_kv !== li.n_head ? ` · kv ${Math.floor(h.head / (li.n_head / li.n_head_kv))}` : "";
+  lines.push(`<span class="t-id">L${L} H${h.head}</span><span class="t-v">${h.kind === "attn" ? "attention" : t("線形注意")}${kv}</span>${name ? `<span class="t-name">${esc(name)}</span>` : ""}`);
+  const ho = state.heads, v = ho && ho.values.get(L);
+  if (ho && ho.field.startsWith("heads:")) {
+    const r = ho.info.get(`${L}:${h.head}`);
+    if (r) lines.push(`<span class="t-k">color</span><span class="t-v" style="margin:0">z ${fmt(r.z, 2)} · #${r.rank}/${ho.n} · null ${fmt(r.null_pct, 2)}${
+      r.trigger_mass !== null && r.trigger_mass !== undefined ? ` · trigger ${fmt(r.trigger_mass, 3)}` : ""}${r.dir_cos !== null && r.dir_cos !== undefined ? ` · dir_cos ${fmt(r.dir_cos, 3)}` : ""}</span>`);
+  } else if (ho && v && Number.isFinite(v[h.head])) {
+    lines.push(`<span class="t-k">color</span><span class="t-v" style="margin:0">${t("注目 {v}({tok} へ)", { v: fmt(v[h.head], 3), tok: esc(ho.label || "") })}</span>`);
+  }
+  const r = state.recipe && state.recipe.hasHead(L, h.head);
+  if (r) lines.push(`<span class="t-k">recipe</span><span class="t-v" style="margin:0">×${fmt(r.k, 2)}</span>`);
+  if (state.model) lines.push(`<span class="t-wait">${t("クリックで HEAD パネル")}</span>`);
+  return lines.join("<br>");
+}
+
 function tooltipHTML(h) {
+  if (h.head !== undefined) return headTooltipHTML(h);
   const who = h.shared ? `shared N${h.neuron}` : h.expert !== undefined ? `E${h.expert} N${h.neuron}` : `N${h.neuron}`;
   const L = h.layer, n = h.neuron, lines = [];
   const name = state.model && !h.shared && h.expert === undefined ? (state.model.names || {})[`${L}:${n}`] : null;
@@ -121,8 +146,10 @@ function updateStatus() {
   const map = state.map;
   const where = map && map.front !== null ? `L${map.front}` : t("{n} 層", { n: state.arch.n_layer });   // 層の説明は選択欄にある
   const flash = state.flash && state.flash.until > Date.now() ? state.flash.text : "";        // ジョブの結果などの一時的な知らせ
-  $("#status-main").textContent = `${m.name} · ${where}${flash ? ` · ${flash}` : ""}${state.note ? ` · ${state.note}` : ""}`;
-  $("#status-main").title = $("#status-main").textContent;
+  const sp = state.model && state.model.speed;                  // GPU / CPU の層と推定の速さ(CHANGE-03 C)。CPU の層があるときだけ出す
+  const off = sp && sp.cpu_layers > 0 ? ` · ${t("GPU {g} 層 / CPU {c} 層、約 {v} tok/s", { g: sp.gpu_layers, c: sp.cpu_layers, v: Math.round(sp.decode_tok_s) })}` : "";
+  $("#status-main").textContent = `${m.name} · ${where}${off}${flash ? ` · ${flash}` : ""}${state.note ? ` · ${state.note}` : ""}`;
+  $("#status-main").title = $("#status-main").textContent + (sp ? ` · ${t("GPU {g} 層 / CPU {c} 層、約 {v} tok/s", { g: sp.gpu_layers, c: sp.cpu_layers, v: Math.round(sp.decode_tok_s) })}` : "");
   $("#perf").textContent = state.view === "embed"
     ? (embedView && embedView.data ? `${embedView.data.points.length.toLocaleString()} rollouts (embed)` : "— (embed)")
     : state.view === "layers" ? "(layers)"                                // 層の数は左にある
@@ -142,13 +169,19 @@ function legend() {
   const floors = [...o.metas.values()].map((m) => m.floor);
   const color = o.field === "none" ? it(sw("#10141b"), t("データ無し"))
     : `<b>${esc(fieldLabel(o.field))}</b> ${legendHTML(o.field, o.scale || {}, { threshold: o.threshold, nHits: o.hits ? o.hits.length : 0, floors })}`;
-  const frame = o.field === "none" ? "" : `<div>${it(`${t("シートの枠")}: `, sw("#252b33"), t("データ無し"))}${it(sw("#5e4a26"), "→", sw("#f0b850"), t("光る点の数(最多の層で最も明るい)"))}` +
+  const fh = state.heads && state.heads.field === "fires_heads"                                  // fires のヘッドの注目(点の色と一緒に出す)
+    ? `<div><b>${esc(fieldLabel("fires_heads"))}</b> ${legendHTML("fires_heads", state.heads.scale)}</div>` : "";
+  const litWhat = o.field.startsWith("heads:") ? t("光るヘッドの数(最多の層で最も明るい)") : t("光る点の数(最多の層で最も明るい)");
+  const frame = o.field === "none" ? "" : `<div>${it(`${t("シートの枠")}: `, sw("#252b33"), t("データ無し"))}${it(sw("#5e4a26"), "→", sw("#f0b850"), litWhat)}` +
     (o.factor < 1 ? itl(t("(光る点が全体の {p}% あるので、点は一律に暗くし、数は枠で示す)", { p: Math.round(0.02 / o.factor * 100) })) : "") +
     (o.weak && o.weak.size ? itl(t("({layers} は活性統計が無く文章内 p99 で割ったので、枠の比較から外した)", { layers: [...o.weak].map((L) => `L${L}`).join(", ") })) : "") + "</div>";
   const ring = (c) => `<span class="sw ring" style="border-color:${c}"></span>`;
   const ag = agent ? agent.state : null;
+  const hbox = (c) => `<span class="sw hbox" style="border-color:${c}"></span>`;
   const marks = (state.recipe && state.recipe.neurons().length ? [it(ring("#f2d24b"), t("レシピ +")), it(ring("#c94fa7"), t("レシピ −(大きさ = |dose|)"))] : [])
     .concat(state.focus ? [it(ring("#ffffff"), t("開いているニューロン"))] : [])
+    .concat(state.recipe && state.recipe.heads().length ? [it(hbox("#f2d24b"), hbox("#c94fa7"), t("レシピのヘッド(黄 = 強める ×k > 1、赤紫 = 弱める・消す ×k < 1)"))] : [])
+    .concat(state.headFocus ? [it(hbox("#ffffff"), t("開いているヘッド"))] : [])
     .concat(ag && ag.highlights.length ? [it(`<span class="sw ring dash" style="border-color:#6fe3ff"></span>`, `${t("エージェントの強調")}${ag.label ? ` (${esc(ag.label)})` : ""}`)] : [])
     .concat(ag && ag.notes.length ? [itl(`<span class="sw ring" style="border-color:#6fe3ff;width:9px;height:9px"></span><span class="ag-note-sw">agent ✎</span>` +
       t("エージェントの注釈(小さな輪。札は 28 字まで、マウスを当てると全文、クリックで開く)"))] : [])
@@ -164,8 +197,11 @@ function legend() {
     ? t("シート内の並び = {k} 配置(UMAP)。近くにあっても似ているのは弱い傾向だけ", { k: state.layout }) +
       (state.layoutMissing && state.layoutMissing.length ? t("(未計算の {n} 層は番号順)", { n: state.layoutMissing.length }) : "")
     : t("シート内の並びはニューロン番号順(近くにあっても似ているとは限らない)");
-  $("#legend").innerHTML = `<div>${color}</div>${frame}<div>${parts.join("")}</div>${marks.length ? `<div>${marks.join("")}</div>` : ""}${links}` +
-    `<div class="note st">${t("各層 = 手前の板(mixer、上辺の刻みが head の数)+ 奥のシート(MLP の全ニューロン{moe})、下の線 = 残差", { moe })}</div>` +
+  const st = state.model && state.arch.layers.some((li) => li.head_dim)
+    ? t("各層 = 手前の板(mixer、上辺の刻み = ヘッド。マウスを当てると番号、クリックで HEAD パネル)+ 奥のシート(MLP の全ニューロン{moe})、下の線 = 残差", { moe })
+    : t("各層 = 手前の板(mixer、上辺の刻みが head の数)+ 奥のシート(MLP の全ニューロン{moe})、下の線 = 残差", { moe });
+  $("#legend").innerHTML = `<div>${color}</div>${fh}${frame}<div>${parts.join("")}</div>${marks.length ? `<div>${marks.join("")}</div>` : ""}${links}` +
+    `<div class="note st">${st}</div>` +
     `<div class="note">${lay}</div>`;
 }
 
@@ -175,11 +211,12 @@ let overlayToken = 0;
 function fillColorSelect() {
   const sel = $("#color-select");
   const names = ["none", ...Object.keys(FIELDS).filter((k) => k !== "none"), ...(state.model ? state.model.directions.map((d) => `cos:${d}`) : [])];
+  const heads = state.model ? state.model.heads || [] : [];                // 保存済みのヘッドの対照分析(CHANGE-04 G)
   sel.innerHTML = names.map((k) => {
     const n = state.model && k !== "none" ? layersWith(k, state.model).length : 0;
     const dis = k !== "none" && !n;
     return `<option value="${esc(k)}"${dis ? " disabled" : ""}>${esc(fieldLabel(k))}${k === "none" ? "" : dis ? ` (${t("データ無し")})` : ` (${t("{n} 層", { n })})`}</option>`;
-  }).join("");
+  }).join("") + heads.map((h) => `<option value="${esc(`heads:${h.name}`)}">${esc(fieldLabel(`heads:${h.name}`))} (${t("{n} ヘッド", { n: h.n_heads })})</option>`).join("");
   const f = state.overlay.field;
   if (f.startsWith("search:") || f.startsWith("fires:")) sel.insertAdjacentHTML("beforeend", `<option value="${esc(f)}">${esc(fieldLabel(f))}</option>`);
   sel.value = state.overlay.field;
@@ -193,6 +230,80 @@ async function refreshModel() {
   state.model.layouts = m.layouts;
   state.model.connections = m.connections;
   state.model.runs = m.runs;
+  state.model.heads = m.heads;
+}
+
+// --- ヘッドの色(CHANGE-04 G): 板の上辺の帯。heads:<name> は対照分析の z、fires_heads は fires で選んだトークンへの注目 ----------
+const headsCache = new LayerCache((name) => getJSON(`/api/heads/${encodeURIComponent(name)}`));
+const firesHeadsCache = new LayerCache(async (fid) => {
+  const r = await getBin(`/api/fires/${fid}/heads`);
+  const [n, T] = r.shape.split(",").map(Number);
+  return { v: new Float32Array(r.buf), n, T, meta: r.meta };
+});
+
+// 今の state.heads で帯を塗る。層ごとの光るヘッドの数を返す
+function colorHeads() {
+  const ho = state.heads, cols = new Map(), lit = new Map();
+  if (!ho) { state.map.setHeadColors(null); return lit; }
+  for (const [L, v] of ho.values) {
+    const c = colorizeHeads(ho.field === "fires_heads" ? "fires_heads" : "heads", v,
+                            { ...ho.scale, nullPct: ho.nulls ? ho.nulls.get(L) : null });
+    cols.set(L, c);
+    lit.set(L, c.lit);
+  }
+  state.map.setHeadColors(cols);
+  return lit;
+}
+
+function clearHeads() {
+  if (!state.heads) return;
+  state.heads = null;
+  state.map.setHeadColors(null);
+}
+
+// overlay heads:<name>: 対照分析の全ヘッドの z。点(ニューロン)は塗らない
+async function applyHeadsOverlay(field, tok) {
+  const name = field.slice(6);
+  headsCache.done.delete(name);                                   // 作り直したかもしれないので取り直す
+  const d = await headsCache.get(name);
+  if (tok !== overlayToken) return null;
+  const values = new Map(), nulls = new Map(), info = new Map(), lit = [];
+  d.rows.forEach((r, i) => {
+    const li = state.arch.layers[r.layer];
+    if (!li || !(r.head < li.n_head)) return;
+    if (!values.has(r.layer)) { values.set(r.layer, new Float32Array(li.n_head).fill(NaN)); nulls.set(r.layer, new Float32Array(li.n_head).fill(NaN)); }
+    values.get(r.layer)[r.head] = r.z ?? NaN;
+    nulls.get(r.layer)[r.head] = r.null_pct ?? NaN;
+    info.set(`${r.layer}:${r.head}`, { ...r, rank: i + 1 });
+    if ((r.null_pct ?? 0) >= 0.95 && Number.isFinite(r.z)) lit.push(r.z);
+  });
+  state.heads = { field, values, nulls, info, n: d.rows.length,
+                  scale: { lo: lit.length ? Math.min(...lit) : 0, hi: lit.length ? Math.max(...lit) : 1 } };
+  return colorHeads();
+}
+
+// fires のヘッドの注目(fires_heads): 選んだトークンへの、後ろの位置からの注目の平均。全トークン(-1)は各ヘッドの最大
+async function applyFiresHeads(fid, tok, label) {
+  const tokn = overlayToken;
+  let x;
+  try { x = await firesHeadsCache.get(fid); }
+  catch (e) { state.note = `${t("エラー")}: ${e.message}`; updateStatus(); clearHeads(); legend(); return; }
+  if (tokn !== overlayToken) return;
+  const values = new Map();
+  let mx = 0;
+  x.meta.heads.forEach(([L, h], i) => {
+    if (!values.has(L)) values.set(L, new Float32Array(state.arch.layers[L].n_head).fill(NaN));
+    const row = x.v.subarray(i * x.T, (i + 1) * x.T);
+    let v = NaN;
+    if (tok === -1) { for (let p = 1; p < x.T; p++) if (Number.isFinite(row[p]) && !(row[p] <= v)) v = row[p]; }
+    else if (tok < x.T) v = row[tok];
+    values.get(L)[h] = v;
+    if (Number.isFinite(v)) mx = Math.max(mx, v);
+  });
+  state.heads = { field: "fires_heads", values, scale: { max: mx }, label };
+  colorHeads();
+  legend();
+  rehover();
 }
 
 // 枠の明るさ = その層で光っている点の数(いちばん多い層を 1 とする、比例)。全体ビューでは上位 3 層に札も出す。
@@ -234,6 +345,28 @@ async function applyOverlay(field) {
   o.field = field;
   o.scale = null;                                  // 読み込みが終わるまで前の overlay の尺度を使わない
   $("#cos-thr-wrap").classList.toggle("hidden", !field.startsWith("cos:"));
+  clearHeads();
+  if (field.startsWith("heads:") && state.model) {                       // ヘッドの対照分析: 板の上辺の帯だけを塗る
+    o.values = new Map(); o.metas = new Map(); o.factor = 1;
+    state.map.resetColors(); state.map.setStructureDim(0.35);
+    state.note = t("{f} を読み込み中 {a}/{b}", { f: fieldLabel(field), a: 0, b: 1 });
+    updateStatus();
+    await refreshModel();
+    if (tok !== overlayToken) return;
+    fillColorSelect();
+    let lit;
+    try { lit = await applyHeadsOverlay(field, tok); }
+    catch (e) { state.note = `${t("エラー")}: ${e.message}`; updateStatus(); return; }
+    if (!lit) return;
+    o.scale = state.heads.scale;
+    state.note = "";
+    showLayerCounts(lit, "ヘッド");
+    legend();
+    o.ms = performance.now() - t0;
+    updateStatus();
+    rehover();
+    return;
+  }
   if (field === "none" || !state.model) {
     o.values = new Map(); o.metas = new Map(); o.scale = null;
     state.map.resetColors(); state.map.setStructureDim(1); state.map.setFrameColors(new Map()); state.map.setBadges([]);
@@ -280,6 +413,7 @@ function applyHits(q, mode, hits) {
   o.factor = 1;
   o.values = new Map(); o.metas = new Map(); o.scale = null;
   $("#cos-thr-wrap").classList.add("hidden");
+  clearHeads();
   map.resetColors();
   const byL = new Map();
   for (const h of hits) { if (!byL.has(h.layer)) byL.set(h.layer, []); byL.get(h.layer).push(h.neuron); }
@@ -290,8 +424,9 @@ function applyHits(q, mode, hits) {
   legend();
 }
 
-// fires の値で色を付ける(全層の値を 1 回で取る)。tok = -1 は全トークンでの |最大|
-async function applyFiresOverlay(fid, tok, label, thr) {
+// fires の値で色を付ける(全層の値を 1 回で取る)。tok = -1 は全トークンでの |最大|。
+// heads なら板の上辺のヘッドも、選んだトークンへの注目で塗る(fires_heads)
+async function applyFiresOverlay(fid, tok, label, thr, heads = false) {
   const tokn = ++overlayToken, o = state.overlay;
   if (!o.field.startsWith("fires:") && !o.field.startsWith("search:")) o.prev = o.field;
   state.note = t("fires の値を読み込み中");
@@ -315,6 +450,7 @@ async function applyFiresOverlay(fid, tok, label, thr) {
   fillColorSelect();
   updateStatus();
   rehover();
+  if (heads) applyFiresHeads(fid, tok, label); else { clearHeads(); legend(); }
 }
 
 // --- 配置(§4.4)と配線(§4.7) ------------------------------------------------------------------------------
@@ -396,11 +532,19 @@ function closeSearch() {
 }
 
 // --- LIST・NEURON ----------------------------------------------------------------------------------------
-let rank, neuron, layersView, searchList, chat, firesPanel, recipePanel, jobsBar, embedView, evalView, agent;
+let rank, neuron, layersView, searchList, chat, firesPanel, recipePanel, jobsBar, embedView, evalView, agent, headPanel;
 
 function expand(id) {
   const p = $(`#${id}`);
   if (p.classList.contains("collapsed")) { p.classList.remove("collapsed"); state.map.resize(); }
+}
+
+// NEURON と HEAD は同列の右パネル。画面が狭いときは、開く方でないもう一方をたたむ(地図の幅を残す)
+function expandRight(id) {
+  const other = id === "neuron" ? "head" : "neuron";
+  if (window.innerWidth < 1700 && !$(`#${other}`).classList.contains("collapsed")) $(`#${other}`).classList.add("collapsed");
+  expand(id);
+  state.map.resize();
 }
 
 function openNeuron({ layer, n, kind = "neuron", run = null, tab = null }, { focus = true } = {}) {
@@ -408,7 +552,7 @@ function openNeuron({ layer, n, kind = "neuron", run = null, tab = null }, { foc
   state.shownNote = agent ? agent.noteOf(layer, n) : null;
   state.focus = { layer, n, kind };
   if (first) legend();
-  expand("neuron");
+  expandRight("neuron");
   neuron.open({ layer, n, kind, run, tab });
   showLinks();
   if (kind === "neuron") {
@@ -418,6 +562,20 @@ function openNeuron({ layer, n, kind = "neuron", run = null, tab = null }, { foc
   }
   if (rank.layer !== layer) showLayerInList(layer).then(() => rank.select(layer, n, kind));
   else rank.select(layer, n, kind);
+}
+
+// HEAD パネルでヘッドを開く(CHANGE-04 G)。視点は動かさず、板の上辺の刻みに白い印
+function openHead({ layer, head, tab = null }) {
+  const li = state.arch.layers[layer];
+  if (!li || !li.head_dim || !(head >= 0 && head < li.n_head)) return false;
+  state.headFocus = { layer, head };
+  expandRight("head");
+  headPanel.open({ layer, head, tab });
+  state.map.markHead(layer, head);
+  history.replaceState(null, "", `#L${layer}/H${head}`);
+  $("#jump").value = `L${layer} H${head}`;
+  legend();
+  return true;
 }
 
 async function showLayerInList(L) {
@@ -445,6 +603,10 @@ async function onJobFinished(j) {
   if (j.kind === "layout") { layoutCache.clear(); if (state.layout === j.params.kind) applyLayout(state.layout); }
   if (j.kind === "connections" && state.focus) { showLinks(); neuron.render(); }
   if (j.kind === "eval" && evalView) evalView.refresh(j.result && j.result.name);
+  if (j.kind === "heads_contrast") {                                     // ヘッドの対照分析: overlay の選択肢と、開いているヘッドの Contrast
+    headsCache.clear();
+    if (headPanel && state.headFocus) { headPanel.sums.clear(); headPanel.open(state.headFocus); }
+  }
   if (j.kind === "embed" && embedView) { embedView.setRuns(state.model.runs); if (embedView.run === j.params.run) embedView.load(j.params.run); }
   const f = state.overlay.field;
   if (f !== "none" && !f.startsWith("search:") && !f.startsWith("fires:")) applyOverlay(f);
@@ -457,6 +619,7 @@ function startJob(kind, params) {
 
 function recipeChanged(r) {
   state.map.setMarks(r.neurons().map((u) => ({ layer: u.layer, neuron: u.neuron, dose: u.dose })));   // 方向のユニットは印なし
+  state.map.setHeadMarks(r.heads().map((u) => ({ layer: u.layer, head: u.head, k: u.k })));          // ヘッドは板の上辺の刻みに
   $("#recipe-count").textContent = r.units.length ? `(${r.units.length})` : "";
   legend();
 }
@@ -520,8 +683,10 @@ async function setView(v) {
   }
 }
 
-// "L14 N8949" / "14:8949" / MoE は "L10 E93 N252"
+// "L14 N8949" / "14:8949" / MoE は "L10 E93 N252" / ヘッドは "L21 H7"・"21:H7"
 function parseJump(text) {
+  const h = text.trim().match(/^L?(\d+)\s*[\s:/,]\s*H(\d+)$/i);
+  if (h) return { layer: +h[1], head: +h[2] };
   const m = text.trim().match(/^L?(\d+)\s*[\s:/,]\s*(?:E(\d+)\s*[\s:/,]\s*)?N?(\d+)$/i);
   if (!m) return null;
   return { layer: +m[1], expert: m[2] !== undefined ? +m[2] : null, neuron: +m[3] };
@@ -536,6 +701,11 @@ function wireHeader() {
   jump.addEventListener("keydown", (ev) => {
     if (ev.key !== "Enter") return;
     const j = parseJump(ev.target.value);
+    if (j && j.head !== undefined) {                                     // ヘッドは HEAD パネルで(視点は動かさない)
+      const ok = !!state.model && openHead({ layer: j.layer, head: j.head });
+      ev.target.style.borderColor = ok ? "" : "#c94fa7";
+      return;
+    }
     const li = j && state.arch.layers[j.layer];
     const moe = li && li.ffn.startsWith("moe");
     const ok = li && (moe ? j.expert !== null && j.expert < li.n_expert && j.neuron < li.n_ff : j.expert === null && j.neuron < li.n_ff);
@@ -556,6 +726,12 @@ function wireHeader() {
     const w = $("#neuron").classList.toggle("wide");
     $("#neuron-wide").textContent = t(w ? "⇔ 戻す" : "⇔ 広げる");
     state.map.resize();
+  });
+  $("#head-wide").addEventListener("click", () => {
+    const w = $("#head").classList.toggle("wide");
+    $("#head-wide").textContent = t(w ? "⇔ 戻す" : "⇔ 広げる");
+    state.map.resize();
+    if (headPanel && headPanel.res && headPanel.tab === "pattern") headPanel.drawOut();   // ヒートマップを新しい幅で描き直す
   });
   for (const b of document.querySelectorAll("#list-tabs button[data-tab]")) b.addEventListener("click", () => listTab(b.dataset.tab));
   $("#color-select").addEventListener("change", (ev) => { if (ev.target.value !== state.overlay.field) applyOverlay(ev.target.value); });
@@ -595,6 +771,10 @@ async function main() {
   state.map = new LayerMap($("#map"), state.arch, {
     onHover: showTooltip,
     onClick: (h) => {
+      if (h.head !== undefined) {                                        // 板の上辺の刻み = ヘッド
+        if (state.model) openHead({ layer: h.layer, head: h.head }); else $("#jump").value = `L${h.layer} H${h.head}`;
+        return;
+      }
       if (h.expert !== undefined || h.shared || !state.model) {
         $("#jump").value = h.expert !== undefined ? `L${h.layer} E${h.expert} N${h.neuron}` : `L${h.layer} N${h.neuron}`;
         return;
@@ -629,7 +809,21 @@ async function main() {
       },
       unitWords: (L, n) => { const us = unitsCache.peek(L); const u = us && us.byN.get(n); return u ? u.words.slice(0, 3).join(" · ") : ""; },
       directions: () => (state.model ? state.model.directions : []),
+      onOpenHead: (u) => openHead(u),
+      headKind: (L) => mixerLabel(state.arch.layers[L]),
     });
+    headPanel = new HeadPanel($("#head-body"), {
+      onRecipe: (L, h, k) => {
+        const cur = state.recipe.hasHead(L, h);
+        if (cur && cur.k === k) state.recipe.removeHead(L, h); else state.recipe.addHead(L, h, k);   // 同じ倍率でもう一度押すと外す
+        if (!$("#recipe-list").classList.contains("hidden")) recipePanel.render();
+      },
+      inRecipe: (L, h) => { const u = state.recipe.hasHead(L, h); return u ? u.k : null; },
+      onNamed: (names) => { state.model.names = names; },
+      onOverlay: (field) => { if (state.view !== "map") setView("map"); applyOverlay(field); },
+      onGoto: (u) => openHead(u),
+    });
+    state.headPanel = headPanel;                                         // 自動テスト用
     firesPanel = new FiresPanel($("#fires-list"), {
       nLayer: state.arch.n_layer, onOpen: (u) => openNeuron(u), onField: applyFiresOverlay,
     });
@@ -682,8 +876,12 @@ async function main() {
   if (!state.model) return;
   loadVocab(`${state.model.meta.model_id}:2`).then((v) => { state.vocab = v; rehover(); });   // hover の語(IndexedDB に置く)
   const first = state.model.coverage.find((c) => c.sweep_runs.length);
-  const m = location.hash.match(/^#L(\d+)(?:\/E(\d+))?\/N(\d+)/);
-  if (m) {
+  const m = location.hash.match(/^#L(\d+)(?:\/E(\d+))?\/N(\d+)/), mh = location.hash.match(/^#L(\d+)\/H(\d+)/);
+  if (mh) {
+    if (first) expand("list");
+    showLayerInList(+mh[1]);
+    openHead({ layer: +mh[1], head: +mh[2] });
+  } else if (m) {
     const li = state.arch.layers[+m[1]];
     if (li && li.ffn.startsWith("moe")) state.map.focusNeuron(+m[1], +m[2] * li.n_ff + +m[3]);
     else if (li) openNeuron({ layer: +m[1], n: +m[3] });

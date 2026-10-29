@@ -322,7 +322,7 @@ export class NeuronPanel {
       out.push(`<h4>${t("eval(このニューロンを含むもの、新しい順)")}</h4>${d.evals.map((e) => `<div class="n-eval">
         <a href="#" data-eval="${esc(e.name)}">${esc(e.name)}</a> <span class="mono">${how(e)}</span>${e.n_units > 1 ? ` <span class="muted">${t("ほか {n}", { n: e.n_units - 1 })}</span>` : ""} <span class="muted">when=${esc(e.when || "all")}</span>
         <div class="muted note mono"><span title="${t("配布可の最大倍率(能力 −5pt・ppl +10%・混入なし)")}">${e.max_shippable_dose === null ? `<span class="minus">${t("配布可なし")}</span>` : t("配布可 {d}", { d: fmt(e.max_shippable_dose, 2) })}</span>${
-          e.at_max ? ` · <span title="${t("最大の倍率での能力の低下(pt)と性格の変化量")}">@${fmt(e.at_max.dose, 2)} −${fmt(e.at_max.capability_drop_pt, 1)}pt · ${t("新語")} ${fmt(e.at_max.novelty, 2)}</span>` : ""}</div></div>`).join("")}`);
+          e.at_max ? ` · <span title="${t("最大の倍率での能力の低下(pt)と性格の変化量")}">@${fmt(e.at_max.dose, 2)} −${fmt(e.at_max.capability_drop_pt, 1)}pt · ${t("新語")} ${fmt(e.at_max.novelty, 2)}${e.at_max.ctrl_novelty_p95 != null ? ` <span class="muted" title="${t("同じ大きさのランダムな向きの対照レシピの新語の 95% 点")}">(${t("対照")} p95 ${fmt(e.at_max.ctrl_novelty_p95, 2)})</span>` : ""}</span>` : ""}</div></div>`).join("")}`);
     }
     if (d.gain_k && d.gain_k.length) out.push(`<p class="muted note mono">${t("当てたことのある gain")}: ${d.gain_k.map((k) => `×${fmt(k, 2)}`).join(" ")}</p>`);
     if (d.down_norm !== null) out.push(`<p class="muted note mono">‖W_down[:, n]‖ = ${fmt(d.down_norm, 4)}</p>`);
