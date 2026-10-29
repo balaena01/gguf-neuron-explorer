@@ -115,10 +115,22 @@ class _Ctx:
         self.n_seq_max = n_seq_max
         self.capture = capture
         self.batch = C.llama_batch_init(n_batch, 0, max(1, n_seq_max))
+        self.batch_embd = None          # 音声の埋め込みを入れるバッチ(media.py、使うときに作る)
+        self.n_embd_inp = 0
+        self.split_logits: dict[int, np.ndarray] | None = None   # _decode を分けたときの logits(items の番号 → 行)
+
+    def embd_batch(self, n_embd: int):
+        if self.batch_embd is None:
+            self.batch_embd = C.llama_batch_init(self.n_batch, n_embd, max(1, self.n_seq_max))
+            self.n_embd_inp = n_embd
+        return self.batch_embd
 
     def free(self) -> None:
         if self.ptr is not None:
             C.llama_batch_free(self.batch)
+            if self.batch_embd is not None:
+                C.llama_batch_free(self.batch_embd)
+                self.batch_embd = None
             C.llama_free(self.ptr)
             self.ptr = None
 
@@ -126,7 +138,8 @@ class _Ctx:
 class Engine:
     def __init__(self, path: str | Path, *, n_gpu_layers: int = -1, n_ctx: int = 4096,
                  n_seq_max: int = 8, n_threads: int | None = None, n_batch: int = 2048,
-                 probe_ubatch: int = 512, kv_unified: bool = True, verbose: bool = False):
+                 probe_ubatch: int = 512, kv_unified: bool = True, verbose: bool = False,
+                 mmproj: str | Path | None = None):
         _llama_logger.set_verbose(verbose)
         _backend_init()
         self.path = Path(path)
@@ -152,6 +165,8 @@ class Engine:
         self._probe: _Ctx | None = None
         self._probe_logits_all = False
         self._attn_probe: _Ctx | None = None      # CHANGE-04: flash attention を切った probe ctx(kq_soft_max を見るため)
+        self.mmproj = Path(mmproj) if mmproj else None
+        self._media = None                        # 音声の入力(media.py)。音声が来たときに mmproj を読む
 
     # --- lifecycle ------------------------------------------------------------------------------
 
@@ -160,6 +175,9 @@ class Engine:
             if c is not None:
                 c.free()
         self._steer = self._probe = self._attn_probe = None
+        if self._media is not None:
+            self._media.close()
+            self._media = None
         if self.model:
             C.llama_model_free(self.model)
             self.model = None
@@ -246,6 +264,9 @@ class Engine:
         tpl = template or self.chat_template
         if not tpl:
             raise ValueError("GGUF に tokenizer.chat_template がありません(configs/templates で上書きしてください)")
+        if any(isinstance(m.get("content"), list) for m in messages):     # 部品の content(音声は MARKER の文字に)
+            from .media import normalize
+            messages = normalize(messages)[0]
         return render_template(tpl, messages, enable_thinking=enable_thinking,
                                add_generation_prompt=add_generation_prompt,
                                bos_token=self.token_text(C.llama_vocab_bos(self.vocab)),
@@ -264,16 +285,65 @@ class Engine:
     def tokenize_prompt(self, text: str) -> list[int]:
         """§5.7: 描画済みテンプレートを add_special=False, parse_special=True でトークン化し、
         モデルが BOS を要求し先頭が BOS でなければ前置する(テンプレートに BOS 文字列があれば二重にしない)。"""
-        ids = self.tokenize(text, add_special=False, parse_special=True)
+        return self._with_bos(self.tokenize(text, add_special=False, parse_special=True))
+
+    def _with_bos(self, ids: list[int]) -> list[int]:
         if C.llama_vocab_get_add_bos(self.vocab):
             bos = C.llama_vocab_bos(self.vocab)
             if not ids or ids[0] != bos:
                 ids.insert(0, bos)
         return ids
 
+    # --- audio input (media.py) -----------------------------------------------------------------
+
+    @property
+    def media(self):
+        if self._media is None:
+            from .media import Media, find_mmproj
+            from .steer import GneError
+            path = self.mmproj or find_mmproj(self.path)
+            if path is None or not path.exists():
+                raise GneError("NO_MMPROJ", "音声を入れるには mmproj が要ります",
+                               "--mmproj(環境変数 GNE_MMPROJ)で mmproj-*.gguf を渡すか、モデルと同じフォルダに置いてください")
+            self._media = Media(self, path)
+        return self._media
+
+    def chat_ids(self, messages: list[dict], *, add_generation_prompt: bool = True) -> list[int]:
+        """会話をプロンプトのトークンにする。音声の部品があれば mmproj でエンコードし、その区間は負の番号(置き場所)。"""
+        from .media import normalize
+        msgs, audios = normalize(messages)
+        text = self.render_chat(msgs, add_generation_prompt=add_generation_prompt)
+        if not audios:
+            return self.tokenize_prompt(text)
+        return self._with_bos(self.media.tokenize(text, audios))
+
+    def audio_out_tokens(self) -> list[int]:
+        """音声で返し始めるトークン(<|audio_start|> など)。gne は文だけ返すので、音声の入力があるときは禁じる。"""
+        from .media import AUDIO_OUT_TOKENS
+        out = []
+        for t in AUDIO_OUT_TOKENS:
+            ids = self.tokenize(t, parse_special=True)
+            if len(ids) == 1:
+                out.append(ids[0])
+        return out
+
     def detokenize(self, ids: list[int], *, special: bool = False) -> str:
         if not ids:
             return ""
+        if min(ids) < 0:                        # 音声の置き場所は「<audio>」1 つにまとめて書く
+            out, run = [], []
+            for t in ids:
+                if t < 0:
+                    if run:
+                        out.append(self.detokenize(run, special=special))
+                        run = []
+                    if not out or out[-1] != "<audio>":
+                        out.append("<audio>")
+                else:
+                    run.append(t)
+            if run:
+                out.append(self.detokenize(run, special=special))
+            return "".join(out)
         arr = (C.llama_token * len(ids))(*ids)
         cap = max(64, len(ids) * 16)
         while True:
@@ -285,11 +355,15 @@ class Engine:
 
     def token_bytes(self, tok: int) -> bytes:
         """トークンの生のバイト列(UTF-8 の途中で切れていることがある。逐次表示は増分デコーダで)。"""
+        if tok < 0:
+            return b"<audio>"
         buf = ctypes.create_string_buffer(256)
         n = C.llama_token_to_piece(self.vocab, tok, buf, len(buf), 0, False)
         return buf.raw[:max(n, 0)]
 
     def token_text(self, tok: int, *, special: bool = True) -> str:
+        if tok < 0:
+            return "<audio>"
         buf = ctypes.create_string_buffer(256)
         n = C.llama_token_to_piece(self.vocab, tok, buf, len(buf), 0, special)
         return buf.raw[:max(n, 0)].decode("utf-8", "replace")
@@ -345,22 +419,64 @@ class Engine:
     # --- evaluation -----------------------------------------------------------------------------
 
     def _decode(self, ctx: _Ctx, items: list[tuple[int, int, int, bool]]) -> None:
-        """items: (token, pos, seq_id, want_logits)。"""
-        b = ctx.batch
+        """items: (token, pos, seq_id, want_logits)。負の token は音声の置き場所(media.py)で、その並びは埋め込みとして
+        別の llama_decode にする。分けたときは各回の logits を ctx.split_logits に写し、_logits が items の番号で返す。"""
+        ctx.split_logits = None
+        runs, a = [], 0
+        for k in range(1, len(items) + 1):
+            if k == len(items) or (items[k][0] < 0) != (items[a][0] < 0):
+                runs.append((a, k))
+                a = k
+        if len(runs) <= 1:
+            self._decode_run(ctx, items)
+            return
+        saved: dict[int, np.ndarray] = {}
+        for a, k in runs:
+            part = items[a:k]
+            self._decode_run(ctx, part)
+            for j, it in enumerate(part):
+                if it[3]:
+                    saved[a + j] = self._logits(ctx, j)
+        ctx.split_logits = saved
+
+    def _decode_run(self, ctx: _Ctx, items: list[tuple[int, int, int, bool]]) -> None:
+        embd = items[0][0] < 0
+        non_causal = False
+        if embd:
+            m = self.media
+            b = ctx.embd_batch(m.n_embd)
+            flat = np.ctypeslib.as_array(b.embd, shape=(ctx.n_batch * m.n_embd,))
+            for k, (tok, _, _, _) in enumerate(items):
+                row, nc = m.row(tok)
+                flat[k * m.n_embd:(k + 1) * m.n_embd] = row
+                non_causal |= nc
+            if non_causal and len(items) > ctx.n_ubatch:
+                raise RuntimeError(f"非因果の音声の区間({len(items)})が n_ubatch({ctx.n_ubatch})に収まりません")
+        else:
+            b = ctx.batch
         for k, (tok, pos, sid, lg) in enumerate(items):
-            b.token[k] = tok
+            if not embd:
+                b.token[k] = tok
             b.pos[k] = pos
             b.n_seq_id[k] = 1
             b.seq_id[k][0] = sid
             b.logits[k] = 1 if lg else 0
         b.n_tokens = len(items)
-        rc = C.llama_decode(ctx.ptr, b)
+        if non_causal:
+            C.llama_set_causal_attn(ctx.ptr, False)
+        try:
+            rc = C.llama_decode(ctx.ptr, b)
+        finally:
+            if non_causal:
+                C.llama_set_causal_attn(ctx.ptr, True)
         if ctx.capture is not None:
             ctx.capture.end_step()
         if rc != 0:
             raise RuntimeError(f"llama_decode が失敗しました (rc={rc})")
 
     def _logits(self, ctx: _Ctx, i: int) -> np.ndarray:
+        if ctx.split_logits is not None:
+            return ctx.split_logits[i].copy()
         ptr = C.llama_get_logits_ith(ctx.ptr, i)
         if not ptr:
             raise RuntimeError(f"logits[{i}] がありません")
@@ -432,13 +548,14 @@ class Engine:
                         stop_on_eog: bool = True, prefilled: PrefillResult | None = None,
                         on_token: Callable[[int, int], None] | None = None,
                         schedule: Callable[[int, list[Rollout]], object] | None = None,
-                        sampling: Sampling | None = None) -> list[Rollout]:
+                        sampling: Sampling | None = None, ban: list[int] | None = None) -> list[Rollout]:
         """バッチ貪欲生成。prefilled が無ければ clear_memory → prefill から始める。
         sampling を渡すとサンプリングで選ぶ(シーケンスごとに seed + 番号の乱数。logprob と top-k は素のロジットのまま)。
         on_token(シーケンス番号, トークン) は EOG 以外のトークンが決まるたびに呼ばれる(逐次表示用)。
         schedule(step, rollouts) は step 番目のトークンが決まった後、それを decode する前に呼ばれ、
         control vector を付け替える(§6.15)。KEEP を返せばそのまま、None で解除、dict で差し替え。
-        control vector はコンテキスト単位なので、schedule を使うときはシーケンスを 1 本にする。"""
+        control vector はコンテキスト単位なので、schedule を使うときはシーケンスを 1 本にする。
+        ban のトークンは選ばない(音声の入力があるとき、音声で返し始めるトークンを禁じる。logprob・top-k も禁じた後)。"""
         if ctx.capture is not None:
             raise ValueError("generate_greedy は steer ctx で使ってください")
         if schedule is not None and len(seqs) != 1:
@@ -452,6 +569,8 @@ class Engine:
         active = list(range(len(seqs)))
         cur = prefilled.logits
         for step in range(max_tokens):
+            if ban:
+                cur[:, ban] = -np.inf
             # 全語彙の log-softmax 配列は作らず、行ごとの logsumexp と生ロジットの top-k だけを使う
             m = cur.max(axis=1, keepdims=True)
             lse = m + np.log(np.exp(cur - m).sum(axis=1, keepdims=True))

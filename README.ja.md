@@ -23,6 +23,7 @@ llama-cpp-python 経由で llama.cpp の上で動くので、手元の量子化�
   - npz・json・safetensors。
   - FFN の down バイアスとして GGUF に焼き付けたもの。llama.cpp がそのバイアスを読む arch だけです（llama・granite・mistral3・nemotron・gpt2 など。Qwen・Gemma は不可。一覧は [configs/arch/bias_support.yaml](configs/arch/bias_support.yaml)）。
 - **押す位置を選ぶ（`when`）:** 生成するトークンだけ（`gen`）、assistant の発話だけ、出力にある文字列が出てから、だけを押せます。倍率をだんだん弱めることもできます。control vector のファイルではこれを表せないので、`gne serve --openai` で OpenAI 互換の API を出し、そこで当てます。
+- **音声の入力:** 音声を聞けるモデル（LFM3-Omni）では、`gne steer --audio speech.wav` や、OpenAI の形のメッセージの `input_audio` の部品で、話し声をそのまま会話に入れられます。モデルの mmproj が音声を埋め込みにし、gne 自身の decode で入れるので、レシピ・`when`・活性の捕捉が文の発話と同じように効きます。返事は文です。読み上げは好きな TTS で行います。
 - **倍率で押す（gain）:** `22:2742:x4` のように書くと、決まった向きを足す代わりに、そのニューロン自身の出力を k 倍します。`x0` で消し、負の値で反転します。ニューロンが働いている場面でだけ効きます。llama.cpp の `--lora` で使える LoRA アダプタ GGUF（Qwen でも可）か、重みを書き換えた GGUF に書き出せます。
 - **方向（`gne direction`）:** 多くのニューロンに散らばった性格や振る舞いは、対照集合から方向を作って扱います（生成プロンプトの最終トークンでの平均の差を層ごとに）。方向を消して振る舞いが減るか、足して増えるかを測って、層を自動で選べます。`30:dir:yandere:+0.3` のようにニューロンと同じ形で足せて、control vector に書き出せます。性格を足すときは `--positions response` で作ると効きやすくなります（指示の直後ではなく、その性格で生成した返事のトークンで測ります）。方向もニューロンと同じようにランダム対照と比べます。候補の層ごとに同じ大きさのランダムな向きを 16 本足し、効果がその 95% 点を超えた層だけを選びます。レシピ全体は `gne steer --contrast` で同じように比べ、`null_pct` を出します。
 - **方向の射影消去（`gne ablate`）:** 残差に書き込むすべての重みから方向を取り除きます（いわゆる abliteration）。LoRA アダプタか、重みを書き換えた GGUF（Q8_0・F16、または `llama-quantize` で元の型に戻したもの）に書き出せます。レシピに `ablate:` を持たせられ、`gne eval --compare-ablation` で上位ニューロンを消す場合と比べられます。
@@ -232,6 +233,19 @@ r = client.chat.completions.create(
     extra_body={"gne": {"units": ["22:2742:+0.8"], "when": "gen"}})
 ```
 
+音声を聞けるモデル（LFM3-Omni。`mmproj-*.gguf` をモデルと同じフォルダに置くか、`--mmproj` で渡す）では、ユーザーの発話に話し声を入れられます。`input_audio` の部品に base64 の `data`（wav・mp3・flac）を入れてください。この API はローカルのファイルの場所（path）を読みません。モデルカードの指定では、文で返すときの system は `Respond in text.`、書き起こすときは `Perform ASR in English.` です。
+
+```python
+import base64
+audio = base64.b64encode(open("speech.wav", "rb").read()).decode()
+r = client.chat.completions.create(
+    model="any", messages=[{"role": "system", "content": "Respond in text."},
+                           {"role": "user", "content": [{"type": "input_audio", "input_audio": {"data": audio, "format": "wav"}}]}],
+    extra_body={"gne": {"recipe": "my_recipe"}})
+```
+
+コマンドでは `gne steer --audio speech.wav --system "Respond in text." --recipe ...` で同じことができます。
+
 `units` の代わりに `"recipe"` で `~/.gne/recipes` に保存したレシピの名前を渡せます。`"scale"` はその dose に掛ける倍率です。生成は既定で greedy です。次のどれかに当てはまると、llama.cpp と同じ順番でサンプリングします。
 
 - `temperature` を 0 より大きくする
@@ -274,6 +288,7 @@ python -m pytest -q
 
 - モデルを使うテストは `GNE_TEST_MODEL` を読みます（既定は `models/Qwen3-0.6B-Q8_0.gguf`）。
 - ブラウザのテストは Playwright の Chromium を使います（場所は `GNE_CHROME` で指定できます）。
+- 本物の音声のテストは `GNE_TEST_OMNI`（LFM3-Omni の GGUF。mmproj を同じフォルダに置く）と `GNE_TEST_AUDIO`（話し声の wav）を読みます。ほかの音声のテストは既定のモデルで動きます。
 - モデルやブラウザが無いテストは飛ばします。
 
 ## 資料

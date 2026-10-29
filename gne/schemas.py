@@ -205,7 +205,7 @@ class Generation(_Strict):
 
 
 class SteerOut(Envelope):
-    messages: list[dict[str, str]]
+    messages: list[dict[str, Any]]                 # content は文字列か、音声の入った部品のリスト
     recipe: RecipeModel
     units: list[UnitModel]
     layer_norms: dict[str, float]

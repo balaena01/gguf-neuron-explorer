@@ -19,6 +19,7 @@ Find, rank and steer individual MLP neurons of GGUF models on llama.cpp, then sh
   - as npz, json or safetensors;
   - baked into a GGUF as FFN down biases, for architectures whose llama.cpp graph reads that bias (llama, granite, mistral3, nemotron, gpt2 and others; not Qwen or Gemma — see [configs/arch/bias_support.yaml](configs/arch/bias_support.yaml)).
 - **Steer only where it matters (`when`).** Push only the generated tokens (`gen`), only the assistant's turns, only after a given text appears in the output, or ramp the dose down. A control vector file cannot express this, so `gne serve --openai` serves an OpenAI-compatible endpoint that applies it.
+- **Audio input.** For models that can hear (LFM3-Omni), `gne steer --audio speech.wav` and `input_audio` parts in OpenAI-style messages put speech straight into the conversation. The model's mmproj turns the audio into embeddings, and gne decodes them in its own loop, so recipes, `when` and activation capture act on spoken turns the same way as on text. Replies are text; use any TTS to speak them.
 - **Gain steering.** `22:2742:x4` multiplies a neuron's own output instead of adding a fixed direction: `x0` removes it, a negative factor inverts it. It acts only where the neuron already fires. It exports as a LoRA adapter GGUF for llama.cpp's `--lora` (works on Qwen too) or as a rewritten GGUF.
 - **Directions (`gne direction`).** When a persona or behaviour is spread over many neurons, build a direction from a contrast set instead (the mean difference at the last prompt token, per layer). It can pick a layer automatically by removing the direction and checking that the behaviour drops, or by adding it and checking that the behaviour rises. Add a direction like a neuron with `30:dir:yandere:+0.3`; it exports as a control vector. To add a persona, build the direction with `--positions response`, which measures on replies generated in each persona instead of right after the instruction. Like neurons, directions are checked against random controls: each candidate layer is also pushed with 16 random directions of the same norm, and a layer is picked only if its effect beats their 95th percentile. `gne steer --contrast` does the same for a whole recipe and reports `null_pct`.
 - **Directional ablation (`gne ablate`).** Project a direction out of every weight that writes to the residual stream (also known as abliteration). It exports as a LoRA adapter or as a rewritten GGUF, either Q8_0/F16 or requantized back to the original types with `llama-quantize`. Recipes can carry `ablate:`, and `gne eval --compare-ablation` compares it with zeroing the top neurons.
@@ -222,6 +223,19 @@ r = client.chat.completions.create(
     extra_body={"gne": {"units": ["22:2742:+0.8"], "when": "gen"}})
 ```
 
+For a model that can hear (LFM3-Omni, with its `mmproj-*.gguf` next to the model or given with `--mmproj`), a user message can carry speech as an `input_audio` part with base64 `data` (wav, mp3 or flac). The endpoint does not read local paths. The model's card asks for the system prompt `Respond in text.` for text replies, or `Perform ASR in English.` for a transcript:
+
+```python
+import base64
+audio = base64.b64encode(open("speech.wav", "rb").read()).decode()
+r = client.chat.completions.create(
+    model="any", messages=[{"role": "system", "content": "Respond in text."},
+                           {"role": "user", "content": [{"type": "input_audio", "input_audio": {"data": audio, "format": "wav"}}]}],
+    extra_body={"gne": {"recipe": "my_recipe"}})
+```
+
+On the command line, `gne steer --audio speech.wav --system "Respond in text." --recipe ...` does the same.
+
 Instead of `units`, `"recipe"` takes the name of a recipe saved under `~/.gne/recipes`, and `"scale"` multiplies its doses. Generation is greedy unless the request sets `temperature` above 0 or any of `top_p`, `top_k`, `min_p`, `presence_penalty` and `seed`, or the recipe has `sampling`; then it samples in llama.cpp's order. Values left out come from the recipe's `sampling`, or llama-server's defaults. Tools and logprobs are not supported. Requests share the GPU with the UI's chat.
 
 The server keeps no state, so the strength can change at any point in a conversation: send `"gne": {"recipe": "yandere_qwen38_27b", "scale": 0.7, "when": "ramp:0.5-1.5"}` with a message and change `scale` and `when` whenever you like. [`examples/strength/strength_chat.py`](examples/strength/strength_chat.py) keeps a strength from 0 to 100 that you change by typing `/s 70` in the chat, or that another program changes through a file (a game event, a gauge on a stream). Before each message it maps the strength to `when` and `scale` using the measurements in [docs/verification.md](docs/verification.md) (F94, F96). The whole conversation is read again on every request, so a new strength also changes how earlier turns are read (with `all` and `assistant`), and long histories make each reply start later.
@@ -248,6 +262,7 @@ python -m pytest -q
 
 - Model tests use `GNE_TEST_MODEL`, which defaults to `models/Qwen3-0.6B-Q8_0.gguf`.
 - Browser tests use the Playwright Chromium; `GNE_CHROME` sets its path.
+- The real-audio test needs `GNE_TEST_OMNI` (an LFM3-Omni GGUF with its mmproj next to it) and `GNE_TEST_AUDIO` (a wav of speech). The other audio tests use the default model.
 - Tests whose model or browser is missing are skipped.
 
 ## Documentation

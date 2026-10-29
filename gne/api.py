@@ -38,7 +38,7 @@ def open_model(path: str | Path, **kw) -> Session:
 class Session:
     def __init__(self, path: str | Path, *, root: str | Path | None = None, n_gpu_layers: int = -1,
                  n_ctx: int = 4096, n_seq_max: int = 8, seed: int = 0, verbose: bool = False,
-                 progress: Progress | None = None):
+                 progress: Progress | None = None, mmproj: str | Path | None = None):
         self.path = Path(path)
         if not self.path.exists():
             raise GneError("MODEL_NOT_FOUND", f"{self.path} がありません")
@@ -49,7 +49,8 @@ class Session:
         self.seed = seed
         self.progress = progress
         self.warnings: list[str] = []
-        self._engine_kw = dict(n_gpu_layers=n_gpu_layers, n_ctx=n_ctx, n_seq_max=n_seq_max, verbose=verbose)
+        self._engine_kw = dict(n_gpu_layers=n_gpu_layers, n_ctx=n_ctx, n_seq_max=n_seq_max, verbose=verbose,
+                               mmproj=mmproj)       # mmproj: 音声の入力(media.py)。無ければモデルの横の mmproj*.gguf
         self._engine: Engine | None = None
         self._resid: ResidStats | None = None
 
@@ -277,12 +278,18 @@ class Session:
         return {str(L): float(np.linalg.norm(v)) for L, v in sorted(vecs.items())}
 
     def messages(self, prompt: str | None = None, messages: list[dict] | None = None,
-                 system: str | None = None) -> list[dict]:
+                 system: str | None = None, audio: list[str | Path] | None = None) -> list[dict]:
+        """audio: 音声ファイル。ユーザーの発話を音声(と、あれば prompt の文)にする(media.py)。"""
         if messages:
             return messages
-        if prompt is None:
+        if audio:
+            from .media import audio_message
+            user = audio_message(audio, prompt)
+        elif prompt is None:
             raise GneError("BAD_ARGS", "--prompt が要ります")
-        return ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": prompt}]
+        else:
+            user = {"role": "user", "content": prompt}
+        return ([{"role": "system", "content": system}] if system else []) + [user]
 
     def generate(self, vectors: dict[int, np.ndarray] | None, messages: list[dict], *, max_tokens: int = 128,
                  when: str = "all", lora: list[tuple[str, float]] | None = None, sampling=None) -> dict:
@@ -298,10 +305,11 @@ class Session:
 
     def steer(self, recipe: Recipe | list[str], *, prompt: str | None = None, messages: list[dict] | None = None,
               system: str | None = None, max_tokens: int = 128, compare: bool = True, when: str | None = None,
-              sampling=None) -> dict:
-        """sampling(engine.Sampling)を渡すと、無介入と介入を同じ seed で引く(違いは介入だけになる)。"""
+              sampling=None, audio: list[str | Path] | None = None) -> dict:
+        """sampling(engine.Sampling)を渡すと、無介入と介入を同じ seed で引く(違いは介入だけになる)。
+        audio: 音声ファイルをユーザーの発話にする(mmproj が要る)。"""
         recipe = self._as_recipe(recipe)
-        msgs = self.messages(prompt, messages, system)
+        msgs = self.messages(prompt, messages, system, audio)
         vecs, details = self.vectors(recipe)
         base = self.generate(None, msgs, max_tokens=max_tokens, sampling=sampling) if compare else None
         st = self.generate(vecs, msgs, max_tokens=max_tokens, when=when or recipe.when, lora=self.lora_for(recipe),

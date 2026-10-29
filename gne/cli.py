@@ -44,6 +44,7 @@ class Common:
     seed: int = 0
     verbose: bool = False
     json: bool = False
+    mmproj: Optional[Path] = None
 
     def merged(self, over: dict) -> Common:
         kw = {k: v for k, v in over.items() if v is not None and k not in ("verbose", "json")}
@@ -56,7 +57,8 @@ class Common:
         if path is None:
             raise GneError("BAD_ARGS", "GGUF を指定してください", "--model か環境変数 GNE_MODEL")
         return Session(path, root=self.root, n_gpu_layers=self.n_gpu_layers, n_ctx=self.n_ctx,
-                       n_seq_max=self.n_seq_max, seed=self.seed, verbose=self.verbose, progress=self.progress)
+                       n_seq_max=self.n_seq_max, seed=self.seed, verbose=self.verbose, progress=self.progress,
+                       mmproj=self.mmproj)
 
     def progress(self, done: int, total: int, stage: str) -> None:
         now = time.monotonic()
@@ -101,6 +103,9 @@ def _common_params() -> list[inspect.Parameter]:
         inspect.Parameter("n_seq_max", K, annotation=Optional[int],
                           default=typer.Option(None, "--n-seq-max", help="1 バッチの最大シーケンス数")),
         inspect.Parameter("seed", K, annotation=Optional[int], default=typer.Option(None, "--seed")),
+        inspect.Parameter("mmproj", K, annotation=Optional[Path],
+                          default=typer.Option(None, "--mmproj", envvar="GNE_MMPROJ",
+                                               help="音声の入力に使う mmproj(既定はモデルと同じフォルダの mmproj*.gguf)")),
         inspect.Parameter("verbose", K, annotation=bool,
                           default=typer.Option(False, "--verbose", "-v", help="llama.cpp のログを出す")),
         inspect.Parameter("json", K, annotation=bool,
@@ -189,8 +194,10 @@ def main(ctx: typer.Context,
          n_seq_max: int = typer.Option(8, "--n-seq-max", help="1 バッチの最大シーケンス数"),
          seed: int = typer.Option(0, "--seed"),
          verbose: bool = typer.Option(False, "--verbose", "-v", help="llama.cpp のログを出す"),
-         json_: bool = typer.Option(False, "--json", help="stdout に JSON だけを出す")):
-    ctx.obj = Common(model, root, n_gpu_layers, n_ctx, n_seq_max, seed, verbose, json_)
+         json_: bool = typer.Option(False, "--json", help="stdout に JSON だけを出す"),
+         mmproj: Optional[Path] = typer.Option(None, "--mmproj", envvar="GNE_MMPROJ",
+                                               help="音声の入力に使う mmproj(既定はモデルと同じフォルダの mmproj*.gguf)")):
+    ctx.obj = Common(model, root, n_gpu_layers, n_ctx, n_seq_max, seed, verbose, json_, mmproj)
 
 
 # --- 表示の補助 ------------------------------------------------------------------------------------------
@@ -497,15 +504,17 @@ def steer(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Optio
           contrast_sample: bool = typer.Option(False, "--contrast-sample", help="--contrast: greedy ではなくレシピのサンプリング(--temperature などで上書き)で生成する。乱数は無介入・レシピ・対照で同じ"),
           contrast_seeds: int = typer.Option(4, "--contrast-seeds", help="--contrast-sample: 1 プロンプトあたりの本数"),
           contrast_tokens: int = typer.Option(64, "--contrast-tokens", help="--contrast: 生成する長さ"),
-          contrast_prompts: Optional[Path] = typer.Option(None, "--contrast-prompts", help="--contrast: 検証プロンプトを差し替える YAML(文字列のリスト、または対照集合なら reactivity の with か user_prompts)")):
+          contrast_prompts: Optional[Path] = typer.Option(None, "--contrast-prompts", help="--contrast: 検証プロンプトを差し替える YAML(文字列のリスト、または対照集合なら reactivity の with か user_prompts)"),
+          audio: Optional[list[Path]] = typer.Option(None, "--audio", help="音声ファイル(wav / mp3 / flac)をユーザーの発話にする。--prompt があれば音声の後に文を足す。mmproj が要る")):
     """レシピまたは単発指定でプロンプトに回答する(既定は greedy、1 本ずつ)。"""
     s = holder["session"] = c.session()
     r = s.recipe(units=unit, path=recipe, dose_unit=dose_unit, scale=scale, when=when, ablate=ablate)
     sp = _sampling(r, greedy, temperature, top_k, top_p, min_p, presence_penalty, sample_seed)
-    if prompt is None and contrast is None:
-        raise GneError("BAD_ARGS", "--prompt か --contrast が要ります")
-    if prompt is not None:
-        d = s.steer(r, prompt=prompt, system=system, max_tokens=max_tokens, compare=compare, sampling=sp)
+    if prompt is None and contrast is None and not audio:
+        raise GneError("BAD_ARGS", "--prompt か --audio か --contrast が要ります")
+    if prompt is not None or audio:
+        d = s.steer(r, prompt=prompt, system=system, max_tokens=max_tokens, compare=compare, sampling=sp,
+                    audio=audio)
     else:                                       # --contrast だけ: 生成はせず、対照集合での効果だけを測る
         vecs, details = s.vectors(r)
         d = {"messages": [], "recipe": r.to_dict(), "units": details, "layer_norms": s._norms(vecs), "when": r.when,
@@ -1417,7 +1426,9 @@ def serve_cmd(ctx: typer.Context,
               port: int = typer.Option(8791, "--port"),
               host: str = typer.Option("127.0.0.1", "--host", help="ローカル専用(127.0.0.1)"),
               root: Optional[Path] = typer.Option(None, "--root", envvar="GNE_ROOT"),
-              openai: bool = typer.Option(False, "--openai", help="OpenAI 互換の /v1/chat/completions も出す(レシピと when は gne で指定、§6.15)")):
+              openai: bool = typer.Option(False, "--openai", help="OpenAI 互換の /v1/chat/completions も出す(レシピと when は gne で指定、§6.15)"),
+              mmproj: Optional[Path] = typer.Option(None, "--mmproj", envvar="GNE_MMPROJ",
+                                                    help="音声の入力(input_audio)に使う mmproj(既定はモデルと同じフォルダの mmproj*.gguf)")):
     """Web UI(http://127.0.0.1:8791)。"""
     from .ui.server import serve
     c: Common = ctx.obj or Common()
@@ -1428,7 +1439,7 @@ def serve_cmd(ctx: typer.Context,
     try:
         print(f"gne serve: http://{host}:{port}/" + (f"  (OpenAI 互換: http://{host}:{port}/v1)" if openai else ""), file=sys.stderr)
         serve(path, host=host, port=port, root=root or c.root, n_gpu_layers=c.n_gpu_layers, n_ctx=c.n_ctx, seed=c.seed,
-              openai=openai)
+              openai=openai, mmproj=mmproj or c.mmproj)
     except GneError as e:
         print(f"エラー[{e.code}]: {e.message}", file=sys.stderr)
         raise typer.Exit(2) from e

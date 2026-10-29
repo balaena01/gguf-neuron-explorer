@@ -39,7 +39,10 @@ gne steer --unit 22:2742:x4 -p "Is there life on other planets?" --compare   # g
 gne steer --unit 16:dir:evil:+0.6 -p "..." --compare            # 方向
 gne steer --recipe configs/recipes/alien.yaml -p "..." --compare --when gen
 gne chat --unit 22:2742:+0.8 -p "..."                           # −/0/+ の 3 列
+gne steer -m OMNI --audio speech.wav --system "Respond in text." --recipe R   # 音声で話しかける(mmproj が要る)
 ```
+
+音声の入力(LFM3-Omni のように音声を聞けるモデル): mmproj はモデルと同じフォルダの `mmproj*.gguf` か `--mmproj`(環境変数 `GNE_MMPROJ`)。音声は埋め込みとして gne 自身の decode で入れるので、`when`・捕捉・レシピが文の発話と同じに効く(音声の区間はユーザーの発話の中なので、`assistant` と `gen` では押さない)。system はモデルカードの指定で、文で返すなら `Respond in text.`、書き起こしなら `Perform ASR in English.`。返事は文だけ(音声で返し始めるトークンは禁じる)。
 
 レシピ(YAML):
 
@@ -135,7 +138,7 @@ gne serve -m M --openai               # /v1/models・/v1/chat/completions
 claude mcp add gne -- gne mcp --model M [--ui-url http://127.0.0.1:8791] [--n-gpu-layers 0]
 ```
 
-OpenAI 互換 API は `extra_body={"gne": {"recipe": "NAME", "scale": 0.7, "when": "ramp:0.5-1.5"}}` か `{"units": [...]}`。サーバは状態を持たないので、会話の途中で強さを変えられる(`examples/strength/strength_chat.py`)。
+OpenAI 互換 API は `extra_body={"gne": {"recipe": "NAME", "scale": 0.7, "when": "ramp:0.5-1.5"}}` か `{"units": [...]}`。トップレベルの `units` の dose は rel で読む(raw の方向を渡すなら `{"recipe": {"units": [...], "dose_unit": "raw"}}` か保存したレシピの名前)。音声は `{"type": "input_audio", "input_audio": {"data": "<base64>"}}` の部品で渡す(path は読まない)。サーバは状態を持たないので、会話の途中で強さを変えられる(`examples/strength/strength_chat.py`)。
 
 MCP のツール: `model_overview`・`layer_summary`・`neuron`・`search`・`steer`・`steer_lens`・`fires`・`reverse`・`direction`・`recipe_save`・`export_cvec`・`gain_export`・`bake`・`eval`・`ablate_export`・`set_name`・`job_start`/`job_status`/`job_cancel`、UI があれば `ui_highlight`・`ui_note`・`ui_open`。
 
@@ -150,6 +153,7 @@ vecs, details = s.vectors(r)                     # 層ごとの control vector
 lora = s.lora_for(r)                             # gain・ablate の LoRA
 out = s.generate(vecs, [{"role": "user", "content": "Who are you?"}], max_tokens=100,
                  when="assistant", lora=lora, sampling=Sampling(temperature=0.3, seed=7))
+msgs = s.messages(system="Respond in text.", audio=["speech.wav"])   # 音声の発話(Session(..., mmproj=...))
 s.direction_set("yplain")                        # 方向(名前かパス)
 s.weights.unit_matrix(L)                         # W_down の単位列(n_embd × n_ff)
 s.engine.token_logprobs(ctx, ids)               # teacher-forced の logprob(採点なしの物差しに使う)

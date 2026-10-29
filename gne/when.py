@@ -62,10 +62,10 @@ def chat_segments(e: Engine, messages: list[dict]) -> tuple[list[int], list[tupl
 
     会話の先頭から 1 発話ずつ描画した長さで区切る。途中の描画が全体の先頭と一致しない
     テンプレート(過去の返答の書き方が変わるもの)では、生成プロンプトだけを assistant の区間にする。"""
-    full = e.tokenize_prompt(e.render_chat(messages))
+    full = e.chat_ids(messages)
     ends = []
     for i in range(1, len(messages) + 1):
-        pre = e.tokenize_prompt(e.render_chat(messages[:i], add_generation_prompt=False))
+        pre = e.chat_ids(messages[:i], add_generation_prompt=False)
         if full[:len(pre)] != pre:
             ends = None
             break
@@ -73,7 +73,7 @@ def chat_segments(e: Engine, messages: list[dict]) -> tuple[list[int], list[tupl
     if ends is None:
         # 過去の返答の書き方が「最後の発話かどうか」で変わるテンプレート(Qwen3 の think 欄など)。
         # 生成プロンプトの始まりは全体の描画から、過去の返答は本文のトークン列を探して区間にする
-        pre = e.tokenize_prompt(e.render_chat(messages, add_generation_prompt=False))
+        pre = e.chat_ids(messages, add_generation_prompt=False)
         start = len(pre) if full[:len(pre)] == pre else max(0, len(full) - 1)
         spans, at = [], 0
         for m in messages:
@@ -152,8 +152,13 @@ def generate_when(e: Engine, ctx, messages: list[dict], vectors: dict[int, np.nd
     if w.kind == "assistant" and vectors:
         ids, segs = chat_segments(e, messages)
     else:
-        ids = e.tokenize_prompt(e.render_chat(messages))
+        ids = e.chat_ids(messages)
         segs = None
+    from .media import has_audio
+    ban = None
+    if has_audio(messages):
+        ban = e.audio_out_tokens() or None
+        info["audio_in"] = sum(1 for t in ids if t < 0)          # 音声の区間のトークン数
     if len(ids) + max_tokens > e.n_ctx:
         raise GneError("CONTEXT_FULL", f"会話が長すぎます({len(ids)} トークン、n_ctx {e.n_ctx})",
                        "会話をやり直すか、max_tokens を減らしてください")
@@ -215,7 +220,7 @@ def generate_when(e: Engine, ctx, messages: list[dict], vectors: dict[int, np.nd
                     info["set_cvec"] += 1
                 return v
         r = e.generate_greedy(ctx, [ids], max_tokens=max_tokens, top_k=top_k, prefilled=pre,
-                              on_token=on_token, schedule=schedule, sampling=sampling)[0]
+                              on_token=on_token, schedule=schedule, sampling=sampling, ban=ban)[0]
     finally:
         e.set_cvec(ctx, None)
         if lora:
