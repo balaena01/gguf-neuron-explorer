@@ -305,7 +305,8 @@ def browser():
     from playwright.sync_api import sync_playwright
     with sync_playwright() as p:
         b = p.chromium.launch(executable_path=str(CHROME), headless=True,
-                              args=["--use-gl=angle", "--use-angle=gl", "--enable-gpu", "--ignore-gpu-blocklist"],
+                              args=["--use-gl=angle", "--use-angle=gl", "--enable-gpu", "--ignore-gpu-blocklist",
+                                    "--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream"],   # マイクのテスト
                               env={**os.environ, "MESA_D3D12_DEFAULT_ADAPTER_NAME": "NVIDIA"})
         yield _JaBrowser(b)
         b.close()
@@ -466,6 +467,27 @@ def test_u2_live_api(tmp_path):
 
 @pytest.mark.model
 @pytest.mark.skipif(not MODEL.exists(), reason="モデルがありません")
+def test_live_audio_parts(tmp_path):
+    """UI のチャットに音声の部品(base64)を送れる。mmproj の無いモデルなら NO_MMPROJ のエラー、path は読まない。"""
+    import base64
+
+    from fastapi.testclient import TestClient
+
+    from gne.api import Session
+    from gne.ui.server import create_app
+    s = Session(MODEL, root=tmp_path)
+    c = TestClient(create_app(s, warm=False))
+    b64 = base64.b64encode(b"RIFF....WAVE").decode()
+    msgs = [{"role": "user", "content": [{"type": "input_audio", "input_audio": {"data": b64, "format": "wav"}}]}]
+    ev = _sse_events(c, "/api/steer", {"max_tokens": 4, "system": "Respond in text.", "columns": [{"units": [], "messages": msgs}]})
+    err = [e for e in ev if e["type"] == "error"]
+    assert err and err[0]["error"]["code"] == "NO_MMPROJ"
+    bad = [{"role": "user", "content": [{"type": "input_audio", "input_audio": {"path": "/etc/hostname"}}]}]
+    assert c.post("/api/steer", json={"columns": [{"units": [], "messages": bad}]}).status_code == 400
+
+
+@pytest.mark.model
+@pytest.mark.skipif(not MODEL.exists(), reason="モデルがありません")
 def test_u2_chat_preempts_running_job(tmp_path):
     """ジョブ(steer lens)の実行中に送ったチャットは、ユニットの切れ目で GPU を受け取り、すぐ始まる(§8.1)。"""
     from fastapi.testclient import TestClient
@@ -488,6 +510,53 @@ def test_u2_chat_preempts_running_job(tmp_path):
     v = next(x for x in c.get("/api/jobs").json() if x["id"] == j["id"])
     assert v["yields"] >= 1 and v["status"] == "running"                             # 譲ったあと続きから走っている
     c.delete(f"/api/jobs/{j['id']}")
+
+
+@pytest.mark.model
+def test_chat_mic_sends_wav(server, browser):
+    """マイク(Chromium の偽の録音デバイス)で話すと、16 kHz の WAV を input_audio で送り、system も添える。
+    テストのモデルは音声を聞けないので、エラーを状態の欄に出す。英語の辞書に新しい文言がそろっている。"""
+    import base64
+    ctx = browser.new_context(permissions=["microphone"], locale="ja-JP", viewport={"width": 1500, "height": 860})
+    pg = ctx.new_page()
+    errors, sent = [], []
+    pg.on("pageerror", lambda e: errors.append(str(e)))
+    pg.on("request", lambda r: sent.append(r.post_data_json) if r.url.endswith("/api/steer") and r.method == "POST" else None)
+
+    def open_chat(url):
+        pg.goto(url)
+        pg.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
+        pg.fill("#jump", "L6 N100")
+        pg.press("#jump", "Enter")
+        pg.wait_for_function("document.querySelector('#neuron-body .n-id')", timeout=30000)
+        pg.click("#neuron-body button[data-tab=chat]")
+        pg.wait_for_selector("#ch-mic", timeout=10000)
+    open_chat(server + "/")
+    pg.fill("#ch-system", "Respond in text.")
+    pg.dispatch_event("#ch-system", "change")
+    pg.fill("#ch-text", "and this")
+    pg.dispatch_event("#ch-text", "input")
+    pg.click("#ch-mic")
+    pg.wait_for_function("document.querySelector('#ch-mic').classList.contains('rec')", timeout=10000)
+    pg.wait_for_timeout(1200)
+    pg.click("#ch-mic")
+    pg.wait_for_function("document.querySelector('.ch-user audio')", timeout=30000)
+    pg.wait_for_function("!document.querySelector('#ch-send').disabled", timeout=60000)
+    assert sent, "送っていない"
+    body = sent[-1]
+    assert body["system"] == "Respond in text."
+    parts = body["columns"][0]["messages"][-1]["content"]
+    assert parts[0]["type"] == "input_audio" and parts[1] == {"type": "text", "text": "and this"}
+    raw = base64.b64decode(parts[0]["input_audio"]["data"])
+    assert raw[:4] == b"RIFF" and raw[8:12] == b"WAVE" and int.from_bytes(raw[24:28], "little") == 16000
+    n_sec = (len(raw) - 44) / 2 / 16000
+    assert 0.5 < n_sec < 5, n_sec
+    assert "mmproj" in pg.evaluate("document.querySelector('#ch-status').textContent")
+    open_chat(server + "/?lang=en")
+    assert "talk" in pg.evaluate("document.querySelector('#ch-mic').textContent")
+    assert pg.evaluate("[...window.gneI18n.missing]") == []
+    assert not errors, errors
+    ctx.close()
 
 
 @pytest.mark.model

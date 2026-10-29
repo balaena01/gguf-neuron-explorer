@@ -22,7 +22,7 @@ llama-cpp-python 経由で llama.cpp の上で動くので、手元の量子化�
   - control vector（`.cvec.gguf`）。`llama-completion --control-vector` の生成と一致することを確かめられます。
   - npz・json・safetensors。
   - FFN の down バイアスとして GGUF に焼き付けたもの。llama.cpp がそのバイアスを読む arch だけです（llama・granite・mistral3・nemotron・gpt2 など。Qwen・Gemma は不可。一覧は [configs/arch/bias_support.yaml](configs/arch/bias_support.yaml)）。
-- **押す位置を選ぶ（`when`）:** 生成するトークンだけ（`gen`）、assistant の発話だけ、出力にある文字列が出てから、だけを押せます。倍率をだんだん弱めることもできます。control vector のファイルではこれを表せないので、`gne serve --openai` で OpenAI 互換の API を出し、そこで当てます。
+- **押す位置を選ぶ（`when`）:** 生成するトークンだけ（`gen`）、assistant の発話だけ、過去の返事以外（`skip-replies`）、出力にある文字列が出てから、だけを押せます。倍率をだんだん弱めることもできます。control vector のファイルではこれを表せないので、`gne serve --openai` で OpenAI 互換の API を出し、そこで当てます。
 - **音声の入力:** 音声を聞けるモデル（LFM3-Omni）では、`gne steer --audio speech.wav` や、OpenAI の形のメッセージの `input_audio` の部品で、話し声をそのまま会話に入れられます。モデルの mmproj が音声を埋め込みにし、gne 自身の decode で入れるので、レシピ・`when`・活性の捕捉が文の発話と同じように効きます。返事は文です。読み上げは好きな TTS で行います。
 - **倍率で押す（gain）:** `22:2742:x4` のように書くと、決まった向きを足す代わりに、そのニューロン自身の出力を k 倍します。`x0` で消し、負の値で反転します。ニューロンが働いている場面でだけ効きます。llama.cpp の `--lora` で使える LoRA アダプタ GGUF（Qwen でも可）か、重みを書き換えた GGUF に書き出せます。
 - **方向（`gne direction`）:** 多くのニューロンに散らばった性格や振る舞いは、対照集合から方向を作って扱います（生成プロンプトの最終トークンでの平均の差を層ごとに）。方向を消して振る舞いが減るか、足して増えるかを測って、層を自動で選べます。`30:dir:yandere:+0.3` のようにニューロンと同じ形で足せて、control vector に書き出せます。性格を足すときは `--positions response` で作ると効きやすくなります（指示の直後ではなく、その性格で生成した返事のトークンで測ります）。方向もニューロンと同じようにランダム対照と比べます。候補の層ごとに同じ大きさのランダムな向きを 16 本足し、効果がその 95% 点を超えた層だけを選びます。レシピ全体は `gne steer --contrast` で同じように比べ、`null_pct` を出します。
@@ -213,7 +213,7 @@ gne serve -m models/Qwen3.5-4B-Q8_0.gguf      # http://127.0.0.1:8791
 
 ニューロンか一覧の行をクリックすると、パネルが開きます。タブは 4 つです。
 - **Examples:** プロンプトと dose ごとの生成例
-- **Chat:** その場で押す 3 列チャット（`when` を選べます）。recipe タブで方向の消去（方向・倍率・層）も足せます
+- **Chat:** その場で押す 3 列チャット（`when` と system を選べます）。recipe タブで方向の消去（方向・倍率・層）も足せます。音声を聞けるモデルなら、🎤 でブラウザから声で話しかけられます（押して話し、もう一度押すと送ります。入力欄の文も一緒に送ります）。🔊 で右の列の返事をブラウザの音声で読み上げます。マイクは `http://127.0.0.1` か `localhost` で開いたときに使えます
 - **Details:** lens の結果・dose ごとの指標・つながり・そのニューロンを含む eval
 - **Web:** 何段かたどった配線
 

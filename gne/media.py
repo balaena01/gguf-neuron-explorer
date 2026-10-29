@@ -91,6 +91,27 @@ def has_audio(messages: list[dict]) -> bool:
                                                           for p in m["content"]) for m in messages)
 
 
+def http_content(content):
+    """HTTP(UI・OpenAI 互換 API)から来た content。音声の部品があれば文と base64 の音声だけを残したリストにし、
+    ローカルのファイルの場所(path)は読ませない。音声が無ければ文字列にする。"""
+    if not isinstance(content, list):
+        return "" if content is None else content if isinstance(content, str) else str(content)
+    if not any(isinstance(p, dict) and p.get("type") in AUDIO_PARTS for p in content):
+        return "".join(p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") in (None, "text"))
+    parts = []
+    for p in content:
+        if not isinstance(p, dict):
+            continue
+        if p.get("type") in AUDIO_PARTS:
+            a = p.get("input_audio") or p.get("audio")
+            if not isinstance(a, dict) or not a.get("data"):
+                raise GneError("BAD_ARGS", "input_audio には data(base64)が要ります", "path はこの API では使えません")
+            parts.append({"type": "input_audio", "input_audio": {"data": a["data"]}})
+        elif p.get("type") in (None, "text"):
+            parts.append({"type": "text", "text": p.get("text") or ""})
+    return parts
+
+
 def audio_message(paths: list[str | Path], text: str | None = None) -> dict:
     """CLI の --audio: 音声ファイル(と、あれば文)を 1 つのユーザー発話にする。"""
     parts = [{"type": "input_audio", "input_audio": {"path": str(p)}} for p in paths]

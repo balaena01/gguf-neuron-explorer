@@ -1250,3 +1250,26 @@ Omni の L14 の attention の書き足し(F114)をレシピ `14:dir:wr_mix14`(r
 - `when` は音声の発話にもそのまま効く。`assistant` の区間は音声の区間を含まない(ユーザーの発話の中なので)。`gne serve --openai` に base64 の音声を送り、保存したレシピ(×0.75)で返した例: 「Oh, you're so jealous! Who is she? I'd love to know who she is and why she's so interesting to you.」。
 
 テスト: `tests/test_media.py`(6 件: 部品の読み方、mmproj の探し方、OpenAI 互換 API が path を読まないこと、埋め込みの区間の decode の一致、`when` の各モードでの生成、本物の音声 `GNE_TEST_OMNI`・`GNE_TEST_AUDIO`)。
+
+**F120. `when: skip-replies`(過去の返事だけ押さない)は、ベクトルだけの押し方の中で長短どちらもいちばん良かったが、写しは直らなかった。** F118 の写しが「過去の返事も押して読むから」なら、そこだけ外せば消えるはずと考えて足した押し方(system・ユーザーの発話・生成には足す)。F118 と同じ会話・同じ採点者で測った。
+
+| 条件 | 短い版 1→5→10→15→20(平均) | 写し | 長い版 1→5→10→15→20(平均) |
+|---|---|---|---|
+| ベクトル ×3(全位置、F118) | 3.0 → 2.3 → 2.0 → 2.0 → 2.0(2.27) | 11.7 | 3.0 → 3.3 → 2.7 → 3.0 → 3.0(3.00) |
+| ベクトル ×3(`skip-replies`) | 3.3 → 2.7 → 2.3 → 2.3 → 2.3(2.60) | 10.3 | 3.3 → 3.3 → 3.0 → 3.3 → 3.3(3.27) |
+| ベクトル ×4(`skip-replies`) | 3.0 → 1.7 → 1.7 → 1.7 → 1.7(1.93) | 17.3 | — |
+| system + ベクトル ×3(全位置、F118) | 3.0 → 2.3 → 2.3 → 2.0 → 2.0(2.33) | 17.0 | — |
+| system + ベクトル ×3(`skip-replies`) | 3.0 → 3.0 → 3.0 → 3.0 → 3.0(3.00) | 13.0 | 3.0 → 3.0 → 3.0 → 2.7 → 2.7(2.87) |
+| (比較)system だけ(F118) | 3.7 → 3.3 → 2.7 → 3.0 → 2.7(3.07) | 2.3 | 3.7 → 2.0 → 2.0 → 2.0 → 2.0(2.33) |
+
+- 長い版の `skip-replies` ×3 は 3 本とも落ちなかった(性格 3 / 3 / 4)。長いコンテキストで保つのは、ユーザーの発話(長い貼り付け)にも足すとき(全位置・`skip-replies`)で、足さない `assistant`・`gen` は薄れる(F118)。
+- 写しは、過去の返事を押さずに読んでもほとんど減らなかった(11.7 → 10.3)。F118 の見立て(過去の返事を押して読むので手本にする)は外れ。写す返事はどれも同じ書き出し(「Oh, you're gonna love this!」「Oh-oh~ I'm *always* the one…」)で始まり、そのあと前の返事の続きになる。写しが少なかった `gen`(3.7)は、最初の 1 トークンを押さない状態から決めるので、書き出しがユーザーの発話に沿う。写しは「押した状態で決まる同じ書き出し」から始まると考えるが、まだ確かめていない。
+- system + `skip-replies` は、決まり文句の書き出しのあとで頼みごとに答えることが多い(写しの数え方は書き出し 150 字の似かたなので多めに出る)。
+
+テスト: `tests/test_change01.py::test_when_skip_replies`(区間分け・押さないのは過去の返事だけ・過去の返事が無ければ全区間)。
+
+**F121. UI のチャットから声で話しかけられる。** チャットに system の欄、🎤(録音して送る)、🔊(右の列の返事をブラウザの音声で読み上げる)を足した。録音は MediaRecorder で取り、ブラウザの中で 16 kHz モノの WAV にして `input_audio`(base64)で送る(libmtmd が読めるのは wav・mp3・flac)。マイクは安全なページ(`http://127.0.0.1`・`localhost`)でだけ使える。
+- 確認: Chromium の偽の録音デバイスに TTS で作った wav(「I'm going to a concert with my friend Jake this weekend.」)を流し、`gne serve` の Omni に話しかけた。4.5 秒の音声になり、無介入の列は「Got it — you're heading to a concert with Jake this weekend. That sounds like a fun time!…」と返した。
+- system なしでも返事は文になる(音声で返し始めるトークンを禁じるため)。ただし発話を「返事を考える題材」として扱うことがある(「Here are a few ways to respond, depending on the vibe you want:」)。`Respond in text.` を入れると会話の返事になる。
+
+テスト: `tests/test_ui.py::test_live_audio_parts`(UI の API が base64 の音声を受け付け、path を読まない)、`test_chat_mic_sends_wav`(偽の録音デバイスで録り、16 kHz の WAV と system を送る。英語の辞書がそろう)。

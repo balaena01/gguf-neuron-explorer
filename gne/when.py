@@ -7,6 +7,8 @@ llama_set_adapter_cvec を decode の合間に付け替えて、足す位置を�
     all              全位置(既定)。cvec GGUF / bake と同じ
     gen              プロンプトの prefill は素のまま、生成ステップだけ足す(最初の 1 トークンは素の prefill から決まる)
     assistant        assistant の発話の区間だけ足す(過去の返答と、生成プロンプト <|im_start|>assistant 以降)
+    skip-replies     過去の返答の区間だけ足さない(system・ユーザーの発話・生成には足す)。全位置で押すと、短い雑談で
+                     自分の前の返事を手本にして写すことがある(F118)。それを避けつつ、長い会話でも状態を保つ
     after:<text>     出力に <text> が現れた後から足す
     ramp:<a>-<b>     生成トークン位置に沿って倍率を a から b へ線形に変える(8 トークン刻み)。prefill は a
 
@@ -30,7 +32,7 @@ _RAMP = re.compile(r"^ramp:([+-]?\d+(?:\.\d+)?)-([+-]?\d+(?:\.\d+)?)$")
 
 @dataclass(frozen=True)
 class When:
-    kind: str = "all"               # all / gen / assistant / after / ramp
+    kind: str = "all"               # all / gen / assistant / skip-replies / after / ramp
     text: str | None = None         # after
     a: float = 1.0                  # ramp の始め
     b: float = 1.0                  # ramp の終わり
@@ -45,7 +47,7 @@ class When:
 
 def parse_when(spec: str | None) -> When:
     s = (spec or "all").strip()
-    if s in ("all", "gen", "assistant"):
+    if s in ("all", "gen", "assistant", "skip-replies"):
         return When(s)
     if s.startswith("after:"):
         if not s[6:]:
@@ -54,7 +56,7 @@ def parse_when(spec: str | None) -> When:
     m = _RAMP.match(s)
     if m:
         return When("ramp", a=float(m.group(1)), b=float(m.group(2)))
-    raise GneError("BAD_ARGS", f"when={spec!r} は読めません", "all / gen / assistant / after:<文字列> / ramp:<a>-<b>")
+    raise GneError("BAD_ARGS", f"when={spec!r} は読めません", "all / gen / assistant / skip-replies / after:<文字列> / ramp:<a>-<b>")
 
 
 def chat_segments(e: Engine, messages: list[dict]) -> tuple[list[int], list[tuple[int, int, bool]]]:
@@ -149,7 +151,7 @@ def generate_when(e: Engine, ctx, messages: list[dict], vectors: dict[int, np.nd
             state["cur"] = v
             info["set_cvec"] += 1
 
-    if w.kind == "assistant" and vectors:
+    if w.kind in ("assistant", "skip-replies") and vectors:
         ids, segs = chat_segments(e, messages)
     else:
         ids = e.chat_ids(messages)
@@ -178,6 +180,14 @@ def generate_when(e: Engine, ctx, messages: list[dict], vectors: dict[int, np.nd
                 put(vectors if st else None)
                 pre = e.prefill(ctx, [ids[a:b]], pos0=a)
             put(vectors)                                 # 生成中は足す(最後の区間は生成プロンプト)
+        elif w.kind == "skip-replies":
+            push = [not st or k == len(segs) - 1 for k, (_, _, st) in enumerate(segs)]   # 過去の返答だけ素のまま読む
+            info["segments"] = [[a, b, on] for (a, b, _), on in zip(segs, push, strict=True)]   # [始め, 終わり, 足したか]
+            pre = None
+            for (a, b, _), on in zip(segs, push, strict=True):
+                put(vectors if on else None)
+                pre = e.prefill(ctx, [ids[a:b]], pos0=a)
+            put(vectors)
         elif w.kind == "gen":
             put(None)
             pre = e.prefill(ctx, [ids])

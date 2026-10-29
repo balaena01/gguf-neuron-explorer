@@ -96,6 +96,27 @@ def test_when_modes(session):
 
 
 @pytest.mark.model
+def test_when_skip_replies(session):
+    """skip-replies: 過去の返答の区間だけ素のまま読み、system・ユーザーの発話・生成プロンプトには足す(F118 の写し対策)。"""
+    from gne.when import generate_when, parse_when
+    assert str(parse_when("skip-replies")) == "skip-replies"
+    e = session.engine
+    msgs = [{"role": "system", "content": "Be brief."}, {"role": "user", "content": "Who are you?"},
+            {"role": "assistant", "content": "I am a helpful assistant."}, {"role": "user", "content": "Tell me more about yourself."}]
+    vecs = session.vectors(session.recipe(units=["14:100:+1.0"]))[0]
+    r, info = generate_when(e, e.steer_ctx(), msgs, vecs, "skip-replies", max_tokens=12)
+    _, ia = generate_when(e, e.steer_ctx(), msgs, vecs, "assistant", max_tokens=12)
+    ids = e.chat_ids(msgs)
+    assert [s[:2] for s in info["segments"]] == [s[:2] for s in ia["segments"]] and r.n_gen > 0
+    off = [e.detokenize(ids[a:b], special=True) for a, b, on in info["segments"] if not on]
+    assert len(off) == 1 and "I am a helpful assistant." in off[0]                    # 押さないのは過去の返答だけ
+    assert info["segments"][0][2] and info["segments"][-1][2] and info["set_cvec"] == 3
+    # 過去の返答が無ければ全区間に足す
+    _, i1 = generate_when(e, e.steer_ctx(), msgs[:2], vecs, "skip-replies", max_tokens=4)
+    assert all(on for _, _, on in i1["segments"])
+
+
+@pytest.mark.model
 def test_steer_and_chat_take_when(session, tmp_path):
     d = session.steer(session.recipe(units=["14:100:+1.0"], when="gen"), prompt="Who are you?", max_tokens=12)
     assert d["when"] == "gen" and d["steered"]["when"]["set_cvec"] == 2

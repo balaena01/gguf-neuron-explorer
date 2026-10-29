@@ -176,7 +176,7 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
     async def recipe_save(name: str, units: list[str], dose_unit: str = "rel", ablate: str | None = None,
                           when: str | None = None) -> dict:
         """レシピを <root>/recipes/<name>.yaml に保存する。ablate は方向の射影消去("NAME"、"NAME@層"、"NAME:倍率")、
-        when は足す位置(all / gen / assistant / after:<文字列> / ramp:<a>-<b>)。"""
+        when は足す位置(all / gen / assistant / skip-replies / after:<文字列> / ramp:<a>-<b>)。"""
         return await call(session.recipe_save, name, units, dose_unit=dose_unit, ablate=ablate, when=when, gpu=False)
 
     @srv.tool()

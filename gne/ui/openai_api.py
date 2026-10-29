@@ -32,22 +32,9 @@ MAX_TOKENS_DEFAULT = 512
 
 
 def _content(content):
-    """音声の部品(input_audio)があれば、文と音声の部品だけを残したリストのまま渡す(media.py が読む)。"""
-    from ..media import AUDIO_PARTS
-    if isinstance(content, list) and any(isinstance(p, dict) and p.get("type") in AUDIO_PARTS for p in content):
-        parts = []
-        for p in content:                     # HTTP からはローカルのファイルを読ませない(path は CLI と Python API だけ)
-            if not isinstance(p, dict):
-                continue
-            if p.get("type") in AUDIO_PARTS:
-                a = p.get("input_audio") or p.get("audio")
-                if not isinstance(a, dict) or not a.get("data"):
-                    raise GneError("BAD_ARGS", "input_audio には data(base64)が要ります", "path はこの API では使えません")
-                parts.append({"type": "input_audio", "input_audio": {"data": a["data"]}})
-            elif p.get("type") in (None, "text"):
-                parts.append({"type": "text", "text": p.get("text") or ""})
-        return parts
-    return _text(content)
+    """音声の部品(input_audio)があれば、文と base64 の音声の部品だけを残したリストのまま渡す(media.py が読む)。"""
+    from ..media import http_content
+    return http_content(content)
 
 
 def _text(content) -> str:

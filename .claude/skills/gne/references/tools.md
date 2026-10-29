@@ -50,7 +50,7 @@ gne steer -m OMNI --audio speech.wav --system "Respond in text." --recipe R   # 
 name: example
 model_id: qwen3.5-4b-64d32ead87      # 違うモデルでは警告だけ出る
 dose_unit: rel
-when: gen                             # all / gen / assistant / after:<文字列> / ramp:<a>-<b>
+when: gen                             # all / gen / assistant / skip-replies / after:<文字列> / ramp:<a>-<b>
 sampling: {temperature: 1.0, top_k: 20, top_p: 0.95, min_p: 0.05, presence_penalty: 0.9}
 units:
   - {layer: 22, neuron: 2742, dose: +0.8}
@@ -133,7 +133,7 @@ control vector は全位置に足す(when は使えない)。sampling も運べ�
 ## 6. UI・OpenAI 互換 API・MCP
 
 ```bash
-gne serve -m M                        # http://127.0.0.1:8791(地図・層・eval・埋め込み、ニューロンの調書とチャット)
+gne serve -m M                        # http://127.0.0.1:8791(地図・層・eval・埋め込み、ニューロンの調書とチャット。チャットに system の欄・🎤 マイク・🔊 読み上げ)
 gne serve -m M --openai               # /v1/models・/v1/chat/completions
 claude mcp add gne -- gne mcp --model M [--ui-url http://127.0.0.1:8791] [--n-gpu-layers 0]
 ```

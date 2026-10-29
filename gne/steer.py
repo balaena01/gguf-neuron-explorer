@@ -138,7 +138,7 @@ class Recipe:
     model_id: str | None = None
     dose_unit: DoseUnit = "rel"
     name: str | None = None
-    when: str = "all"               # §6.15 位置別ステアリング: all / gen / assistant / after:<text> / ramp:<a>-<b>
+    when: str = "all"               # §6.15 位置別ステアリング: all / gen / assistant / skip-replies / after:<text> / ramp:<a>-<b>
     ablate: AblateSpec | None = None   # §6.17 方向の射影消去(LoRA で当てる)
     sampling: dict | None = None       # このレシピを試すときのサンプリング(SAMPLING_KEYS、seed なし)。無ければ呼ぶ側の既定
 

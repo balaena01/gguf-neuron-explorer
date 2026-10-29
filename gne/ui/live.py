@@ -80,6 +80,9 @@ class Live:
             seed = vals.pop("seed", None)
             sampling = Sampling(**vals, seed=seed if seed is not None else int.from_bytes(uuid.uuid4().bytes[:4], "little"))
         system = body.get("system")
+        from ..media import http_content                 # 音声の部品(base64)。ローカルのファイルは読ませない
+        hist = [[{**m, "content": http_content(m.get("content")) if m.get("role") == "user" else m.get("content")}
+                 for m in (c.get("messages") or [])] for c in cols]
         sid = uuid.uuid4().hex[:8]
         stop = threading.Event()
         self._streams[sid] = stop
@@ -96,8 +99,8 @@ class Live:
                     for i, (c, r, w) in enumerate(zip(cols, recipes, whens, strict=True)):
                         if stop.is_set():
                             break
-                        msgs = ([{"role": "system", "content": system}] if system else []) + list(c.get("messages") or [])
-                        ids = e.tokenize_prompt(e.render_chat(msgs))
+                        msgs = ([{"role": "system", "content": system}] if system else []) + hist[i]
+                        ids = e.chat_ids(msgs)
                         if len(ids) + max_tokens > e.n_ctx:
                             raise GneError("CONTEXT_FULL", f"会話が長すぎます({len(ids)} トークン、n_ctx {e.n_ctx})",
                                            "会話をやり直すか、max_tokens を減らしてください")

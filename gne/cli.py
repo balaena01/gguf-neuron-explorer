@@ -449,7 +449,7 @@ _BUDGET = typer.Option(None, "--budget", help="時間の予算(30m・2h・90s)�
 _DOSE_UNIT = typer.Option(None, "--dose-unit", help="rel / absmax / raw(既定はレシピの値、--unit なら rel)")
 _SCALE = typer.Option(1.0, "--scale", help="全ユニットの dose に掛ける係数")
 _ABLATE = typer.Option(None, "--ablate", help="方向の射影消去(§6.17): NAME、NAME@層、NAME:倍率(例 evil@10:0.5)。LoRA で当てる")
-_WHEN = typer.Option(None, "--when", help="足す位置(§6.15): all / gen / assistant / after:<文字列> / ramp:<a>-<b>。既定はレシピの値(無ければ all)")
+_WHEN = typer.Option(None, "--when", help="足す位置(§6.15): all / gen / assistant / skip-replies / after:<文字列> / ramp:<a>-<b>。既定はレシピの値(無ければ all)")
 _TEMP = typer.Option(None, "--temperature", help="サンプリングの温度。サンプリングの値をどれか付けるか、レシピに sampling があればサンプリング"
                                                  "(足りない値はレシピの sampling、無ければ llama-server の既定)。0 だけなら greedy")
 _TOP_K = typer.Option(None, "--top-k", help="サンプリングの top-k(0 で切らない)")

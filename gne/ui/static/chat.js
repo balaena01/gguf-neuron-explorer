@@ -5,6 +5,7 @@ import { postJSON, postSSE } from "./api.js";
 import { t as tr } from "./i18n.js";                 // t は会話のターンの変数名に使っているので tr
 import { esc, tokHTML } from "./panels.js";
 import { samplingLabel } from "./recipe.js";
+import { Mic } from "./mic.js";
 
 // "14:8949:+1" → "L14 N8949 +1"、ヘッドの gain "21:H7:x0" → "L21 H7 ×0"
 const unitLabel = (spec) => {
@@ -41,7 +42,7 @@ export class ChatPanel {
       const d = JSON.parse(localStorage.getItem(SP_KEY) || "null");
       if (d) { Object.assign(this, { spPreset: d.preset || "greedy", sp: { ...this.sp, ...(d.sp || {}) }, seedFixed: !!d.seedFixed, seed: +d.seed || 1234 }); }
     } catch { /* 覚えていなくても使える */ }
-    this.when = "all";                 // 足す位置(本体設計 §6.15): all / gen / assistant / after / ramp
+    this.when = "all";                 // 足す位置(本体設計 §6.15): all / gen / assistant / skip-replies / after / ramp
     this.whenArg = "";                 // after の文字列、ramp の a-b
     this.turns = [];                   // [{ user, labels, replies: [], finish: [] }]
     this.neuron = null;                // { layer, n }
@@ -49,6 +50,11 @@ export class ChatPanel {
     this.sid = null;
     this.readsText = "";
     this.readsOut = null;
+    this.system = "";                  // system プロンプト(空なら無し)。音声で話すときは "Respond in text."(LFM3-Omni)
+    this.draft = "";                   // 入力欄の文(描き直しても消えないように)
+    this.mic = new Mic();              // 音声で話しかける(mic.js)
+    this.micTimer = null;
+    this.speak = false;                // 右の列の返事をブラウザの音声で読み上げる
   }
 
   // NEURON パネルが別のニューロンを開いたとき。ニューロンを相手にした会話はやり直す
@@ -144,22 +150,24 @@ export class ChatPanel {
       : `dose <button class="small" data-step="-0.1" title="${tr("小さく")}">▼</button><input id="ch-dose" type="number" step="0.1" value="${this.dose}"><button class="small" data-step="0.1" title="${tr("大きく")}">▲</button>
          <span class="seg"><button class="on" title="${tr("本体設計の rel dose(残差ノルムの中央値に対する大きさ)を足す")}">add</button><button disabled title="${tr("活性の倍率は本体設計で未対応")}">×</button></span>`;
     const turns = this.turns.map((t, ti) => `
-      <div class="ch-user"><span class="muted">${tr("あなた")}</span> ${esc(t.user)}${t.labels.join() !== cols.map((c) => c.label).join() ? `<span class="muted note">(${t.labels.map(esc).join(" / ")})</span>` : ""}${t.sp ? `<span class="muted note ch-sp-used">${esc(t.sp)}</span>` : ""}</div>
+      <div class="ch-user"><span class="muted">${tr("あなた")}</span> ${t.audio ? `🎤 <audio controls src="data:audio/wav;base64,${t.audio}"></audio><span class="muted note">${tr("{s} 秒の音声", { s: fmt(t.seconds, 1) })}</span> ` : ""}${esc(t.user)}${t.labels.join() !== cols.map((c) => c.label).join() ? `<span class="muted note">(${t.labels.map(esc).join(" / ")})</span>` : ""}${t.sp ? `<span class="muted note ch-sp-used">${esc(t.sp)}</span>` : ""}</div>
       <div class="ch-row">${t.replies.map((r, ci) => `<div class="ch-cell ${["minus", "", "plus"][ci] || ""}" data-t="${ti}" data-c="${ci}">${this.cellHTML(t, ci)}</div>`).join("")}</div>`).join("");
     return `
       <div class="ch-tools">${amount}<span class="muted">max</span><input id="ch-max" type="number" min="1" max="2048" value="${this.maxTokens}">
-        <span class="muted" title="${tr("足す位置: all = 全位置 / gen = 生成中だけ(プロンプトの理解を壊さない)/ assistant = assistant の発話だけ / after = 出力にその文字列が出てから / ramp = 倍率を a から b へ変える")}">when</span><select id="ch-when">${
-          ["all", "gen", "assistant", "after", "ramp"].map((w) => `<option value="${w}"${this.when === w ? " selected" : ""}>${w}</option>`).join("")}</select>${
+        <span class="muted" title="${tr("足す位置: all = 全位置 / gen = 生成中だけ(プロンプトの理解を壊さない)/ assistant = assistant の発話だけ / skip-replies = 過去の返事以外(過去の返事は素のまま読む)/ after = 出力にその文字列が出てから / ramp = 倍率を a から b へ変える")}">when</span><select id="ch-when">${
+          ["all", "gen", "assistant", "skip-replies", "after", "ramp"].map((w) => `<option value="${w}"${this.when === w ? " selected" : ""}>${w}</option>`).join("")}</select>${
           this.when === "after" || this.when === "ramp" ? `<input id="ch-when-x" size="8" value="${esc(this.whenArg)}" placeholder="${this.when === "after" ? tr("結論:") : "1.5-0.5"}">` : ""}
         <button class="small" id="ch-reset"${this.busy ? " disabled" : ""}>${tr("会話を消す")}</button></div>
       <div class="ch-tools">${this.samplingHTML()}</div>
+      <div class="ch-tools"><span class="muted">system</span><input id="ch-system" class="ch-system" value="${esc(this.system)}" placeholder="${tr("空なら無し(音声で話すなら Respond in text.)")}">
+        <label class="muted" title="${tr("右の列の返事を、ブラウザの音声で読み上げる")}"><input type="checkbox" id="ch-speak"${this.speak ? " checked" : ""}> 🔊 ${tr("読み上げ")}</label></div>
       <div class="ch-log">
         <div class="ch-row ch-head">${cols.map((c, i) => `<div class="${["minus", "", "plus"][i]}">${esc(c.label)}${
           this.target === "recipe" && c.units.length ? `<div class="ch-units muted">${c.units.map((u) => `<span class="u">${esc(unitLabel(u))}</span>`).join(" · ")}</div>` : ""}</div>`).join("")}</div>
         ${turns || `<p class="muted note">${tr("同じ発話を 3 列で生成します(左から −、無介入、+)。返答は列ごとに別の履歴になります。")}</p>`}
       </div>
-      <div class="ch-input"><textarea id="ch-text" rows="2" placeholder="${tr("メッセージ(Ctrl+Enter で送る)")}"${this.busy ? " disabled" : ""}></textarea>
-        <button id="ch-send"${this.busy ? " disabled" : ""}>${tr("送る")}</button><button id="ch-stop"${this.busy ? "" : " disabled"}>${tr("止める")}</button></div>
+      <div class="ch-input"><textarea id="ch-text" rows="2" placeholder="${tr("メッセージ(Ctrl+Enter で送る)")}"${this.busy ? " disabled" : ""}>${esc(this.draft)}</textarea>
+        <button id="ch-send"${this.busy ? " disabled" : ""}>${tr("送る")}</button><button id="ch-mic" class="${this.mic.recording ? "rec" : ""}" title="${tr("音声で話しかける(押して話し、もう一度押すと送る。入力欄の文も一緒に送る)")}"${this.busy ? " disabled" : ""}>${this.mic.recording ? `■ ${tr("止めて送る")}` : `🎤 ${tr("話す")}`}</button><button id="ch-stop"${this.busy ? "" : " disabled"}>${tr("止める")}</button></div>
       <div class="ch-status muted note" id="ch-status">${esc(this.status || "")}</div>`;
   }
 
@@ -217,19 +225,56 @@ export class ChatPanel {
     if (wx) wx.addEventListener("change", (ev) => { this.whenArg = ev.target.value.trim(); });
     $("#ch-reset").addEventListener("click", () => { this.turns = []; this.status = ""; this.render(); });
     const text = $("#ch-text");
+    text.addEventListener("input", () => { this.draft = text.value; });
     text.addEventListener("keydown", (ev) => { if (ev.key === "Enter" && (ev.ctrlKey || ev.metaKey)) this.send(text.value); });
     $("#ch-send").addEventListener("click", () => this.send(text.value));
+    $("#ch-mic").addEventListener("click", () => this.toggleMic());
+    $("#ch-system").addEventListener("change", (ev) => { this.system = ev.target.value.trim(); });
+    $("#ch-speak").addEventListener("change", (ev) => { this.speak = ev.target.checked; if (!this.speak && window.speechSynthesis) speechSynthesis.cancel(); });
     $("#ch-stop").addEventListener("click", () => { if (this.sid) postJSON(`/api/steer/${this.sid}/stop`, {}); });
     const log = $(".ch-log");
     log.scrollTop = log.scrollHeight;
   }
 
-  async send(user) {
+  // 音声で話しかける: 1 回目で録音を始め、2 回目で止めて送る(入力欄の文があれば音声の後に添える)
+  async toggleMic() {
+    if (this.busy) return;
+    if (!this.mic.recording) {
+      try { await this.mic.start(); } catch (e) {
+        this.setStatus(e.message === "no-mic" ? tr("このページではマイクを使えません(http://127.0.0.1 か localhost で開いてください)")
+          : tr("マイクを使えませんでした: {e}", { e: e.name === "NotAllowedError" ? tr("許可されていません") : e.message }));
+        return;
+      }
+      this.render();
+      this.micTimer = setInterval(() => this.setStatus(tr("録音中… {s} 秒(もう一度押すと送る)", { s: fmt(this.mic.seconds(), 1) })), 200);
+      return;
+    }
+    clearInterval(this.micTimer);
+    this.micTimer = null;
+    this.setStatus(tr("音声を変換しています…"));
+    let r = null;
+    try { r = await this.mic.stop(); } catch (e) { this.setStatus(`${tr("録音できませんでした")}: ${e.message}`); this.render(); return; }
+    if (!r) { this.status = tr("録音できませんでした"); this.render(); return; }
+    const el = this.el && this.el.querySelector("#ch-text");
+    await this.send(el ? el.value : this.draft, r);
+  }
+
+  speakReply(text) {
+    if (!this.speak || !text || !window.speechSynthesis) return;
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = /[\u3040-\u30ff\u4e00-\u9fff]/.test(text) ? "ja-JP" : "en-US";
+    speechSynthesis.cancel();
+    speechSynthesis.speak(u);
+  }
+
+  async send(user, audio = null) {
     user = (user || "").trim();
-    if (!user || this.busy) return;
+    if ((!user && !audio) || this.busy) return;
     const cols = this.columns();
     const sp = this.samplingBody();
-    const turn = { user, labels: cols.map((c) => c.label), replies: cols.map(() => ""), finish: cols.map(() => null), sp: sp.label };
+    const turn = { user, audio: audio ? audio.b64 : null, seconds: audio ? audio.seconds : null,
+                   labels: cols.map((c) => c.label), replies: cols.map(() => ""), finish: cols.map(() => null), sp: sp.label };
+    this.draft = "";
     const prev = this.turns.slice();
     this.turns.push(turn);
     this.busy = true;
@@ -238,14 +283,17 @@ export class ChatPanel {
     this.failed = false;
     this.render();
     const t0 = performance.now();
+    // 音声の発話は input_audio の部品(base64 の WAV)。サーバはローカルのファイルを読まない
+    const said = (t) => t.audio ? [{ type: "input_audio", input_audio: { data: t.audio, format: "wav" } }, ...(t.user ? [{ type: "text", text: t.user }] : [])] : t.user;
     const body = {
       max_tokens: this.maxTokens,
       ...sp.body,
       when: this.whenSpec(),
+      ...(this.system ? { system: this.system } : {}),
       columns: cols.map((c, ci) => ({
         label: c.label, units: c.units, ...(c.ablate ? { ablate: c.ablate } : {}),
-        messages: [...prev.flatMap((t) => [{ role: "user", content: t.user }, { role: "assistant", content: t.replies[ci] }]),
-                   { role: "user", content: user }],
+        messages: [...prev.flatMap((t) => [{ role: "user", content: said(t) }, { role: "assistant", content: t.replies[ci] }]),
+                   { role: "user", content: said(turn) }],
       })),
     };
     const cell = (ci) => this.el && this.el.querySelector(`.ch-cell[data-t="${this.turns.length - 1}"][data-c="${ci}"]`);
@@ -265,7 +313,10 @@ export class ChatPanel {
         } else if (ev.type === "warn") this.setStatus(ev.warnings.join(" / "));
         else if (ev.type === "error") { this.status = `${tr("エラー")}: ${ev.error.message}`; this.failed = true; }
         else if (ev.type === "done") {
-          if (!this.failed) this.status = tr("{s} 秒で 3 列を生成(うち GPU 待ち {w} 秒)", { s: fmt(ev.seconds, 1), w: fmt(this.waited, 1) });
+          if (!this.failed) {
+            this.status = tr("{s} 秒で 3 列を生成(うち GPU 待ち {w} 秒)", { s: fmt(ev.seconds, 1), w: fmt(this.waited, 1) });
+            this.speakReply(turn.replies[turn.replies.length - 1]);
+          }
         }
       });
     } catch (e) { this.status = `${tr("エラー")}: ${e.message}`; }
