@@ -35,13 +35,12 @@ def fire_scores(session, ids: list[int], layers: list[int] | None = None, routes
     e = session.engine
     names = e.list_names(ids[:16])
     cand = range(e.n_layer) if layers is None else layers
-    act = {pick_act_name(names, L): L for L in cand if pick_act_name(names, L)}
     moe = {}
-    for L in cand:
-        if pick_act_name(names, L) is None:
-            mn = moe_names(names, L)
-            if "act" in mn and "argsort" in mn:
-                moe[L] = mn
+    for L in cand:                                 # MoE が先(shared expert の FFN は dense と同じ ffn_swiglu-L で出る)
+        mn = moe_names(names, L)
+        if "act" in mn and "argsort" in mn:
+            moe[L] = mn
+    act = {pick_act_name(names, L): L for L in cand if L not in moe and pick_act_name(names, L)}
     want = set(act) | {mn[k] for mn in moe.values() for k in ("act", "argsort")}
     cap = Capture(lambda nm: nm in want)
     ctx = e.probe_ctx(cap)

@@ -90,9 +90,10 @@ def contrastive_directions(engine: Engine, cs: ContrastSet, *, layers: Sequence[
     names = engine.list_names(seqs["A"][0][0][:16])
     act_names = {}
     if with_act:
+        from .moe import moe_names
         for L in Ls:
             nm = pick_act_name(names, L)
-            if nm:
+            if nm and "argsort" not in moe_names(names, L):   # MoE の層の ffn_swiglu は shared expert の活性なので使わない
                 act_names[nm] = L
     resid_names = {f"l_out-{L}": L for L in Ls}
     cap = Capture(lambda n: n in resid_names or n in act_names)

@@ -19,6 +19,7 @@ from gne.steer import GneError, Recipe, parse_unit
 ROOT = Path(__file__).resolve().parent.parent
 MOE = Path(os.environ.get("GNE_TEST_MOE", ROOT / "models" / "granite-3.1-1b-a400m-instruct-Q8_0.gguf"))
 MOE_BIAS = Path(os.environ.get("GNE_TEST_MOE_BIAS", ROOT / "models" / "LFM2-8B-A1B-Q4_K_M.gguf"))
+MOE_SHARED = Path(os.environ.get("GNE_TEST_MOE_SHARED", ROOT / "models" / "Qwen1.5-MoE-A2.7B-Chat.Q4_K_M.gguf"))
 
 
 # --- A. 住所 --------------------------------------------------------------------------------------
@@ -429,3 +430,45 @@ def test_gain_bake_by_scale_patch(tmp_path):
     assert (tmp_path / "g.gguf.patch.json").exists()
     q = bake_gain_gguf(wt, r, tmp_path / "q.gguf", requant="q8_0")
     assert "method" not in q
+
+
+@pytest.mark.model
+def test_shared_expert_qwen2moe(tmp_path_factory):
+    """shared expert のある MoE(qwen2moe、GNE_TEST_MOE_SHARED): 統計は MoE の側を取る(shared expert の FFN は dense と同じ
+    ffn_swiglu-L で出る)。shared expert のニューロンの gain(LoRA を ffn_up_shexp に)と add(方向押し)。"""
+    s = _session(MOE_SHARED, tmp_path_factory, "moe_shared")
+    try:
+        L = 12
+        li = s.weights.arch.layers[L]
+        assert li.ffn == "moe+shared" and li.n_ff_shexp > 0 and not li.has_router_bias
+        assert not [w for w in s.weights.check_arch() if "ffn_down.weight" in w]
+        d = s.stats_act(layers=[L], tokens=600)
+        assert d["layers"][0]["tensor_name"].startswith("ffn_moe_") and d["layers"][0]["moe"]["n_expert"] == li.n_expert
+        ids = _ids(s)
+        _, o = _capture(s, ids, L, ("argsort",))
+        from gne.capture import Capture
+        e = s.engine
+
+        def shared(lora=None):
+            cap = Capture(lambda n: n == f"ffn_swiglu-{L}")
+            ctx = e.probe_ctx(cap)
+            e.clear_memory(ctx)
+            e.set_cvec(ctx, None)
+            e.set_lora(ctx, lora)
+            try:
+                e.prefill(ctx, [ids])
+                return cap.take()[f"ffn_swiglu-{L}"]
+            finally:
+                e.set_lora(ctx, None)
+        a0 = shared()
+        assert a0.shape == (len(ids), li.n_ff_shexp)
+        n = int(np.argmax(np.abs(a0).mean(0)))
+        a1 = shared(s.lora_for(s.recipe(units=[f"{L}:S:N{n}:x2"])))
+        assert np.abs(a1[:, n] - 2 * a0[:, n]).max() < 0.03 * np.abs(a0[:, n]).max()
+        assert np.array_equal(np.delete(a1, n, 1), np.delete(a0, n, 1))
+        _, det = s.vectors(s.recipe(units=[f"{L}:S:N{n}:+0.5"]))
+        assert det[0]["semantics"] == "direction" and det[0]["norm"] > 0
+        assert s.weights.n_units(L) == li.n_expert * li.n_ff                       # shared expert は通し番号の外
+    finally:
+        s.close()
+

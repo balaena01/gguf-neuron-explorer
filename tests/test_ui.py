@@ -596,7 +596,8 @@ def test_u2_recipe_chat_fires_in_browser(server, browser):
     pg.click("#fi-run")
     pg.wait_for_function("document.querySelector('#fi-list tr[data-l]')", timeout=60000)
     assert pg.evaluate("window.gne.overlay.field").startswith("fires:")
-    assert "活性統計が無い" in pg.evaluate("document.querySelector('#fires-list .ch-status').textContent")   # 統計の無い層を名指し
+    pg.wait_for_function("(document.querySelector('#fires-list .ch-status') || {}).textContent?.includes('活性統計が無い')",
+                         timeout=30000)                                                # 統計の無い層を名指し(一覧の後に出る)
     assert pg.evaluate("document.querySelectorAll('#fi-list tr.weak').length") > 0                        # 一覧の行に印
     assert pg.evaluate("window.gne.overlay.weak.size") > 0 and "枠の比較から外した" in pg.evaluate("document.querySelector('#legend').textContent")
     assert pg.evaluate("[...document.querySelectorAll('#fi-list td.w')].every(td => td.getBoundingClientRect().width > 80)")   # lens 列に幅がある

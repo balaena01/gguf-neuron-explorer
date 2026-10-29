@@ -419,9 +419,10 @@ def response_directions(session, cs: ContrastSet, *, max_tokens: int = 96, with_
     if with_act:
         probe = e.tokenize_prompt(e.render_chat([{"role": "user", "content": cs.user_prompts[0]}]))
         seen = e.list_names(probe[:16])
+        from .moe import moe_names
         for L in Ls:
             nm = pick_act_name(seen, L)
-            if nm:
+            if nm and "argsort" not in moe_names(seen, L):      # MoE の層の ffn_swiglu は shared expert の活性
                 act_names[nm] = L
     act_sums = {side: {L: 0.0 for L in act_names.values()} for side in "AB"}
     act_sq = {L: 0.0 for L in act_names.values()}             # A∪B の活性の二乗和(効果量 = 差 ÷ 標準偏差 に使う)

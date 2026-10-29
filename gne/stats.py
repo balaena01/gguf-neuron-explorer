@@ -268,12 +268,12 @@ def neuron_activation_stats(engine: Engine, corpus: Corpus, layers: Sequence[int
     act_names = {}
     moe: dict[int, dict[str, str]] = {}
     for L in Ls:
+        mn = moe_names(names_all, L)
+        if "act" in mn and "argsort" in mn:        # MoE が先(shared expert の FFN は dense と同じ ffn_swiglu-L で出る)
+            moe[L] = mn
+            continue
         nm = pick_act_name(names_all, L)
         if nm is None:
-            mn = moe_names(names_all, L)
-            if "act" in mn and "argsort" in mn:
-                moe[L] = mn
-                continue
             raise RuntimeError(f"層 {L} の ffn_down 入力テンソルが見つかりません(gne probe --list-names --layer {L})")
         act_names[nm] = L
     moe_wanted = {v for mn in moe.values() for k, v in mn.items() if k in ("act", "argsort", "weights")}

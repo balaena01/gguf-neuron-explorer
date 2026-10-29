@@ -1309,3 +1309,10 @@ Omni の L14 の attention の書き足し(F114)をレシピ `14:dir:wr_mix14`(r
 - **fires**: MoE の層は、選ばれた専門家の活性を通し番号に散らし(選ばれなければ 0)、トークンごとに選ばれた専門家を `routed` で返す。
 - **F eval**: 専門家全体の gain・route を含むレシピは、倍率ごとに作業用コピーにパッチを当てて測る(倍率 d では k は 1 から k へ、route は 0 から delta へ d の割合で動く)。ランダムな対照も同じパッチで測る。L12 の 2 専門家を消すと能力 0.75 → 0.72、ppl 9.37 → 9.41。終わった後、作業用コピーにパッチは残らない。
 - **最終層**: llama.cpp は最終層で出力のトークンの行だけを計算するので、専門家の捕捉で最終層を含めるときは全位置のロジットを出させる(`logits_all`)。
+
+**shared expert のある MoE(Qwen1.5-MoE-A2.7B-Chat、Q4_K_M、`qwen2moe`)**: 24 層すべて MoE、60 専門家中 4 個(1 個あたり 1408)と shared expert(5632、`ffn_gate_inp_shexp` のシグモイドで重みづけ)。ルーターのバイアスは無く、選んだ重みは正規化しない(実効の重みは `ffn_moe_weights`)。`ffn_down_exps` は Q5_0。
+- shared expert の FFN はグラフで dense と同じ名前(`ffn_up-L`・`ffn_gate-L`・`ffn_swiglu-L`)と `ffn_shexp*` で出る。そのままだと統計・fires・逆引きが層を dense と取り違えるので、MoE の捕捉(`ffn_moe_swiglu`・`ffn_moe_argsort`)がある層は MoE として読み、`ffn_swiglu-L` は shared expert の活性として扱う。
+- V18 中央値 1.5%(p95 4.5%)、専門家のニューロンの gain の誤差 0.16%。shared expert のニューロンの gain(`L:S:Nn:x2`、LoRA を `ffn_up_shexp` に)で活性がちょうど 2 倍(誤差 0.67%)、ほかのニューロンはビット単位で同じ。
+- パッチの読み直しは 9.5 GB で 1.7 秒(初回は 7.6 秒、作業用コピーを作るのを含めて 14 秒)。専門家の対照分析は 1440 専門家を 14 秒。
+- shared expert のニューロンは層の通し番号の外(sweep・lens・逆引き・UI の地図は選ばれる専門家の分だけ)。`L:S:Nn` のユニットで押す。
+

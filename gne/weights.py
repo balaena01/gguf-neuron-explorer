@@ -143,7 +143,8 @@ class Weights:
                 scales[L] = float(np.asarray(tensor_to_f32(t)).reshape(-1)[0])
 
         down0 = self._tensors.get("blk.0.ffn_down.weight") or next(
-            (t for n, t in self._tensors.items() if n.endswith("ffn_down.weight")), None)
+            (t for n, t in self._tensors.items() if n.endswith("ffn_down.weight")), None) or next(
+            (t for n, t in self._tensors.items() if n.endswith("ffn_down_exps.weight")), None)   # 全層 MoE のモデル
 
         return ModelMeta(
             path=self.path,
@@ -189,7 +190,8 @@ class Weights:
                 out.append(f"ffn_down の量子化型 {m.ffn_down_qtype} は dequantize できません: F16 / Q8_0 版を用意してください")
         except KeyError:
             out.append(f"ffn_down.weight が見つからないか型が不明です({m.ffn_down_qtype})")
-        missing = [L for L in range(m.n_layer) if f"blk.{L}.ffn_down.weight" not in self._tensors]
+        missing = [L for L in range(m.n_layer) if f"blk.{L}.ffn_down.weight" not in self._tensors
+                   and f"blk.{L}.ffn_down_exps.weight" not in self._tensors]          # MoE の層は ffn_down_exps
         if missing:
             out.append(f"ffn_down.weight が無い層: {missing[:8]}{' …' if len(missing) > 8 else ''}")
         return out
