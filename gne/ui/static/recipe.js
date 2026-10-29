@@ -1,6 +1,8 @@
 // レシピ(別冊 §2 LIST の recipe タブ、§4.8 マーク)。ユニットの追加・dose のスライダー・保存と読み込み・cvec の書き出し。
 // ablate(方向の射影消去、本体設計 §6.17)の行: 方向・層の範囲・倍率。3 列チャットでは − の列で倍率を反転する。
 // ヘッドの gain(CHANGE-04 D・G、L:Hh:xk): 行の倍率 k は 1 が無介入。全体に掛ける倍率 s では 1 + (k − 1)·s(eval の倍率列と同じ)。
+// MoE(CHANGE-05 G): 専門家のニューロン L:Ee:Nn(add = 書き込み方向の押し、gain = 選ばれたときだけ効く)、専門家全体の gain L:Ee:xk、
+// ルーターのバイアス L:Ee:route:delta(s 倍)、shared expert のニューロン L:S:Nn。
 // 編集中のレシピはこのブラウザの localStorage に下書きとして置く(使えなければ置かない)。
 import { getJSON, postJSON } from "./api.js";
 import { t } from "./i18n.js";
@@ -10,10 +12,20 @@ const fmt = (x, d = 2) => (x === null || x === undefined || !Number.isFinite(+x)
 const signed = (x, d = 2) => `${x >= 0 ? "+" : "−"}${fmt(Math.abs(x), d)}`;
 const isDir = (u) => u.kind === "direction";
 const isHead = (u) => u.kind === "head";
+const isNeuron = (u) => (u.kind || "neuron") === "neuron";
+export const isMoe = (u) => u.kind === "expert_neuron" || u.kind === "expert" || u.kind === "shared";
+const isGain = (u) => isHead(u) || u.mode === "gain";             // 倍率 k(1 が無介入)の行
+const isRoute = (u) => u.mode === "route";
+const isPush = (u) => (u.kind === "expert_neuron" || u.kind === "shared") && !isGain(u);   // MoE の add = 書き込み方向の押し
+const moeKey = (u) => `${u.layer}:${u.kind}:${u.expert ?? ""}:${u.neuron ?? ""}:${u.mode || "add"}`;
 // 方向のユニット(gne direction の方向、L:dir:NAME:dose)は dose が小さいので、スライダーを ±1・刻み 0.005 にする
-const range = (u) => (isDir(u) ? { max: 1, step: 0.005, d: 3 } : { max: 3, step: 0.05, d: 2 });
+// ルーターのバイアスに足す値(route)は ±4・刻み 0.1
+const range = (u) => (isDir(u) ? { max: 1, step: 0.005, d: 3 } : isRoute(u) ? { max: 4, step: 0.1, d: 1 } : { max: 3, step: 0.05, d: 2 });
 const GAIN = { min: -1, max: 3, step: 0.05 };          // ヘッドの倍率 k のスライダー(0 で消す、負で反転、1 で無介入)
-const unitOrder = (u) => [u.layer, isHead(u) ? 1 : 0, isHead(u) ? u.head : u.neuron ?? -1];
+// 並び: 層 → ニューロン・方向・専門家のニューロン → ヘッド → 専門家全体、同じものは add → gain → route
+const unitOrder = (u) => [u.layer, isHead(u) ? 1 : u.kind === "expert" ? 2 : 0,
+  isHead(u) ? u.head : u.kind === "expert" ? u.expert : u.kind === "expert_neuron" ? 1e7 + u.expert * 1e5 + u.neuron
+    : u.kind === "shared" ? 2e7 + u.neuron : u.neuron ?? -1, isRoute(u) ? 2 : isGain(u) ? 1 : 0];
 
 // スライダーは 0(中央)から値まで塗る。+ は黄、− は赤紫。中央に 0 の目盛り
 function trackBG(v, max = 3) {
@@ -35,12 +47,22 @@ const kLabel = (k) => `×${fmt(k, 2)}`;
 // 全体に掛ける倍率 s でのヘッドの倍率(1 が無介入。s = −1 なら 1 の反対側: ×0 → ×2)
 const gainAt = (k, s) => +(1 + (k - 1) * s).toFixed(4);
 
+// ユニット 1 つのサーバ向けの指定(gne/steer.py の parse_unit の形)。s はレシピ全体に掛ける倍率
+export function unitSpec(u, s = 1) {
+  const who = isHead(u) ? `H${u.head}` : isDir(u) ? `dir:${u.direction}` : u.kind === "expert_neuron" ? `E${u.expert}:N${u.neuron}`
+    : u.kind === "shared" ? `S:N${u.neuron}` : u.kind === "expert" ? `E${u.expert}${isRoute(u) ? ":route" : ""}` : `${u.neuron}`;
+  if (isGain(u)) return `${u.layer}:${who}:x${gainAt(u.k, s)}`;
+  const d = u.dose * s;
+  return `${u.layer}:${who}:${d >= 0 ? "+" : ""}${+d.toFixed(4)}`;
+}
+
 export class Recipe {
   constructor(modelId, onChange) {
     this.key = `gne.recipe.${modelId}`;
     this.onChange = onChange;
     this.name = "";
-    this.units = [];                   // [{ layer, neuron, dose }]、方向 { layer, kind: "direction", direction, dose }、ヘッド { layer, kind: "head", head, k }
+    this.units = [];                   // [{ layer, neuron, dose }]、方向 { layer, kind: "direction", direction, dose }、ヘッド { layer, kind: "head", head, k }、
+                                       // MoE { layer, kind: "expert_neuron" | "shared" | "expert", expert, neuron, mode: "add" | "gain" | "route", dose | k }
     this.ablate = null;                // { direction, scale, layers, from_layer } か null
     this.sampling = null;              // このレシピを試すときのサンプリング { temperature, top_k, top_p, min_p, presence_penalty } か null
     this.skipped = 0;                  // 読み込んだレシピのうち UI では扱えないユニット(ニューロンの gain、ヘッドの query など)の数。
@@ -67,18 +89,30 @@ export class Recipe {
   setSampling(sp) { this.sampling = sp ? { ...sp } : null; this._save(); }
 
   // サーバに送るユニット指定。scale はレシピ全体に掛ける倍率(3 列チャットの ± 列、eval の倍率と同じ意味)
-  specs(scale = 1) {
-    return this.units.map((u) => (isHead(u) ? `${u.layer}:H${u.head}:x${gainAt(u.k, scale)}`
-      : `${u.layer}:${isDir(u) ? `dir:${u.direction}` : u.neuron}:${u.dose * scale >= 0 ? "+" : ""}${+(u.dose * scale).toFixed(4)}`));
-  }
-  // control vector に入るもの(add)だけ。ヘッドの gain は LoRA なので cvec には入らない
-  addSpecs() { return this.specs().filter((_, i) => !isHead(this.units[i])); }
-  has(L, n) { return this.units.find((u) => !isDir(u) && !isHead(u) && u.layer === L && u.neuron === n); }
-  neurons() { return this.units.filter((u) => !isDir(u) && !isHead(u)); }
+  specs(scale = 1) { return this.units.map((u) => unitSpec(u, scale)); }
+  // control vector に入るもの(add)だけ。gain は LoRA、専門家全体の gain と route はスケールパッチなので cvec には入らない
+  // (MoE の add は書き込み方向の押しとして入る)
+  addSpecs() { return this.units.filter((u) => !isGain(u) && !isRoute(u)).map((u) => unitSpec(u)); }
+  has(L, n) { return this.units.find((u) => isNeuron(u) && u.layer === L && u.neuron === n); }
+  neurons() { return this.units.filter(isNeuron); }
   hasHead(L, h) { return this.units.find((u) => isHead(u) && u.layer === L && u.head === h); }
   heads() { return this.units.filter(isHead); }
+  // MoE の単位(q: { layer, kind, expert, neuron, mode })。同じ単位でも add・gain・route は別の行
+  findMoe(q) { const k = moeKey(q); return this.units.find((u) => isMoe(u) && moeKey(u) === k); }
+  moe() { return this.units.filter(isMoe); }
+  // v は add・route なら dose、gain なら倍率 k。null で外す
+  setMoe(q, v) {
+    const u = this.findMoe(q);
+    if (v === null) { if (u) this.remove(this.units.indexOf(u)); return; }
+    const f = q.mode === "gain" ? "k" : "dose";
+    if (u) u[f] = v;
+    else this.units.push({ layer: q.layer, kind: q.kind, ...(q.kind !== "shared" ? { expert: q.expert } : {}),
+                           ...(q.kind !== "expert" ? { neuron: q.neuron } : {}), mode: q.mode || "add", [f]: v });
+    this._sort();
+    this._save();
+  }
   _sort() {
-    this.units.sort((a, b) => { const x = unitOrder(a), y = unitOrder(b); return x[0] - y[0] || x[1] - y[1] || x[2] - y[2]; });
+    this.units.sort((a, b) => { const x = unitOrder(a), y = unitOrder(b); return x[0] - y[0] || x[1] - y[1] || x[2] - y[2] || x[3] - y[3]; });
   }
   add(L, n, dose) {
     const u = this.has(L, n);
@@ -93,17 +127,22 @@ export class Recipe {
     this._save();
   }
   removeHead(L, h) { const u = this.hasHead(L, h); if (u) this.remove(this.units.indexOf(u)); }
-  // 行 i の値(ニューロン・方向は dose、ヘッドは倍率 k)
-  set(i, v) { if (isHead(this.units[i])) this.units[i].k = v; else this.units[i].dose = v; this._save(); }
+  // 行 i の値(ニューロン・方向・route は dose、ヘッドと gain は倍率 k)
+  set(i, v) { if (isGain(this.units[i])) this.units[i].k = v; else this.units[i].dose = v; this._save(); }
   remove(i) { this.units.splice(i, 1); this._save(); }
   clear() { this.units = []; this.name = ""; this.ablate = null; this.sampling = null; this.skipped = 0; this._save(); }
   load(name, units, ablate = null, sampling = null) {
+    const moeOk = (u) => isMoe(u) && (u.kind === "shared" || (u.expert !== null && u.expert !== undefined))
+      && ({ expert_neuron: ["add", "gain"], shared: ["add", "gain"], expert: ["gain", "route"] }[u.kind].includes(u.mode || "add"))
+      && (u.mode === "gain" ? Number.isFinite(+u.k) && u.k !== null : true);
     const ok = units.filter((u) => (((u.kind || "neuron") === "neuron" || u.kind === "direction") && (u.mode || "add") === "add")
-      || (u.kind === "head" && u.mode === "gain" && u.head !== null && u.head !== undefined && Number.isFinite(+u.k)));
+      || (u.kind === "head" && u.mode === "gain" && u.head !== null && u.head !== undefined && Number.isFinite(+u.k)) || moeOk(u));
     this.skipped = units.length - ok.length;
     this.name = name;
     this.units = ok.map((u) => (isDir(u) ? { layer: u.layer, kind: "direction", direction: u.direction, dose: u.dose }
       : isHead(u) ? { layer: u.layer, kind: "head", head: u.head, k: +u.k }
+      : isMoe(u) ? { layer: u.layer, kind: u.kind, ...(u.kind !== "shared" ? { expert: +u.expert } : {}), ...(u.kind !== "expert" ? { neuron: u.neuron } : {}),
+                     mode: u.mode || "add", ...(u.mode === "gain" ? { k: +u.k } : { dose: +(u.dose ?? u.delta) }) }
       : { layer: u.layer, neuron: u.neuron, dose: u.dose }));
     this.ablate = ablate || null;
     this.sampling = sampling || null;
@@ -115,12 +154,14 @@ export class Recipe {
 export const samplingLabel = (sp) => (sp ? `${t("温度")} ${+sp.temperature} · top-k ${sp.top_k} · top-p ${+sp.top_p} · min-p ${+sp.min_p} · presence ${+sp.presence_penalty}` : "");
 
 export class RecipePanel {
-  constructor(root, recipe, { onOpen, onOpenHead, onChat, unitWords, directions, headKind }) {
+  constructor(root, recipe, { onOpen, onOpenHead, onOpenExpert, onChat, unitWords, directions, headKind, nFF }) {
     this.root = root;
     this.r = recipe;
     this.directions = directions || (() => []);   // 方向の名前(gne direction / reverse)
     this.onOpen = onOpen;
     this.onOpenHead = onOpenHead || (() => {});   // ({ layer, head }) → HEAD パネルで開く
+    this.onOpenExpert = onOpenExpert || (() => {});   // ({ layer, expert }) → EXPERT パネルで開く(CHANGE-05 G)
+    this.nFF = nFF || (() => 0);                  // (L) → MoE の層の専門家の幅(通し番号 = 専門家 × 幅 + n)
     this.headKind = headKind || (() => "");       // (L) → "attention" / "線形注意" など
     this.onChat = onChat;
     this.unitWords = unitWords;        // (L, n) → 短い説明(sweep の語など)。無ければ ""
@@ -136,13 +177,14 @@ export class RecipePanel {
   render() {
     const r = this.r;
     const rows = r.units.map((u, i) => {
-      if (isHead(u)) return this.headRow(u, i);
+      if (isGain(u)) return this.gainRow(u, i);
       const g = range(u);
       const id = isDir(u)
         ? `<span class="mono" title="${t("方向(gne direction で作ったもの)。その層に足す")}">L${u.layer} dir:${esc(u.direction)}</span> <span class="muted w">${t("方向")}</span>`
+        : isMoe(u) ? this.moeId(u, i)
         : `<a href="#" data-open="${i}">L${u.layer} N${u.neuron}</a> <span class="muted w">${esc(this.unitWords(u.layer, u.neuron))}</span>`;
       return `
-      <tr data-i="${i}"><td class="id">${id}<button class="small rm" data-rm="${i}" title="${t("外す")}">×</button>
+      <tr data-i="${i}"${isMoe(u) ? ` class="rc-moe"` : ""}><td class="id">${id}<button class="small rm" data-rm="${i}" title="${t("外す")}">×</button>
         <div class="sl"><span class="muted">−${g.max}</span><input type="range" class="dose" min="-${g.max}" max="${g.max}" step="${g.step}" value="${u.dose}" data-i="${i}" style="background:${trackBG(u.dose, g.max)}"><span class="muted">+${g.max}</span>
           <span class="sg mono ${u.dose >= 0 ? "plus" : "minus"}">${signed(u.dose, g.d)}</span>
           <input type="number" min="-10" max="10" step="${g.step}" value="${u.dose}" data-i="${i}" class="num" title="${t("値を直接入れる")}"></div></td></tr>`;
@@ -156,6 +198,7 @@ export class RecipePanel {
         : `<p class="muted note">${t("ユニットがありません。NEURON の「+ レシピ」「− レシピ」で足します。")}</p>`}
       ${r.skipped ? `<p class="muted note">${t("UI では扱えないユニット(ニューロンの gain・ヘッドの query・ランダム方向など){n} 個を外しました", { n: r.skipped })}</p>` : ""}
       ${r.heads().length ? `<p class="muted note">${t("ヘッドの倍率 k は 1 が無介入(0 で消す、2 で倍、負で反転)。LoRA で当てるので cvec には入りません。3 列チャットの − 列は 1 の反対側(×0 なら ×2)。")}</p>` : ""}
+      ${r.moe().length ? `<p class="muted note">${t("MoE: 方向押し = 専門家のニューロンの add。専門家が選ばれたかに関係なく全トークンにその書き込み方向を足す(ニューロン押しではない)。選ばれたときだけ効くのは gain(×)。専門家全体の ×k と route はモデルを読み直すパッチで当てる(列ごとに 0.3〜1 秒)。3 列チャットの − 列は ×k が 2 − k、route と add は符号を反転。")}</p>` : ""}
       ${this.ablateHTML()}
       ${r.sampling ? `<div class="rc-sampling muted note" title="${t("このレシピを試すときのサンプリング。チャットの「レシピの設定」で使い、保存するとレシピのファイルに入る(OpenAI 互換 API の既定にもなる)")}">${t("サンプリング")}: <span class="mono">${esc(samplingLabel(r.sampling))}</span><button class="small" id="rc-sp-rm" title="${t("レシピから外す")}">×</button></div>` : ""}
       <p class="muted note">${t("dose は rel(その層の残差ノルムの中央値に対する大きさ)。マップに + は黄、− は赤紫の輪で出ます。")}</p>
@@ -183,7 +226,7 @@ export class RecipePanel {
         const tr = this.root.querySelector(`tr[data-i="${i}"]`);
         for (const x of tr.querySelectorAll("input")) if (x !== ev.target) x.value = String(v);
         const sg = tr.querySelector(".sg");
-        if (isHead(r.units[i])) {
+        if (isGain(r.units[i])) {
           tr.querySelector("input.dose").style.background = gainBG(v);
           sg.textContent = kLabel(v); sg.className = `sg mono ${v >= 1 ? "plus" : "minus"}`;
           return;
@@ -198,7 +241,10 @@ export class RecipePanel {
       el.addEventListener("click", (ev) => {
         ev.preventDefault();
         const u = r.units[+el.dataset.open];
-        if (isHead(u)) this.onOpenHead({ layer: u.layer, head: u.head }); else this.onOpen({ layer: u.layer, n: u.neuron });
+        if (isHead(u)) this.onOpenHead({ layer: u.layer, head: u.head });
+        else if (u.kind === "expert") this.onOpenExpert({ layer: u.layer, expert: u.expert });
+        else if (u.kind === "expert_neuron") this.onOpen({ layer: u.layer, n: u.expert * this.nFF(u.layer) + u.neuron });
+        else this.onOpen({ layer: u.layer, n: u.neuron });
       });
     }
     $("#rc-chat").addEventListener("click", () => this.onChat());
@@ -208,10 +254,22 @@ export class RecipePanel {
     $("#rc-export").addEventListener("click", () => this.export());
   }
 
-  // ヘッドの行(L21 H7 ×0.00)。スライダーは倍率 k(−1〜3、1 が無介入)
-  headRow(u, i) {
+  // MoE の単位の名前(CHANGE-05 G)。add には「方向押し」の印、専門家全体は EXPERT パネルへ
+  moeId(u, i) {
+    const push = isPush(u) ? ` <span class="badge push" title="${t("書き込み方向の押し: 専門家が選ばれたかに関係なく、全トークンでこのニューロンの書き込み方向を足す(ニューロン押しではない)")}">${t("方向押し")}</span>` : "";
+    if (u.kind === "expert_neuron") return `<a href="#" data-open="${i}" title="${t("NEURON パネルで開く")}">L${u.layer} E${u.expert} N${u.neuron}</a>${push}${
+      isGain(u) ? ` <span class="muted w">gain · ${t("選ばれたときだけ")}</span>` : ""}`;
+    if (u.kind === "shared") return `<span class="mono">L${u.layer} S N${u.neuron}</span>${push} <span class="muted w">shared expert${isGain(u) ? " · gain" : ""}</span>`;
+    return `<a href="#" data-open="${i}" title="${t("EXPERT パネルで開く")}">L${u.layer} E${u.expert}</a> <span class="muted w">${
+      isRoute(u) ? t("route(ルーターのバイアスに足す)") : t("専門家全体 · gain(パッチ)")}</span>`;
+  }
+
+  // 倍率の行(ヘッド L21 H7 ×0.00、MoE の gain)。スライダーは倍率 k(−1〜3、1 が無介入)
+  gainRow(u, i) {
+    const id = isHead(u) ? `<a href="#" data-open="${i}" title="${t("HEAD パネルで開く")}">L${u.layer} H${u.head}</a> <span class="muted w">${esc(this.headKind(u.layer))} · gain</span>`
+      : this.moeId(u, i);
     return `
-      <tr data-i="${i}" class="rc-head"><td class="id"><a href="#" data-open="${i}" title="${t("HEAD パネルで開く")}">L${u.layer} H${u.head}</a> <span class="muted w">${esc(this.headKind(u.layer))} · gain</span><button class="small rm" data-rm="${i}" title="${t("外す")}">×</button>
+      <tr data-i="${i}" class="rc-gain${isHead(u) ? " rc-head" : " rc-moe"}"><td class="id">${id}<button class="small rm" data-rm="${i}" title="${t("外す")}">×</button>
         <div class="sl"><span class="muted">${GAIN.min}</span><input type="range" class="dose" min="${GAIN.min}" max="${GAIN.max}" step="${GAIN.step}" value="${u.k}" data-i="${i}" style="background:${gainBG(u.k)}"><span class="muted">${GAIN.max}</span>
           <span class="sg mono ${u.k >= 1 ? "plus" : "minus"}">${kLabel(u.k)}</span>
           <input type="number" min="-4" max="8" step="${GAIN.step}" value="${u.k}" data-i="${i}" class="num" title="${t("値を直接入れる")}"></div></td></tr>`;

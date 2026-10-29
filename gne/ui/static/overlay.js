@@ -1,6 +1,8 @@
 // 色の重ね合わせ(別冊 §4.3、色は §13.2)。層ごとの値(Float32Array、NaN = データ無し)を点の RGBA に写す。
 // a は「目立たせる度合い」: 光る点(床・閾値より上)は 255 にして、遠くから見ても消えないようにする。
 // 光る点が全体の 2% を超えるときは、全層で同じ係数で a を下げる(emphasize、F39)。
+// CHANGE-05 G: MoE の層の専門家ごとの値(expert_usage = 選択率、experts:<name> = 専門家の対照分析の z)。値は専門家の全ニューロンに同じ
+// (地図ではタイルごとの色になる)。
 import { t } from "./i18n.js";
 import { COLORS } from "./map.js";
 
@@ -14,12 +16,14 @@ export const FIELDS = {
   logit_peak: { label: t("logit lens の最大 |z|"), needs: "logit_lens" },
   act_q999: { label: t("活性の p99.9"), needs: "act_stats" },
   named: { label: t("名前付き"), needs: "named" },
+  expert_usage: { label: t("専門家の選択率"), needs: "act_stats_moe" },   // MoE のモデルだけ選べる
 };
 
 export function fieldLabel(name) {
   if (name.startsWith("cos:")) return t("逆引き {d} との cos", { d: name.slice(4) });
   if (name.startsWith("writers:")) return t("書き手 {d} の寄与", { d: name.slice(8) });
   if (name.startsWith("heads:")) return t("ヘッドの対照 {d} の z", { d: name.slice(6) });
+  if (name.startsWith("experts:")) return t("専門家の対照 {d} の z", { d: name.slice(8) });
   if (name === "fires_heads") return t("ヘッドの注目(fires の選んだトークンへ)");
   if (name.startsWith("search:")) return t("検索「{q}」", { q: name.slice(7) });
   if (name.startsWith("fires:")) return `fires ${name.split(":").slice(2).join(":")}`;   // fires:<id>:<見出し>
@@ -33,8 +37,10 @@ export function layersWith(name, model) {
   if (name.startsWith("heads:")) return ((model.heads || []).find((h) => h.name === name.slice(6)) || {}).layers || [];
   if (name.startsWith("cos:")) return cov.filter((c) => c.directions.includes(name.slice(4))).map((c) => c.layer);
   if (name.startsWith("writers:")) return ((model.writers || []).find((w) => w.name === name.slice(8)) || {}).layers || [];
+  if (name.startsWith("experts:")) return ((model.experts || []).find((x) => x.name === name.slice(8)) || {}).layers || [];
   const need = FIELDS[name].needs;
   if (need === "named") return [...new Set(Object.keys(model.names || {}).map((k) => +k.split(":")[0]))];
+  if (need === "act_stats_moe") return cov.filter((c) => c.act_stats && model.arch.layers[c.layer].ffn.startsWith("moe")).map((c) => c.layer);
   return cov.filter((c) => (need === "sweep" ? c.sweep_runs.length > 0 : !!c[need])).map((c) => c.layer);
 }
 
@@ -45,6 +51,14 @@ function quantile(sorted, q) {
 
 // 全層をまとめた尺度(層どうしを比べられるように、明るさは全層で同じ基準にする)
 export function globalScale(name, layers) {
+  if (name === "expert_usage") {                                  // 選択率: 一様(k / E = 選択率の平均)と最大
+    const r = layers.flatMap(({ meta }) => meta.rate || []);
+    return { n: r.length, uniform: r.length ? r.reduce((a, b) => a + b, 0) / r.length : 0, max: r.length ? Math.max(...r) : 0 };
+  }
+  if (name.startsWith("experts:")) {                              // 対照分析の z: 対照の 95% を超えた専門家の最小〜最大
+    const z = layers.flatMap(({ meta }) => Object.values(meta.experts || {}).filter((x) => (x.null_pct ?? 0) >= 0.95 && Number.isFinite(x.z)).map((x) => x.z));
+    return { n: z.length, lo: z.length ? Math.min(...z) : 0, hi: z.length ? Math.max(...z) : 1 };
+  }
   const vals = [];
   for (const { v } of layers) {
     for (let i = 0; i < v.length; i++) {
@@ -61,7 +75,7 @@ export function globalScale(name, layers) {
 const lerp = (a, b, t) => [0, 1, 2].map((i) => Math.round(a[i] + (b[i] - a[i]) * t));
 const clamp01 = (x) => Math.max(0, Math.min(1, x));
 
-// v: Float32Array(n_ff)、meta: サーバの X-Meta、scale: globalScale、opt: { threshold, named: Set(n) }。
+// v: Float32Array(n_ff)、meta: サーバの X-Meta、scale: globalScale、opt: { threshold, named: Set(n), nPer: MoE の専門家の幅 }。
 // 返す配列の .lit に光る点の数
 export function colorize(name, v, meta, scale, opt = {}) {
   const n = v.length, out = new Uint8Array(n * 4);
@@ -90,6 +104,14 @@ export function colorize(name, v, meta, scale, opt = {}) {
       else put(i, amber((y - scale.p90) / Math.max(scale.p999 - scale.p90, 1e-6)), 255);
     } else if (name === "named") {
       put(i, COLORS.sel, 255);
+    } else if (name === "expert_usage") {                                    // 一様の 1.5 倍以上を琥珀に。それ未満は選択率に比べて暗く
+      const hot = 1.5 * (scale.uniform || 0);
+      if (x < hot) put(i, lerp(COLORS.swept, AMBER_LO, 0.5 * clamp01(x / Math.max(hot, 1e-6))), 0);
+      else put(i, amber((x - hot) / Math.max(scale.max - hot, 1e-6)), 255);
+    } else if (name.startsWith("experts:")) {                                // 対照の 95% を超えた専門家を琥珀に、明るさ = z
+      const r = (meta.experts || {})[Math.floor(i / Math.max(opt.nPer || 1, 1))];
+      if (!r || (r.null_pct ?? 0) < 0.95) put(i, COLORS.swept, 0);
+      else put(i, amber((x - scale.lo) / Math.max(scale.hi - scale.lo, 1e-6)), 255);
     } else if (name.startsWith("fires:")) {
       const thr = opt.threshold ?? 1, a = Math.abs(x);                       // 1 = その層の活性の q999
       if (a < thr) put(i, COLORS.swept, 0);
@@ -159,6 +181,7 @@ export function emphasize(out, factor) {
 const sw = (rgb) => `<span class="sw" style="background:rgb(${rgb.join(",")})"></span>`;
 const it = (...xs) => `<span class="it">${xs.join("")}</span>`;      // 凡例の 1 項目(途中で折り返さない)
 const fmt = (x, d = 2) => (x === null || x === undefined || !Number.isFinite(x) ? "—" : x.toFixed(d));
+const pctS = (x) => (Number.isFinite(x) ? `${(x * 100).toFixed(1)}%` : "—");
 
 // 凡例(色の意味は常に出す、§4.3)。opt: { threshold, nHits, floors: [層の床] }
 export function legendHTML(name, scale, opt = {}) {
@@ -176,6 +199,14 @@ export function legendHTML(name, scale, opt = {}) {
     act_q999: [it(sw(COLORS.swept), t("全層の上位 10% 未満")), ramp(AMBER_LO, AMBER_HI, `${fmt(10 ** scale.p90, 2)}〜${fmt(10 ** scale.p999, 2)}`)],
     named: [it(sw(COLORS.sel), t("名前付き"))],
   };
+  if (name === "expert_usage") {
+    return none + it(sw(COLORS.swept), t("一様({p})の 1.5 倍未満", { p: pctS(scale.uniform) })) +
+      ramp(AMBER_LO, AMBER_HI, t("選択率 {a}〜{b}", { a: pctS(1.5 * (scale.uniform || 0)), b: pctS(scale.max) })) + it(t("色 = 専門家のタイルごと(stats act のコーパス)"));
+  }
+  if (name.startsWith("experts:")) {
+    return none + it(sw(COLORS.swept), t("対照の 95% 以下")) + ramp(AMBER_LO, AMBER_HI, t("z {a}〜{b}(対照の 95% 超)", { a: fmt(scale.lo, 1), b: fmt(scale.hi, 1) })) +
+      it(t("色 = 専門家のタイルごと"));
+  }
   if (name.startsWith("heads:")) {
     return none + it(sw(HEAD_IDLE), t("対照の 95% 以下")) + ramp(AMBER_LO, AMBER_HI, t("z {a}〜{b}(対照の 95% 超)", { a: fmt(scale.lo, 1), b: fmt(scale.hi, 1) })) +
       it(t("色 = 板の上辺のヘッドの帯"));

@@ -1,4 +1,6 @@
 // LIST(rank タブ)と NEURON パネル(Examples / Details)。別冊 §2・§5。
+// CHANGE-05 G: MoE の層のニューロン(通し番号 = 専門家 × 幅 + n)は L12 E37 N511 の住所で出し、レシピには L:Ee:Nn で足す
+// (add = 書き込み方向の押し、×0 / ×2 = 選ばれたときだけ効く gain)。connections(Web)は MoE の層では使えない。
 import { getJSON, postJSON } from "./api.js";
 import { t } from "./i18n.js";
 
@@ -114,7 +116,11 @@ export class RankList {
 
 // --- NEURON パネル ------------------------------------------------------------------------------------------
 export class NeuronPanel {
-  constructor(root, { onNamed, onRecipe, inRecipe, onChat, hasConnections, onGoto, agentNote, onEval }) {
+  constructor(root, { onNamed, onRecipe, inRecipe, onGain, inGain, onChat, hasConnections, onGoto, agentNote, onEval, onOpenExpert, isMoe }) {
+    this.onGain = onGain || (() => {});        // (L, n, k) → レシピに gain で足す・外す(MoE のニューロン)
+    this.inGain = inGain || (() => null);      // (L, n) → レシピの中の倍率 k か null
+    this.onOpenExpert = onOpenExpert || (() => {});   // ({ layer, expert }) → EXPERT パネルで開く
+    this.isMoe = isMoe || (() => false);       // (L) → MoE の層か
     this.agentNote = agentNote || (() => null);
     this.hasConnections = hasConnections || (() => false);
     this.onGoto = onGoto;
@@ -148,7 +154,7 @@ export class NeuronPanel {
     this.links = undefined;
     this.webSum = null;
     this.render();
-    if (kind === "neuron" && this.hasConnections()) {
+    if (kind === "neuron" && this.hasConnections() && !this.isMoe(layer)) {
       getJSON("/api/connections", { layer, n, k: 14 }).then((x) => { if (tok === this._token) { this.links = x; this.render(); } })
         .catch(() => { if (tok === this._token) { this.links = null; this.render(); } });
     } else this.links = null;
@@ -158,22 +164,27 @@ export class NeuronPanel {
     if (!this.d) return;                                                     // まだ読み込んでいない
     const d = this.d, s = d.sweep;
     const rnd = d.kind === "random";
-    const id = rnd ? `L${d.layer} random ${d.neuron}` : `L${d.layer} N${d.neuron}`;
+    const moe = d.expert !== undefined && d.expert !== null;
+    const id = rnd ? `L${d.layer} random ${d.neuron}` : moe ? d.address || `L${d.layer} E${d.expert} N${d.expert_neuron}` : `L${d.layer} N${d.neuron}`;
+    const noWeb = rnd || moe || !this.hasConnections();
+    const webWhy = moe ? t("MoE の層は connections の対象外") : rnd ? t("ランダム方向の対照には connections がありません") : t("connections が要ります(層の右クリック →「connections」)");
     const stats = s ? `${s.rank ? `#${s.rank}/${s.n_ranked} · ` : ""}mass ${fmt(s.mass, 1)} · null ${s.null_pct === null ? "—" : pct(s.null_pct)} · z ${fmt(s.z, 2)}`
       : t("sweep なし");
     this.root.innerHTML = `
       <div class="n-head">
-        <div class="n-id mono">${id}</div>
+        <div class="n-id mono">${id}${moe ? ` <span class="muted n-flat" title="${t("層の中の通し番号(専門家 × 専門家の幅 + n。地図と overlay はこの番号)")}">#${d.neuron}</span>` : ""}</div>
         <div class="n-stats mono muted">${stats}${s ? ` · <span title="${esc(s.design)}">${esc(s.run)}</span>` : ""}</div>
         ${d.note ? `<p class="muted note">${esc(d.note_args ? t("run {run} には順位表が無いので、この層のほかの run({other})の結果を出しています", d.note_args) : d.note)}</p>` : ""}
         ${!rnd && this.agentNote(d.layer, d.neuron) ? `<div class="ag-box"><span class="muted">✎ ${t("エージェントの注釈")}</span> ${esc(this.agentNote(d.layer, d.neuron))}</div>` : ""}
         ${rnd ? `<p class="muted note">${t("ランダム方向の対照(名前は付けられません)")}</p>` : `
         <div class="n-row"><input class="n-name" placeholder="${t("名前(入力して Enter か欄の外で保存)")}" value="${esc(d.name || "")}" spellcheck="false">
           ${this.recipeButtons(d)}</div>`}
+        ${moe ? `<div class="n-row n-moe">${this.gainButtons(d)}<button class="small" id="n-expert" title="${t("この専門家(L{L} E{e})を EXPERT パネルで開く", { L: d.layer, e: d.expert })}">${t("EXPERT パネルで開く")}</button></div>
+        <p class="muted note n-moe-note">${t("MoE の専門家のニューロン。+ / − は方向押し(専門家が選ばれたかに関係なく、全トークンでこのニューロンの書き込み方向を足す)。×0 / ×2 の gain は専門家が選ばれたときだけ効く本当のニューロン押し。")}</p>` : ""}
       </div>
       <div class="tabs">
         <button data-tab="examples">Examples</button><button data-tab="chat"${rnd ? ` disabled title="${t("ランダム方向の対照ではチャットできません")}"` : ""}>Chat</button>
-        <button data-tab="details">Details</button><button data-tab="web"${rnd || !this.hasConnections() ? ` disabled title="${t("connections が要ります(層の右クリック →「connections」)")}"` : ""}>Web</button>
+        <button data-tab="details">Details</button><button data-tab="web"${noWeb ? ` disabled title="${webWhy}"` : ""}>Web</button>
       </div>
       <div class="n-tab" id="n-tab"></div>`;
     for (const b of this.root.querySelectorAll(".tabs button")) {
@@ -196,9 +207,14 @@ export class NeuronPanel {
     for (const b of this.root.querySelectorAll("[data-rc]")) {
       b.addEventListener("click", () => { this.onRecipe(d.layer, d.neuron, +b.dataset.rc); this.render(); });
     }
+    for (const b of this.root.querySelectorAll("[data-gk]")) {
+      b.addEventListener("click", () => { this.onGain(d.layer, d.neuron, +b.dataset.gk); this.render(); });
+    }
+    const ex = this.root.querySelector("#n-expert");
+    if (ex) ex.addEventListener("click", () => this.onOpenExpert({ layer: d.layer, expert: d.expert }));
     const body = this.root.querySelector("#n-tab");
     if (this.tab === "chat" && !rnd) { this.onChat(body, d); return; }
-    if (this.tab === "web" && !rnd && this.hasConnections()) { this.web(body); return; }
+    if (this.tab === "web" && !noWeb) { this.web(body); return; }
     body.innerHTML = this.tab === "details" ? this.details() : this.examples();
     for (const tr of body.querySelectorAll("tr[data-go]")) {
       tr.addEventListener("click", () => { const [L, n] = tr.dataset.go.split(":").map(Number); this.onGoto({ layer: L, n }); });
@@ -211,6 +227,7 @@ export class NeuronPanel {
   linksHTML() {
     const lk = this.links;
     if (this.d.kind !== "neuron") return "";
+    if (this.d.expert !== undefined && this.d.expert !== null) return `<h4>connections</h4><p class="muted">${t("MoE の層は connections の対象外")}</p>`;
     if (lk === undefined) return `<h4>connections</h4><p class="muted">${t("読み込み中…")}</p>`;
     if (lk === null) return `<h4>connections</h4><p class="muted">${t("まだありません(層の番号を右クリック →「connections」。重みだけから全層ペアを CPU で計算)")}</p>`;
     const sg = (e) => `<span class="sgb ${e.sign >= 0 ? "plus" : "minus"}">${e.sign >= 0 ? "+" : "−"}</span>`;
@@ -267,6 +284,18 @@ export class NeuronPanel {
     return `${b(1, t("+ レシピ"))}${b(-1, t("− レシピ"))}`;
   }
 
+  // MoE のニューロンの gain(×0 で消す、×2 で倍)。選ばれたときだけ効く。同じ倍率でもう一度押すと外す
+  gainButtons(d) {
+    const cur = this.inGain(d.layer, d.neuron);
+    const b = (k) => {
+      const on = cur !== null && cur === k;
+      return `<button data-gk="${k}" class="small${on ? ` on ${k < 1 ? "minus" : "plus"}` : ""}" title="${on ? t("もう一度押すとレシピから外す")
+        : t("レシピに gain ×{k} で足す(専門家が選ばれたときだけ効く。倍率は recipe タブで変えられる)", { k })}">${on ? `${t("レシピ")} ×${k}` : t("×{k} レシピ", { k })}</button>`;
+    };
+    const other = cur !== null && cur !== 0 && cur !== 2 ? `<span class="muted mono h-cur">${t("レシピ")} ×${fmt(cur, 2)}</span>` : "";
+    return `${b(0)}${b(2)}${other}`;
+  }
+
   examples() {
     const s = this.d.sweep;
     if (!s) return `<p class="muted">${t("この層の sweep にこのユニットはありません。rollout は sweep を回すと出ます({cmd})。", { cmd: `<code>gne sweep --layer ${this.d.layer}</code>` })}</p>`;
@@ -316,7 +345,8 @@ export class NeuronPanel {
         `<tr><td>${esc(k)}</td><td class="${v.cos >= 0 ? "plus" : "minus"}">${fmt(v.cos, 4)}</td><td class="muted">${t("層内 {r} 位", { r: v.rank_in_layer })}</td></tr>`).join("")}</table>`);
     }
     const a = d.activation;
-    if (a) out.push(`<h4>${t("活性(統計コーパス)")}</h4><table class="kv mono"><tr><td>p99.9</td><td>${fmt(a.q999, 3)}</td><td>absmax</td><td>${fmt(a.absmax, 3)}</td></tr><tr><td>rms</td><td>${fmt(a.rms, 3)}</td><td>${t("平均")}</td><td>${fmt(a.mean, 4)}</td></tr></table>`);
+    if (a) out.push(`<h4>${t("活性(統計コーパス)")}</h4><table class="kv mono"><tr><td>p99.9</td><td>${fmt(a.q999, 3)}</td><td>absmax</td><td>${fmt(a.absmax, 3)}</td></tr><tr><td>rms</td><td>${fmt(a.rms, 3)}</td><td>${t("平均")}</td><td>${fmt(a.mean, 4)}</td></tr></table>${
+      a.n_routed !== undefined ? `<p class="muted note">${t("専門家が選ばれた {n} トークンだけで数えた値", { n: a.n_routed })}${a.reliable ? "" : ` · <span class="minus">${t("観測が少ないので分位点は目安")}</span>`}</p>` : ""}`);
     if (d.evals && d.evals.length) {
       const how = (e) => (e.mode === "gain" ? `×${fmt(e.k, 2)}` : `${e.dose >= 0 ? "+" : "−"}${fmt(Math.abs(e.dose), 2)}`);
       out.push(`<h4>${t("eval(このニューロンを含むもの、新しい順)")}</h4>${d.evals.map((e) => `<div class="n-eval">

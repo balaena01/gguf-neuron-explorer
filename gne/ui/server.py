@@ -171,6 +171,21 @@ def create_app(session, *, warm: bool = True, openai: bool = False) -> FastAPI:
     def heads_one(name: str):
         return data.heads_one(name)
 
+    # --- CHANGE-05 G: MoE の専門家(EXPERT パネル、地図の expert_usage・experts:<name>) -----------------------
+    @app.get("/api/expert")
+    def expert(layer: int, expert: int):
+        return session.expert(layer, expert)
+
+    @app.get("/api/experts")
+    def experts():
+        from ..experts import list_expert_contrasts
+        return {"contrasts": list_expert_contrasts(session)}
+
+    @app.get("/api/experts/{name}")
+    def experts_one(name: str):
+        from ..experts import load_expert_candidates
+        return {"name": name, "rows": load_expert_candidates(session, name)}
+
     @app.post("/api/attention")
     def attention(text: str = Body(...), layer: int | None = Body(None), head: int | None = Body(None), pos: int = Body(-1),
                   top: int = Body(5), system: str | None = Body(None), chat: bool = Body(False), compare: bool = Body(False)):

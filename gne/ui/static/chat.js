@@ -7,11 +7,14 @@ import { esc, tokHTML } from "./panels.js";
 import { samplingLabel } from "./recipe.js";
 import { Mic } from "./mic.js";
 
-// "14:8949:+1" → "L14 N8949 +1"、ヘッドの gain "21:H7:x0" → "L21 H7 ×0"
-const unitLabel = (spec) => {
-  const p = spec.split(":"), last = p[p.length - 1];
-  if (last.startsWith("x")) return `L${p[0]} ${/^\d+$/.test(p[1]) ? `N${p[1]}` : p[1]} ×${+(+last.slice(1)).toFixed(4)}`;
-  const d = +last, who = p[1] === "dir" ? `dir:${p[2]}` : `N${p[1]}`;
+// "14:8949:+1" → "L14 N8949 +1"、ヘッドの gain "21:H7:x0" → "L21 H7 ×0"、方向 "30:dir:NAME:+0.3" → "L30 dir:NAME +0.3"。
+// MoE(CHANGE-05): "12:E37:N511:+0.8" → "L12 E37 N511 +0.8"、"12:E3:x0" → "L12 E3 ×0"、"12:E3:route:+2" → "L12 E3 route +2"、
+// "12:S:N5:+0.5" → "L12 S N5 +0.5"
+export const unitLabel = (spec) => {
+  const p = spec.split(":"), last = p[p.length - 1], mid = p.slice(1, -1);
+  const who = mid[0] === "dir" ? `dir:${mid.slice(1).join(":")}` : mid.map((x) => (/^\d+$/.test(x) ? `N${x}` : x)).join(" ");
+  if (last.startsWith("x")) return `L${p[0]} ${who} ×${+(+last.slice(1)).toFixed(4)}`;
+  const d = +last;
   return `L${p[0]} ${who} ${(d >= 0 ? "+" : "−") + +Math.abs(d).toFixed(4)}`;
 };
 const fmt = (x, d = 2) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : (+x).toFixed(d));
@@ -113,9 +116,10 @@ export class ChatPanel {
               { label: tr("0(無介入)"), units: [] },
               { label: tr("レシピ×({s})", { s: `+${fmt(s, 2)}` }), units: this.recipe.specs(s), ablate: this.recipe.ablateAt(s) }];
     }
-    const { layer: L, n } = this.neuron, d = this.dose;
-    return [{ label: `−${fmt(d, 2)}`, units: [`${L}:${n}:-${d}`] }, { label: tr("0(無介入)"), units: [] },
-            { label: `+${fmt(d, 2)}`, units: [`${L}:${n}:+${d}`] }];
+    const { layer: L, n } = this.neuron, d = this.dose, x = this.detail;
+    const who = x && x.expert !== undefined && x.expert !== null ? `E${x.expert}:N${x.expert_neuron}` : n;   // MoE の層は L:Ee:Nn(方向押し)
+    return [{ label: `−${fmt(d, 2)}`, units: [`${L}:${who}:-${d}`] }, { label: tr("0(無介入)"), units: [] },
+            { label: `+${fmt(d, 2)}`, units: [`${L}:${who}:+${d}`] }];
   }
 
   mount(el) {
@@ -148,7 +152,9 @@ export class ChatPanel {
     const amount = this.target === "recipe"
       ? `${tr("倍率")} <button class="small" data-step="-0.25" title="${tr("小さく")}">▼</button><input id="ch-dose" type="number" step="0.25" value="${this.scale}"><button class="small" data-step="0.25" title="${tr("大きく")}">▲</button>`
       : `dose <button class="small" data-step="-0.1" title="${tr("小さく")}">▼</button><input id="ch-dose" type="number" step="0.1" value="${this.dose}"><button class="small" data-step="0.1" title="${tr("大きく")}">▲</button>
-         <span class="seg"><button class="on" title="${tr("本体設計の rel dose(残差ノルムの中央値に対する大きさ)を足す")}">add</button><button disabled title="${tr("活性の倍率は本体設計で未対応")}">×</button></span>`;
+         <span class="seg"><button class="on" title="${tr("本体設計の rel dose(残差ノルムの中央値に対する大きさ)を足す")}">add</button><button disabled title="${tr("活性の倍率は本体設計で未対応")}">×</button></span>${
+          this.detail && this.detail.expert !== undefined && this.detail.expert !== null
+            ? `<span class="badge push" title="${tr("MoE の専門家のニューロンの add は書き込み方向の押し(専門家が選ばれたかに関係なく全トークンに足す)。選ばれたときだけ効く gain は NEURON の ×0 / ×2 からレシピで試す")}">${tr("方向押し")}</span>` : ""}`;
     const turns = this.turns.map((t, ti) => `
       <div class="ch-user"><span class="muted">${tr("あなた")}</span> ${t.audio ? `🎤 <audio controls src="data:audio/wav;base64,${t.audio}"></audio><span class="muted note">${tr("{s} 秒の音声", { s: fmt(t.seconds, 1) })}</span> ` : ""}${esc(t.user)}${t.labels.join() !== cols.map((c) => c.label).join() ? `<span class="muted note">(${t.labels.map(esc).join(" / ")})</span>` : ""}${t.sp ? `<span class="muted note ch-sp-used">${esc(t.sp)}</span>` : ""}</div>
       <div class="ch-row">${t.replies.map((r, ci) => `<div class="ch-cell ${["minus", "", "plus"][ci] || ""}" data-t="${ti}" data-c="${ci}">${this.cellHTML(t, ci)}</div>`).join("")}</div>`).join("");

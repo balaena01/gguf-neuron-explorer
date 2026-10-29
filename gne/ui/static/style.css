@@ -48,14 +48,17 @@ input::placeholder { color: #4a5464; }
 #status-main { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 #perf { color: #6f7b8c; }
 
-#main { display: grid; grid-template-columns: auto 1fr auto auto; min-height: 0; }
+#main { display: grid; grid-template-columns: auto 1fr auto auto auto; min-height: 0; }
 .panel { background: var(--panel); border-right: 1px solid var(--line); width: 300px; display: flex; flex-direction: column; min-height: 0; }
 #neuron.panel { border-right: 0; border-left: 1px solid var(--line); width: 470px; }
 #neuron.panel.wide { width: min(56vw, 900px); }
 #head.panel { border-right: 0; border-left: 1px solid var(--line); width: 470px; }
 #head.panel.wide { width: min(56vw, 900px); }
-.panel.collapsed, #neuron.panel.collapsed, #neuron.panel.wide.collapsed, #head.panel.collapsed, #head.panel.wide.collapsed { width: 34px; }
-.panel.collapsed #neuron-wide, .panel.collapsed #head-wide { display: none; }
+#expert.panel { border-right: 0; border-left: 1px solid var(--line); width: 430px; }
+#expert.panel.wide { width: min(56vw, 900px); }
+.panel.collapsed, #neuron.panel.collapsed, #neuron.panel.wide.collapsed, #head.panel.collapsed, #head.panel.wide.collapsed,
+#expert.panel.collapsed, #expert.panel.wide.collapsed { width: 34px; }
+.panel.collapsed #neuron-wide, .panel.collapsed #head-wide, .panel.collapsed #expert-wide { display: none; }
 .panel.collapsed .panel-body { display: none; }
 .panel.collapsed .panel-head { writing-mode: vertical-rl; }
 .panel-head { padding: 6px; display: flex; gap: 6px; }
@@ -185,7 +188,7 @@ table.ex td.cell.open .txt { display: block; -webkit-line-clamp: unset; }
   padding: 0 4px; margin: 0 4px 3px 0; }
 .badge.plus { border-color: #6b5e22; }
 .badge.minus { border-color: #5d2b50; }
-#neuron h4, #head h4 { margin: 14px 0 6px; font-size: 12px; color: var(--muted); font-weight: 400; letter-spacing: 0.04em; }
+#neuron h4, #head h4, #expert h4 { margin: 14px 0 6px; font-size: 12px; color: var(--muted); font-weight: 400; letter-spacing: 0.04em; }
 .chips { display: flex; flex-wrap: wrap; gap: 4px; }
 .chip { background: #161d27; border-radius: 3px; padding: 0 6px; font-family: var(--mono); font-size: 12px; }
 .chip i { font-style: normal; color: var(--muted); margin-left: 4px; font-size: 10px; }
@@ -421,3 +424,31 @@ table.h-top th, table.h-top td { padding-right: 10px; }
 #overlay span.mk-h.hov { border: 1px solid rgba(255, 255, 255, 0.7); }
 #legend .sw.hbox { width: 6px; height: 12px; background: transparent; border-width: 2px; border-radius: 1px; }
 table.rc tr.rc-head td.id a { color: #9fd0e8; }
+
+/* CHANGE-05 G: EXPERT パネル、NEURON パネルの MoE の行、recipe タブの方向押しの印、fires の選ばれた専門家 */
+#expert .panel-body { overflow: auto; }
+#expert .h-kind { font-size: 12px; font-weight: 400; }
+#expert .h-cur { align-self: center; font-size: 11px; white-space: nowrap; }
+#expert .x-act { flex-wrap: wrap; }
+#expert h4 button { margin-left: 6px; }
+#expert table.x-use td { padding-right: 12px; }
+#expert table.x-use td.hot, #expert .x-c h4 .hot { color: var(--accent); }
+#expert table.x-met td { padding-right: 10px; }
+#expert table.x-met td.muted { font-size: 11px; }
+#expert .x-few { margin: 4px 0; }
+#expert .x-toks { margin-top: 4px; }
+.x-wrap { overflow-x: auto; }
+table.x-top { table-layout: auto; width: auto; }
+table.x-top th, table.x-top td { padding-right: 10px; }
+#neuron .n-moe { margin-top: 6px; flex-wrap: wrap; }
+#neuron .n-moe .h-cur { align-self: center; font-size: 11px; white-space: nowrap; }
+#neuron .n-moe-note { margin: 4px 0 0; }
+#neuron .n-flat { font-size: 12px; font-weight: 400; }
+.badge.push { border-color: #2f6f86; color: #9fd0e8; margin: 0 0 0 6px; }
+table.rc tr.rc-moe td.id a { color: #9fd0e8; }
+.fi-routed { margin: 4px 0 6px; }
+.fi-routed summary { cursor: pointer; }
+.fi-routed-list { font-size: 12px; max-height: 140px; overflow: auto; color: #6fe3ff; }
+.fi-routed-list .muted { display: inline-block; width: 30px; }
+#legend .sw.tile { background: transparent; border-width: 2px; border-radius: 1px; }
+table.fi-tab.moe th:nth-child(1) { width: 52px; } table.fi-tab.moe th:nth-child(2) { width: 80px; }   /* MoE は E37 N511 の形 */

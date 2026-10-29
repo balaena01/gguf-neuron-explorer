@@ -100,9 +100,14 @@ export class EvalView {
     const d = this.data;
     if (!d) { body.innerHTML = `<p class="muted note">${t("eval がまだありません。上の「今のレシピで eval」で作ります(gne eval / MCP の eval でも)。")}</p>`; return; }
     const th = d.suite.thresholds;
+    // ユニットの名前(MoE は E37 N511・S N5・E3、CHANGE-05 G)。route は保存の形では delta
+    const who = (u) => (u.kind === "head" ? `H${u.head}` : u.kind === "random" ? `random${u.seed}` : u.kind === "direction" ? `dir:${u.direction}`
+      : u.kind === "expert_neuron" ? `E${u.expert} N${u.neuron}` : u.kind === "shared" ? `S N${u.neuron}` : u.kind === "expert" ? `E${u.expert}` : `N${u.neuron}`);
+    const pm = (x) => `${x >= 0 ? "+" : "−"}${fmt(Math.abs(x), 2)}`;
     const units = d.recipe.units.map((u) => (u.mode === "query" ? `L${u.layer} H${u.head} query ${u.direction}→${String(u.seek || "").split("/").pop().replace(/\.ya?ml$/, "")} ×${fmt(u.k, 2)}`
-      : u.mode === "gain" ? `L${u.layer} ${u.kind === "head" ? `H${u.head}` : `N${u.neuron}`} ×${fmt(u.k, 2)}`
-      : `L${u.layer} ${u.kind === "random" ? `random${u.seed}` : u.kind === "direction" ? `dir:${u.direction}` : `N${u.neuron}`} ${u.dose >= 0 ? "+" : "−"}${fmt(Math.abs(u.dose), 2)}`));
+      : u.mode === "gain" ? `L${u.layer} ${who(u)} ×${fmt(u.k, 2)}`
+      : u.mode === "route" ? `L${u.layer} ${who(u)} route ${pm(u.delta ?? u.dose)}`
+      : `L${u.layer} ${who(u)} ${pm(u.dose)}`));
     const rx = d.reactivity, hc = rx && rx.head_controls > 0;
     // 反応性(CHANGE-04 F)の列: トリガーあり・なしの判定の一致率と差。ヘッドの対照があればその p95 と null_pct
     const rxCells = (r) => {

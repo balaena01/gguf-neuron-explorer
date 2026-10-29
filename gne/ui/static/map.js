@@ -2,6 +2,7 @@
 // シート平面の交点から解析的に求める(点群へのレイキャストはしない、§4.2)。
 // CHANGE-04 G: mixer の板の上辺の刻み = attention ヘッド(線形注意の層も)。板の面との交点でヘッドを拾い、
 // ヘッドごとの色の帯(overlay heads:<name>・fires_heads)と、レシピ・開いているヘッドの印を出す。
+// CHANGE-05 G: MoE の専門家のタイルの枠(fires で選ばれた専門家・レシピの専門家・開いている専門家)。
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { t } from "./i18n.js";
@@ -104,9 +105,10 @@ export class LayerMap {
     this.onContext = onContext || null;  // 層の番号・ラベルの右クリック(L, イベント)
     this.onOpen = onOpen || null;        // 札のクリックでニューロンを開く({ layer, n })
     this.agent = { highlights: [], notes: [], label: null };   // エージェントの強調と注釈(§11、§4.8 notes)
-    this.marks = [];                   // レシピのユニット [{ layer, neuron, dose }](§4.8)
+    this.marks = [];                   // レシピのユニット [{ layer, neuron, dose, label? }](§4.8)
     this.headMarks = [];               // レシピのヘッド [{ layer, head, k }](CHANGE-04 G)。板の上辺の刻みに印
     this.headFocus = null;             // HEAD パネルで開いているヘッド [L, h]
+    this.tileFrames = [];              // MoE の専門家のタイルの枠(CHANGE-05 G、setTileFrames)
     this._headOn = [];                 // 層ごと: ヘッドの色(overlay)を出しているか
     this.cellOf = [];                  // 層ごとの配置表(§4.4): ニューロン → 格子の番号。null は番号順
     this.neuronAt = [];                // その逆: 格子の番号 → ニューロン
@@ -299,6 +301,47 @@ export class LayerMap {
   // レシピのヘッドの印(CHANGE-04 G)。units: [{ layer, head, k }]。k < 1 は赤紫(弱める・消す)、k > 1 は黄(強める)
   setHeadMarks(units) {
     this.headMarks = units || [];
+    this._overlayDirty = true;
+  }
+
+  // 専門家のタイルの枠(CHANGE-05 G)。items: [{ layer, expert, color: 0xRRGGBB, ring: 0〜2 }]。ring は枠の位置
+  // (0 = すき間の外寄り、1 = タイルの縁、2 = タイルの内側。同じ専門家に枠がいくつあっても重ならない)。全体ビューと、その層の正面ビューで出す
+  setTileFrames(items) {
+    this.tileFrames = items || [];
+    for (const m of this._tileObjs || []) { this.scene.remove(m); m.geometry.dispose(); m.material.dispose(); }
+    this._tileObjs = [];
+    const byL = new Map();
+    for (const it of this.tileFrames) {
+      const s = this.specs[it.layer];
+      if (!s || s.kind !== "moe" || !(it.expert >= 0 && it.expert < s.nExpert)) continue;
+      if (!byL.has(it.layer)) byL.set(it.layer, []);
+      byL.get(it.layer).push(it);
+    }
+    for (const [L, xs] of byL) {
+      const s = this.specs[L], x = sheetX(L) - 0.004, gap = (s.pitch - s.tileExt) / 2, pos = [], col = [];
+      // ring 0 はすき間の外寄りに 2 本(太く見せる)、1 はタイルの縁、2 はタイルの内側
+      const pads = [[gap * 0.85, gap * 0.6], [gap * 0.2], [-s.tileExt * 0.035]];
+      for (const it of xs) {
+        const c = new THREE.Color(it.color);
+        const tr = Math.floor(it.expert / s.g), tc = it.expert % s.g;
+        for (const pad of pads[Math.max(0, Math.min(2, it.ring || 0))]) {
+          const y1 = GEOM.Y0 + s.ext - tr * s.pitch - gap + pad, y0 = y1 - s.tileExt - 2 * pad;
+          const z0 = -s.ext / 2 + tc * s.pitch + gap - pad, z1 = z0 + s.tileExt + 2 * pad;
+          pos.push(x, y0, z0, x, y1, z0, x, y1, z0, x, y1, z1, x, y1, z1, x, y0, z1, x, y0, z1, x, y0, z0);
+          for (let v = 0; v < 8; v++) col.push(c.r, c.g, c.b);
+        }
+      }
+      const g = new THREE.BufferGeometry();
+      g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+      g.setAttribute("color", new THREE.Float32BufferAttribute(col, 3));
+      const m = new THREE.LineSegments(g, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.95,
+                                                                        depthWrite: false, depthTest: false }));
+      m.renderOrder = 3;
+      m.userData.layer = L;
+      m.visible = this.front === null || this.front === L;
+      this.scene.add(m);
+      this._tileObjs.push(m);
+    }
     this._overlayDirty = true;
   }
 
@@ -522,6 +565,7 @@ export class LayerMap {
     // 開いているニューロンの輪は、全体ビューとその層の正面ビューで出す。3D の線は全体ビューだけ(正面ビューは 2D の札と線)
     if (this._marker) this._marker.visible = !!this._markerAt && (front === null || front === this._markerAt[0]);
     if (this._links) this._links.visible = front === null;
+    for (const m of this._tileObjs || []) m.visible = front === null || m.userData.layer === front;
     this._overlayDirty = true;
   }
 
@@ -733,7 +777,7 @@ export class LayerMap {
       const d = 10 + 6 * Math.min(Math.abs(m.dose), 3);
       items.push({ x: p.x - r.left, y: p.y - r.top, text: "", cls: `mk ${m.dose >= 0 ? "plus" : "minus"}`, w: d });
       if (this.front === null) {                                           // 全体ビューではどのユニットか札で。重なる札は下へずらして線を引く
-        const sg = m.dose >= 0 ? "+" : "−", text = `L${m.layer} N${m.neuron} ${sg}${+Math.abs(m.dose).toFixed(2)}`;
+        const sg = m.dose >= 0 ? "+" : "−", text = m.label || `L${m.layer} N${m.neuron} ${sg}${+Math.abs(m.dose).toFixed(2)}`;   // label: MoE の L E N
         const x = p.x - r.left + d / 2 + 4, w = text.length * 7 + 10;
         let y = p.y - r.top;
         while (marked.some((q) => x < q.x + q.w + 4 && q.x < x + w + 4 && Math.abs(q.y - y) < 17)) y += 18;

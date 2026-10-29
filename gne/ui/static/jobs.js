@@ -6,7 +6,7 @@ import { esc } from "./panels.js";
 
 export const KIND = { embed: tr("埋め込み"), connections: "connections", layout: tr("配置"), lens_logit: "logit lens", lens_steer: "steer lens", sweep_rank: "sweep", sweep: "sweep", rank: "rank",
                stats_resid: tr("残差の統計"), stats_act: tr("活性の統計"), reverse: tr("逆引き"), eval: "eval",
-               heads_contrast: tr("ヘッドの対照分析") };
+               heads_contrast: tr("ヘッドの対照分析"), experts_contrast: tr("専門家の対照分析"), experts_sweep: tr("専門家の sweep") };
 
 function eta(s) {
   if (s === null || s === undefined || !Number.isFinite(s)) return "";

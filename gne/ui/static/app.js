@@ -3,6 +3,8 @@
 // U1: 色の重ね合わせ(overlay)、LIST の rank、NEURON(Examples / Details)、hover の語、検索、layers ビュー。
 // U2: NEURON の Chat(3 列・reads you)、LIST の fires と recipe、地図のレシピの印、ジョブのバーと計算メニュー。
 // CHANGE-04 G: 板の上辺の刻み = ヘッド(hover・クリックで HEAD パネル)、overlay heads:<name> と fires のヘッドの注目、レシピのヘッド。
+// CHANGE-05 G: MoE の専門家(EXPERT パネル、jump の L12 E37)、overlay expert_usage・experts:<name>、fires で選ばれた専門家のタイルの枠、
+// MoE のニューロン(通し番号 = 専門家 × 幅 + n)を NEURON パネルで開き、レシピに L:Ee:Nn で足す。
 import { LayerCache, getBin, getJSON, loadVocab } from "./api.js";
 import { AgentLink } from "./agent.js";
 import { LANG, setLang, t, translateDOM } from "./i18n.js";
@@ -17,6 +19,7 @@ import { syntheticArch } from "./layout.js";
 import { LayerMap } from "./map.js";
 import { FIELDS, colorize, colorizeHeads, colorizeHits, emphasisFactor, emphasize, fieldLabel, globalScale, layersWith, legendHTML } from "./overlay.js";
 import { HeadPanel } from "./heads.js";
+import { ExpertPanel } from "./experts.js";
 import { NeuronPanel, RankList, SearchList, esc, toksHTML } from "./panels.js";
 import { Recipe, RecipePanel } from "./recipe.js";
 
@@ -28,6 +31,8 @@ const state = {
   layout: "index", web: false, webHops: 2, links: null, linkMode: "direct",
   overlay: { field: "none", threshold: null, scale: null, values: new Map(), metas: new Map(), hits: null, prev: "none" },
   headFocus: null,                        // HEAD パネルで開いているヘッド { layer, head }
+  expertFocus: null,                      // EXPERT パネルで開いている専門家 { layer, expert }
+  firesRouted: null,                      // fires で選んだトークンで選ばれた専門家 Map(層 → [専門家])
   heads: null,                            // ヘッドの色 { field: "heads:<name>" | "fires_heads", values: Map(層 → Float32Array(n_head)), … }
 };
 window.gne = state;                       // 自動テスト(playwright)と開発用
@@ -35,6 +40,10 @@ window.gne = state;                       // 自動テスト(playwright)と開�
 const MIXER = { attention: "attention", linear_attention: t("線形注意"), recurrent: t("回帰"), none: t("mixer なし") };
 const mixerLabel = (li) => MIXER[li.mixer];
 const isMoE = () => state.arch.layers.some((li) => li.ffn.startsWith("moe"));
+const moeLayer = (L) => { const li = state.arch.layers[L]; return li && li.ffn.startsWith("moe") ? li : null; };
+// MoE の層の通し番号 → { expert, neuron }(MoE でなければ null)
+const moeAddr = (L, n) => { const li = moeLayer(L); return li ? { expert: Math.floor(n / li.n_ff), neuron: n % li.n_ff } : null; };
+const pct = (x) => (Number.isFinite(+x) ? `${(x * 100).toFixed(1)}%` : "—");
 const fmt = (x, d = 2) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : (+x).toFixed(d));
 
 // --- 層ごとのデータ(層単位で一括ロードし、hover のたびには通信しない、§4.6) ----------------------------------
@@ -86,8 +95,39 @@ function headTooltipHTML(h) {
   return lines.join("<br>");
 }
 
+// MoE の専門家のニューロン(CHANGE-05 G): L E N、名前、今の overlay の値(選択率・専門家の z・ほかは値)、fires で選ばれたか、レシピ
+function expertTooltipHTML(h) {
+  const L = h.layer, li = state.arch.layers[L], flat = h.expert * li.n_ff + h.neuron, lines = [];
+  const name = state.model ? (state.model.names || {})[`${L}:${flat}`] : null;
+  lines.push(`<span class="t-id">L${L} E${h.expert} N${h.neuron}</span>${name ? `<span class="t-name">${esc(name)}</span>` : ""}`);
+  if (!state.model) return lines.join("<br>");
+  const f = state.overlay.field, v = state.overlay.values.get(L), meta = state.overlay.metas.get(L);
+  const kv = (k, x) => lines.push(`<span class="t-k">${k}</span><span class="t-v" style="margin:0">${x}</span>`);
+  if (f === "expert_usage" && meta && meta.rate) {
+    kv("color", t("E{e} の選択率 {p}(一様 {u})", { e: h.expert, p: pct(meta.rate[h.expert]), u: pct(li.n_expert_used / li.n_expert) }));
+  } else if (f.startsWith("experts:") && meta && meta.experts) {
+    const r = meta.experts[h.expert];
+    if (r) kv("color", `E${h.expert} · z ${fmt(r.z, 2)} · null ${fmt(r.null_pct, 2)} · usage ${fmt(r.usage_shift, 3)} · cos ${fmt(r.contrib_cos, 3)}`);
+  } else if (v && f !== "none" && !f.startsWith("search:") && Number.isFinite(v[flat])) {
+    kv("color", `${esc(fieldLabel(f))} = ${fmt(v[flat], 3)}`);
+  }
+  const ro = state.firesRouted && state.firesRouted.get(L);
+  if (ro && ro.includes(h.expert)) kv("fires", t("このトークンで選ばれた専門家({i} 番目)", { i: ro.indexOf(h.expert) + 1 }));
+  const r = state.recipe;
+  if (r) {
+    const xs = [r.findMoe({ layer: L, kind: "expert_neuron", expert: h.expert, neuron: h.neuron, mode: "add" }),
+                r.findMoe({ layer: L, kind: "expert_neuron", expert: h.expert, neuron: h.neuron, mode: "gain" }),
+                r.findMoe({ layer: L, kind: "expert", expert: h.expert, mode: "gain" }), r.findMoe({ layer: L, kind: "expert", expert: h.expert, mode: "route" })]
+      .filter(Boolean).map((u) => `${u.kind === "expert" ? `E${h.expert} ` : ""}${u.mode === "gain" ? `×${fmt(u.k, 2)}` : `${u.mode === "route" ? "route " : ""}${u.dose >= 0 ? "+" : "−"}${fmt(Math.abs(u.dose), 2)}`}`);
+    if (xs.length) kv("recipe", xs.join(" · "));
+  }
+  lines.push(`<span class="t-wait">${t("クリックで NEURON パネル(専門家は jump に L{L} E{e})", { L, e: h.expert })}</span>`);
+  return lines.join("<br>");
+}
+
 function tooltipHTML(h) {
   if (h.head !== undefined) return headTooltipHTML(h);
+  if (h.expert !== undefined) return expertTooltipHTML(h);
   const who = h.shared ? `shared N${h.neuron}` : h.expert !== undefined ? `E${h.expert} N${h.neuron}` : `N${h.neuron}`;
   const L = h.layer, n = h.neuron, lines = [];
   const name = state.model && !h.shared && h.expert === undefined ? (state.model.names || {})[`${L}:${n}`] : null;
@@ -179,10 +219,16 @@ function legend() {
   const ring = (c) => `<span class="sw ring" style="border-color:${c}"></span>`;
   const ag = agent ? agent.state : null;
   const hbox = (c) => `<span class="sw hbox" style="border-color:${c}"></span>`;
-  const marks = (state.recipe && state.recipe.neurons().length ? [it(ring("#f2d24b"), t("レシピ +")), it(ring("#c94fa7"), t("レシピ −(大きさ = |dose|)"))] : [])
+  const tile = (c) => `<span class="sw tile" style="border-color:${c}"></span>`;
+  const rx = state.recipe ? state.recipe.moe() : [];
+  const marks = (state.recipe && (state.recipe.neurons().length || rx.some((u) => u.kind === "expert_neuron"))
+    ? [it(ring("#f2d24b"), t("レシピ +")), it(ring("#c94fa7"), t("レシピ −(大きさ = |dose|)"))] : [])
     .concat(state.focus ? [it(ring("#ffffff"), t("開いているニューロン"))] : [])
     .concat(state.recipe && state.recipe.heads().length ? [it(hbox("#f2d24b"), hbox("#c94fa7"), t("レシピのヘッド(黄 = 強める ×k > 1、赤紫 = 弱める・消す ×k < 1)"))] : [])
     .concat(state.headFocus ? [it(hbox("#ffffff"), t("開いているヘッド"))] : [])
+    .concat(rx.some((u) => u.kind === "expert") ? [it(tile("#f2d24b"), tile("#c94fa7"), t("レシピの専門家(黄 = 強める・選ばれやすく、赤紫 = 弱める・消す・選ばれにくく)"))] : [])
+    .concat(state.expertFocus ? [it(tile("#ffffff"), t("開いている専門家"))] : [])
+    .concat(state.firesRouted ? [it(tile("#6fe3ff"), t("fires のトークンで選ばれた専門家"))] : [])
     .concat(ag && ag.highlights.length ? [it(`<span class="sw ring dash" style="border-color:#6fe3ff"></span>`, `${t("エージェントの強調")}${ag.label ? ` (${esc(ag.label)})` : ""}`)] : [])
     .concat(ag && ag.notes.length ? [itl(`<span class="sw ring" style="border-color:#6fe3ff;width:9px;height:9px"></span><span class="ag-note-sw">agent ✎</span>` +
       t("エージェントの注釈(小さな輪。札は 28 字まで、マウスを当てると全文、クリックで開く)"))] : [])
@@ -211,8 +257,10 @@ let overlayToken = 0;
 
 function fillColorSelect() {
   const sel = $("#color-select");
-  const names = ["none", ...Object.keys(FIELDS).filter((k) => k !== "none"), ...(state.model ? state.model.directions.map((d) => `cos:${d}`) : []),
-                 ...(state.model ? (state.model.writers || []).map((w) => `writers:${w.name}`) : [])];
+  const names = ["none", ...Object.keys(FIELDS).filter((k) => k !== "none" && (k !== "expert_usage" || isMoE())),
+                 ...(state.model ? state.model.directions.map((d) => `cos:${d}`) : []),
+                 ...(state.model ? (state.model.writers || []).map((w) => `writers:${w.name}`) : []),
+                 ...(state.model ? (state.model.experts || []).map((x) => `experts:${x.name}`) : [])];   // 専門家の対照分析(CHANGE-05 G)
   const heads = state.model ? state.model.heads || [] : [];                // 保存済みのヘッドの対照分析(CHANGE-04 G)
   sel.innerHTML = names.map((k) => {
     const n = state.model && k !== "none" ? layersWith(k, state.model).length : 0;
@@ -234,6 +282,13 @@ async function refreshModel() {
   state.model.runs = m.runs;
   state.model.heads = m.heads;
   state.model.writers = m.writers;
+  await refreshExperts();
+}
+
+// 保存済みの専門家の対照分析(gne experts contrast、CHANGE-05 G)。MoE のモデルだけ
+async function refreshExperts() {
+  if (!state.model || !isMoE()) return;
+  try { state.model.experts = (await getJSON("/api/experts")).contrasts; } catch { state.model.experts = state.model.experts || []; }
 }
 
 // --- ヘッドの色(CHANGE-04 G): 板の上辺の帯。heads:<name> は対照分析の z、fires_heads は fires で選んだトークンへの注目 ----------
@@ -262,6 +317,25 @@ function clearHeads() {
   if (!state.heads) return;
   state.heads = null;
   state.map.setHeadColors(null);
+}
+
+// --- 専門家のタイルの枠(CHANGE-05 G): 開いている専門家(白、いちばん外)、レシピの専門家全体の gain・route
+// (黄 = 強める・選ばれやすく、赤紫 = 弱める・消す・選ばれにくく)、fires で選んだトークンで選ばれた専門家(水色、内側) ----------
+function updateTileFrames() {
+  if (!state.map) return;
+  const items = [];
+  if (state.expertFocus) items.push({ ...state.expertFocus, color: 0xffffff, ring: 0 });
+  for (const u of state.recipe ? state.recipe.moe() : []) {
+    if (u.kind === "expert") items.push({ layer: u.layer, expert: u.expert, color: (u.mode === "gain" ? u.k > 1 : u.dose > 0) ? 0xf2d24b : 0xc94fa7, ring: 1 });
+  }
+  if (state.firesRouted) for (const [L, es] of state.firesRouted) for (const e of es) items.push({ layer: L, expert: e, color: 0x6fe3ff, ring: 2 });
+  state.map.setTileFrames(items);
+}
+
+function clearRouted() {
+  if (!state.firesRouted) return;
+  state.firesRouted = null;
+  updateTileFrames();
 }
 
 // overlay heads:<name>: 対照分析の全ヘッドの z。点(ニューロン)は塗らない
@@ -326,7 +400,8 @@ function recolor() {
   let total = 0;
   for (const [L, v] of o.values) {
     const named = new Set(Object.keys(state.model.names || {}).filter((k) => +k.split(":")[0] === L).map((k) => +k.split(":")[1]));
-    const rgba = colorize(o.field, v, o.metas.get(L), o.scale, { threshold: o.threshold, named });
+    const li = moeLayer(L);
+    const rgba = colorize(o.field, v, o.metas.get(L), o.scale, { threshold: o.threshold, named, nPer: li ? li.n_ff : 0 });
     rgbas.set(L, rgba);
     lit.set(L, rgba.lit);
     total += v.length;
@@ -349,6 +424,7 @@ async function applyOverlay(field) {
   o.scale = null;                                  // 読み込みが終わるまで前の overlay の尺度を使わない
   $("#cos-thr-wrap").classList.toggle("hidden", !field.startsWith("cos:") && !field.startsWith("writers:"));
   clearHeads();
+  clearRouted();
   if (field.startsWith("heads:") && state.model) {                       // ヘッドの対照分析: 板の上辺の帯だけを塗る
     o.values = new Map(); o.metas = new Map(); o.factor = 1;
     state.map.resetColors(); state.map.setStructureDim(0.35);
@@ -417,6 +493,7 @@ function applyHits(q, mode, hits) {
   o.values = new Map(); o.metas = new Map(); o.scale = null;
   $("#cos-thr-wrap").classList.add("hidden");
   clearHeads();
+  clearRouted();
   map.resetColors();
   const byL = new Map();
   for (const h of hits) { if (!byL.has(h.layer)) byL.set(h.layer, []); byL.get(h.layer).push(h.neuron); }
@@ -479,7 +556,9 @@ async function applyLayout(kind) {
 // 開いたニューロンの配線。web が off なら直接の上流・下流(各 14)、on なら多段の web
 async function showLinks() {
   const f = state.focus, c = state.model && state.model.connections;
-  if (!f || f.kind !== "neuron" || !c || state.linkMode === "off") { state.map.setLinks(null); state.links = null; legend(); return; }
+  if (!f || f.kind !== "neuron" || !c || state.linkMode === "off" || moeLayer(f.layer)) {   // MoE の層は connections の対象外
+    state.map.setLinks(null); state.links = null; legend(); return;
+  }
   const key = `${f.layer}:${f.n}:${state.web}`;
   state.linksKey = key;
   let edges;
@@ -535,17 +614,19 @@ function closeSearch() {
 }
 
 // --- LIST・NEURON ----------------------------------------------------------------------------------------
-let rank, neuron, layersView, searchList, chat, firesPanel, recipePanel, jobsBar, embedView, evalView, agent, headPanel, writersView;
+let rank, neuron, layersView, searchList, chat, firesPanel, recipePanel, jobsBar, embedView, evalView, agent, headPanel, writersView, expertPanel;
 
 function expand(id) {
   const p = $(`#${id}`);
   if (p.classList.contains("collapsed")) { p.classList.remove("collapsed"); state.map.resize(); }
 }
 
-// NEURON と HEAD は同列の右パネル。画面が狭いときは、開く方でないもう一方をたたむ(地図の幅を残す)
+// NEURON・HEAD・EXPERT は同列の右パネル。画面が狭いときは、開く方でないものをたたむ(地図の幅を残す)。
+// 広い画面でも開いているのは 2 枚まで(NEURON を残し、NEURON を開くときは HEAD をたたむ)
 function expandRight(id) {
-  const other = id === "neuron" ? "head" : "neuron";
-  if (window.innerWidth < 1700 && !$(`#${other}`).classList.contains("collapsed")) $(`#${other}`).classList.add("collapsed");
+  const open = ["neuron", "head", "expert"].filter((x) => x !== id && !$(`#${x}`).classList.contains("collapsed"));
+  const fold = window.innerWidth < 1700 ? open : open.length > 1 ? open.filter((x) => x !== (id === "neuron" ? "expert" : "neuron")) : [];
+  for (const x of fold) $(`#${x}`).classList.add("collapsed");
   expand(id);
   state.map.resize();
 }
@@ -560,8 +641,9 @@ function openNeuron({ layer, n, kind = "neuron", run = null, tab = null }, { foc
   showLinks();
   if (kind === "neuron") {
     if (focus) state.map.focusNeuron(layer, n); else state.map.markNeuron(layer, n);
-    history.replaceState(null, "", `#L${layer}/N${n}`);
-    $("#jump").value = `L${layer} N${n}`;
+    const x = moeAddr(layer, n);                                         // MoE の層は L12 E37 N511(n は通し番号)
+    history.replaceState(null, "", x ? `#L${layer}/E${x.expert}/N${x.neuron}` : `#L${layer}/N${n}`);
+    $("#jump").value = x ? `L${layer} E${x.expert} N${x.neuron}` : `L${layer} N${n}`;
   }
   if (rank.layer !== layer) showLayerInList(layer).then(() => rank.select(layer, n, kind));
   else rank.select(layer, n, kind);
@@ -579,6 +661,33 @@ function openHead({ layer, head, tab = null }) {
   $("#jump").value = `L${layer} H${head}`;
   legend();
   return true;
+}
+
+// EXPERT パネルで専門家を開く(CHANGE-05 G)。視点は動かさず、地図のタイルに白い枠
+function openExpert({ layer, expert }) {
+  const li = moeLayer(layer);
+  if (!li || !expertPanel || !(expert >= 0 && expert < li.n_expert)) return false;
+  state.expertFocus = { layer, expert };
+  expandRight("expert");
+  expertPanel.open({ layer, expert });
+  updateTileFrames();
+  history.replaceState(null, "", `#L${layer}/E${expert}`);
+  $("#jump").value = `L${layer} E${expert}`;
+  legend();
+  return true;
+}
+
+// レシピ全体を 3 列チャットで(recipe タブ・EXPERT パネル)。where = チャットを置くニューロン(無ければ開いているもの、レシピの最初)
+function startRecipeChat(where = null) {
+  const u = state.recipe.neurons()[0], m = state.recipe.moe().find((x) => x.kind === "expert_neuron");
+  chat.useRecipe();
+  if (!$("#neuron").classList.contains("wide")) $("#neuron-wide").click();        // 3 列は広い方が読みやすい
+  const f = state.focus;
+  if (where) openNeuron({ ...where, tab: "chat" }, { focus: false });
+  else if (f && f.kind === "neuron") openNeuron({ layer: f.layer, n: f.n, tab: "chat" }, { focus: false });
+  else if (u) openNeuron({ layer: u.layer, n: u.neuron, tab: "chat" });
+  else if (m) openNeuron({ layer: m.layer, n: m.expert * state.arch.layers[m.layer].n_ff + m.neuron, tab: "chat" });
+  else openNeuron({ layer: state.layer, n: 0, tab: "chat" });                  // ablate・専門家だけのレシピ: チャットの置き場所に
 }
 
 async function showLayerInList(L) {
@@ -615,6 +724,9 @@ async function onJobFinished(j) {
     headsCache.clear();
     if (headPanel && state.headFocus) { headPanel.sums.clear(); headPanel.open(state.headFocus); }
   }
+  if ((j.kind === "experts_contrast" || j.kind === "experts_sweep" || j.kind === "stats_act") && expertPanel && state.expertFocus) {
+    expertPanel.open(state.expertFocus);                                 // 専門家の対照分析・使用統計(CHANGE-05 G): 開いている専門家を取り直す
+  }
   if (j.kind === "embed" && embedView) { embedView.setRuns(state.model.runs); if (embedView.run === j.params.run) embedView.load(j.params.run); }
   const f = state.overlay.field;
   if (f !== "none" && !f.startsWith("search:") && !f.startsWith("fires:")) applyOverlay(f);
@@ -626,8 +738,12 @@ function startJob(kind, params) {
 }
 
 function recipeChanged(r) {
-  state.map.setMarks(r.neurons().map((u) => ({ layer: u.layer, neuron: u.neuron, dose: u.dose })));   // 方向のユニットは印なし
+  const moeN = r.moe().filter((u) => u.kind === "expert_neuron").map((u) => ({      // MoE のニューロンは通し番号の位置に(gain は k − 1 を dose に)
+    layer: u.layer, neuron: u.expert * state.arch.layers[u.layer].n_ff + u.neuron, dose: u.mode === "gain" ? u.k - 1 : u.dose,
+    label: `L${u.layer} E${u.expert} N${u.neuron} ${u.mode === "gain" ? `×${+(+u.k).toFixed(2)}` : `${u.dose >= 0 ? "+" : "−"}${+Math.abs(u.dose).toFixed(2)}`}` }));
+  state.map.setMarks([...r.neurons().map((u) => ({ layer: u.layer, neuron: u.neuron, dose: u.dose })), ...moeN]);   // 方向のユニットは印なし
   state.map.setHeadMarks(r.heads().map((u) => ({ layer: u.layer, head: u.head, k: u.k })));          // ヘッドは板の上辺の刻みに
+  updateTileFrames();                                                                                 // 専門家全体はタイルの枠に
   $("#recipe-count").textContent = r.units.length ? `(${r.units.length})` : "";
   legend();
 }
@@ -705,10 +821,12 @@ async function setView(v) {
   }
 }
 
-// "L14 N8949" / "14:8949" / MoE は "L10 E93 N252" / ヘッドは "L21 H7"・"21:H7"
+// "L14 N8949" / "14:8949" / MoE は "L10 E93 N252"、専門家は "L10 E93"(EXPERT パネル) / ヘッドは "L21 H7"・"21:H7"
 function parseJump(text) {
   const h = text.trim().match(/^L?(\d+)\s*[\s:/,]\s*H(\d+)$/i);
   if (h) return { layer: +h[1], head: +h[2] };
+  const x = text.trim().match(/^L?(\d+)\s*[\s:/,]\s*E(\d+)$/i);
+  if (x) return { layer: +x[1], expert: +x[2], neuron: null };
   const m = text.trim().match(/^L?(\d+)\s*[\s:/,]\s*(?:E(\d+)\s*[\s:/,]\s*)?N?(\d+)$/i);
   if (!m) return null;
   return { layer: +m[1], expert: m[2] !== undefined ? +m[2] : null, neuron: +m[3] };
@@ -728,12 +846,18 @@ function wireHeader() {
       ev.target.style.borderColor = ok ? "" : "#c94fa7";
       return;
     }
+    if (j && j.neuron === null) {                                        // 専門家は EXPERT パネルで(視点は動かさない)
+      const ok = !!state.model && openExpert({ layer: j.layer, expert: j.expert });
+      ev.target.style.borderColor = ok ? "" : "#c94fa7";
+      return;
+    }
     const li = j && state.arch.layers[j.layer];
     const moe = li && li.ffn.startsWith("moe");
     const ok = li && (moe ? j.expert !== null && j.expert < li.n_expert && j.neuron < li.n_ff : j.expert === null && j.neuron < li.n_ff);
     ev.target.style.borderColor = ok ? "" : "#c94fa7";
     if (!ok) return;
-    if (moe) {
+    if (moe && state.model) openNeuron({ layer: j.layer, n: j.expert * li.n_ff + j.neuron });   // 通し番号で NEURON パネル
+    else if (moe) {
       state.map.focusNeuron(j.layer, j.expert * li.n_ff + j.neuron);
       history.replaceState(null, "", `#L${j.layer}/E${j.expert}/N${j.neuron}`);
     } else if (state.model) openNeuron({ layer: j.layer, n: j.neuron });
@@ -754,6 +878,11 @@ function wireHeader() {
     $("#head-wide").textContent = t(w ? "⇔ 戻す" : "⇔ 広げる");
     state.map.resize();
     if (headPanel && headPanel.res && headPanel.tab === "pattern") headPanel.drawOut();   // ヒートマップを新しい幅で描き直す
+  });
+  $("#expert-wide").addEventListener("click", () => {
+    const w = $("#expert").classList.toggle("wide");
+    $("#expert-wide").textContent = t(w ? "⇔ 戻す" : "⇔ 広げる");
+    state.map.resize();
   });
   for (const b of document.querySelectorAll("#list-tabs button[data-tab]")) b.addEventListener("click", () => listTab(b.dataset.tab));
   $("#color-select").addEventListener("change", (ev) => { if (ev.target.value !== state.overlay.field) applyOverlay(ev.target.value); });
@@ -788,6 +917,7 @@ async function main() {
   } else {
     state.model = await getJSON("/api/model");
     state.arch = state.model.arch;
+    await refreshExperts();
   }
   document.title = `gne · ${state.model ? state.model.meta.name : state.arch.arch}`;
   const t0 = performance.now();
@@ -798,10 +928,11 @@ async function main() {
         if (state.model) openHead({ layer: h.layer, head: h.head }); else $("#jump").value = `L${h.layer} H${h.head}`;
         return;
       }
-      if (h.expert !== undefined || h.shared || !state.model) {
-        $("#jump").value = h.expert !== undefined ? `L${h.layer} E${h.expert} N${h.neuron}` : `L${h.layer} N${h.neuron}`;
+      if (h.shared || !state.model) {                                     // shared expert のニューロン(と合成の構造)は jump の欄に住所だけ
+        $("#jump").value = h.expert !== undefined ? `L${h.layer} E${h.expert} N${h.neuron}` : h.shared ? `L${h.layer} S N${h.neuron}` : `L${h.layer} N${h.neuron}`;
         return;
       }
+      if (h.expert !== undefined) { openNeuron({ layer: h.layer, n: h.cell }, { focus: false }); return; }   // MoE は通し番号で
       openNeuron({ layer: h.layer, n: h.neuron }, { focus: false });
     },
     onLayer: onLayerChanged,
@@ -820,16 +951,9 @@ async function main() {
     state.chat = chat;                                                   // 自動テスト用
     recipePanel = new RecipePanel($("#recipe-list"), state.recipe, {
       onOpen: (u) => openNeuron(u),
-      onChat: () => {
-        const u = state.recipe.neurons()[0];
-        chat.useRecipe();
-        if (!$("#neuron").classList.contains("wide")) $("#neuron-wide").click();        // 3 列は広い方が読みやすい
-        const f = state.focus;
-        if (f && f.kind === "neuron") openNeuron({ layer: f.layer, n: f.n, tab: "chat" }, { focus: false });
-        else if (u) openNeuron({ layer: u.layer, n: u.neuron, tab: "chat" });
-        else openNeuron({ layer: state.layer, n: 0, tab: "chat" });                  // ablate だけのレシピ: チャットの置き場所に
-
-      },
+      onChat: () => startRecipeChat(),
+      onOpenExpert: (u) => openExpert(u),
+      nFF: (L) => state.arch.layers[L].n_ff,
       unitWords: (L, n) => { const us = unitsCache.peek(L); const u = us && us.byN.get(n); return u ? u.words.slice(0, 3).join(" · ") : ""; },
       directions: () => (state.model ? state.model.directions : []),
       onOpenHead: (u) => openHead(u),
@@ -849,7 +973,21 @@ async function main() {
     state.headPanel = headPanel;                                         // 自動テスト用
     firesPanel = new FiresPanel($("#fires-list"), {
       nLayer: state.arch.n_layer, onOpen: (u) => openNeuron(u), onField: applyFiresOverlay,
+      onRouted: (m) => { state.firesRouted = m && m.size ? m : null; updateTileFrames(); legend(); rehover(); },
     });
+    if (isMoE()) {                                                       // EXPERT パネル(CHANGE-05 G)は MoE のモデルだけ
+      expertPanel = new ExpertPanel($("#expert-body"), {
+        onRecipe: (q, v) => { state.recipe.setMoe(q, v); if (!$("#recipe-list").classList.contains("hidden")) recipePanel.render(); },
+        inRecipe: (q) => { const u = state.recipe.findMoe(q); return u ? (q.mode === "gain" ? u.k : u.dose) : null; },
+        recipeSize: () => state.recipe.units.length + (state.recipe.ablate ? 1 : 0),
+        hasBias: (L) => !!(moeLayer(L) && moeLayer(L).has_router_bias),
+        onNeuron: (u) => openNeuron(u),
+        onOverlay: (field) => { if (state.view !== "map") setView("map"); applyOverlay(field); },
+        onChat: (where) => startRecipeChat(where),
+      });
+      state.expertPanel = expertPanel;                                   // 自動テスト用
+      $("#expert").classList.remove("hidden");
+    }
     jobsBar = new JobsBar($("#jobs-bar"), { onFinished: onJobFinished });
     $("#agent-btn").classList.remove("hidden");
     agent = new AgentLink({
@@ -870,14 +1008,28 @@ async function main() {
     recipeChanged(state.recipe);
     recipePanel.render();
   }
+  // MoE の層のニューロン(通し番号 n)のレシピの単位: L:Ee:Nn の add(方向押し)か gain
+  const moeQ = (L, n, mode) => { const x = moeAddr(L, n); return x ? { layer: L, kind: "expert_neuron", expert: x.expert, neuron: x.neuron, mode } : null; };
   neuron = new NeuronPanel($("#neuron-body"), {
     onRecipe: (L, n, sign) => {
-      const cur = state.recipe.has(L, n);
-      if (cur && Math.sign(cur.dose) === sign) state.recipe.remove(state.recipe.units.indexOf(cur));   // もう一度押すと外す
+      const q = moeQ(L, n, "add");
+      const cur = q ? state.recipe.findMoe(q) : state.recipe.has(L, n);
+      if (q) state.recipe.setMoe(q, cur && Math.sign(cur.dose) === sign ? null : sign * (cur ? Math.abs(cur.dose) : 1));
+      else if (cur && Math.sign(cur.dose) === sign) state.recipe.remove(state.recipe.units.indexOf(cur));   // もう一度押すと外す
       else state.recipe.add(L, n, sign * (cur ? Math.abs(cur.dose) : 1));
       if (!$("#recipe-list").classList.contains("hidden")) recipePanel.render();
     },
-    inRecipe: (L, n) => { const u = state.recipe && state.recipe.has(L, n); return u ? u.dose : null; },
+    inRecipe: (L, n) => { const q = moeQ(L, n, "add"), u = state.recipe && (q ? state.recipe.findMoe(q) : state.recipe.has(L, n)); return u ? u.dose : null; },
+    onGain: (L, n, k) => {                                               // MoE のニューロンの ×0 / ×2(同じ倍率でもう一度押すと外す)
+      const q = moeQ(L, n, "gain");
+      if (!q) return;
+      const cur = state.recipe.findMoe(q);
+      state.recipe.setMoe(q, cur && cur.k === k ? null : k);
+      if (!$("#recipe-list").classList.contains("hidden")) recipePanel.render();
+    },
+    inGain: (L, n) => { const q = moeQ(L, n, "gain"), u = q && state.recipe && state.recipe.findMoe(q); return u ? u.k : null; },
+    onOpenExpert: (u) => openExpert(u),
+    isMoe: (L) => !!moeLayer(L),
     onChat: (el, d) => { chat.setNeuron(d.layer, d.neuron, d); chat.mount(el); },
     hasConnections: () => !!(state.model && state.model.connections),
     onGoto: (u) => openNeuron(u),
@@ -900,13 +1052,18 @@ async function main() {
   loadVocab(`${state.model.meta.model_id}:2`).then((v) => { state.vocab = v; rehover(); });   // hover の語(IndexedDB に置く)
   const first = state.model.coverage.find((c) => c.sweep_runs.length);
   const m = location.hash.match(/^#L(\d+)(?:\/E(\d+))?\/N(\d+)/), mh = location.hash.match(/^#L(\d+)\/H(\d+)/);
+  const mx = location.hash.match(/^#L(\d+)\/E(\d+)$/);
   if (mh) {
     if (first) expand("list");
     showLayerInList(+mh[1]);
     openHead({ layer: +mh[1], head: +mh[2] });
+  } else if (mx) {
+    if (first) expand("list");
+    showLayerInList(+mx[1]);
+    openExpert({ layer: +mx[1], expert: +mx[2] });
   } else if (m) {
     const li = state.arch.layers[+m[1]];
-    if (li && li.ffn.startsWith("moe")) state.map.focusNeuron(+m[1], +m[2] * li.n_ff + +m[3]);
+    if (li && li.ffn.startsWith("moe")) openNeuron({ layer: +m[1], n: +(m[2] || 0) * li.n_ff + +m[3] });
     else if (li) openNeuron({ layer: +m[1], n: +m[3] });
   } else {
     if (first) expand("list");

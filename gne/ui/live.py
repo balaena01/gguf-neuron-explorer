@@ -94,34 +94,35 @@ class Live:
                 with self.arbiter.interactive():
                     q.put({"type": "gpu", "waited_s": time.perf_counter() - t0})
                     self.s.warnings = []
-                    e = self.s.engine
-                    ctx = e.steer_ctx()
                     for i, (c, r, w) in enumerate(zip(cols, recipes, whens, strict=True)):
                         if stop.is_set():
                             break
-                        msgs = ([{"role": "system", "content": system}] if system else []) + hist[i]
-                        ids = e.chat_ids(msgs)
-                        if len(ids) + max_tokens > e.n_ctx:
-                            raise GneError("CONTEXT_FULL", f"会話が長すぎます({len(ids)} トークン、n_ctx {e.n_ctx})",
-                                           "会話をやり直すか、max_tokens を減らしてください")
-                        vecs = self.s.vectors(r)[0] if r is not None else None
-                        q.put({"type": "column", "col": i, "n_prompt": len(ids)})
-                        dec = codecs.getincrementaldecoder("utf-8")(errors="replace")
+                        # CHANGE-05: 専門家全体の gain・route は作業用コピーで読み直して生成する(抜けると元に戻す)
+                        with self.s.patched(self.s.patches_for(r)) as e:
+                            ctx = e.steer_ctx()
+                            msgs = ([{"role": "system", "content": system}] if system else []) + hist[i]
+                            ids = e.chat_ids(msgs)
+                            if len(ids) + max_tokens > e.n_ctx:
+                                raise GneError("CONTEXT_FULL", f"会話が長すぎます({len(ids)} トークン、n_ctx {e.n_ctx})",
+                                               "会話をやり直すか、max_tokens を減らしてください")
+                            vecs = self.s.vectors(r)[0] if r is not None else None
+                            q.put({"type": "column", "col": i, "n_prompt": len(ids)})
+                            dec = codecs.getincrementaldecoder("utf-8")(errors="replace")
 
-                        def cb(_si, tok, _i=i, _dec=dec):
-                            if stop.is_set():
-                                raise _Stopped()
-                            piece = _dec.decode(e.token_bytes(tok))
-                            if piece:
-                                q.put({"type": "text", "col": _i, "text": piece})
-                        try:
-                            out, winfo = generate_when(e, ctx, msgs, vecs, w, max_tokens=max_tokens, on_token=cb,
-                                                       lora=self.s.lora_for(r), sampling=sampling)
-                            q.put({"type": "end", "col": i, "text": out.text, "finish": out.finish, "n_gen": out.n_gen,
-                                   "when": winfo})
-                        except _Stopped:
-                            q.put({"type": "end", "col": i, "text": None, "finish": "stopped", "n_gen": None})
-                            break
+                            def cb(_si, tok, _i=i, _dec=dec):
+                                if stop.is_set():
+                                    raise _Stopped()
+                                piece = _dec.decode(e.token_bytes(tok))
+                                if piece:
+                                    q.put({"type": "text", "col": _i, "text": piece})
+                            try:
+                                out, winfo = generate_when(e, ctx, msgs, vecs, w, max_tokens=max_tokens, on_token=cb,
+                                                           lora=self.s.lora_for(r), sampling=sampling)
+                                q.put({"type": "end", "col": i, "text": out.text, "finish": out.finish, "n_gen": out.n_gen,
+                                       "when": winfo})
+                            except _Stopped:
+                                q.put({"type": "end", "col": i, "text": None, "finish": "stopped", "n_gen": None})
+                                break
                     if self.s.warnings:
                         q.put({"type": "warn", "warnings": list(self.s.warnings)})
             except GneError as ex:
@@ -191,7 +192,7 @@ class Live:
         else:
             raise GneError("BAD_ARGS", f"tok は -1 か 1〜{len(f['ids']) - 1} です")
         m = self.s.meta
-        sizes = [m.n_ff_at(L) for L in range(m.n_layer)]
+        sizes = [self.s.weights.n_units(L) for L in range(m.n_layer)]        # MoE の層は全専門家の通し番号(CHANGE-05)
         parts = [fields[L] if L in fields else np.full(n, np.nan, np.float32) for L, n in enumerate(sizes)]
         mx = float(max((np.nanmax(np.abs(p)) for p in parts if np.isfinite(p).any()), default=0.0))
         weak = sorted(int(L) for L, src in f["norm"].items() if src == "text_p99")   # 活性統計が無く文章内 p99 で割った層
@@ -224,9 +225,12 @@ class Live:
         rows.sort(reverse=True)
         out = []
         norm = self._fire(fid)["norm"]
+        w = self.s.weights
         for _, L, n, sc in rows[:limit]:
             out.append({"layer": L, "neuron": n, "score": sc, "lens": self._lens_pole(L, n, sc >= 0),
                         "norm": norm.get(str(L))})
+            if w.meta.n_expert and w.is_moe(L):                              # CHANGE-05: 専門家とその中の番号
+                out[-1]["expert"], out[-1]["expert_neuron"] = w.moe_split(L, n)
         return {"tok": tok, "n_hits": len(rows), "neurons": out, "text_p99": meta["text_p99"]}
 
     def fires_heads(self, fid: str) -> tuple[bytes, list[int], dict]:
@@ -319,8 +323,7 @@ class Live:
     # --- reads you(1 ニューロンの活性をトークンごとに) -------------------------------------------------------
     def reads(self, L: int, n: int, text: str) -> dict:
         from ..fires import fire_ids, fire_scores
-        self.data._check(L)
-        if not 0 <= n < self.s.meta.n_ff_at(L):
+        if not 0 <= n < self.data._check(L):                                  # MoE の層は通し番号(CHANGE-05)
             raise GneError("BAD_ARGS", f"L{L} N{n} は範囲外です")
 
         def fn():
@@ -345,7 +348,8 @@ class Live:
                 continue
             out.append({"name": p.stem, "model_id": r.model_id, "dose_unit": r.dose_unit,
                         "units": [{"layer": u.layer, "neuron": u.neuron, "dose": u.dose, "kind": u.kind, "mode": u.mode,
-                                   "k": u.k, "direction": u.direction, "head": u.head, "seek": getattr(u, "seek", None)} for u in r.units],
+                                   "k": u.k, "direction": u.direction, "head": u.head, "seek": getattr(u, "seek", None),
+                                   "expert": u.expert} for u in r.units],                  # expert: MoE(CHANGE-05)
                         "ablate": r.ablate.to_dict() if r.ablate else None, "when": r.when, "sampling": r.sampling,
                         "this_model": r.model_id in (None, self.s.meta.model_id)})
         return out

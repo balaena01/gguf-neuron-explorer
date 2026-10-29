@@ -1,6 +1,8 @@
 // LIST の fires タブ(別冊 §5.5)。文章を流してトークンを並べ、トークンを選ぶと、そのトークンで最も光るニューロンの
 // 一覧(層の範囲・符号・閾値・lens の語で絞る)と、マップの色(全層の値)を出す。「全トークン」は各ニューロンの |最大|。
 // 「ヘッド」を入れておくと、板の上辺のヘッドも、選んだトークンへの注目(後ろの位置からの平均)で色付けする(CHANGE-04 G の fires_heads)。
+// MoE(CHANGE-05 G): 選んだトークンで各 MoE の層が選んだ専門家を一覧にし、地図のタイルに枠を付ける(onRouted)。選ばれなかった専門家の
+// ニューロンは 0。一覧のニューロンは E37 N5 の形。
 import { getJSON, postJSON } from "./api.js";
 import { t as tr } from "./i18n.js";                 // t はトークンの変数名に使っているので tr
 import { esc, tokHTML } from "./panels.js";
@@ -8,11 +10,12 @@ import { esc, tokHTML } from "./panels.js";
 const fmt = (x, d = 2) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : (+x).toFixed(d));
 
 export class FiresPanel {
-  constructor(root, { nLayer, onOpen, onField }) {
+  constructor(root, { nLayer, onOpen, onField, onRouted }) {
     this.root = root;
     this.nLayer = nLayer;
     this.onOpen = onOpen;
     this.onField = onField;            // (fid, tok, label, thr, heads) → マップの色を切り替える
+    this.onRouted = onRouted || (() => {});   // (Map(層 → [専門家]) | null) → 地図のタイルの枠
     this.heads = true;                 // ヘッドの注目も色にする(flash attention を切った prefill を 1 回足す)
     this.text = "";
     this.res = null;
@@ -36,14 +39,14 @@ export class FiresPanel {
       <div class="ch-input"><textarea id="fi-text" rows="4" placeholder="${tr("文章を貼る(トークンごとに、どの層のどのニューロンが光るか)")}">${esc(this.text)}</textarea>
         <button id="fi-run">${tr("流す")}</button></div>
       <div class="ch-status muted note">${esc(this.status || tr("スコア = 活性 ÷ その層の基準(活性統計の q999)。先頭のトークンは除く"))}</div>
-      ${r ? `<div class="fi-toks">${chips}</div>
+      ${r ? `<div class="fi-toks">${chips}</div>${this.routedHTML()}
       <div class="list-tools fi-filt">
         <label class="muted">${tr("層")} <input id="fi-lmin" type="number" min="0" max="${this.nLayer - 1}" value="${f.lmin}">〜<input id="fi-lmax" type="number" min="0" max="${this.nLayer - 1}" value="${f.lmax}"></label>
         <select id="fi-sign"><option value="both">±</option><option value="+">+</option><option value="-">−</option></select>
         <label class="muted">|s| ≥ <input id="fi-thr" type="number" step="0.5" min="0" value="${f.thr}"></label>
         <input id="fi-q" placeholder="${tr("lens の語")}" value="${esc(f.q)}" spellcheck="false">
         <label class="muted" title="${tr("板の上辺のヘッドを、選んだトークンへの注目(そのトークンより後ろの位置からの注目の平均)で色付けする")}"><input type="checkbox" id="fi-heads"${this.heads ? " checked" : ""}> ${tr("ヘッド")}</label></div>
-      <div class="rank-wrap"><table class="rank mono fi-tab"><thead><tr><th>${tr("層")}</th><th>N</th><th>${tr("スコア")}</th><th title="${tr("光った向きの lens の極。S = steer lens、L = logit lens")}">${tr("lens(向きの極)")}</th></tr></thead>
+      <div class="rank-wrap"><table class="rank mono fi-tab${r.routed ? " moe" : ""}"><thead><tr><th>${tr("層")}</th><th>N</th><th>${tr("スコア")}</th><th title="${tr("光った向きの lens の極。S = steer lens、L = logit lens")}">${tr("lens(向きの極)")}</th></tr></thead>
         <tbody id="fi-list">${this.listHTML()}</tbody></table></div>` : ""}`;
     const $ = (s) => this.root.querySelector(s);
     $("#fi-text").addEventListener("input", (ev) => { this.text = ev.target.value; });
@@ -72,10 +75,28 @@ export class FiresPanel {
       const weak = x.norm === "text_p99";
       const lens = x.lens ? `<span class="${x.lens.pole === "+" ? "plus" : "minus"}" title="${tr("{src} lens の {pole} 極", { src: x.lens.src, pole: x.lens.pole })}">${x.lens.pole === "+" ? "↑" : "↓"}${x.lens.src === "steer" ? "S" : "L"}</span> ${x.lens.tokens.map(tokHTML).join("")}` : `<span class="muted">${tr("lens なし")}</span>`;
       return `<tr data-l="${x.layer}" data-n="${x.neuron}" class="${weak ? "weak" : ""}"${weak ? ` title="${tr("この層は活性統計が無いので、文章の中の層内 p99 で割った(ほかの層と比べにくい)")}"` : ""}>
-        <td>L${x.layer}${weak ? '<span class="badge">p99</span>' : ""}</td><td>N${x.neuron}</td>
+        <td>L${x.layer}${weak ? '<span class="badge">p99</span>' : ""}</td><td${x.expert !== undefined ? ` title="${tr("層の中の通し番号 {n}", { n: x.neuron })}"` : ""}>${
+          x.expert !== undefined ? `E${x.expert} N${x.expert_neuron}` : `N${x.neuron}`}</td>
         <td class="${x.score >= 0 ? "plus" : "minus"}">${fmt(x.score, 2)}</td><td class="w">${lens}</td></tr>`;
     }).join("")
       + (this.list.n_hits > this.list.neurons.length ? `<tr><td colspan="4" class="muted">${tr("ほか {n} 個", { n: this.list.n_hits - this.list.neurons.length })}</td></tr>` : "");
+  }
+
+  // 選んだトークンで MoE の層ごとに選ばれた専門家(routed の行 i = 位置 i + 1)。全トークンや MoE でなければ null
+  routedAt(tok) {
+    const ro = this.res && this.res.routed;
+    if (!ro || tok < 1) return null;
+    return new Map(Object.entries(ro).filter(([, rows]) => rows[tok - 1]).map(([L, rows]) => [+L, rows[tok - 1]]));
+  }
+
+  routedHTML() {
+    const ro = this.res && this.res.routed;
+    if (!ro) return "";
+    const m = this.routedAt(this.tok);
+    if (!m) return `<p class="muted note fi-routed">${tr("トークンを選ぶと、MoE の層ごとに選ばれた専門家を出します(地図のタイルに水色の枠)")}</p>`;
+    const rows = [...m].sort((a, b) => a[0] - b[0]).map(([L, es]) => `<div><span class="muted">L${L}</span> ${es.map((e) => `E${e}`).join(" ")}</div>`).join("");
+    return `<details class="fi-routed" open><summary class="muted note">${tr("選ばれた専門家(このトークン、{n} 層、選ばれた順。地図のタイルに水色の枠)", { n: m.size })}</summary>
+      <div class="mono fi-routed-list">${rows}</div></details>`;
   }
 
   label() {
@@ -96,6 +117,7 @@ export class FiresPanel {
       this.list = null;
       this.render();
       this.onField(this.res.id, -1, this.label(), this.filt.thr, this.heads);
+      this.onRouted(null);
       this.loadList();
     } catch (e) { this.status = `${tr("エラー")}: ${e.message}`; this.render(); }
   }
@@ -105,6 +127,7 @@ export class FiresPanel {
     this.list = null;
     this.render();
     this.onField(this.res.id, tok, this.label(), this.filt.thr, this.heads);
+    this.onRouted(this.routedAt(tok));
     this.loadList();
   }
 

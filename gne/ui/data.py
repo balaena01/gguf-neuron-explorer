@@ -24,7 +24,7 @@ from ..dossier import (
 )
 from ..steer import GneError
 
-FIELDS = ("sweep", "sweep_null", "steer_kl", "logit_peak", "act_q999", "named")   # と "cos:<方向の名前>"
+FIELDS = ("sweep", "sweep_null", "steer_kl", "logit_peak", "act_q999", "named", "expert_usage")   # と "cos:<方向>"・"writers:<名前>"・"experts:<名前>"
 HEAVY = ("token_ids", "logprob", "top_ids", "top_lps")                             # rollout のうち UI で使わない欄
 
 
@@ -79,7 +79,7 @@ class UIData:
     def _check(self, L: int) -> int:
         if not 0 <= L < self.s.meta.n_layer:
             raise GneError("BAD_ARGS", f"層 {L} は範囲外です")
-        return self.s.meta.n_ff_at(L)
+        return self.s.weights.n_units(L)             # MoE の層は全専門家の通し番号(CHANGE-05)
 
     def names(self) -> dict[str, str]:
         p = self.s.store.root / "names" / f"{self.s.meta.model_id}.json"
@@ -240,8 +240,26 @@ class UIData:
         elif name == "act_q999":
             a = self.act(L)
             if a is not None:
-                v[:] = a.q999[:n_ff]
+                v[:] = a.q999.reshape(-1)[:n_ff]
                 meta.update(has=True)
+        elif name == "expert_usage":                                     # CHANGE-05: 専門家の選択率(その専門家のニューロン全部に同じ値)
+            a = self.act(L)
+            if a is not None and a.is_moe:
+                rate = a.n_routed / max(a.n_tokens, 1)
+                v[:] = np.repeat(rate, n_ff // len(rate)).astype(np.float32)
+                meta.update(has=True, n_tokens=a.n_tokens, rate=[float(x) for x in rate])
+        elif name.startswith("experts:"):                                # 専門家の対照分析の z
+            from ..experts import load_expert_candidates
+            li = self.s.weights.arch.layers[L]
+            if li.ffn.startswith("moe"):
+                try:
+                    rows = [x for x in load_expert_candidates(self.s, name[8:]) if x["layer"] == L]
+                except GneError:
+                    rows = []
+                for x in rows:
+                    v[x["expert"] * li.n_ff:(x["expert"] + 1) * li.n_ff] = x["z"]
+                meta.update(has=bool(rows), experts={str(x["expert"]): {k: x[k] for k in ("z", "usage_shift", "contrib_cos", "null_pct")}
+                                                     for x in rows})
         elif name == "named":
             for k in self.names():
                 if ":H" in k:                                            # ヘッドの名前("L:Hh")はシートに無い
@@ -262,7 +280,7 @@ class UIData:
                 v[:] = c["contrib"][:n_ff]
                 meta.update(has=True)
         else:
-            raise GneError("BAD_ARGS", f"overlay {name!r} はありません", f"{', '.join(FIELDS)}, cos:<方向>, writers:<名前>")
+            raise GneError("BAD_ARGS", f"overlay {name!r} はありません", f"{', '.join(FIELDS)}, cos:<方向>, writers:<名前>, experts:<名前>")
         return v, meta
 
     # --- hover(§4.6): steer ±6・logit ±6 の語番号と KL± ------------------------------------------------------
@@ -315,9 +333,13 @@ class UIData:
         tok = self.tok
         out: dict = {"layer": L, "neuron": n, "kind": kind, "name": None, "down_norm": None, "sweep": None,
                      "steer_lens": None, "logit_lens": None, "directions": {}, "activation": None}
+        moe = kind == "neuron" and bool(self.s.meta.n_expert) and self.s.weights.is_moe(L)
         if kind == "neuron":
             out["name"] = self.names().get(f"{L}:{n}")
             out["down_norm"] = float(self.s.weights.down_norms(L)[n])
+        if moe:                                           # CHANGE-05 G: MoE の層は通し番号 n = 専門家 × n_ff + n
+            e, k = self.s.weights.moe_split(L, n)
+            out.update(expert=e, expert_neuron=k, semantics="direction", address=f"L{L} E{e} N{k}")
 
         # sweep: 指定の run、無ければこのユニットを含む run のうちニューロンの多いもの。
         # 指定の run に順位表(units.jsonl)が無いとき(逆引きの確かめの run など)は、ほかの run に戻して注記する
@@ -372,8 +394,11 @@ class UIData:
                     out["directions"][name] = {"cos": float(c[n]), "rank_in_layer": int((np.abs(c) > abs(c[n])).sum()) + 1}
             a = self.act(L)
             if a is not None:
-                out["activation"] = {"absmax": float(a.absmax[n]), "q999": float(a.q999[n]), "q99": float(a.q99[n]),
-                                     "rms": float(a.rms[n]), "mean": float(a.mean[n])}
+                f = (lambda x: float(x.reshape(-1)[n]))            # MoE の層は (n_expert, n_ff_exp) を通し番号で引く
+                out["activation"] = {"absmax": f(a.absmax), "q999": f(a.q999), "q99": f(a.q99), "rms": f(a.rms), "mean": f(a.mean)}
+                if a.is_moe:                                       # その専門家が選ばれたトークンだけで数えた値
+                    e = n // a.absmax.shape[1]
+                    out["activation"].update(n_routed=int(a.n_routed[e]), reliable=bool(a.n_routed[e] >= 200))
             out["evals"] = unit_evals(self.s, L, n)
             out["gain_k"] = gain_tried(self.s, L, n)
         out["coverage"] = {k: bool(out[k]) for k in ("sweep", "steer_lens", "logit_lens", "directions", "activation")}

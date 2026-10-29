@@ -1316,3 +1316,326 @@ def test_writers_view_and_overlay(server, browser):
     pg.click("#writers-view table.wrx tbody tr[data-layer='14'][data-n='77']")
     pg.wait_for_function("window.gne.focus && window.gne.focus.layer === 14 && window.gne.focus.n === 77", timeout=30000)
     assert not errors, errors
+
+
+# --- CHANGE-05 G: MoE(EXPERT パネル、専門家の overlay、fires の選ばれた専門家、MoE のニューロンのレシピ) -----------------------
+
+MOE = Path(os.environ.get("GNE_TEST_MOE", ROOT / "models" / "granite-3.1-1b-a400m-instruct-Q8_0.gguf"))
+
+
+@pytest.fixture(scope="module")
+def moe_server(tmp_path_factory):
+    """MoE のモデル(GNE_TEST_MOE。granite-3.1-1b-a400m: 24 層 × 専門家 32・使用 8・幅 512、ルーターのバイアス無し)のサーバ。
+    層 5・12 の活性統計(専門家の使用統計)と、専門家の対照分析 pirate(層 5・12)を作っておく。"""
+    if not MOE.exists():
+        pytest.skip(f"MoE のモデルがありません({MOE})")
+    import uvicorn
+    import yaml
+
+    from gne.api import Session
+    from gne.ui.server import create_app
+    root = tmp_path_factory.mktemp("ui_moe")
+    s = Session(MOE, root=root, n_ctx=1024)
+    s.stats_act(layers=[5, 12], tokens=1500)
+    c = root / "pirate.yaml"
+    c.write_text(yaml.safe_dump({"name": "pirate", "system_a": "You are a pirate. Always talk like a pirate, with arr and matey.",
+                                 "system_b": "You are a helpful assistant.", "user_prompts": ["Who are you?", "Tell me about the weather."],
+                                 "validate": {"match": "arr|matey", "target": "a pirate"}}))
+    top = s.experts_contrast(c, max_tokens=16, layers=[5, 12])["top"][0]
+    port = _free_port()
+    srv = uvicorn.Server(uvicorn.Config(create_app(s), host="127.0.0.1", port=port, log_level="warning"))
+    th = threading.Thread(target=srv.run, daemon=True)
+    th.start()
+    for _ in range(100):
+        if srv.started:
+            break
+        time.sleep(0.05)
+    yield {"url": f"http://127.0.0.1:{port}", "L": top["layer"], "E": top["expert"], "W": s.weights.arch.layers[top["layer"]].n_ff}
+    srv.should_exit = True
+    th.join(5)
+    s.close()
+
+
+def _open_list(pg, tab):
+    if pg.evaluate("document.querySelector('#list').classList.contains('collapsed')"):
+        pg.click(".toggle[data-target=list]")
+    pg.click(f"#list-tabs button[data-tab={tab}]")
+
+
+@pytest.mark.model
+def test_moe_expert_panel_in_browser(moe_server, browser):
+    """EXPERT パネル: jump の L E で開く(L E N はニューロン)、使われ方・対照分析・ニューロンの上位、×0 / ×2 をレシピに(− 列は 2 − k)、
+    3 列チャット(専門家全体の gain はパッチで読み直す)、上位のニューロンと地図のクリックで NEURON パネル(通し番号)。"""
+    url, L, E, W = moe_server["url"], moe_server["L"], moe_server["E"], moe_server["W"]
+    pg = browser.new_page(viewport={"width": 1500, "height": 860})
+    errors = []
+    pg.on("pageerror", lambda e: errors.append(str(e)))
+    pg.goto(url + "/")
+    pg.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
+    pg.evaluate("window.gne.recipe.clear()")
+    assert pg.evaluate("document.querySelector('#jump').placeholder") == "L10 E0 N0"
+    assert not pg.evaluate("document.querySelector('#expert').classList.contains('hidden')")
+    pg.fill("#jump", f"L{L} E{E}")
+    pg.press("#jump", "Enter")
+    pg.wait_for_function(f"document.querySelector('#expert-body .n-id') && document.querySelector('#expert-body .n-id').textContent.startsWith('L{L} E{E} ')",
+                         timeout=30000)
+    assert pg.evaluate("location.hash") == f"#L{L}/E{E}"
+    d = pg.evaluate("window.gne.expertPanel.d")
+    assert d["usage"] and d["contrasts"][0]["name"] == "pirate" and d["contrasts"][0]["rank"] == 1 and len(d["neurons"]) == 20
+    body = pg.inner_text("#expert-body")
+    assert "softmax top-k · 8/32" in body and "選択率" in body and "一様 25.0%" in body and f"#1/{d['contrasts'][0]['of']}" in body
+    assert pg.evaluate("document.querySelectorAll('#expert-body .x-c').length") == 1
+    assert pg.evaluate("document.querySelectorAll('#expert-body table.x-top tbody tr').length") == 20
+    assert pg.evaluate("!!document.querySelector('#expert-body .x-few')") == (not d["usage"]["reliable"])   # 観測が少なければ注記
+    assert pg.evaluate("document.querySelectorAll('#expert-body [data-xr]').length") == 0     # granite にルーターのバイアスは無い
+    assert pg.evaluate("document.querySelector('#x-chat').disabled")                          # レシピが空
+    frames = lambda: pg.evaluate("window.gne.map.tileFrames.map((f) => [f.layer, f.expert, f.ring, f.color])")  # noqa: E731
+    assert [L, E, 0, 0xffffff] in frames()                                                    # 開いている専門家の白い枠
+    # レシピ: ×0 → もう一度押すと外す → ×2。3 列チャットの − 列は 2 − k
+    pg.click("#expert-body [data-xk='0']")
+    assert pg.evaluate("window.gne.recipe.specs()") == [f"{L}:E{E}:x0"] and pg.evaluate("window.gne.recipe.specs(-1)") == [f"{L}:E{E}:x2"]
+    assert [L, E, 1, 0xc94fa7] in frames()
+    pg.click("#expert-body [data-xk='0']")
+    assert pg.evaluate("window.gne.recipe.specs()") == []
+    pg.click("#expert-body [data-xk='2']")
+    assert pg.evaluate("window.gne.recipe.specs()") == [f"{L}:E{E}:x2"] and pg.evaluate("window.gne.recipe.specs(-1)") == [f"{L}:E{E}:x0"]
+    assert [L, E, 1, 0xf2d24b] in frames()
+    # route ±1 はルーターのバイアスのある層だけ(granite には無いので、構造の値だけ替えて押せることを確かめる。サーバには送らない)
+    pg.evaluate(f"(() => {{ window.gne.arch.layers[{L}].has_router_bias = true; window.gne.expertPanel.render(); }})()")
+    pg.click("#expert-body [data-xr='1']")
+    assert pg.evaluate("window.gne.recipe.specs()") == [f"{L}:E{E}:x2", f"{L}:E{E}:route:+1"]
+    assert pg.evaluate("window.gne.recipe.specs(-1)") == [f"{L}:E{E}:x0", f"{L}:E{E}:route:-1"]
+    pg.click("#expert-body [data-xr='1']")                                            # もう一度押すと外す
+    pg.evaluate(f"(() => {{ window.gne.arch.layers[{L}].has_router_bias = false; window.gne.expertPanel.render(); }})()")
+    assert pg.evaluate("window.gne.recipe.specs()") == [f"{L}:E{E}:x2"]
+    pg.click("#x-chat")
+    pg.wait_for_selector("#ch-text", timeout=30000)
+    assert pg.evaluate("[...document.querySelectorAll('.ch-head .ch-units')].map((x) => x.innerText)") == [f"L{L} E{E} ×0", f"L{L} E{E} ×2"]
+    pg.fill("#ch-max", "6")
+    pg.dispatch_event("#ch-max", "change")
+    pg.fill("#ch-text", "Who are you?")
+    pg.dispatch_event("#ch-text", "input")
+    pg.click("#ch-send")
+    pg.wait_for_function("window.gne.chat && !window.gne.chat.busy && window.gne.chat.turns.length === 1", timeout=180000)
+    replies = pg.evaluate("window.gne.chat.turns[0].replies")
+    assert len(replies) == 3 and all(replies), (replies, pg.evaluate("window.gne.chat.status"))
+    assert not pg.evaluate("window.gne.chat.failed"), pg.evaluate("window.gne.chat.status")
+    # 上位のニューロン → NEURON パネル(通し番号)。jump の L E N もニューロン
+    n0 = d["neurons"][0]["neuron"]
+    pg.fill("#jump", f"L{L} E{E}")
+    pg.press("#jump", "Enter")
+    pg.wait_for_selector("#expert-body table.x-top tbody tr", timeout=30000)
+    pg.click("#expert-body table.x-top tbody tr")
+    pg.wait_for_function(f"window.gne.focus && window.gne.focus.n === {E * W + n0}", timeout=30000)
+    pg.wait_for_function(f"document.querySelector('#neuron-body .n-id') && document.querySelector('#neuron-body .n-id').textContent.startsWith('L{L} E{E} N{n0}')",
+                         timeout=30000)
+    assert pg.evaluate("location.hash") == f"#L{L}/E{E}/N{n0}" and pg.evaluate("document.querySelector('#jump').value") == f"L{L} E{E} N{n0}"
+    pg.fill("#jump", f"L{L} E{E} N5")
+    pg.press("#jump", "Enter")
+    pg.wait_for_function(f"window.gne.focus && window.gne.focus.n === {E * W + 5}", timeout=30000)
+    # 地図の専門家のタイルのニューロンをクリック → NEURON パネル
+    pg.select_option("#layer-select", str(L))
+    pg.wait_for_timeout(300)
+    sp = pg.evaluate(f"window.gne.map.screenOf({L}, {E * W + 40})")
+    pg.mouse.move(sp["x"], sp["y"])
+    pg.wait_for_timeout(100)
+    hv = pg.evaluate("window.gne.map.hover")
+    assert (hv["layer"], hv["expert"], hv["neuron"]) == (L, E, 40)
+    pg.mouse.click(sp["x"], sp["y"])
+    pg.wait_for_function(f"window.gne.focus && window.gne.focus.n === {E * W + 40}", timeout=30000)
+    assert not errors, errors
+    pg.close()
+
+
+@pytest.mark.model
+def test_moe_overlays_and_fires_routing(moe_server, browser):
+    """overlay expert_usage(専門家の選択率)と experts:<name>(専門家の対照分析の z): 値・凡例・hover。fires の routed: 選んだトークンで
+    選ばれた専門家の一覧と地図のタイルの枠、一覧のニューロンは E N の形。"""
+    import re
+    import urllib.request
+    url, L, E, W = moe_server["url"], moe_server["L"], moe_server["E"], moe_server["W"]
+    f = urllib.request.urlopen(url + f"/api/layer/{L}/field?name=experts:pirate")
+    meta = json.loads(f.headers["X-Meta"])
+    v = np.frombuffer(f.read(), np.float32)
+    assert v.size == 32 * W and abs(float(v[E * W + 3]) - meta["experts"][str(E)]["z"]) < 1e-4
+    pg = browser.new_page(viewport={"width": 1500, "height": 860})
+    errors = []
+    pg.on("pageerror", lambda e: errors.append(str(e)))
+    pg.goto(url + "/")
+    pg.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
+    opts = pg.evaluate("Object.fromEntries([...document.querySelectorAll('#color-select option')].map((o) => [o.value, o.textContent]))")
+    assert opts["expert_usage"].endswith("(2 層)") and opts["experts:pirate"].endswith("(2 層)")
+    pg.select_option("#color-select", "expert_usage")
+    pg.wait_for_function("window.gne.overlay.field === 'expert_usage' && window.gne.overlay.scale", timeout=30000)
+    info = pg.evaluate("(() => { const o = window.gne.overlay; return { layers: [...o.values.keys()].sort((a, b) => a - b), n: o.values.get(5).length, "
+                       "lit: o.lit.get(5) + o.lit.get(12), uni: o.scale.uniform }; })()")
+    assert info["layers"] == [5, 12] and info["n"] == 32 * W and info["lit"] > 0 and abs(info["uni"] - 0.25) < 1e-6
+    lg = pg.inner_text("#legend")
+    assert "専門家の選択率" in lg and "一様(25.0%)" in lg
+    pg.select_option("#layer-select", str(L))
+    pg.wait_for_timeout(300)
+    sp = pg.evaluate(f"window.gne.map.screenOf({L}, {E * W + 40})")
+    pg.mouse.move(sp["x"], sp["y"])
+    pg.wait_for_timeout(150)
+    tip = pg.inner_text("#tooltip")
+    assert tip.startswith(f"L{L} E{E} N40") and f"E{E} の選択率" in tip
+    pg.select_option("#color-select", "experts:pirate")
+    pg.wait_for_function("window.gne.overlay.field === 'experts:pirate' && window.gne.overlay.scale", timeout=30000)
+    assert pg.evaluate(f"window.gne.overlay.lit.get({L})") >= W                        # 1 位の専門家のタイルは光る
+    assert "専門家の対照 pirate の z" in pg.inner_text("#legend")
+    pg.mouse.move(sp["x"] + 1, sp["y"])
+    pg.wait_for_timeout(150)
+    assert f"E{E} · z {meta['experts'][str(E)]['z']:.2f}" in pg.inner_text("#tooltip")
+    # fires: 選んだトークンで選ばれた専門家
+    _open_list(pg, "fires")
+    pg.fill("#fi-text", "The pirate sailed across the sea.")
+    pg.dispatch_event("#fi-text", "input")
+    pg.click("#fi-run")
+    pg.wait_for_selector(".chip-t[data-tok='2']", timeout=60000)
+    assert pg.evaluate("!!document.querySelector('p.fi-routed')")                       # 全トークンのときは案内だけ
+    pg.click(".chip-t[data-tok='2']")
+    pg.wait_for_function("window.gne.firesRouted && window.gne.firesRouted.size > 0", timeout=30000)
+    nl = pg.evaluate("window.gne.firesRouted.size")
+    assert nl >= 20 and pg.evaluate("[...window.gne.firesRouted.values()].every((es) => es.length === 8)")
+    lines = pg.evaluate("[...document.querySelectorAll('.fi-routed-list > div')].map((x) => x.innerText)")
+    assert len(lines) == nl and re.fullmatch(r"L0\s+(E\d+ ){7}E\d+", lines[0]), lines[:2]
+    assert pg.evaluate("window.gne.map.tileFrames.filter((f) => f.ring === 2).length") == 8 * nl
+    assert "fires のトークンで選ばれた専門家" in pg.inner_text("#legend")
+    pg.wait_for_function("document.querySelector('#fi-list tr[data-l]')", timeout=30000)
+    assert re.fullmatch(r"E\d+ N\d+", pg.evaluate("document.querySelector('#fi-list tr[data-l] td:nth-child(2)').innerText"))
+    pg.click(".chip-t[data-tok='-1']")
+    pg.wait_for_function("window.gne.firesRouted === null", timeout=30000)
+    assert pg.evaluate("window.gne.map.tileFrames.filter((f) => f.ring === 2).length") == 0
+    pg.click(".chip-t[data-tok='3']")
+    pg.wait_for_function("window.gne.firesRouted && window.gne.firesRouted.size > 0", timeout=30000)
+    pg.select_option("#color-select", "none")                                         # ほかの色に替えると枠は消える
+    pg.wait_for_function("window.gne.firesRouted === null", timeout=30000)
+    assert not errors, errors
+    pg.close()
+
+
+@pytest.mark.model
+def test_moe_neuron_recipe_buttons(moe_server, browser):
+    """MoE のニューロン: 住所 L E N と方向押しの注記、+ / − レシピは L:Ee:Nn:±dose、×0 / ×2 は gain、Web タブは使えない。
+    recipe タブの行(方向押しの印・gain・専門家全体・route・shared)、− 列の反転、3 列チャットの列見出しの表示、保存と読み込み。"""
+    import urllib.request
+    url, L, E, W = moe_server["url"], moe_server["L"], moe_server["E"], moe_server["W"]
+    flat = E * W + 7
+    pg = browser.new_page(viewport={"width": 1500, "height": 860})
+    errors = []
+    pg.on("pageerror", lambda e: errors.append(str(e)))
+    pg.goto(url + f"/#L{L}/E{E}/N7")
+    pg.wait_for_function("window.gne && window.gne.overlayReady && document.querySelector('#neuron-body .n-id')", timeout=60000)
+    pg.evaluate("window.gne.recipe.clear()")
+    nid = pg.inner_text("#neuron-body .n-id")
+    assert nid.startswith(f"L{L} E{E} N7") and f"#{flat}" in nid and pg.evaluate("window.gne.focus.n") == flat
+    assert "方向押し" in pg.inner_text("#neuron-body .n-moe-note")
+    web = pg.evaluate("(() => { const b = document.querySelector('#neuron-body .tabs button[data-tab=web]'); return [b.disabled, b.title]; })()")
+    assert web == [True, "MoE の層は connections の対象外"]
+    specs = lambda s=1: pg.evaluate(f"window.gne.recipe.specs({s})")  # noqa: E731
+    pg.click("#neuron-body [data-rc='1']")
+    assert specs() == [f"{L}:E{E}:N7:+1"]
+    pg.click("#neuron-body [data-rc='-1']")
+    assert specs() == [f"{L}:E{E}:N7:-1"]
+    pg.click("#neuron-body [data-gk='0']")
+    assert specs() == [f"{L}:E{E}:N7:-1", f"{L}:E{E}:N7:x0"] and specs(-1) == [f"{L}:E{E}:N7:+1", f"{L}:E{E}:N7:x2"]
+    pg.click("#neuron-body [data-gk='0']")                                            # もう一度押すと外す
+    pg.click("#neuron-body [data-gk='2']")
+    assert specs() == [f"{L}:E{E}:N7:-1", f"{L}:E{E}:N7:x2"]
+    marks = pg.evaluate("window.gne.map.marks")
+    assert {"layer": L, "neuron": flat, "dose": -1, "label": f"L{L} E{E} N7 −1"} in marks
+    pg.click("#neuron-body button[data-tab=details]")
+    det = pg.inner_text("#neuron-body")
+    assert "MoE の層は connections の対象外" in det and "トークンだけで数えた値" in det
+    pg.click("#neuron-body button[data-tab=chat]")
+    pg.wait_for_selector("#ch-text", timeout=30000)
+    if pg.evaluate("window.gne.chat.target") != "neuron":
+        pg.click("[data-target=neuron]")
+    assert pg.evaluate("window.gne.chat.columns().map((c) => c.units)") == [[f"{L}:E{E}:N7:-0.8"], [], [f"{L}:E{E}:N7:+0.8"]]
+    assert pg.evaluate("!!document.querySelector('#neuron-body .ch-tools .badge.push')")
+    # recipe タブ: 方向押しの印、gain の行の倍率
+    _open_list(pg, "recipe")
+    rc = pg.inner_text("#recipe-list table.rc")
+    assert f"L{L} E{E} N7" in rc and "選ばれたときだけ" in rc and pg.evaluate("document.querySelectorAll('#recipe-list .badge.push').length") == 1
+    assert "方向押し = 専門家のニューロンの add" in pg.inner_text("#recipe-list")
+    pg.fill("#recipe-list tr.rc-gain input.num", "0.5")
+    pg.dispatch_event("#recipe-list tr.rc-gain input.num", "input")
+    assert specs() == [f"{L}:E{E}:N7:-1", f"{L}:E{E}:N7:x0.5"] and specs(-1) == [f"{L}:E{E}:N7:+1", f"{L}:E{E}:N7:x1.5"]
+    # 専門家全体・route・shared(/api/recipes の行の形で読む)と、列見出しの表示
+    pg.evaluate("""window.gne.recipe.load('x', [{ layer: 12, kind: 'expert', expert: 3, mode: 'route', dose: 2, neuron: null },
+      { layer: 12, kind: 'shared', neuron: 5, mode: 'add', dose: 0.5, expert: null }, { layer: 12, kind: 'expert', expert: 3, mode: 'gain', k: 0, dose: 0 },
+      { layer: 12, kind: 'expert_neuron', expert: 30, neuron: 511, mode: 'add', dose: 0.8 }])""")
+    assert pg.evaluate("window.gne.recipe.skipped") == 0
+    assert specs() == ["12:E3:route:+2", "12:S:N5:+0.5", "12:E3:x0", "12:E30:N511:+0.8"]              # 読んだ順のまま
+    assert specs(-1) == ["12:E3:route:-2", "12:S:N5:-0.5", "12:E3:x2", "12:E30:N511:-0.8"]
+    assert pg.evaluate("window.gne.recipe.addSpecs()") == ["12:S:N5:+0.5", "12:E30:N511:+0.8"]   # gain と route は cvec に入らない
+    labels = pg.evaluate("""import('./chat.js').then((m) => [...window.gne.recipe.specs(-1),
+      '14:8949:+1', '21:H7:x0', '30:dir:pirate:+0.3', '12:E37:N511:x2'].map(m.unitLabel))""")
+    assert labels == ["L12 E3 route −2", "L12 S N5 −0.5", "L12 E3 ×2", "L12 E30 N511 −0.8", "L14 N8949 +1", "L21 H7 ×0", "L30 dir:pirate +0.3",
+                      "L12 E37 N511 ×2"]
+    _open_list(pg, "rank")
+    _open_list(pg, "recipe")
+    rc = pg.inner_text("#recipe-list table.rc")
+    assert "L12 E30 N511" in rc and "L12 S N5" in rc and "L12 E3" in rc and "route" in rc
+    assert pg.evaluate("document.querySelectorAll('#recipe-list .badge.push').length") == 2
+    # 保存したレシピ(サーバ)の読み込み: expert が戻る
+    req = urllib.request.Request(url + "/api/recipes/ui_moe", data=json.dumps({"units": [f"{L}:E{E}:N7:+0.8", f"{L}:E{E}:N7:x2", f"{L}:E{E}:x0"]}).encode(),
+                                 headers={"Content-Type": "application/json"})
+    urllib.request.urlopen(req).read()
+    _open_list(pg, "rank")
+    _open_list(pg, "recipe")
+    pg.wait_for_function("[...document.querySelectorAll('#rc-load option')].some((o) => o.value === 'ui_moe')", timeout=10000)
+    pg.select_option("#rc-load", "ui_moe")
+    assert specs() == [f"{L}:E{E}:N7:+0.8", f"{L}:E{E}:N7:x2", f"{L}:E{E}:x0"] and pg.evaluate("window.gne.recipe.skipped") == 0
+    pg.click("#n-expert")                                                              # EXPERT パネルで開く
+    pg.wait_for_function(f"document.querySelector('#expert-body .n-id') && document.querySelector('#expert-body .n-id').textContent.startsWith('L{L} E{E} ')",
+                         timeout=30000)
+    assert pg.evaluate("document.querySelector('#expert-body [data-xk=\"0\"]').classList.contains('on')")   # 読み込んだ ×0
+    assert not errors, errors
+    pg.close()
+
+
+@pytest.mark.model
+def test_moe_panels_in_english(moe_server, browser):
+    """?lang=en で EXPERT パネル・MoE のニューロン・レシピ・fires の routed・専門家の overlay の文言がすべて英語の辞書にある。"""
+    url, L, E, W = moe_server["url"], moe_server["L"], moe_server["E"], moe_server["W"]
+    pg = browser.new_page(viewport={"width": 1500, "height": 860})
+    errors = []
+    pg.on("pageerror", lambda e: errors.append(str(e)))
+    pg.goto(url + f"/?lang=en#L{L}/E{E}")
+    pg.wait_for_function("window.gne && window.gne.overlayReady && document.querySelector('#expert-body .n-id')", timeout=60000)
+    pg.evaluate("(() => { window.gne.recipe.clear(); window.gne.expertPanel.render(); })()")
+    assert "selection rate" in pg.inner_text("#expert-body")
+    pg.click("#expert-body [data-xk='0']")
+    pg.click("#expert-body table.x-top tbody tr")
+    pg.wait_for_function("document.querySelector('#neuron-body .n-moe-note')", timeout=30000)
+    pg.click("#neuron-body [data-rc='1']")
+    pg.click("#neuron-body [data-gk='2']")
+    for tab in ("details", "chat", "examples"):
+        pg.click(f"#neuron-body button[data-tab={tab}]")
+        pg.wait_for_timeout(300)
+    _open_list(pg, "recipe")
+    assert "direction push" in pg.inner_text("#recipe-list")
+    _open_list(pg, "fires")
+    pg.fill("#fi-text", "Arr matey.")
+    pg.dispatch_event("#fi-text", "input")
+    pg.click("#fi-run")
+    pg.wait_for_selector(".chip-t[data-tok='2']", timeout=60000)
+    pg.click(".chip-t[data-tok='2']")
+    pg.wait_for_function("window.gne.firesRouted", timeout=30000)
+    for f in ("expert_usage", "experts:pirate"):
+        pg.select_option("#color-select", f)
+        pg.wait_for_function(f"window.gne.overlay.field === '{f}' && window.gne.overlay.scale", timeout=30000)
+        pg.select_option("#layer-select", str(L))
+        pg.wait_for_timeout(300)
+        sp = pg.evaluate(f"window.gne.map.screenOf({L}, {E * W + 40})")
+        pg.mouse.move(sp["x"], sp["y"])
+        pg.wait_for_timeout(150)
+    pg.fill("#jump", "L3 E0")                                                          # 活性統計も対照分析も無い層
+    pg.press("#jump", "Enter")
+    pg.wait_for_function("document.querySelector('#expert-body .n-id') && document.querySelector('#expert-body .n-id').textContent.startsWith('L3 E0 ')",
+                         timeout=30000)
+    assert "No activation stats" in pg.inner_text("#expert-body")
+    assert pg.evaluate("[...window.gneI18n.missing]") == []
+    assert not errors, errors
+    pg.close()
