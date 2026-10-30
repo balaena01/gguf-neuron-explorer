@@ -968,6 +968,7 @@ async function main() {
       inRecipe: (L, h) => { const u = state.recipe.hasHead(L, h); return u ? u.k : null; },
       onNamed: (names) => { state.model.names = names; },
       onOverlay: (field) => { if (state.view !== "map") setView("map"); applyOverlay(field); },
+      directions: () => (state.model ? state.model.directions : []),
       onGoto: (u) => openHead(u),
     });
     state.headPanel = headPanel;                                         // 自動テスト用

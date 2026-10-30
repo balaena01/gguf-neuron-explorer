@@ -191,6 +191,11 @@ def create_app(session, *, warm: bool = True, openai: bool = False) -> FastAPI:
                   top: int = Body(5), system: str | None = Body(None), chat: bool = Body(False), compare: bool = Body(False)):
         return live.attention(text, layer=layer, head=head, pos=pos, top=top, system=system, chat=chat, compare=compare)
 
+    @app.post("/api/listen")
+    def listen(user: str = Body(...), heads: str = Body(...), system: str | None = Body(None), reply: str | None = Body(None),
+               max_tokens: int = Body(64), direction: str | None = Body(None), top: int = Body(20)):
+        return live.listen(user, heads=heads, system=system, reply=reply, max_tokens=max_tokens, direction=direction, top=top)
+
     @app.get("/api/search")
     def search(q: str, mode: str = "lens", limit: int = 500):
         return data.search(q, mode=mode, limit=limit)

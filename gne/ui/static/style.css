@@ -407,6 +407,21 @@ body.view-other .map-only { opacity: 0.35; }
 .hp-info { font-size: 12px; min-height: 1.6em; margin: 4px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .hp-info b { color: #fff; font-weight: 400; }
 table.hp-trig td, table.hp-trig th { padding-right: 8px; }
+/* HEAD パネルの Listen: 文脈のトークンを注目・運んだ量で塗る */
+#head .ls-opts { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+#head .ls-opts input#ls-heads { width: 120px; }
+#head .ls-num { width: 56px; }
+.ls-toks, .ls-reply { font-family: var(--sans); font-size: 13px; line-height: 1.75; margin: 6px 0; padding: 6px 8px; background: #0b0e13;
+  border: 1px solid var(--line); border-radius: 4px; word-break: break-word; }
+.ls-toks .lt { border-radius: 2px; color: #e9edf2; white-space: pre-wrap; }
+.ls-toks .lt.r-template { color: #7d8794; font-size: 11px; }
+.ls-toks .lt.r-user { box-shadow: inset 0 -1px 0 #6fe3ff; }
+.ls-reply .lt { color: #c9d1db; }
+.ls-bars { display: flex; gap: 2px; align-items: flex-end; height: 64px; margin: 4px 0 10px; }
+.ls-bar { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; height: 100%; }
+.ls-bar span { display: block; width: 100%; min-height: 1px; border-radius: 2px 2px 0 0; opacity: 0.55; }
+.ls-bar.sel span { opacity: 1; box-shadow: 0 0 0 1px #fff inset; }
+.ls-bar i { font-style: normal; font-size: 10px; color: #8f9bab; }
 table.hp-trig td.w { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--sans); }
 .h-con { border-top: 1px solid #141a22; padding-top: 2px; margin-bottom: 10px; }
 .h-con h4 b { color: #dfe6ee; font-weight: 400; }

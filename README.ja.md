@@ -35,6 +35,8 @@ llama-cpp-python 経由で llama.cpp の上で動くので、手元の量子化�
   - 出力がペルソナの方向をどれだけ書くか
 
   雑音の床は中立の system どうしの差です。`21:H7:x0` / `x2` で、そのヘッドの出力を `W_O` の列ブロックの LoRA で k 倍します。`gne eval --reactivity` では、トリガーがあるときだけ性格が出るかを、同じ倍率のランダムなヘッドと比べて測ります。
+
+  `gne heads listen`（ヘッドのパネルの Listen タブ）は会話を 1 つ流し、選んだヘッド（`14:H0-3` など）で、返事のトークンがそれより前の各トークンにどれだけ注目したかを出します。保存済みの方向を渡すと、ヘッドの出力のその方向の成分を、元のトークンごとに分けます。各トークンの値ベクトルに注目の重みとヘッドのゲートを掛け、`W_O` と、attention の出力の後の norm（その norm を持つ arch だけ）を通したものです。層の全ヘッドで足すと、その層の attention の出力に戻ります。残る誤差も出力し、Qwen3・Qwen3.5・LFM3 では 1% 未満でした。
 - **MoE（専門家を選ぶモデル）:** MoE の層のニューロンは `L12 E37 N511`（専門家 37 のニューロン 511）と書きます。`gne experts contrast` は、ペルソナのときに選ばれやすくなる専門家と、ペルソナの方向を書く専門家を順位づけます。`gne experts sweep` は専門家を 1 つずつ消す・強めて試します。MoE の層の `add` はニューロンの書き込み方向を全トークンに足すだけで、本当のニューロン押しは gain（`12:E37:N511:x2`、その専門家が選ばれたときだけ効く）です。専門家全体（`12:E37:x0`）とルーターのバイアス（`12:E37:route:+2`）はスケールパッチで当てます。作業用コピーの量子化ブロックのスケールをちょうど書き換え、使い終わったら戻します。
 - **Web UI:** 全層・全ニューロンを 3D で並べた地図です。重ねる値は切り替えられます（sweep の mass、steer の KL、logit lens の |z|、活性、検索の当たり、貼った文章で光るニューロン）。ほかに次の機能があります。
   - 順位の一覧とニューロンのパネル
@@ -113,6 +115,7 @@ gne steer --recipe configs/recipes/alien.yaml --contrast configs/contrast/alien.
 
 gne heads contrast --contrast configs/contrast/yandere_react.yaml   # attention ヘッドの順位(ペルソナあり vs 中立)
 gne heads show 15 2                                           # ヘッド 1 個の調書(順位・W_O ブロックの logit lens・当てた gain)
+gne heads listen --heads 14:H0-3 --system @persona.txt -u "I had lunch with a coworker." --direction wr_mix14   # 返事からの注目と、トークンごとの寄与
 gne steer --unit 15:H2:x2 -p "I had lunch with Emily today." --compare   # ヘッドの gain(W_O の LoRA)
 gne eval --recipe R --reactivity configs/contrast/yandere_react.yaml --head-controls 8
 ```

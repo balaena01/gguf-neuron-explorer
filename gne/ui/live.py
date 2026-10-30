@@ -297,6 +297,16 @@ class Live:
         r, warns = self._gpu(lambda: one(system, chat))
         return {**r, "compare": False, "warnings": warns}
 
+    # --- HEAD パネルの Listen: 返事のトークンからの注目と、文脈の各トークンの方向への寄与 ---------------------------
+    def listen(self, user: str, *, heads: str, system: str | None = None, reply: str | None = None, max_tokens: int = 64,
+               direction: str | None = None, top: int = 20) -> dict:
+        """gne heads listen(Session.heads_listen)。返事が空なら greedy に作る。"""
+        reply = reply if reply and reply.strip() else None
+        r, warns = self._gpu(lambda: self.s.heads_listen(user, heads=heads, system=system, reply=reply,
+                                                         max_tokens=max(1, min(int(max_tokens), 256)),
+                                                         direction=direction or None, top=top))
+        return {**r, "warnings": warns}
+
     def _lens_pole(self, L: int, n: int, positive: bool) -> dict | None:
         """光った向きに対応する lens の極(正に光ったら + 極、負なら − 極)。steer lens があればそれ、無ければ logit lens。"""
         sl = self.data.steer_lens(L)

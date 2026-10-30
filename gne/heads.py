@@ -305,6 +305,177 @@ def attention_view(session, text: str, *, pos: int = -1, layer: int | None = Non
     return out
 
 
+def parse_heads(spec: str, weights) -> list[tuple[int, int]]:
+    """"14:H0-3,16:H2,12:H*" → [(14, 0), (14, 1), …]。softmax の attention の層だけ。"""
+    import re
+    out: list[tuple[int, int]] = []
+    for part in [p.strip() for p in str(spec).split(",") if p.strip()]:
+        m = re.fullmatch(r"(\d+):[Hh](\*|\d+)(?:-(\d+))?", part)
+        if not m:
+            raise GneError("BAD_ARGS", f"{part!r}: ヘッドは L:Hh・L:Ha-b・L:H* で書きます(例 14:H0-3)")
+        L = int(m.group(1))
+        if not 0 <= L < weights.meta.n_layer:
+            raise GneError("BAD_ARGS", f"層 {L} は範囲外です")
+        li = weights.arch.layers[L]
+        if li.mixer != "attention" or not li.head_dim:
+            raise GneError("BAD_ARGS", f"層 {L} は softmax の attention の層ではありません")
+        a = 0 if m.group(2) == "*" else int(m.group(2))
+        b = li.n_head - 1 if m.group(2) == "*" else int(m.group(3) or a)
+        if not 0 <= a <= b < li.n_head:
+            raise GneError("BAD_ARGS", f"{part!r}: L{L} のヘッドは 0..{li.n_head - 1} です")
+        out += [(L, h) for h in range(a, b + 1) if (L, h) not in out]
+    if not out:
+        raise GneError("BAD_ARGS", "ヘッドを指定してください(例 14:H0-3)")
+    return out
+
+
+# attention の出力の後の norm(γ ⊙ x / rms(x))。重みの名前も計算グラフの名前も arch によって意味が違う(Qwen3.5 の
+# post_attention_norm・attn_post_norm は FFN の前の norm)ので、確かめた arch の名前だけを使う
+_POST_NORM_W = "blk.{L}.post_attention_norm.weight"
+
+
+def _post_norm_out(arch: str, extra: dict, L: int) -> str | None:
+    """attention の出力の後の norm の出力の捕捉名(LFM3 の post_operator_norm、Gemma 系の attn_post_norm)。無ければ None。"""
+    for nm in extra:
+        if nm.endswith(f"post_operator_norm-{L}") or (arch.startswith("gemma") and nm == f"attn_post_norm-{L}"):
+            return nm
+    return None
+
+
+def listen_view(session, user: str, *, heads: str | list[tuple[int, int]], system: str | None = None,
+                reply: str | None = None, max_tokens: int = 64, direction: str | None = None, top: int = 20) -> dict:
+    """返事のトークンが、選んだヘッドで文脈のどのトークンに注目しているか(gne heads listen、HEAD パネルの Listen)。
+
+    attn[s] = 返事の各トークン t からトークン s への注目 a_h(t, s) の平均(選んだヘッドで合計)。
+    direction があれば、トークン s の値ベクトルがヘッドの出力を通してその層の方向 d̂ に寄与した量も出す:
+      contrib_h[s] = mean_t a_h(t, s) · ⟨W_O,h (g_h(t) ⊙ v(s)), γ ⊙ d̂⟩ / rms_t
+    g = ヘッドのゲート(LFM3 のヘッドごとの sigmoid、Qwen3.5 の要素ごとのゲート。無ければ 1)、γ と rms_t = attention の後の norm
+    (無ければ 1)。層の全ヘッド・全トークンで足すと、返事のトークンでの attention の出力の平均の d̂ 成分にちょうどなる。
+    分解を足し直した出力と捕捉した出力の差(check_rel_err)も返す。返事を渡さなければ greedy に作る。"""
+    from .attn import _names, _probe
+    from .weights import tensor_to_f32
+    e, w = session.engine, session.weights
+    if not user or not user.strip():
+        raise GneError("BAD_ARGS", "ユーザーの発話が空です")
+    hs = parse_heads(heads, w) if isinstance(heads, str) else [(int(L), int(h)) for L, h in heads]
+    system = (system or "").strip() or None
+    msgs = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": user}]
+    pids = e.tokenize_prompt(e.render_chat(msgs))
+    if reply is None:
+        rids = [t for t in session.generate(None, msgs, max_tokens=max_tokens)["token_ids"] if not e.is_eog(t)]
+    else:
+        rids = e.tokenize(reply, add_special=False, parse_special=False)
+    if not rids:
+        raise GneError("BAD_ARGS", "返事が空です")
+    ids, st = pids + rids, len(pids)
+    T = len(ids)
+    Ls = sorted({L for L, _ in hs})
+    probe, pctx = _probe(e)
+    names = _names(e, probe, pctx, ids[:16])
+    extra = []
+    for L in Ls:
+        extra += [nm for nm in names if nm.endswith(f"-{L}") and "gate" in nm and "ffn" not in nm]
+        extra += [nm for nm in (f"kqv_out-{L}", f"attn_pregate-{L}", f"attn_gated-{L}", f"attn_output-{L}", f"attn_post_norm-{L}")
+                  if nm in names]
+        extra += [nm for nm in names if nm.endswith(f"post_operator_norm-{L}")]
+        if f"ffn_inp-{L}" in names and L > 0 and f"l_out-{L - 1}" in names:   # attention の出力 = ffn_inp − 層の入力
+            extra += [f"ffn_inp-{L}", f"l_out-{L - 1}"]
+    ac = capture_attention(session, [ids], layers=Ls, want_pattern=True, want_head_out=False, want_qkv=bool(direction),
+                           extra=extra)[0]
+    for L in Ls:
+        if L not in ac.pattern:
+            raise GneError("ARCH_UNSUPPORTED", f"L{L} の注目のパターンを捕捉できませんでした")
+    toks = [ac.text[a:b] for a, b in ac.offsets]
+    roles = ["template"] * T
+    cut = ac.offsets[st][0]
+    for role, content in (("system", system), ("user", user.strip())):
+        spans = [sp for sp in find_spans(ac.text, [content]) if sp[1] <= cut] if content else []
+        if spans:
+            for i in spans_to_tokens(ac.offsets, [spans[0] if role == "system" else spans[-1]]):
+                roles[i] = role
+    for i in range(st, T):
+        roles[i] = "reply"
+    attn = {(L, h): ac.pattern[L][h, st:, :].mean(axis=0) for L, h in hs}
+    contrib, layers = {}, {}
+    if direction:
+        for L in Ls:
+            li = w.arch.layers[L]
+            H, hd = li.n_head, li.head_dim
+            d = np.asarray(session.direction_vec(direction, L), np.float64)
+            dn = d / max(float(np.linalg.norm(d)), 1e-12)
+            P, V = ac.pattern[L], ac.qkv[L]["Vcur"]                       # (H, T, T), (T, n_kv, hd)
+            grp = H // V.shape[1]
+            G = np.ones((T - st, H, hd))
+            gate = None
+            gate_nm = next((nm for nm in ac.extra if nm.endswith(f"-{L}") and "gate" in nm and "ffn" not in nm
+                            and ac.extra[nm].size == T * H), None)
+            pre = next((f"{b}-{L}" for b in ("kqv_out", "attn_pregate") if f"{b}-{L}" in ac.extra), None)
+            if gate_nm:                                                   # ヘッドごとのスカラーのゲート(LFM3)
+                g = ac.extra[gate_nm].reshape(T, H)[st:].astype(np.float64)
+                if g.min() < 0 or g.max() > 1:
+                    g = 1.0 / (1.0 + np.exp(-g))
+                G, gate = np.broadcast_to(g[:, :, None], G.shape), "per_head"
+            elif f"gate_sigmoid-{L}" in ac.extra and ac.extra[f"gate_sigmoid-{L}"].size == T * H * hd:   # 要素ごと(Qwen3.5)
+                G, gate = ac.extra[f"gate_sigmoid-{L}"].reshape(T, H, hd)[st:].astype(np.float64), "elementwise"
+            elif pre and f"attn_gated-{L}" in ac.extra:                  # 要素ごとのゲート = ゲート後 / ゲート前
+                kq = ac.extra[pre].reshape(T, H, hd)[st:].astype(np.float64)
+                ag = ac.extra[f"attn_gated-{L}"].reshape(T, H, hd)[st:].astype(np.float64)
+                ok = np.abs(kq) > 1e-8
+                G, gate = np.where(ok, ag / np.where(ok, kq, 1.0), 1.0), "elementwise"
+            WO = w.head_writer_matrix(L).reshape(-1, H, hd).astype(np.float64)
+            Vh = V[:, np.arange(H) // grp, :].astype(np.float64)          # (T, H, hd)
+            O = np.einsum("hts,shk->thk", P[:, st:, :].astype(np.float64), Vh)
+            out = np.einsum("dhk,thk->td", WO, O * G)                     # (Tr, n_embd) 書き込み行列の出力(norm の前)
+            gname = _POST_NORM_W.format(L=L)
+            ref_nm = _post_norm_out(w.meta.arch, ac.extra, L)
+            post = ref_nm is not None and w.has_tensor(gname)
+            if post:
+                gam = np.asarray(tensor_to_f32(w.tensor(gname)), np.float64).reshape(-1)
+                eps = float(w.field(f"{w.meta.arch}.attention.layer_norm_rms_epsilon", 1e-6) or 1e-6)
+                inv = 1.0 / np.sqrt(np.mean(out ** 2, axis=1) + eps)
+                recon, dp = out * inv[:, None] * gam[None, :], gam * dn
+            else:
+                inv, recon, dp = np.ones(T - st), out, dn
+                ref_nm = f"attn_output-{L}" if f"attn_output-{L}" in ac.extra else None
+            err, ref = None, None
+            if ref_nm is not None and ac.extra[ref_nm].size == T * recon.shape[1]:
+                ref = ac.extra[ref_nm].reshape(T, -1)[st:].astype(np.float64)
+            elif not post and f"ffn_inp-{L}" in ac.extra and f"l_out-{L - 1}" in ac.extra:
+                ref = (ac.extra[f"ffn_inp-{L}"].reshape(T, -1) - ac.extra[f"l_out-{L - 1}"].reshape(T, -1))[st:].astype(np.float64)
+            if ref is not None:
+                err = float(np.linalg.norm(recon - ref) / max(float(np.linalg.norm(ref)), 1e-12))
+            U = np.einsum("dhk,d->hk", WO, dp)                            # (H, hd) = W_O,hᵀ (γ ⊙ d̂)
+            car = np.stack([((P[h, st:, :] * inv[:, None]) * ((G[:, h, :] * U[h][None, :]) @ Vh[:, h, :].T)).mean(axis=0)
+                            for h in range(H)])                           # (H, T)
+            layers[str(L)] = {"contrib_by_head": [round(float(x), 6) for x in car.sum(axis=1)],
+                              "contrib_total": round(float(car.sum()), 6), "proj_mean": round(float((recon @ dn).mean()), 6),
+                              "out_norm_mean": round(float(np.linalg.norm(recon, axis=1).mean()), 6),
+                              "gate": gate,
+                              "post_norm": post, "check_rel_err": None if err is None else round(err, 6)}
+            for L2, h in hs:
+                if L2 == L:
+                    contrib[(L, h)] = car[h]
+    e.free_attn_probe()
+    r6 = lambda a: [round(float(x), 6) for x in a]
+    sa = sum(attn.values())
+    sc = sum(contrib.values()) if contrib else None
+
+    def ranked(vals):
+        idx = [i for i in np.argsort(-vals) if i < st][:top]
+        return [{"pos": int(i), "token": toks[i], "role": roles[i], "value": round(float(vals[i]), 6)} for i in idx]
+    by_role = {}
+    for role in ("system", "user", "template", "reply"):
+        m = np.array([r == role for r in roles])
+        by_role[role] = {"attn": round(float(sa[m].sum()), 6), "contrib": None if sc is None else round(float(sc[m].sum()), 6)}
+    return {"user": user, "system": system, "reply": e.detokenize(rids), "n_tokens": T, "reply_start": st,
+            "tokens": toks, "roles": roles, "heads": [{"layer": L, "head": h} for L, h in hs],
+            "attn": r6(sa), "attn_by_head": {f"{L}:H{h}": r6(v) for (L, h), v in attn.items()},
+            "direction": direction, "contrib": None if sc is None else r6(sc),
+            "contrib_by_head": {f"{L}:H{h}": r6(v) for (L, h), v in contrib.items()} or None,
+            "layers": layers or None, "by_role": by_role, "top_attn": ranked(sa),
+            "top_contrib": None if sc is None else ranked(sc)}
+
+
 def _head_names(session) -> dict[str, str]:
     p = session.store.root / "names" / f"{session.meta.model_id}.json"
     return json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}

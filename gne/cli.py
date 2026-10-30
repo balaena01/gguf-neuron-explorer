@@ -1392,6 +1392,32 @@ def heads_attention(c: Common, holder: dict, text: str = typer.Option(..., "--te
     return d, "\n".join(lines), 0
 
 
+@gne_command(heads_app, "listen", "heads listen")
+def heads_listen(c: Common, holder: dict, user: str = typer.Option(..., "--user", "-u", help="ユーザーの発話"),
+                 heads: str = typer.Option(..., "--heads", help="見るヘッド(例 14:H0-3,16:H2、L:H* で層の全ヘッド)"),
+                 system: Optional[str] = typer.Option(None, "--system", help="system(@FILE でファイルから)"),
+                 reply: Optional[str] = typer.Option(None, "--reply", help="返事(省くと greedy に作る)"),
+                 max_tokens: int = typer.Option(64, "--max-tokens", help="返事を作るときの長さ"),
+                 direction: Optional[str] = typer.Option(None, "--direction", help="寄与を測る方向(保存済みの名前。その層の分を使う)"),
+                 top: int = typer.Option(20, "--top")):
+    """返事のトークンが、選んだヘッドで文脈のどのトークンに注目し、各トークンが方向にどれだけ寄与したか(注目 × ゲート × OV の分解)。"""
+    s = holder["session"] = c.session()
+    if system and system.startswith("@"):
+        system = Path(system[1:]).read_text(encoding="utf-8")
+    d = s.heads_listen(user, heads=heads, system=system, reply=reply, max_tokens=max_tokens, direction=direction, top=top)
+    hs = ",".join(f"L{x['layer']}H{x['head']}" for x in d["heads"])
+    lines = [f"{d['n_tokens']} トークン(返事は {d['reply_start']} から): {d['reply'][:160]!r}", f"ヘッド {hs}"]
+    for k, x in d["by_role"].items():
+        lines.append(f"  {k:<8} 注目 {x['attn']:.3f}" + ("" if x["contrib"] is None else f"  寄与 {x['contrib']:+.4f}"))
+    for L, x in (d["layers"] or {}).items():
+        lines.append(f"L{L}: 層全体の寄与 {x['contrib_total']:+.4f}(ヘッドごと " + " ".join(f"{v:+.3f}" for v in x["contrib_by_head"])
+                     + f")、分解の誤差 {x['check_rel_err'] if x['check_rel_err'] is not None else '—'}")
+    for title, key in (("寄与の上位", "top_contrib"), ("注目の上位", "top_attn")):
+        if d[key]:
+            lines.append(title + ": " + " ".join(f"{x['token']!r}({x['value']:+.3f})" for x in d[key]))
+    return d, "\n".join(lines), 0
+
+
 @gne_command(heads_app, "show", "heads show")
 def heads_show(c: Common, holder: dict, layer: int = typer.Argument(..., help="層 L"),
                head: int = typer.Argument(..., help="ヘッド番号"),

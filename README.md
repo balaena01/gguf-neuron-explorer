@@ -31,6 +31,8 @@ Find, rank and steer individual MLP neurons of GGUF models on llama.cpp, then sh
   - how well their output writes the persona direction.
 
   The noise floor is two neutral system prompts compared with each other. `21:H7:x0` / `x2` scales one head's output through a LoRA on its `W_O` column block. `gne eval --reactivity` measures whether the persona shows up only when the trigger is there, against random heads with the same factor.
+
+  `gne heads listen` (the Listen tab of the head panel) runs one conversation and reports, for chosen heads such as `14:H0-3`, how much attention the reply tokens pay to each earlier token. Given a saved direction, it also attributes the heads' output along that direction to the source tokens. Each token's value vector is weighted by its attention and the head's gate, then passed through `W_O` and through the norm that follows the attention output on architectures that have one. Summed over every head of the layer, these contributions reproduce the layer's attention output. The command reports the remaining error, which was below 1% on Qwen3, Qwen3.5 and LFM3.
 - **Mixture of Experts.** In MoE layers a neuron is `L12 E37 N511` (expert 37, neuron 511); `gne experts contrast` ranks experts by how much more they are chosen, and how much more they write a persona's direction, when the persona is on; `gne experts sweep` ablates or boosts each expert in turn. In an MoE layer `add` only pushes a neuron's write direction at every token; the real neuron push is gain (`12:E37:N511:x2`, active only when the expert is chosen). Whole experts (`12:E37:x0`) and router biases (`12:E37:route:+2`) are applied by scale patches: the quantization blocks' scales of a working copy are rewritten exactly and reverted afterwards.
 - **Web UI.** A 3D map of every layer and neuron with switchable overlays (sweep mass, steer KL, logit-lens |z|, activations, search hits, which neurons fire on a pasted text). It also has:
   - a ranked list and a neuron panel;
@@ -109,6 +111,7 @@ gne steer --recipe configs/recipes/alien.yaml --contrast configs/contrast/alien.
 
 gne heads contrast --contrast configs/contrast/yandere_react.yaml   # rank attention heads (persona vs neutral)
 gne heads show 15 2                                           # one head: rank, W_O block logit lens, gains tried
+gne heads listen --heads 14:H0-3 --system @persona.txt -u "I had lunch with a coworker." --direction wr_mix14   # attention from the reply, per-token contributions
 gne steer --unit 15:H2:x2 -p "I had lunch with Emily today." --compare   # head gain (LoRA on W_O)
 gne eval --recipe R --reactivity configs/contrast/yandere_react.yaml --head-controls 8
 ```

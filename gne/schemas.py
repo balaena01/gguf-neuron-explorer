@@ -780,6 +780,26 @@ class AttentionOut(Envelope):                   # CHANGE-04 B(gne heads attentio
     pattern: list[list[float]] | None = None
 
 
+class ListenOut(Envelope):                      # gne heads listen(返事のトークンからの注目と、方向への寄与)
+    user: str
+    system: str | None
+    reply: str
+    n_tokens: int
+    reply_start: int
+    tokens: list[str]
+    roles: list[Literal["system", "user", "template", "reply"]]
+    heads: list[dict[str, int]]
+    attn: list[float]
+    attn_by_head: dict[str, list[float]]
+    direction: str | None
+    contrib: list[float] | None
+    contrib_by_head: dict[str, list[float]] | None
+    layers: dict[str, dict[str, Any]] | None
+    by_role: dict[str, dict[str, float | None]]
+    top_attn: list[dict[str, Any]]
+    top_contrib: list[dict[str, Any]] | None
+
+
 class HeadOut(Envelope):                        # CHANGE-04(gne heads show)
     layer: int
     head: int
@@ -829,7 +849,7 @@ COMMAND_SCHEMAS: dict[str, type[Envelope]] = {
     "stats resid": StatsResidOut, "stats act": StatsActOut, "steer": SteerOut,
     "export-cvec": ExportOut, "import-cvec": ImportOut, "bake": BakeOut, "gain": GainOut,
     "eval": EvalOut, "direction": DirectionOut, "ablate": AblateOut,
-    "heads contrast": HeadsContrastOut, "heads attention": AttentionOut, "heads show": HeadOut, "heads name": HeadNameOut,
+    "heads contrast": HeadsContrastOut, "heads attention": AttentionOut, "heads listen": ListenOut, "heads show": HeadOut, "heads name": HeadNameOut,
     "experts contrast": ExpertsContrastOut, "experts show": ExpertOut, "experts sweep": ExpertsSweepOut,
     "heads query": HeadsQueryOut,
     "connections": ConnectionsOut, "worker": WorkerOut, "writers": WritersOut, "writers-export": WritersExportOut,

@@ -346,6 +346,15 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
         return await call(session.attention, text, layer=layer, head=head, top=top, pos=pos, chat=chat, system=system)
 
     @srv.tool()
+    async def heads_listen(user: str, heads: str, system: str | None = None, reply: str | None = None, max_tokens: int = 64,
+                           direction: str | None = None, top: int = 20) -> dict:
+        """返事のトークンが、選んだヘッド(例 "14:H0-3")で文脈のどのトークンに注目しているか(注目の平均)。
+        direction(保存済みの方向)を渡すと、文脈の各トークンがヘッドの出力を通してその層の方向に寄与した量(注目 × ゲート × OV、
+        attention の後の norm 込み)と、層の全ヘッドの寄与のうち選んだヘッドの分も返す。reply を省くと greedy に作る。"""
+        return await call(session.heads_listen, user, heads=heads, system=system, reply=reply, max_tokens=max_tokens,
+                          direction=direction, top=top)
+
+    @srv.tool()
     async def set_name(layer: int, neuron: int, name: str) -> dict:
         """ニューロンに名前を付ける(空文字で消す)。調書と search(mode="name") に出る。"""
         return await call(session.set_name, layer, neuron, name, gpu=False)

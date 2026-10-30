@@ -5,6 +5,8 @@
 //   トリガー(部分文字列、"re:" で正規表現)の列に印を付け、トリガー区間への注目を表にする。
 // Contrast: 保存済みのヘッドの対照分析(gne heads contrast)ごとの指標・順位と床、上位のヘッド、対照集合の会話を Pattern で見るリンク。
 // Details: W_O の列ブロックの logit lens(主成分 2 本の上位・下位の語)、当てたことのある gain、大きさ。
+// Listen: system + ユーザーの発話 + 返事を流し、返事のトークンが選んだヘッド(複数可、例 14:H0-3)で文脈のどのトークンに
+//   注目しているか(注目)と、各トークンの方向への寄与(注目 × ゲート × OV、gne heads listen)を文章の上に色で出す。
 import { getJSON, postJSON } from "./api.js";
 import { t } from "./i18n.js";
 import { esc, toksHTML } from "./panels.js";
@@ -77,13 +79,16 @@ function shared(view, S) {
 }
 
 export class HeadPanel {
-  constructor(root, { onRecipe, inRecipe, onNamed, onOverlay, onGoto }) {
+  constructor(root, { onRecipe, inRecipe, onNamed, onOverlay, onGoto, directions }) {
     this.root = root;
     this.onRecipe = onRecipe;          // (L, h, k) → レシピに足す・外す
     this.inRecipe = inRecipe;          // (L, h) → レシピの中の倍率 k か null
     this.onNamed = onNamed;            // (names) → 名前の一覧が変わった
     this.onOverlay = onOverlay;        // (field) → 地図の色を heads:<name> に
     this.onGoto = onGoto;              // ({ layer, head }) → 別のヘッドを開く
+    this.directions = directions || (() => []);   // 保存済みの方向の名前(Listen の「寄与」)
+    this.lis = { heads: "", system: "", user: "", reply: "", dir: "", mode: "contrib", maxTokens: 64 };   // Listen の入力
+    this.lres = null;                  // Listen の結果
     this.tab = "pattern";
     this.d = null;
     this.sums = new Map();             // 対照分析の名前 → /api/heads/<name>(Contrast タブ)
@@ -127,7 +132,7 @@ export class HeadPanel {
         <div class="n-row"><input class="n-name h-name" placeholder="${t("名前(入力して Enter か欄の外で保存)")}" value="${esc(d.name || "")}" spellcheck="false">
           ${this.recipeButtons(d)}</div>
       </div>
-      <div class="tabs"><button data-tab="pattern">Pattern</button><button data-tab="contrast">Contrast${d.contrasts.length ? ` <span class="muted">${d.contrasts.length}</span>` : ""}</button><button data-tab="details">Details</button></div>
+      <div class="tabs"><button data-tab="pattern">Pattern</button><button data-tab="contrast">Contrast${d.contrasts.length ? ` <span class="muted">${d.contrasts.length}</span>` : ""}</button><button data-tab="details">Details</button><button data-tab="listen">Listen</button></div>
       <div class="n-tab" id="h-tab"></div>`;
     for (const b of this.root.querySelectorAll(".tabs button")) {
       b.classList.toggle("on", b.dataset.tab === this.tab);
@@ -148,6 +153,7 @@ export class HeadPanel {
     const body = this.root.querySelector("#h-tab");
     if (this.tab === "contrast") this.contrast(body);
     else if (this.tab === "details") body.innerHTML = this.details();
+    else if (this.tab === "listen") this.listen(body);
     else this.pattern(body);
   }
 
@@ -393,6 +399,126 @@ export class HeadPanel {
         this.run();
       });
     }
+  }
+
+  // --- Listen --------------------------------------------------------------------------------------
+  // 見るヘッドの既定: 開いているヘッド。「K/V グループ」でそのヘッドと K/V を共有するヘッドの組にする
+  groupSpec() {
+    const d = this.d;
+    if (!d.n_head_kv || d.kv_group === null || d.kv_group === undefined) return `${d.layer}:H${d.head}`;
+    const g = d.n_head / d.n_head_kv, a = d.kv_group * g;
+    return g > 1 ? `${d.layer}:H${a}-${a + g - 1}` : `${d.layer}:H${a}`;
+  }
+
+  listen(el) {
+    const L = this.lis, d = this.d;
+    if (d.kind !== "attn") {
+      el.innerHTML = `<p class="muted note">${t("線形注意の層には softmax の注目がないので、Listen は使えません。")}</p>`;
+      return;
+    }
+    if (!L.heads) L.heads = `${d.layer}:H${d.head}`;
+    if (!L.system && this.pat.system) L.system = this.pat.system;
+    const dirs = this.directions();
+    el.innerHTML = `
+      <p class="muted note">${t("返事のトークンが、選んだヘッドで文脈のどのトークンに注目しているか。方向を選ぶと、文脈の各トークンがヘッドの出力を通してその方向にどれだけ寄与したか(注目 × ゲート × OV)も出す。")}</p>
+      <textarea id="ls-system" class="hp-sys" rows="3" placeholder="${t("system(空なら system なし)")}">${esc(L.system)}</textarea>
+      <div class="ch-input"><textarea id="ls-user" rows="2" placeholder="${t("ユーザーの発話")}">${esc(L.user)}</textarea>
+        <button id="ls-run"${this.busy ? " disabled" : ""}>${t("流す")}</button></div>
+      <textarea id="ls-reply" class="hp-sys" rows="2" placeholder="${t("返事(空なら greedy に作る)")}">${esc(L.reply)}</textarea>
+      <div class="list-tools ls-opts">
+        <label class="muted">${t("ヘッド")} <input id="ls-heads" class="mono" value="${esc(L.heads)}" spellcheck="false" title="${t("例 14:H0-3,16:H2(L:H* で層の全ヘッド)")}"></label>
+        <button class="small" id="ls-one" title="${t("開いているヘッドだけにする")}">L${d.layer} H${d.head}</button>
+        <button class="small" id="ls-grp" title="${t("開いているヘッドと K/V を共有するヘッドの組にする")}">${t("K/V グループ")}</button>
+        <label class="muted">${t("方向")} <select id="ls-dir"><option value="">${t("(なし)")}</option>${dirs.map((x) => `<option${x === L.dir ? " selected" : ""}>${esc(x)}</option>`).join("")}</select></label>
+        <label class="muted">${t("長さ")} <input id="ls-max" type="number" min="1" max="256" value="${L.maxTokens}" class="mono ls-num"></label></div>
+      <div class="ch-status muted note" id="ls-status">${esc(this.lstatus || "")}</div>
+      <div id="ls-out"></div>`;
+    const $ = (q) => el.querySelector(q);
+    for (const [id, k] of [["#ls-system", "system"], ["#ls-user", "user"], ["#ls-reply", "reply"], ["#ls-heads", "heads"]]) {
+      $(id).addEventListener("input", (ev) => { L[k] = ev.target.value; });
+    }
+    $("#ls-user").addEventListener("keydown", (ev) => { if (ev.key === "Enter" && (ev.ctrlKey || ev.metaKey)) this.runListen(); });
+    $("#ls-dir").addEventListener("change", (ev) => { L.dir = ev.target.value; });
+    $("#ls-max").addEventListener("change", (ev) => { L.maxTokens = Math.max(1, Math.min(256, +ev.target.value || 64)); });
+    $("#ls-one").addEventListener("click", () => { L.heads = `${d.layer}:H${d.head}`; $("#ls-heads").value = L.heads; });
+    $("#ls-grp").addEventListener("click", () => { L.heads = this.groupSpec(); $("#ls-heads").value = L.heads; });
+    $("#ls-run").addEventListener("click", () => this.runListen());
+    this.drawListen();
+  }
+
+  async runListen() {
+    const L = this.lis;
+    if (!L.user.trim() || !L.heads.trim() || this.busy) return;
+    this.busy = true;
+    this.lstatus = L.reply.trim() ? t("流しています(GPU を待つことがあります)…") : t("返事を作って流しています(GPU を待つことがあります)…");
+    if (this.tab === "listen") this.render();
+    const tok = this._token;
+    try {
+      const x = await postJSON("/api/listen", { user: L.user, heads: L.heads, system: L.system || null, reply: L.reply.trim() ? L.reply : null,
+                                                max_tokens: L.maxTokens, direction: L.dir || null });
+      this.lres = x;
+      if (!x.contrib) L.mode = "attn";
+      else if (this.lres && L.mode === "attn" && !this._modeChosen) L.mode = "contrib";
+      const share = this.contribShare(x);
+      this.lstatus = t("{n} トークン(返事 {r})", { n: x.n_tokens, r: x.n_tokens - x.reply_start })
+        + (share ? ` · ${t("層の寄与のうち選んだヘッドの分 {p}", { p: share })}` : "")
+        + (x.warnings && x.warnings.length ? ` · ${x.warnings.join(" / ")}` : "");
+    } catch (e) { this.lstatus = `${t("エラー")}: ${e.message}`; }
+    finally { this.busy = false; }
+    if (tok === this._token && this.tab === "listen") this.render();
+  }
+
+  // 選んだヘッドの寄与 ÷ その層の全ヘッドの寄与(層ごと)
+  contribShare(x) {
+    if (!x.layers) return "";
+    return Object.entries(x.layers).map(([Lk, info]) => {
+      const sel = x.heads.filter((h) => String(h.layer) === Lk).reduce((a, h) => a + info.contrib_by_head[h.head], 0);
+      return `L${Lk} ${pct(info.contrib_total ? sel / info.contrib_total : null)}`;
+    }).join(" · ");
+  }
+
+  drawListen() {
+    const out = this.root.querySelector("#ls-out"), x = this.lres, L = this.lis;
+    if (!out || !x) return;
+    const contrib = L.mode === "contrib" && x.contrib, vals = contrib ? x.contrib : x.attn;
+    let mx = 0;
+    for (let i = 0; i < x.reply_start; i++) mx = Math.max(mx, Math.abs(vals[i]));
+    const keys = Object.keys(contrib ? x.contrib_by_head : x.attn_by_head);
+    const color = (v) => {
+      const b = Math.sqrt(Math.min(1, Math.abs(v) / Math.max(mx, 1e-9)));
+      const c = contrib ? (v >= 0 ? PLUS : MINUS) : AMBER;
+      return `rgba(${c[0]},${c[1]},${c[2]},${(0.08 + 0.8 * b).toFixed(3)})`;
+    };
+    const span = (i) => {
+      const per = keys.map((k) => `${k} ${contrib ? sgn(x.contrib_by_head[k][i], 4) : fmt(x.attn_by_head[k][i], 4)}`).join("\n");
+      const tip = `#${i} ${tokText(x.tokens[i], 30)} (${x.roles[i]})\n${contrib ? t("寄与") : t("注目")} ${contrib ? sgn(vals[i], 4) : fmt(vals[i], 4)}\n${per}`;
+      const txt = esc(x.tokens[i]).replace(/\n/g, "↵<br>");
+      return `<span class="lt r-${x.roles[i]}" style="background:${color(vals[i])}" title="${esc(tip)}">${txt || "∅"}</span>`;
+    };
+    const ctxHTML = Array.from({ length: x.reply_start }, (_, i) => span(i)).join("");
+    const repHTML = x.tokens.slice(x.reply_start).map((tk) => `<span class="lt r-reply">${esc(tk).replace(/\n/g, "↵<br>")}</span>`).join("");
+    const seg = `<span class="seg hp-view">${[["attn", t("注目")], ["contrib", t("寄与")]].map(([k, l]) =>
+      `<button data-m="${k}" class="${(contrib ? "contrib" : "attn") === k ? "on" : ""}"${k === "contrib" && !x.contrib ? " disabled" : ""}>${l}</button>`).join("")}</span>`;
+    const top = (contrib ? x.top_contrib : x.top_attn) || [];
+    const rows = top.map((r) => `<tr><td>${r.pos}</td><td class="w">${esc(tokText(r.token, 20))}</td><td class="muted">${r.role}</td><td>${contrib ? sgn(r.value, 4) : fmt(r.value, 4)}</td>${
+      keys.map((k) => `<td class="muted">${contrib ? sgn(x.contrib_by_head[k][r.pos], 3) : fmt(x.attn_by_head[k][r.pos], 3)}</td>`).join("")}</tr>`).join("");
+    const role = Object.entries(x.by_role).map(([k, v]) => `<tr><td>${k}</td><td>${fmt(v.attn, 3)}</td><td>${v.contrib === null ? "—" : sgn(v.contrib, 4)}</td></tr>`).join("");
+    const layers = x.layers ? Object.entries(x.layers).map(([Lk, info]) => {
+      const sel = new Set(x.heads.filter((h) => String(h.layer) === Lk).map((h) => h.head));
+      const m = Math.max(...info.contrib_by_head.map(Math.abs), 1e-9);
+      return `<h4>${t("L{L} のヘッドごとの寄与(層全体 {tot}、分解の誤差 {err})", { L: Lk, tot: sgn(info.contrib_total, 3), err: info.check_rel_err === null ? "—" : pct(info.check_rel_err) })}</h4>
+        <div class="ls-bars">${info.contrib_by_head.map((v, h) => `<div class="ls-bar${sel.has(h) ? " sel" : ""}" title="H${h} ${sgn(v, 4)}"><span style="height:${(100 * Math.abs(v) / m).toFixed(1)}%;background:${v >= 0 ? "rgb(242,210,75)" : "rgb(201,79,167)"}"></span><i>${h}</i></div>`).join("")}</div>`;
+    }).join("") : "";
+    out.innerHTML = `${seg}
+      <div class="ls-toks">${ctxHTML}</div>
+      <div class="ls-reply"><span class="muted">${t("返事")}:</span> ${repHTML}</div>
+      <p class="muted note">${contrib ? t("色 = そのトークンの方向への寄与(返事のトークンの平均)。黄 = 方向の向き、赤紫 = 逆向き。明るさ = √(|値| / 文脈の最大)。")
+        : t("色 = 返事の各トークンからの注目の平均(選んだヘッドの合計)。明るさ = √(値 / 文脈の最大)。")} ${t("トークンにマウスを当てるとヘッドごとの値。")}</p>
+      ${layers}
+      <h4>${contrib ? t("寄与の上位(文脈のトークン)") : t("注目の上位(文脈のトークン)")}</h4>
+      <table class="kv mono hp-trig"><tr><th>pos</th><th>${t("トークン")}</th><th>${t("役")}</th><th>${t("合計")}</th>${keys.map((k) => `<th>${esc(k)}</th>`).join("")}</tr>${rows}</table>
+      <h4>${t("役ごとの合計")}</h4><table class="kv mono"><tr><th>${t("役")}</th><th>${t("注目")}</th><th>${t("寄与")}</th></tr>${role}</table>`;
+    for (const b of out.querySelectorAll("[data-m]")) b.addEventListener("click", () => { L.mode = b.dataset.m; this._modeChosen = true; this.drawListen(); });
   }
 
   // --- Details -------------------------------------------------------------------------------------

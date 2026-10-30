@@ -976,6 +976,12 @@ class Session:
         from .heads import attention_view
         return attention_view(self, text, pos=pos, layer=layer, head=head, top=top, system=system, chat=chat)
 
+    def heads_listen(self, user: str, *, heads: str | list[tuple[int, int]], system: str | None = None, reply: str | None = None,
+                     max_tokens: int = 64, direction: str | None = None, top: int = 20) -> dict:
+        """返事のトークンが選んだヘッドで文脈のどのトークンに注目し、各トークンが方向にどれだけ寄与したか(gne heads listen)。"""
+        from .heads import listen_view
+        return listen_view(self, user, heads=heads, system=system, reply=reply, max_tokens=max_tokens, direction=direction, top=top)
+
     def head(self, L: int, h: int, *, lens: bool = True) -> dict:
         """ヘッドの調書。"""
         from .heads import head_dossier

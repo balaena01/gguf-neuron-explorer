@@ -112,6 +112,19 @@ def test_head_lora_shapes_and_math(tmp_path):
     assert lora_cache_path(tmp_path, neu) != lora_cache_path(tmp_path, Recipe(neu.units + [parse_unit("1:H2:x0")]))
 
 
+def test_parse_heads(tmp_path):
+    """Listen のヘッドの書き方: L:Hh・L:Ha-b・L:H*、重なりは 1 つに、範囲外はエラー。"""
+    from gne.heads import parse_heads
+    from gne.weights import Weights
+    _tiny_heads(tmp_path / "m.gguf")
+    w = Weights(tmp_path / "m.gguf")
+    assert parse_heads("1:H2", w) == [(1, 2)]
+    assert parse_heads("1:H0-2, 1:h1, 0:H*", w) == [(1, 0), (1, 1), (1, 2), (0, 0), (0, 1), (0, 2), (0, 3)]
+    for bad in ("1:H4", "1:H3-1", "2:H0", "1:2", ""):
+        with pytest.raises(GneError):
+            parse_heads(bad, w)
+
+
 def test_spans_to_tokens():
     from gne.attn import find_spans, spans_to_tokens
     text = "I had lunch with Emily. 美咲さんと"
@@ -276,3 +289,30 @@ def test_query_v17_on_small_model(session, tmp_path):
     assert len(g["query_loras"]) == 1 and Path(g["query_loras"][0]).exists()
     st = session.steer(rq, prompt="I had lunch with Emily today.", max_tokens=8)
     assert st["units"][0]["mode"] == "query"
+
+
+@pytest.mark.model
+def test_heads_listen_decomposition(session, monkeypatch):
+    """Listen: 注目の行の和 = 1、分解(注目 × V × W_O)を全ヘッドで足し直すと attention の出力に戻る(check_rel_err)、
+    全ヘッド・全トークンの寄与 = 出力の平均の方向成分、system とユーザーの発話のトークンに役が付く。"""
+    from gne.schemas import COMMAND_SCHEMAS
+    rng = np.random.default_rng(0)
+    vec = {L: rng.standard_normal(session.meta.n_embd).astype(np.float32) for L in range(session.meta.n_layer)}
+    monkeypatch.setattr(session, "direction_vec", lambda name, L: vec[L])
+    d = session.heads_listen("I'm going to a concert with Jake this weekend.", heads="5:H*,9:H3", system="You are a jealous girlfriend.",
+                             direction="rand", max_tokens=12)
+    assert [h["layer"] for h in d["heads"]].count(5) == 16 and {"layer": 9, "head": 3} in d["heads"]
+    for k, a in d["attn_by_head"].items():
+        assert abs(sum(a) - 1.0) < 1e-3, k                                       # 返事の各行の和 1 の平均
+    info = d["layers"]["5"]
+    assert info["check_rel_err"] is not None and info["check_rel_err"] < 0.03
+    assert abs(sum(info["contrib_by_head"]) - info["proj_mean"]) < 1e-4 * max(1.0, abs(info["proj_mean"]))
+    assert abs(sum(d["contrib_by_head"]["5:H0"]) - info["contrib_by_head"][0]) < 1e-5
+    assert d["layers"]["9"]["check_rel_err"] < 0.03
+    roles = d["roles"]
+    assert "system" in roles and "user" in roles and roles[d["reply_start"]:] == ["reply"] * (d["n_tokens"] - d["reply_start"])
+    toks = "".join(t for t, r in zip(d["tokens"], roles) if r == "user")
+    assert "concert with Jake" in toks
+    COMMAND_SCHEMAS["heads listen"].model_validate({**session.envelope("heads listen"), **d})
+    d2 = session.heads_listen("Hello there.", heads="5:H1", reply="Hi! Who is Jake?")
+    assert d2["contrib"] is None and d2["reply"].strip() == "Hi! Who is Jake?" and len(d2["top_attn"]) > 0
