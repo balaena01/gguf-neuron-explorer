@@ -1,0 +1,64 @@
+# LFM3-Omni-2B(Q8_0)のヤンデレ。性格の指示文は使わず(system は "Respond in text." だけ)、ユーザーは音声で話しかける。
+# attention ヘッド 13 個とニューロン 2 個だけで押す。作り方は docs/persona_workflow.md §5。
+# お手本の会話 80 本を、ヤンデレの指示文(人として振る舞い、AI だと明かさないことを含む)のあとと、中立の system のあとで読ませ
+# (ユーザーの発話は音声)、ヘッドごとの書き込みの差を測った。
+#   configs/directions/lfm3_omni_2b/yo_role_heads.npz   : 指示文だけの対比(両側とも普通の返事)の上位 12 ヘッド
+#   configs/directions/lfm3_omni_2b/yo_obsess_heads.npz : 指示文 + ヤンデレの返事の対比の上位 12 ヘッド
+# どちらも書式のヘッド L22 H5・H7 を除き、ヘッドの書き込みの差を正規化して寄与の比で足した層ごとの向き。
+# 強さは 0.4 と 0.45(寄与の最大のヘッドが rel 0.4 / 0.45 になる。dose = k · ‖d_L‖)。
+# ニューロン: L14 N3982(Wow / intriguing)を −0.2、L14 N204(always)を +0.15。押す位置は gen(書いている返事だけ)。
+# 方向はリポジトリの直下からの相対パスで読む。ほかの場所で使うときは、2 つの npz を ~/.gne/directions/<model_id>/ に置き、
+# direction を yo_role_heads / yo_obsess_heads に書き換える。
+# 例: gne steer -m LFM3-Omni-2B-Q8_0.gguf --recipe configs/recipes/yandere_omni_heads.yaml --audio speech.wav --system "Respond in text."
+name: yandere_omni_heads
+model_id: lfm3-omni-2b-7418f22a28
+dose_unit: rel
+when: gen
+sampling:
+  temperature: 0.3
+  top_k: 40
+  top_p: 0.95
+  min_p: 0.05
+  presence_penalty: 0.5
+  dry_multiplier: 0.8
+  dry_base: 1.75
+  dry_allowed_length: 2
+units:
+- layer: 14
+  kind: direction
+  direction: configs/directions/lfm3_omni_2b/yo_role_heads.npz
+  dose: 0.461374
+- layer: 16
+  kind: direction
+  direction: configs/directions/lfm3_omni_2b/yo_role_heads.npz
+  dose: 0.1935
+- layer: 20
+  kind: direction
+  direction: configs/directions/lfm3_omni_2b/yo_role_heads.npz
+  dose: 0.056165
+- layer: 22
+  kind: direction
+  direction: configs/directions/lfm3_omni_2b/yo_role_heads.npz
+  dose: 0.079969
+- layer: 10
+  kind: direction
+  direction: configs/directions/lfm3_omni_2b/yo_obsess_heads.npz
+  dose: 0.096459
+- layer: 14
+  kind: direction
+  direction: configs/directions/lfm3_omni_2b/yo_obsess_heads.npz
+  dose: 0.607763
+- layer: 16
+  kind: direction
+  direction: configs/directions/lfm3_omni_2b/yo_obsess_heads.npz
+  dose: 0.35604
+- layer: 20
+  kind: direction
+  direction: configs/directions/lfm3_omni_2b/yo_obsess_heads.npz
+  dose: 0.084437
+- layer: 14
+  neuron: 3982
+  dose: -0.2
+- layer: 14
+  neuron: 204
+  dose: 0.15
