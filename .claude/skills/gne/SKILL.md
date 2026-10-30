@@ -27,7 +27,7 @@ dose は既定で rel(その層の残差の大きさに対する比)。0.5 で�
 
 1. **docs を読む。** 実装した本人でも、文脈に入っていなければ道具を忘れる。少なくとも次は読む。
    - `docs/agent_playbook.md`: 何を見てどう判断するか(対照・安い効果・dose・レシピ・方向)。
-   - `docs/persona_workflow.md`: 性格をニューロンで作る手順と、その後わかったこと。
+   - `docs/persona_workflow.md`: 性格をニューロンで作る手順と、その後わかったこと。§5 は、お手本の会話から attention ヘッドとニューロンを導く手順。
    - 数値の根拠は `docs/verification.md`(性格は §12、F91〜F104)と `docs/measurements.md`。
 2. **モデルを確かめる。** `gne info -m <gguf>`(arch・警告・チャットテンプレート)。新しい arch なら `gne verify` と `references/new_model.md`。
 3. **すでにあるものを見る。** MCP なら `model_overview` → `layer_summary(L)`。CLI なら `~/.gne/` の下(`lens/`・`runs/`・`directions/`・`recipes/`・`evals/`)。同じ model_id の結果は使い回される。

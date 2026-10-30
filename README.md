@@ -300,7 +300,7 @@ The documentation is in Japanese:
 - [docs/measurements.md](docs/measurements.md): timings and throughput.
 - [docs/agent_playbook.md](docs/agent_playbook.md): how to read the results.
 - [docs/setup.md](docs/setup.md): CUDA / ROCm under WSL, one environment per GPU, and workers.
-- [docs/persona_workflow.md](docs/persona_workflow.md): building a persona from neurons, step by step (with the scripts in `examples/persona_neurons/` and the yandere case as the worked example).
+- [docs/persona_workflow.md](docs/persona_workflow.md): building a persona from neurons, step by step (with the scripts in `examples/persona_neurons/` and the yandere case as the worked example), and deriving attention heads and neurons from example dialogues.
 
 ## License
 

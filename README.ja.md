@@ -325,7 +325,7 @@ python -m pytest -q
 - [docs/measurements.md](docs/measurements.md): 速度の実測
 - [docs/agent_playbook.md](docs/agent_playbook.md): 結果の読み方
 - [docs/setup.md](docs/setup.md): WSL での CUDA・ROCm、GPU ごとの環境とワーカー
-- [docs/persona_workflow.md](docs/persona_workflow.md): 性格をニューロンで作る手順（`examples/persona_neurons/` のスクリプトと、ヤンデレでたどった道）
+- [docs/persona_workflow.md](docs/persona_workflow.md): 性格をニューロンで作る手順（`examples/persona_neurons/` のスクリプトと、ヤンデレでたどった道）と、お手本の会話から attention ヘッドとニューロンを導く手順
 
 ## ライセンス
 
