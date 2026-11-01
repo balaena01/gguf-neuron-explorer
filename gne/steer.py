@@ -42,8 +42,8 @@ class Unit:
     dose: float
     kind: Literal["neuron", "random", "direction", "head", "expert_neuron", "expert", "shared"] = "neuron"
     seed: int | None = None          # random 用
-    mode: Literal["add", "gain", "query", "route"] = "add"   # §6.16: add = 活性に定数を足す(dose)、gain = 出力を k 倍、query = ヘッドの条件付きクエリ操作、route = 専門家のルーターバイアスに dose を足す(CHANGE-05)
-    k: float | None = None           # gain の倍率(0 で消去、負で反転)
+    mode: Literal["add", "gain", "query", "route", "proj"] = "add"   # §6.16: add = 活性に定数を足す(dose)、gain = 出力を k 倍、query = ヘッドの条件付きクエリ操作、route = 専門家のルーターバイアスに dose を足す(CHANGE-05)、proj = ヘッドの書き込みの方向成分だけを s 倍ぶん引く(CHANGE-06)
+    k: float | None = None           # gain の倍率(0 で消去、負で反転)。proj では強さ s(YAML は s)
     direction: str | None = None     # direction 用: gne direction(§6.17)で作った方向の名前。その層の r_L を足す
     head: int | None = None          # head 用(CHANGE-04): attention ヘッドの番号。gain(W_O の列ブロックを k 倍)か query
     seek: str | None = None          # query 用(CHANGE-04 E、実験的): 探しに行く語(triggers)を持つ対照集合。k が scale
@@ -59,6 +59,8 @@ class Unit:
             return f"L{self.layer} {who} ×{self.k:g}"
         if self.mode == "query":
             return f"L{self.layer} {who} query {self.direction}→{Path(self.seek or '').stem} ×{self.k:g}"
+        if self.mode == "proj":
+            return f"L{self.layer} {who} s{self.k:g}" + (f" @{self.direction}" if self.direction else "")
         return f"L{self.layer} {who} {self.dose:+g}"
 
 
@@ -152,6 +154,8 @@ class Recipe:
     when: str = "all"               # §6.15 位置別ステアリング: all / gen / assistant / skip-replies / after:<text> / ramp:<a>-<b>
     ablate: AblateSpec | None = None   # §6.17 方向の射影消去(LoRA で当てる)
     sampling: dict | None = None       # このレシピを試すときのサンプリング(SAMPLING_KEYS、seed なし)。無ければ呼ぶ側の既定
+    default_direction: str | None = None   # CHANGE-06: direction を省いた proj のユニットが使う方向
+    direction_layer: str = "own"           # CHANGE-06: proj のユニットに当てる方向の層。own = そのヘッドの層の r_L、base = 方向セットの基準層の r
 
     @classmethod
     def load(cls, path: str | Path) -> Recipe:
@@ -159,12 +163,13 @@ class Recipe:
         units = [Unit(layer=int(u["layer"]), neuron=None if u.get("neuron") is None else int(u["neuron"]),
                       dose=float(u.get("dose", u.get("delta", 0.0))), kind=u.get("kind", "neuron"), seed=u.get("seed"),
                       mode=u.get("mode", "add"),
-                      k=None if u.get("k", u.get("scale")) is None else float(u.get("k", u.get("scale"))),
+                      k=None if u.get("k", u.get("scale", u.get("s"))) is None else float(u.get("k", u.get("scale", u.get("s")))),
                       direction=u.get("direction"), head=None if u.get("head") is None else int(u["head"]),
                       seek=u.get("seek"), expert=None if u.get("expert") is None else int(u["expert"]))
                  for u in d.get("units", [])]
         r = cls(units, d.get("model_id"), d.get("dose_unit", "rel"), d.get("name") or Path(path).stem, d.get("when") or "all",
-                AblateSpec.from_dict(d.get("ablate")), d.get("sampling") or None)
+                AblateSpec.from_dict(d.get("ablate")), d.get("sampling") or None, d.get("default_direction") or None,
+                str(d.get("direction_layer") or "own"))
         r.validate()
         return r
 
@@ -173,22 +178,34 @@ class Recipe:
              **({"when": self.when} if self.when != "all" else {}),
              **({"ablate": {k: v for k, v in self.ablate.to_dict().items() if v is not None}} if self.ablate else {}),
              **({"sampling": dict(self.sampling)} if self.sampling else {}),
+             **({"default_direction": self.default_direction} if self.default_direction else {}),
+             **({"direction_layer": self.direction_layer} if self.direction_layer != "own" else {}),
              "units": [_unit_yaml(u) for u in self.units]}
         Path(path).write_text(yaml.safe_dump(d, allow_unicode=True, sort_keys=False), encoding="utf-8")
 
     def to_dict(self) -> dict:
         return {"name": self.name, "model_id": self.model_id, "dose_unit": self.dose_unit, "when": self.when,
                 "units": [asdict(u) for u in self.units], "ablate": self.ablate.to_dict() if self.ablate else None,
-                "sampling": self.sampling}
+                "sampling": self.sampling,
+                **({"default_direction": self.default_direction} if self.default_direction else {}),
+                **({"direction_layer": self.direction_layer} if self.direction_layer != "own" else {})}
+
+    def like(self, units: list[Unit], **over) -> Recipe:
+        """同じ設定(model_id・dose_unit・名前・when・ablate・sampling・方向の既定)で、ユニットだけ替えたレシピ。"""
+        kw = {"model_id": self.model_id, "dose_unit": self.dose_unit, "name": self.name, "when": self.when,
+              "ablate": self.ablate, "sampling": self.sampling, "default_direction": self.default_direction,
+              "direction_layer": self.direction_layer}
+        kw.update(over)
+        return Recipe(list(units), **kw)
 
     def scaled(self, k: float) -> Recipe:
         # add は dose を k 倍、gain は倍率を「1(何もしない)から k_unit へ」の間で k の割合だけ動かす(eval の倍率列で 0 が無介入になるように)
-        return Recipe([Unit(u.layer, u.neuron, u.dose * k if u.mode in ("add", "route") else u.dose, u.kind, u.seed, u.mode,
-                            None if u.k is None else (u.k * k if u.mode == "query" else 1 + (u.k - 1) * k),
-                            u.direction, u.head, u.seek, u.expert) for u in self.units],
-                      self.model_id, self.dose_unit, self.name, self.when,
-                      None if self.ablate is None else AblateSpec(self.ablate.direction, self.ablate.scale * k,
-                                                                 self.ablate.layers, self.ablate.from_layer), self.sampling)
+        # query と proj(CHANGE-06)は強さをそのまま k 倍(proj の s は LoRA の中で線形)
+        return self.like([Unit(u.layer, u.neuron, u.dose * k if u.mode in ("add", "route") else u.dose, u.kind, u.seed, u.mode,
+                               None if u.k is None else (u.k * k if u.mode in ("query", "proj") else 1 + (u.k - 1) * k),
+                               u.direction, u.head, u.seek, u.expert) for u in self.units],
+                         ablate=None if self.ablate is None else AblateSpec(self.ablate.direction, self.ablate.scale * k,
+                                                                            self.ablate.layers, self.ablate.from_layer))
 
     @property
     def add_units(self) -> list[Unit]:
@@ -212,6 +229,11 @@ class Recipe:
     def query_units(self) -> list[Unit]:
         return [u for u in self.units if u.mode == "query"]
 
+    @property
+    def proj_units(self) -> list[Unit]:
+        """ヘッドの方向成分の射影(CHANGE-06)。"""
+        return [u for u in self.units if u.mode == "proj"]
+
     def validate(self) -> None:
         if self.dose_unit not in ("rel", "absmax", "raw"):
             raise GneError("BAD_RECIPE", f"dose_unit={self.dose_unit!r} は rel / absmax / raw のどれかです")
@@ -228,9 +250,24 @@ class Recipe:
             if not isinstance(self.sampling, dict):
                 raise GneError("BAD_RECIPE", "sampling は {temperature, top_k, top_p, min_p, presence_penalty} の表です")
             self.sampling = sampling_values(self.sampling, seed=False)
+        if self.direction_layer not in ("own", "base"):
+            raise GneError("BAD_RECIPE", f"direction_layer={self.direction_layer!r} は own か base です")
+        if self.default_direction is not None and not re.fullmatch(r"[\w.\-]+", str(self.default_direction)):
+            raise GneError("BAD_RECIPE", f"default_direction の名前 {self.default_direction!r} が不正です")
         for u in self.units:
-            if u.mode not in ("add", "gain", "query", "route"):
-                raise GneError("BAD_RECIPE", f"{u}: mode は add / gain / query / route です")
+            if u.mode not in ("add", "gain", "query", "route", "proj"):
+                raise GneError("BAD_RECIPE", f"{u}: mode は add / gain / query / route / proj です")
+            if u.mode == "proj":                                          # CHANGE-06
+                if u.kind != "head" or u.head is None or u.k is None:
+                    raise GneError("BAD_RECIPE", f"{u}: proj はヘッドだけで、head と s が要ります"
+                                                 "(例 {layer: 33, kind: head, head: 16, mode: proj, direction: NAME, s: 6})")
+                if not (u.direction or self.default_direction):
+                    raise GneError("BAD_RECIPE", f"{u.label()}: proj には方向が要ります(ユニットの direction かレシピの default_direction)")
+                if u.direction is not None and not re.fullmatch(r"[\w.\-]+", u.direction):
+                    raise GneError("BAD_RECIPE", f"{u.label()}: 方向の名前 {u.direction!r} が不正です")
+                if not -100 <= u.k <= 100:
+                    raise GneError("BAD_RECIPE", f"{u.label()}: s は −100〜100 です(1 で方向成分が消え、2 で反転)")
+                continue
             if u.kind in ("expert_neuron", "expert", "shared"):           # MoE(CHANGE-05)
                 if u.kind != "shared" and u.expert is None:
                     raise GneError("BAD_RECIPE", f"{u}: 専門家の番号(expert)が要ります(例 12:E37:N511:+0.8)")
@@ -249,8 +286,8 @@ class Recipe:
                                                  "(例 {layer: 15, kind: head, head: 2, mode: query, direction: yandere, seek: yandere_react, scale: 1})")
                 continue
             if u.kind == "head" and (u.head is None or u.mode != "gain" or u.k is None):
-                raise GneError("BAD_RECIPE", f"{u}: ヘッドは gain だけで、head と k が要ります(例 {u.layer}:H7:x0)。"
-                                             "ヘッドは向きを持たないので add はできません(方向を足すなら L:dir:NAME:dose)")
+                raise GneError("BAD_RECIPE", f"{u}: ヘッドは gain か proj で、head と k(proj は s)が要ります(例 {u.layer}:H7:x0、"
+                                             f"{u.layer}:H7:s6@NAME)。ヘッドは向きを持たないので add はできません(方向を足すなら L:dir:NAME:dose)")
             if u.mode == "gain" and (u.kind not in ("neuron", "head") or u.k is None):
                 raise GneError("BAD_RECIPE", f"{u}: gain は neuron(またはヘッド)と k が要ります(例 {u.layer}:{u.neuron}:x2)")
             if u.kind == "neuron" and u.neuron is None:
@@ -270,6 +307,9 @@ class Recipe:
 _UNIT_RE = re.compile(r"^(\d+):(?:(\d+)|random:(\d+)|dir:([\w.\-@]+)|[Hh](\d+)):(x?)([+-]?[\d.]+(?:e[+-]?\d+)?)$", re.I)
 
 
+_PROJ_RE = re.compile(r"^(\d+):[Hh](\d+):s([+-]?[\d.]+(?:e[+-]?\d+)?)(?:@([\w.\-]+))?$", re.I)
+
+
 _MOE_RE = re.compile(r"^(\d+):(?:E(\d+)|(S)):(?:N(\d+):(x?)|(x)|(route):)([+-]?[\d.]+(?:e[+-]?\d+)?)$", re.I)
 
 
@@ -278,7 +318,12 @@ def parse_unit(spec: str) -> Unit:
     方向は "L:dir:NAME:dose"(gne direction で作った方向 NAME の r_L を層 L に足す、§6.17)、
     attention ヘッドの gain は "L:Hh:xk"(例 21:H7:x0、CHANGE-04)。
     MoE(CHANGE-05): 専門家のニューロンは "L:Ee:Nn:dose" / "L:Ee:Nn:xk"、専門家全体は "L:Ee:xk"(x0 で消す)、
-    ルーターバイアスは "L:Ee:route:delta"、shared expert のニューロンは "L:S:Nn:dose" / "L:S:Nn:xk"。"""
+    ルーターバイアスは "L:Ee:route:delta"、shared expert のニューロンは "L:S:Nn:dose" / "L:S:Nn:xk"。
+    ヘッドの方向成分の射影(CHANGE-06)は "L:Hh:sS@NAME"(例 33:H16:s15.4@tsundere_r)。@NAME を省くとレシピの default_direction。"""
+    mp = _PROJ_RE.match(spec.strip())
+    if mp:
+        L, h, sv, dname = mp.groups()
+        return Unit(int(L), None, 0.0, "head", mode="proj", k=float(sv), direction=dname, head=int(h))
     mm = _MOE_RE.match(spec.strip())
     if mm:
         L, e, shared, n, ngain, egain, route, val = mm.groups()
@@ -297,7 +342,8 @@ def parse_unit(spec: str) -> Unit:
     if not m:
         raise GneError("BAD_UNIT", f"ユニット指定 {spec!r} を読めません",
                        "L:N:dose(例 14:8949:+1.0)、L:random:SEED:dose、gain は L:N:x2(倍率)、方向は L:dir:NAME:dose、"
-                       "ヘッドは L:Hh:xk(例 21:H7:x0)、MoE は L:Ee:Nn:dose・L:Ee:xk・L:Ee:route:delta・L:S:Nn:dose")
+                       "ヘッドは L:Hh:xk(例 21:H7:x0)・方向成分の射影 L:Hh:sS@NAME(例 33:H16:s6@NAME)、"
+                       "MoE は L:Ee:Nn:dose・L:Ee:xk・L:Ee:route:delta・L:S:Nn:dose")
     L, n, seed, dname, head, gain, val = m.groups()
     if head is not None:
         if not gain:
@@ -317,10 +363,12 @@ def parse_unit(spec: str) -> Unit:
 def _unit_yaml(u: Unit) -> dict:
     d = {k: v for k, v in asdict(u).items() if v is not None and not (k == "kind" and v == "neuron")
          and not (k == "mode" and v == "add")}
-    if u.mode in ("gain", "query"):
+    if u.mode in ("gain", "query", "proj"):
         d.pop("dose", None)
     if u.mode == "query":
         d["scale"] = d.pop("k")
+    if u.mode == "proj":
+        d["s"] = d.pop("k")
     if u.mode == "route":
         d["delta"] = d.pop("dose")
     return d
@@ -398,13 +446,14 @@ def unit_details(weights, stats, recipe: Recipe, dirs: DirLoader | None = None) 
     方向のユニットは diff_rel = ‖平均差‖ / ρ_L(rel dose がこの値なら平均差と同じ大きさ)も返す。"""
     rows = []
     for u in recipe.units:
-        if u.mode in ("gain", "query", "route"):
+        if u.mode in ("gain", "query", "route", "proj"):
             rows.append({"layer": u.layer, "neuron": u.neuron, "kind": u.kind, "seed": None,
                          "dose": u.dose if u.mode == "route" else 0.0, "norm": 0.0,
                          "rel_push": None, "rho": None, "add": None, "down_norm": None, "mode": u.mode, "k": u.k,
                          **({"head": u.head} if u.kind == "head" else {}),
                          **({"expert": u.expert} if u.expert is not None else {}),
-                         **({"direction": u.direction, "seek": u.seek} if u.mode == "query" else {})})
+                         **({"direction": u.direction, "seek": u.seek} if u.mode == "query" else {}),
+                         **({"direction": u.direction or recipe.default_direction} if u.mode == "proj" else {})})
             continue
         v = unit_vector(weights, stats, u, recipe.dose_unit, dirs)
         norm = float(np.linalg.norm(v))

@@ -6,7 +6,9 @@ import { esc } from "./panels.js";
 
 export const KIND = { embed: tr("埋め込み"), connections: "connections", layout: tr("配置"), lens_logit: "logit lens", lens_steer: "steer lens", sweep_rank: "sweep", sweep: "sweep", rank: "rank",
                stats_resid: tr("残差の統計"), stats_act: tr("活性の統計"), reverse: tr("逆引き"), eval: "eval",
-               heads_contrast: tr("ヘッドの対照分析"), experts_contrast: tr("専門家の対照分析"), experts_sweep: tr("専門家の sweep") };
+               heads_contrast: tr("ヘッドの対照分析"), experts_contrast: tr("専門家の対照分析"), experts_sweep: tr("専門家の sweep"),
+               heads_causal: tr("因果スクリーニング"), heads_allocate: tr("強さの配分"), head_pipeline: tr("方向とヘッドの一括"), direction: tr("方向"),
+               heads_candidates: tr("強さの候補") };
 
 function eta(s) {
   if (s === null || s === undefined || !Number.isFinite(s)) return "";
@@ -24,6 +26,8 @@ function what(j) {
   if (p.layers !== undefined) bits.push(p.layers === "all" ? tr("全層") : `L${[].concat(p.layers).join(",")}`);
   if (p.design) bits.push(p.design);
   if (p.contrast) bits.push(String(p.contrast).split("/").pop());
+  if (p.spec && typeof p.spec === "object" && p.spec.name) bits.push(p.spec.name);            // head_pipeline(JSON の name)
+  if (j.kind === "heads_candidates" && p.alloc) bits.push(String(p.alloc).split("/").pop());
   if (j.kind === "eval") bits.push(p.name || p.recipe || tr("{n} ユニット", { n: (p.units || []).length }), ...(p.when && p.when !== "all" ? [`@${p.when}`] : []));
   if (p.neurons) bits.push(/^\d/.test(p.neurons) ? `N${p.neurons.replace("-", "–")}` : tr("ニューロン {s}", { s: p.neurons }));
   if (p.random_controls !== undefined) bits.push(tr("+ 対照 {n}", { n: p.random_controls }));

@@ -153,6 +153,7 @@ def heads_contrast(session, contrast: str | Path, *, name: str | None = None, di
     from .evalx import _generate
     t0 = time.perf_counter()
     cs, _ = load_contrast(contrast)
+    cs.require_systems("gne heads contrast")
     name = name or cs.name
     trig = load_triggers(contrast, cs)
     sys_b2 = system_b2 or (yaml.safe_load(Path(contrast).read_text(encoding="utf-8")) or {}).get("system_b2") or DEFAULT_SYSTEM_B2
@@ -305,8 +306,8 @@ def attention_view(session, text: str, *, pos: int = -1, layer: int | None = Non
     return out
 
 
-def parse_heads(spec: str, weights) -> list[tuple[int, int]]:
-    """"14:H0-3,16:H2,12:H*" → [(14, 0), (14, 1), …]。softmax の attention の層だけ。"""
+def parse_heads(spec: str, weights, *, any_mixer: bool = False) -> list[tuple[int, int]]:
+    """"14:H0-3,16:H2,12:H*" → [(14, 0), (14, 1), …]。softmax の attention の層だけ(any_mixer なら線形注意の層も)。"""
     import re
     out: list[tuple[int, int]] = []
     for part in [p.strip() for p in str(spec).split(",") if p.strip()]:
@@ -317,8 +318,9 @@ def parse_heads(spec: str, weights) -> list[tuple[int, int]]:
         if not 0 <= L < weights.meta.n_layer:
             raise GneError("BAD_ARGS", f"層 {L} は範囲外です")
         li = weights.arch.layers[L]
-        if li.mixer != "attention" or not li.head_dim:
-            raise GneError("BAD_ARGS", f"層 {L} は softmax の attention の層ではありません")
+        if not li.head_dim or not li.head_writer or (li.mixer != "attention" and not any_mixer):
+            raise GneError("BAD_ARGS", f"層 {L} は softmax の attention の層ではありません" if not any_mixer
+                           else f"層 {L} にはヘッドがありません")
         a = 0 if m.group(2) == "*" else int(m.group(2))
         b = li.n_head - 1 if m.group(2) == "*" else int(m.group(3) or a)
         if not 0 <= a <= b < li.n_head:
@@ -605,6 +607,7 @@ def query_vectors(session, L: int, h: int, *, direction: str, seek: str | Path, 
     li = w.arch.layers[L]
     lo, hi = q_rows(w, L, h)
     cs, _ = load_contrast(seek)
+    cs.require_systems("gne heads query")
     trig = load_triggers(seek, cs)
     if not any(trig):
         raise GneError("BAD_CONTRAST", f"{seek} に triggers がありません(探しに行く語が要ります)")
@@ -703,6 +706,7 @@ def check_query(session, L: int, h: int, *, direction: str, seek: str | Path,
     t0 = time.perf_counter()
     qv = query_vectors(session, L, h, direction=direction, seek=seek, frac=frac)
     cs, _ = load_contrast(seek)
+    cs.require_systems("gne heads query")
     trig = load_triggers(seek, cs)
     e = session.engine
     convs = []

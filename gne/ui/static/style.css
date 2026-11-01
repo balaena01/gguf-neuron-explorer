@@ -40,7 +40,7 @@ input::placeholder { color: #4a5464; }
 #layer-select, #jump { font-family: var(--mono); }
 #layer-select { max-width: 280px; }
 #color-select { max-width: 200px; }
-@media (max-width: 1760px) { #header .lbl { display: none; } }            /* 幅が足りなければ layer / layout / color / jump の字を省く(欄の title に残る) */
+@media (max-width: 1760px) { #header .lbl { display: none; } #views button { padding: 3px 5px; } }   /* 幅が足りなければ layer / layout / color / jump の字を省き(欄の title に残る)、ビューのボタンを詰める */
 @media (max-width: 1560px) { #layer-select { max-width: 170px; } #color-select { max-width: 140px; } #search-q { width: 130px; } }
 @media (max-width: 1340px) { #header { gap: 8px; } #layer-select { max-width: 140px; } #color-select { max-width: 120px; } #search-q { width: 100px; } #jump { width: 92px; } }
 #status { margin-left: auto; color: var(--muted); display: flex; min-width: 0; flex: 0 1 auto; justify-content: flex-end; gap: 10px; }
@@ -229,6 +229,7 @@ a:visited { color: #a9a3e0; }
 .ch-lens { font-size: 11px; color: var(--muted); margin: 4px 0 6px; line-height: 1.9; }
 .ch-log { border: 1px solid var(--line); border-radius: 4px; max-height: 52vh; overflow: auto; padding: 4px; background: #090c11; }
 .ch-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; }
+.ch-log.single .ch-row { grid-template-columns: minmax(0, 1fr); }
 .ch-head { position: sticky; top: -4px; background: #090c11; font-family: var(--mono); font-size: 12px; padding: 2px 0 4px; z-index: 1; }
 .ch-head > div { padding: 0 4px; }
 .ch-user { margin: 8px 2px 4px; font-size: 12px; color: #dfe6ee; }
@@ -320,6 +321,76 @@ input[type=range].dose::-moz-range-thumb { width: 12px; height: 12px; border-rad
 #layers-view { z-index: 10; }
 #eval-view { position: absolute; inset: 0; overflow-y: auto; overflow-x: hidden; background: #000; z-index: 10; padding: 0 12px 24px; }
 #writers-view { position: absolute; inset: 0; overflow-y: auto; overflow-x: hidden; background: #000; z-index: 10; padding: 0 12px 24px; }
+#direction-view { position: absolute; inset: 0; overflow-y: auto; overflow-x: hidden; background: #000; z-index: 10; padding: 0 12px 24px; }
+.dv-tools { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; padding: 10px 0 2px; }
+#dv-info { margin: 4px 0; color: #aeb9c8; }
+#dv-tip { margin: 6px 0; padding: 6px 10px; min-height: 40px; font-size: 12px; line-height: 1.6; color: #dfe6ee; background: #0b0f15;
+  border: 1px solid #1a212b; border-radius: 4px; }
+#dv-line { display: block; cursor: pointer; margin: 4px 0; }
+#dv-hist { display: block; margin: 4px 0; }
+table.dv-ex td.w { text-align: left; max-width: 520px; overflow: hidden; text-overflow: ellipsis; color: #9aa6b6; font-family: var(--sans); }
+table.dv-ex th:first-child { text-align: left; }
+/* direction ビューの「JSON から方向とヘッドを作る」(pipeline.js) */
+.dv-mode { padding: 10px 0 0; }
+#dv-pipe { max-width: 1180px; }
+.pp-help { margin: 8px 0 6px; max-width: 980px; }
+.pp-in, .pp-set, .pp-go, .pp-actions { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin: 6px 0; }
+.pp-set input[type=number] { width: 5.5em; }
+#pp-text { width: 100%; box-sizing: border-box; font-size: 12px; line-height: 1.45; resize: vertical; }
+#pp-check { margin: 4px 0; line-height: 1.6; }
+.pp-sum { color: #c9d6e6; }
+.pp-warn { color: #d9b36a; }
+#pp-status.err, #pp-check .err { color: #ff8a8a; }
+table.pp-past tbody tr.on td { background: #121923; }
+.pp-res { border-top: 1px solid #1a212b; margin-top: 12px; padding-top: 4px; }
+.pp-res h3 { font-size: 15px; font-weight: 500; margin: 8px 0 4px; }
+.pp-stage { border-top: 1px solid #141a22; margin-top: 10px; padding-top: 2px; }
+.pp-stage > h4 { color: #dfe6ee; font-weight: 500; }
+.pp-stage .muted.note { max-width: 980px; }
+h4.pp-sub { font-size: 12px; color: #aeb9c8; font-weight: 400; margin: 10px 0 2px; }
+.pp-chart { display: block; width: 100%; max-width: 760px; height: auto; margin: 4px 0; }
+.pp-chart text { font: 10px ui-monospace, monospace; fill: #6b7686; }
+.pp-ex { color: #c98a8a; font-family: var(--sans); }
+td.pp-moved { color: #f2d24b; }
+a.pp-head { color: #9fc4ff; text-decoration: none; white-space: nowrap; }
+a.pp-head:hover { text-decoration: underline; }
+table.pp-cmp td.units { max-width: 380px; }
+table.pp-cmp button + button { margin-left: 4px; }
+table.evx tr.rnd td { color: #687384; }
+/* 強さの候補(candidates.js)と、パイプラインの結果の「候補を作る」 */
+.pp-cand { border-top: 1px dashed #1f2630; margin-top: 12px; padding-top: 2px; }
+.pp-cand-q { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; max-width: 1180px; }
+.pp-cand-q textarea { width: 100%; box-sizing: border-box; font: 12px/1.45 var(--mono); resize: vertical; }
+#dv-cand { max-width: 1240px; }
+p.ok { color: #6fcf8f; }
+.cd-best { margin: 6px 0; padding: 6px 10px; background: #10201a; border: 1px solid #1e3a2a; border-radius: 4px; display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; }
+.cd-q { border-top: 1px solid #141a22; padding: 8px 0 4px; }
+.cd-prompt { color: #dfe6ee; margin: 2px 0 6px; }
+.cd-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 8px; }
+.cd-cell { background: #0b0f15; border: 1px solid #1a212b; border-radius: 4px; padding: 6px 8px; }
+.cd-lab { font-size: 11px; color: #9fc4ff; margin-bottom: 4px; }
+.cd-txt { white-space: pre-wrap; font-size: 12px; line-height: 1.5; color: #c9d1dc; max-height: 260px; overflow-y: auto; }
+.cd-score { max-width: 980px; }
+.cd-reply { white-space: pre-wrap; background: #0b0f15; border: 1px solid #1a212b; border-radius: 4px; padding: 10px 12px; margin: 6px 0 10px;
+  font-size: 13px; line-height: 1.6; max-height: 46vh; overflow-y: auto; }
+.cd-pc { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 6px 0; }
+.cd-pc-l { font: 600 13px var(--mono); color: #aeb9c8; margin: 0 4px 0 10px; cursor: help; }
+.cd-pc-l:first-child { margin-left: 0; }
+button.cd-sc { min-width: 34px; font: 13px var(--mono); }
+button.cd-sc.on { background: #1d2633; color: #fff; border-color: var(--accent); }
+.cd-bar { display: inline-block; width: 140px; height: 5px; background: #1f2630; border-radius: 3px; vertical-align: middle; overflow: hidden; }
+.cd-bar span { display: block; height: 100%; background: var(--accent); }
+.cd-rub pre { white-space: pre-wrap; font-size: 12px; color: #aeb9c8; background: #0b0f15; padding: 8px; border-radius: 4px; }
+/* CHANGE-06 G: eval ビューの方式の比較とヘッド数の曲線 */
+table.evx td.l, table.evx th.l { text-align: left; }
+table.evx td.desc { text-align: left; white-space: normal; max-width: 360px; color: #9aa6b6; font-family: var(--sans); }
+table.evx td.excl { text-align: left; white-space: normal; color: #8692a3; font-family: var(--sans); }
+table.evx tr.best td { background: #10201a; }
+table.evx tr.rec td { background: #121923; }
+table.evx td.units { text-align: left; white-space: normal; max-width: 300px; color: #9aa6b6; }
+.evx-scroll { overflow-x: auto; max-width: 100%; }
+.evx-notes { margin: 4px 0 8px; padding-left: 18px; color: #d9b36a; font-size: 12px; }
+#evx-nh { display: block; margin: 4px 0; }
 table.wrx tbody tr { cursor: pointer; }
 table.wrx tbody tr:hover { background: #121820; }
 .evx-tools { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; padding: 10px 0 2px; }
@@ -431,6 +502,15 @@ table.h-met tr { cursor: help; }
 .h-sample { margin: 3px 0; font-size: 12px; }
 table.h-top { table-layout: auto; width: auto; }
 table.h-top th, table.h-top td { padding-right: 10px; }
+.cz-tools { gap: 6px; align-items: center; }
+.cz-scroll { overflow-x: auto; max-width: 100%; }
+table.cz-top th[data-czsort] { cursor: pointer; }
+table.cz-top th.on { color: var(--accent); }
+table.cz-alloc td.w { max-width: 260px; white-space: normal; color: #9aa6b6; }
+table.cz-alloc tr.on td { background: #121923; }
+.badge.rank1 { border-color: #2f5b3e; color: #6fcf8f; }
+.badge.rankk { border-color: #6b5e22; color: #d9b36a; }
+#recipe-list tr.rc-proj select.rc-pdir { max-width: 110px; font-size: 11px; }
 #overlay span.mk-h { transform: translate(-50%, -50%); border: 2px solid; border-radius: 2px; box-sizing: border-box; }
 #overlay span.mk-h.plus { border-color: rgba(242, 210, 75, 0.95); }
 #overlay span.mk-h.minus { border-color: rgba(201, 79, 167, 0.95); }

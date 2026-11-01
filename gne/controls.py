@@ -50,8 +50,7 @@ def control_recipes(session, recipe: Recipe, n: int) -> list[Recipe]:
         ab = recipe.ablate
         if ab is not None:
             ab = AblateSpec(f"random-{SEED_BASE + j}", ab.scale, ab.layers, None)
-        out.append(Recipe(units, recipe.model_id, "rel", name=f"{recipe.name or 'recipe'}-random{j}", when=recipe.when,
-                          ablate=ab, sampling=recipe.sampling))
+        out.append(recipe.like(units, dose_unit="rel", name=f"{recipe.name or 'recipe'}-random{j}", ablate=ab))
     return out
 
 
@@ -79,9 +78,8 @@ def head_control_recipes(session, recipe: Recipe, n: int) -> list[Recipe]:
             cand = [x for x in pool[arch.layers[u.layer].mixer] if x not in taken]
             L, h = cand[int(rng.integers(len(cand)))]
             taken.add((L, h))
-            units.append(Unit(L, None, 0.0, "head", mode="gain", k=u.k, head=h))
-        out.append(Recipe(units, recipe.model_id, recipe.dose_unit, name=f"{recipe.name or 'recipe'}-randhead{j}",
-                          when=recipe.when, ablate=recipe.ablate, sampling=recipe.sampling))
+            units.append(Unit(L, None, 0.0, "head", mode=u.mode, k=u.k, head=h, direction=u.direction))
+        out.append(recipe.like(units, name=f"{recipe.name or 'recipe'}-randhead{j}"))
     return out
 
 

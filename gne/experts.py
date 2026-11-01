@@ -78,6 +78,7 @@ def experts_contrast(session, contrast: str | Path, *, name: str | None = None, 
     from .moe import moe_names, per_token, selected
     t0 = time.perf_counter()
     cs, _ = load_contrast(contrast)
+    cs.require_systems("gne experts contrast")
     name = name or cs.name
     sys_b2 = system_b2 or (yaml.safe_load(Path(contrast).read_text(encoding="utf-8")) or {}).get("system_b2") or DEFAULT_SYSTEM_B2
     e, w = session.engine, session.weights

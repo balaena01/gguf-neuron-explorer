@@ -1,6 +1,6 @@
 # 設計とのずれ
 
-現行コードが設計書(本体設計 `gguf-neuron-explorer-DESIGN.md`、別冊 UI 設計、変更指示 CHANGE-01〜04)と違うところの一覧。変更指示を当てる前に洗い出し(CHANGE-01 §0.1)、変更のたびに更新する。
+現行コードが設計書(本体設計 `gguf-neuron-explorer-DESIGN.md`、別冊 UI 設計、変更指示 CHANGE-01〜06)と違うところの一覧。変更指示を当てる前に洗い出し(CHANGE-01 §0.1)、変更のたびに更新する。
 
 設計書はリポジトリに含めていない(手元の `gguf-neuron-explorer-design-backup/` が正)。Phase 0〜5 で見つけたずれと設計への追記は、`docs/verification.md` の各「設計と違った点・設計への追記」節(F1〜F73)に理由つきで記録してある。ここでは変更指示に関係するものだけをまとめる。
 
@@ -17,6 +17,15 @@
 | CLI `serve` | `--port`、`--openai` | `--port`、`--host`、`--root` | `--openai` を足す(B) |
 | `--control-vector-scaled` の書き方(§7 の例) | `FILE 0.6` | この llama.cpp では `FILE:0.6`(F11) | 文書側の例を直す |
 | 逆引きの位置(CHANGE-02 §0.3) | `positions: last`(生成プロンプトの最終トークン) | `positions` は `all` / `last` / `assistant` | 既にある |
+
+### CHANGE-06 の前に確かめたこと(2026-11-01、CHANGE-06 §0)
+
+| 箇所 | 確かめたこと | 扱い |
+|---|---|---|
+| CHANGE-04 の前提 | ヘッドの住所(`L{l} H{h}`、kind `attn` / `linear`)、`Weights.head_block` / `head_write_matrix`、per-head 出力の捕捉(`attn.capture_attention`)、ヘッド gain の LoRA 書き出し(`gain.head_lora_tensors`)がある | そのまま使う |
+| `gne/direction.py` | `DirectionSet`(`raw` が層 → mean_A − mean_B、`unit(L)`)、`select_layer`、`behavior`、`response_directions`、`load_contrast`(`ContrastSet` と `Validate`) | 速い物差し(`Scorer`・`score`・`base_layer_of`・`set_base_layer`)は `direction.py` に足し、因果と配分は `gne/causal.py`、介入の形式と書き出しは `gne/headproj.py` に分けた |
+| 方向の保存形式 | `directions/<model_id>/<name>.npz` に層 0〜n_layer−2 の方向(最終層は行が間引かれるので無い) | `direction_layer: own` で方向の無い層(最終層)のヘッドは、それより前で一番近い層の方向を使う。基準層は npz の `base_layer` に書く |
+| `gne ablate` の LoRA 書き出し | ライターごとに `A = rᵀW`・`B = −r` を書く `write_ablation_lora` | 書き出しの本体を `ablate.write_lora_tensors(テンソル名 → (A, B))` に切り出し、ablate・方向成分の射影・因果スクリーニングの一時 LoRA で共用。`--via-f16` も `ablate.requant_via_f16(書き出す関数)` に切り出した |
 
 ## 2. 変更指示で生まれたずれ
 
@@ -105,3 +114,44 @@
 | 専門家の CPU への置き場所(CHANGE-05 0 項 5) | `tensor_buft_overrides` | 使わない(llama-cpp-python では `c_void_p` の「unused」)。試した 2 モデルは 12 GB に載る | |
 | shared expert の地図と番号(CHANGE-05 A・G) | shared expert は別の小シート、ニューロンは `L12 S N511` | レシピの `L:S:Nn`(add・gain)と統計の読み分けだけ。層の通し番号・sweep・lens・逆引き・UI の地図には入れない | shared expert の幅は専門家と違う(Qwen1.5-MoE は 5632 と 1408)ので、通し番号に混ぜると地図のタイルの並びが崩れる |
 | まだやっていないもの(CHANGE-05) | E.3 の hot な専門家のニューロンの gain スイープ、F の `eval --compare-ablation` の専門家の行、`gne bake`(control vector の bias 焼き付け)のパッチ経路 | 未着手。gain のスイープは `gne steer --unit L:Ee:Nn:xk` と eval で手で回せる。`gne bake` は列方向(bias)なのでパッチでは書けない | |
+| `gne direction score`(CHANGE-06 B) | `gne direction score --name … --contrast … --layers … --unit …` | そのとおり。`gne direction` をサブコマンドを持つグループにし、サブコマンドが無ければ従来の方向づくりとして動く(`--contrast` は実行時に必須)。`--contrast` を省くと方向を作った対照集合 | 既存の `gne direction --contrast …` を壊さないため |
+| 速い物差しの位置(B) | `positions="last"` | `last`・`last:K`(最後の K トークンの平均)・`assistant`(生成プロンプトのトークン)。`response` は無い(返事を生成するので「生成なし」にならない) | |
+| `score` の返り値(B) | `ScoreReport` | JSON にそのまま出せる dict(層ごとの A / B の mean・sd・n・max・min、cohen_d、cos_base、例ごとの点数、介入があれば drop と drift)。prefill は `select_layer` の `last_logprobs` と同じく 1 本ずつ、probe ctx で l_out を捕捉 | |
+| 基準層の記録(B) | cohen_d 最大の層を方向セットのメタに `base_layer` | 介入なし・`--layers` 省略のときに、まだ基準層が記録されていなければ記録する(`--record` で上書き、`--no-record` で記録しない、`--set-base L` で手で決める、UI の direction ビューでも)。基準層が無いまま `heads causal` などを呼ぶと、その場で測って記録する | 介入つきや層を絞った測定、測り直しで、手で決めた基準層が変わらないように |
+| 物差しの層の既定(C) | 基準層 + 後段 1〜2 層 | 基準層、基準層と方向の最後の層の中間、最後の層の 3 つ | 27B(64 層、基準層 38)で 38・50・62 になり、変更指示の例と同じ |
+| causal・contrib・ratio の層(C.3) | 例では基準層の値 | 主の層(`--primary`、既定は基準層)で出す。各行に全物差しの層の下がり方(`score_drop`)・寄与(`contrib_by_layer`)と、その最大 `causal_max` も入れ、表の既定の並びは `causal_max` | 基準層より後ろのヘッドは主の層では 0 なので、後段の層で取りこぼしを見るため |
+| 層単位のスクリーニング(C.1) | `screen_layers(…, mode="ablate")` | ablate だけ(marginal はヘッド単位)。層の全ヘッドを止める LoRA は階数 min(n_embd, n_in)(`−W = (−I)W`)で、大きいものは F16 の一時ファイル。一時 LoRA は `Engine.drop_lora` で解放してから消す | 何百個も当てると VRAM に残り続けるため |
+| B 側への影響(C.4) | ヘッドごとに B 側の点数の変化と直交成分のずれ | B 側は等間隔に選んだ `--b-examples`(既定 16)例で測る(0 で全部)。`--b-side-max` は除外の印(`excluded`)を付け、配分ではその行を使わない | 試行ごとに B 側を全部測ると時間が倍になるため |
+| 直接の寄与(C.1) | `r̂ᵀW` の列ブロックのノルム × per-head 出力の方向成分の平均 | 同じ値を r̂_Sᵀ W[:, blk_h] x_h の A 側・測定位置の平均として計算(S は物差しの層、S より後ろのヘッドは 0)。marginal でも無介入の状態で測る。`contrib:N` は、そのヘッドより後ろで一番前の物差しの層での寄与の上位 N | |
+| marginal の候補(C.2・D) | 記述なし(配分では「いまの組 + 効き目上位 30 個程度」) | `heads causal --mode marginal` も、候補を省けばいまの組 + 同じ名前の ablate の行の `causal_max` 上位 30 | |
+| 因果の保存(C.5) | `heads/<model_id>/<name>.causal.jsonl` | そのとおり。ablate と marginal の行が同じファイルに入り(同じ mode・同じヘッドの行は置き換え)、まとめ(物差しの層・主の層・無介入の点数・層単位の行・V28 の順位相関)は `<name>.causal.json` | |
+| 配分の最初の組(D) | 「現在の組を当てた状態で」 | `--base-recipe` が無ければ、ablate の行の上位 max(n_heads) 個に causal 比例で、A 側の平均が目標になるよう二分探索した組(手法のノート §3.5)。配るヘッドの方向は測っている方向 | |
+| 推す組(D) | 「残る件数」と「B 側のずれ」が同程度ならヘッド数が最小 | 目標に届いた組のうち、残る件数が最小 + max(1, A 側の 5%) 以内、その中で B 側の直交成分のずれが最小の 1.25 倍以内の組のヘッド数の最小。s の上限 30(UI のスライダーと同じ)。各組のレシピを `heads/<model_id>/<name>.alloc-n{n}.yaml` に書く | |
+| 効きにくい例(D) | `hard/<model_id>/<name>.json` に保存して再利用 | そのとおり。読み直すときはプロンプトの文で引き直す(subset を変えても使える) | |
+| 実行時の proj の LoRA(A・E.1) | — | `heads/<model_id>/proj-<鍵>.lora.gguf`(鍵 = ヘッド・s・方向の中身・direction_layer)を gain・ablate の LoRA と並べて当てる。`gne gain` / `gne headproj export` で書き出すときは、同じテンソルのヘッドの gain と A・B を連結して 1 つのファイルにする | 実行時は使い回し、書き出しは llama.cpp の `--lora` 1 つで済むように |
+| proj のユニット(A.2) | `33:H16:s15.4@tsundere_r`、`s` は `dose_unit` の影響を受けない | そのとおり(`Unit.k` に s を持ち、YAML は `s`)。`scaled`(eval の倍率・`--scale`)は s に掛ける。3 列チャットの − の列は s の符号を反転する。`--unit` で @NAME を省いたときは `headproj export --direction` か、`direction score` の `--name` | |
+| 焼き込みの記録(E.2) | `gne.patches` サイドカー | GGUF のメタデータ `gne.patches`(書き換えたテンソル・元の型・書いた型)と `gne.headproj`(ヘッド・s・方向の鍵)、ファイル `<out>.headproj.json`。変化量は元の重みに LoRA と同じ B @ A を足したもの。`--requant patch` は断る | CHANGE-05 の `.patches.json` は作業用コピーに当てたパッチの名前の一覧なので、形の違うものを入れない |
+| 一致の確認(E.3・V26) | 点数の差が物差しの分解能以内、最尤トークンが全例一致、ppl の差 < 0.5% | 分解能 = A∪B の点数の標準偏差の 1 割。比べるのは対照集合の A・B の全会話の最初のトークンと、eval のタスク集の ppl の文。最尤トークンは、分かれた例が LoRA 版で僅差(0.5 nats 未満、V9・V14 と同じ基準)なら合格。LoRA 版を測ってからモデルを閉じ、焼き込み版を読む | Q8_0 に量子化し直した丸めで、僅差の例が 1 つ分かれた(0.6B・GPU で 24 例中 1 例、F16 なら一致)。大きいモデルでも 1 つずつ載せるため |
+| eval の方向の指標(F.1) | `drift_par` / `drift_orth`(A 側・B 側) | 方向を使うレシピ(proj・方向のユニット・ablate)で、方向を作った対照集合の A / B を基準層と最後の層で測る。行に平らに出す値(`dir_drop_a`・`drift_*`)は最後の層のもの。対照集合に `validate.match` があれば A 側の判定の一致率 `rate` も(外から見える指標) | |
+| proj のランダム対照(F.2) | 同数のヘッドをランダムに、s の分布は元の組と同じ | 元の組の s の値をそのままランダムなヘッドに当てる(方向は同じ名前、own なら新しいヘッドの層の方向)。母集団の既定は物差しの最後の層までの全ヘッド(`--control-pool same-layers` で同じ層)。null_pct は `dir_null_pct`・`rate_null_pct`・`drift_orth_b_null_pct`。V29 の明示は `rate_null_pct`(無介入の一致率が 0 なら `dir_null_pct`)が 0.95 未満のとき行の `notes` と全体の `notes` | 無介入の一致率が 0 だと一致率は下がりようが無いため |
+| 方式の比較(F.3) | `gne eval --compare-methods`、`--match-effect <target>` で全体倍率を二分探索 | 比べる基準は proj のレシピ。目標は `--match-effect`(A 側の点数)か、省けばこのレシピの水準。全層射影は基準層の r を scale α(≤ 1.5)で、ヘッドの丸ごと倍率は同じヘッドを k_h = 1 − α·s_h(α ≤ 2)、ニューロンは物差しの層までの方向に書く上位 `--top-neurons` 個を k = 1 − α(α ≤ 1)。物差しの層は、組の最も後ろのヘッドより後ろの最初の既定の層。結果は `evals/<名前>-compare-methods.json`(コマンドの JSON は eval) | |
+| ヘッド数の削減曲線(F.4) | `--n-heads 6,5,4,3` で各組を評価 | `gne eval --alloc <配分の名前> --n-heads 6,5,4,3`。配分で作った組のレシピを倍率 1 で評価する(無介入の測定は 1 回だけ)。結果は `evals/<名前>-nheads.json` | ヘッド数ごとの s は配分(効率)で決まるので、配分の結果から作る |
+| MCP(H) | `headproj_export(recipe, bake=False)`、`eval(recipe, compare_methods=True, random_controls=N)` | そのとおり(bake はジョブ)。`eval` に `alloc`・`n_heads`・`match_effect`・`score_layer`・`control_pool` も | |
+| 手法の説明(K) | `head-component-steering.md` を `docs/` に入れ、README から参照 | `docs/head-component-steering.md`。実測値の例はこのリポジトリで測った値(verification.md §20)にし、最後に gne のコマンドとの対応(§9)を足した | |
+| 性能の記録(J) | モデルサイズごとに | 0.6B(CPU)だけ測った(docs/measurements.md)。GPU は別の処理が使っていたので、GPU と 27B はまだ | |
+| UI の HEAD パネル(CHANGE-06 G) | Causal タブ: contrib / causal / ratio / 効率 / B 側への影響、ソートと score_layers の切り替え | そのとおり(`heads.js`)。そのヘッドの ablate・marginal の行と順位、分析のヘッドの表(causal_max / causal / contrib / ratio / η で並べ替え、物差しの層の切り替え、行をクリックでそのヘッドを開く)、層単位の行(畳める)、配分の表(行ごとに「レシピに読み込む」)、地図の色を causal / η にするボタン。見出しに「射影 s1 レシピ」(`L:Hh:s1@方向` を足す) | |
+| UI の recipe タブ(G) | proj の行(`L33 H16 s15.4 @tsundere_r`)、s のスライダー 0〜30・刻み 0.1、方向の選択、階数が 1 に畳めているか | そのとおり(`recipe.js`)。層ごとに「階数 1 / 階数 k」の印。`default_direction` を使う行も読み込む。− の列は s の符号を反転。`direction_layer: base` は読み込み・保存では保つが、3 列チャットと「いまのレシピを eval」はユニットの文字列だけを送るので own で当たる(タブにそう書いてある) | チャットと eval のジョブがユニットの文字列だけを受けるため |
+| UI の overlay(G) | `causal:<name>`・`eta:<name>`、凡例で `heads:<name>` と区別 | そのとおり(`overlay.js`)。causal は causal_max、符号つき(正 = 黄、負 = マゼンタ)、除外の印のヘッドは別の色。凡例は「止めたときの下がり方 / 効率」で、対照分析の z(`heads:<name>`)と分けた。ツールチップに causal・contrib・ratio・η・順位 | |
+| UI の direction ビュー(G) | layers ビューの隣に、層ごとの cohen_d の折れ線、基準層、後段の層の方向とのコサイン、A/B のヒストグラム、基準層の上書き | そのとおり(`direction.js`、`/api/directions`・`/api/directions/{name}/score`)。開くと測る。基準層がもう記録されていれば `record_base=False` で測る(開いただけで手で決めた基準層を上書きしない)。基準層とのコサインは保存した方向のベクトルから計算し、層をクリックするとその層の例ごとの点数の表とヒストグラム | |
+| UI の eval ビュー(G) | 直交成分のずれの列、方式比較の表、ヘッド数の削減曲線 | そのとおり(`eval.js`)。方向の指標の列(A 側の下がり方・A / B の直交成分・一致率とその減少・対照があれば null)、`notes`、倍率ごとの層別の表。方式の比較は除外の理由つきの表(B 側の直交成分が最小の方式を強調)、ヘッド数の曲線は能力の低下・B 側の直交成分・残る件数の 3 つの小さな図。どちらも行から「レシピに読み込む」 | |
+| レシピで A / B を作る対照集合(追加) | 対照集合は system_a / system_b の違いで A と B を作る | 対照集合に `recipe_a` / `recipe_b` を書けるようにした(レシピ YAML のパス、保存したレシピの名前、ユニットのリスト、レシピと同じ形の表)。その側ではレシピのユニットを全位置に当てて読ませる(add は control vector、gain・ヘッドは LoRA。専門家全体の gain と route は断る)。system を省いた側は system なしの会話。方向づくり(`gne direction` の last / all / assistant / response、`gne reverse`)、物差し(`direction score`・`heads causal`・`heads allocate`・eval の方向の指標)、層選び・判定(`--select auto`・`behavior`・`steer --contrast`)が側のレシピを当てて測り、調べる介入はその上に重ねる。同じ返事を 2 つの system で読ませる道具(heads contrast・heads query・writers・experts contrast)は `BAD_CONTRAST` で断る。レシピの `when` は使わない(全位置) | ニューロンのレシピが作った振る舞いについて、方向と、それを運ぶヘッドを探すため(verification.md §20.10)。プロンプトを読むだけの測定では、生成する位置だけに当てる `when` は意味を持たない |
+| JSON 1 つから最後まで(追加) | 方向・物差し・因果・配分は別々のコマンド | `gne heads pipeline --spec <JSON か YAML>`(MCP `heads_pipeline`、ジョブ `head_pipeline`、UI の direction ビュー)。spec は対照集合の中身に任意の `pipeline`(target・n_heads・hard・top_layers・max_examples・s_max・positions・score_positions・direction_layer)。対照集合は `<root>/contrasts/<name>.yaml` に書き、方向・因果・配分は `<name>` で保存し、まとめを `<root>/heads/<model_id>/<name>.pipeline.json` に書く | 質問を何百個も用意して、ボタン 1 つで因果のあるヘッドと強さまで出したいため |
+| 止めて測る段階の質問の間引き(追加) | 記述なし(変更指示 J は「遅ければ例数と測定位置を削る」) | 物差し・因果・配分に `max_examples`(CLI `--max-examples`)。subset のあと等間隔に間引く。pipeline の既定は 64(方向づくりには全部の質問を使う) | 試行ごとに使う質問を全部読ませるので、何百問では 1 試行が十数秒を超えるため |
+| モデルを壊すだけの層とヘッドを外す(追加) | `--b-side-max` で B 側の点数を動かすヘッドを除く | `heads causal` の `drift_max`(既定 0.5): 止めると中立の側の残差の直交成分が自分の大きさの 0.5 倍を超えて動く層は自動の層選びで選ばず(`excluded: "breaks"`)、そういうヘッドは配分の候補から外す(`excluded: true`)。配分の効率の段階でも同じ | 最初の層のヘッドを全部止めると、A と B の区別ごとモデルが壊れて点数が大きく動き、自動の層選びの上位を占めた(0.6B の L0 でずれ 1.15、ふつうの層は 0.2 前後、4B でも L0 が上位に入った) |
+| pipeline の目標の既定(追加) | 手法のノートは「B 側の点数と同じ高さ」が出発点 | pipeline で目標を省くと、物差しの最後の層での A 側と B 側の平均の真ん中。「残る」の数もこの目標を超える例で数える(`heads allocate` 単体の既定は今までどおり 0) | 後段の層では B 側の平均がかなり遠く(0.6B の evil の L26 で A +103、B −75)、s の上限 30 では届かないことがあったため |
+| UI から流す(追加) | — | direction ビューの 2 つめのタブ「JSON から方向とヘッドを作る」。JSON(貼り付け・ファイル・ひな形)を読み、名前・質問の数・A / B の作り方を確かめてから `head_pipeline` のジョブを投げる(30 分を超える見積もりは確かめてから)。結果は 4 段階(方向と基準層、因果、最初の比率、効率での配り直し)を説明つきで並べ、組ごとに「レシピに読み込む」「eval する」。`/api/pipelines`・`/api/pipelines/{name}`。ファイルは JSON だけ(ブラウザに YAML の読み手が無い) | |
+| UI のテストの GPU(追加) | — | `tests/test_ui.py` に、テストが作った Session をそのテストの終わりに閉じる autouse の fixture を足した(サーバのある fixture は、ジョブを止めて GPU の調停を待ってから閉じる) | 閉じない Session が GPU に残り、ファイルの途中で 12 GB に達して後半のブラウザのテストが遅く・不安定になっていたため(最大 12 GB → 5.3 GB、15.5 分 → 2.6 分) |
+| system が片方だけの対照集合(追加) | system_a と system_b の両方が要る | どちらか片方だけでもよい(省いた側は同じ質問を system なしで読む)。両方とも無く、レシピも無ければ断る。同じ返事を 2 つの system で読ませる道具(heads contrast など)は、両方の system が要るので断る | 「その性格」と「ふだんどおりのモデル」を比べたいことが多いため |
+| 側ごとに別の質問を読む対照集合(追加) | A と B は同じ user_prompts を読む | `prompts_a` / `prompts_b` を書くと、側ごとに別の質問を読む(数は違ってよい。片側だけ書けばもう片側は user_prompts)。system もレシピも無くてよい(何もしないモデルに 2 種類の質問を読ませる)。方向づくり・物差し(A と B を別々に間引く)・因果・配分・pipeline・UI の JSON が側ごとの質問を使う。validate.prompts を書いていないとき、消して下がるか(ablate)は A 側の質問で、足して上がるか(add)は B 側の質問で見る。同じ質問を 2 つの system で読ませる道具(heads contrast など)は断る | 質問の種類の違い(言語・話題・形式)そのものから方向を作りたいため。質問が違うと狙った違い以外の差も方向に混ざるので、例(`configs/contrast/ja_vs_en.yaml`)は中身をそろえてある |
+| 強さの候補づくり(追加) | 強さは生成なしの物差しで決め、生成を伴う eval は確定候補だけ | `gne heads candidates --alloc <配分>`(MCP `heads_candidates`、ジョブ `heads_candidates`、UI のパイプラインのタブ): 比較表の組 × 全体の倍率(既定 0.5・0.75・1・1.25)と無介入で、両側の質問に同じ種のサンプリングで返事を作る。正の倍率は A 側を、負の倍率は B 側を、どの候補か伏せて `<名前>.cand/round_01.txt` に並べ(鍵は `round_01.key.json`、基準は `RUBRIC.md`)、`--tally`(MCP `heads_candidates_tally`)で P・C と目的の点(消す向き min(6 − P, C)、強める向き min(P, C))を候補ごとに集計する。作り直すと前の採点は退避する。`--with-recipe` は全候補(無介入も)に重ねるレシピ | 方向に沿った点数は、返事に出る振る舞いの強さ・自然さとずれることがあり、最後の倍率は返事を読んで決めたいため。倍率を自動で細かく探すより、少数の候補を名前を伏せて読むほうが、採点の揺れに対して確か |
+| UI のチャットの 1 列(追加) | 3 列チャット(−・無介入・+) | チャットの上の切り替えで 1 列にすると、+ の列(レシピありか、ニューロンを + で押した返事)だけを生成する。選んだ列の数はブラウザに覚える。履歴は列ごとなので、列の数を変えるときは確かめてから会話を消す | レシピを読み込んで、比べずに普通に話したいことが多いため。生成が 3 分の 1 で済む |

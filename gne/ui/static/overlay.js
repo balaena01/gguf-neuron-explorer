@@ -3,6 +3,8 @@
 // 光る点が全体の 2% を超えるときは、全層で同じ係数で a を下げる(emphasize、F39)。
 // CHANGE-05 G: MoE の層の専門家ごとの値(expert_usage = 選択率、experts:<name> = 専門家の対照分析の z)。値は専門家の全ニューロンに同じ
 // (地図ではタイルごとの色になる)。
+// CHANGE-06 G: 因果スクリーニング(gne heads causal)のヘッドの色。causal:<name> = 止めたときの A 側の点数の下がり方(ablate の
+// causal_max)、eta:<name> = s を上げたときの効率 η(marginal)。heads:<name>(CHANGE-04 の対照の z)とは別の量で、板の上辺の帯に塗る。
 import { t } from "./i18n.js";
 import { COLORS } from "./map.js";
 
@@ -23,6 +25,8 @@ export function fieldLabel(name) {
   if (name.startsWith("cos:")) return t("逆引き {d} との cos", { d: name.slice(4) });
   if (name.startsWith("writers:")) return t("書き手 {d} の寄与", { d: name.slice(8) });
   if (name.startsWith("heads:")) return t("ヘッドの対照 {d} の z", { d: name.slice(6) });
+  if (name.startsWith("causal:")) return t("ヘッドの因果の効き {d}(止めたときの下がり方)", { d: name.slice(7) });
+  if (name.startsWith("eta:")) return t("ヘッドの効率 η {d}(s を上げたときの下がり方 ÷ Δs)", { d: name.slice(4) });
   if (name.startsWith("experts:")) return t("専門家の対照 {d} の z", { d: name.slice(8) });
   if (name === "fires_heads") return t("ヘッドの注目(fires の選んだトークンへ)");
   if (name.startsWith("search:")) return t("検索「{q}」", { q: name.slice(7) });
@@ -30,11 +34,21 @@ export function fieldLabel(name) {
   return FIELDS[name] ? FIELDS[name].label : name;
 }
 
+// ヘッドの帯を塗る overlay の種類(heads:<name>・causal:<name>・eta:<name>)。それ以外は null
+export function headField(name) {
+  const k = String(name || "").split(":")[0];
+  return ["heads", "causal", "eta"].includes(k) && name.length > k.length + 1 ? k : null;
+}
+
 // この overlay のデータがある層(model の coverage と名前から)
 export function layersWith(name, model) {
   const cov = model.coverage;
   if (name === "none" || name.startsWith("search:") || name.startsWith("fires:")) return [];
   if (name.startsWith("heads:")) return ((model.heads || []).find((h) => h.name === name.slice(6)) || {}).layers || [];
+  if (name.startsWith("causal:") || name.startsWith("eta:")) {
+    const c = (model.causal || []).find((x) => x.name === name.slice(name.indexOf(":") + 1));
+    return c ? (c.layers || {})[name.startsWith("eta:") ? "marginal" : "ablate"] || [] : [];
+  }
   if (name.startsWith("cos:")) return cov.filter((c) => c.directions.includes(name.slice(4))).map((c) => c.layer);
   if (name.startsWith("writers:")) return ((model.writers || []).find((w) => w.name === name.slice(8)) || {}).layers || [];
   if (name.startsWith("experts:")) return ((model.experts || []).find((x) => x.name === name.slice(8)) || {}).layers || [];
@@ -143,6 +157,9 @@ export function colorizeHits(n, hits) {
 // heads:<name>: 対照(中立どうし)の z の 95% 点を超えたヘッド(null_pct ≥ 0.95)を琥珀に、明るさ = z(光るヘッドの最小〜最大)。
 // fires_heads: 選んだトークンへの注目(後ろの位置からの平均)。明るさ = √(値 / 全ヘッドの最大)、最大の 5% 以上を光るとして数える
 export const HEAD_IDLE = [44, 52, 66];
+export const HEAD_EXCLUDED = [64, 112, 124];          // eta:<name> で B 側の変化が大きく配分から外したヘッド
+// causal / eta: 符号つき。正(止めると・強めると A 側の点数が下がる)は黄、負は赤紫、明るさ = √(|値| / 全ヘッドの最大)。
+// 最大の 10% 以上を光るとして数える。opt.excluded: 外したヘッドの印(Uint8Array(n_head))
 export function colorizeHeads(kind, v, opt = {}) {
   const out = new Uint8Array(v.length * 3);
   let lit = 0;
@@ -154,6 +171,13 @@ export function colorizeHeads(kind, v, opt = {}) {
         const f = x / Math.max(opt.max || 0, 1e-9);
         rgb = lerp(HEAD_IDLE, AMBER_HI, Math.sqrt(clamp01(f)));
         if (f >= 0.05) lit++;
+      } else if (kind === "causal" || kind === "eta") {
+        const f = Math.abs(x) / Math.max(opt.max || 0, 1e-9);
+        if (opt.excluded && opt.excluded[h]) rgb = HEAD_EXCLUDED;
+        else {
+          rgb = lerp(HEAD_IDLE, x >= 0 ? COLORS.plus : COLORS.minus, Math.sqrt(clamp01(f)));
+          if (f >= 0.1) lit++;
+        }
       } else if ((opt.nullPct ? opt.nullPct[h] : 0) >= 0.95) {
         rgb = lerp(AMBER_LO, AMBER_HI, clamp01((x - opt.lo) / Math.max(opt.hi - opt.lo, 1e-6)));
         lit++;
@@ -209,6 +233,18 @@ export function legendHTML(name, scale, opt = {}) {
   }
   if (name.startsWith("heads:")) {
     return none + it(sw(HEAD_IDLE), t("対照の 95% 以下")) + ramp(AMBER_LO, AMBER_HI, t("z {a}〜{b}(対照の 95% 超)", { a: fmt(scale.lo, 1), b: fmt(scale.hi, 1) })) +
+      it(t("色 = 板の上辺のヘッドの帯"));
+  }
+  if (name.startsWith("causal:")) {
+    return none + ramp(HEAD_IDLE, COLORS.plus, t("止めると A 側の点数が下がる 0〜{m}", { m: fmt(scale.max, 2) })) +
+      it(sw(COLORS.minus), t("止めると上がる")) +
+      it(t("値 = ヘッドの出力を 0 にしたときの方向の点数の下がり方(物差しの層の最大、causal_max)。対照の z(ヘッドの対照)とは別物")) +
+      it(t("色 = 板の上辺のヘッドの帯"));
+  }
+  if (name.startsWith("eta:")) {
+    return none + ramp(HEAD_IDLE, COLORS.plus, t("η 0〜{m}", { m: fmt(scale.max, 2) })) + it(sw(COLORS.minus), t("負(強めると上がる)")) +
+      it(sw(HEAD_EXCLUDED), t("B 側の変化が大きく外した")) +
+      it(t("η = いまの組から s を Δs 上げたときの、効きにくい例での下がり方 ÷ Δs(L{L})。対照の z とは別物", { L: scale.primary ?? "—" })) +
       it(t("色 = 板の上辺のヘッドの帯"));
   }
   if (name === "fires_heads") {

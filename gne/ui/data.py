@@ -49,6 +49,7 @@ class UIData:
         self._cache: dict = {}
         self._locks: dict = {}
         self._guard = threading.Lock()
+        self._guard_scores = threading.Lock()   # 候補の採点のファイルは 1 つずつ書く
 
     # --- キャッシュ(キーごとのロック。ファイルの更新時刻が変わったら読み直す) --------------------------------
     def _get(self, key, paths: list[Path], build):
@@ -498,7 +499,223 @@ class UIData:
                 sm = {}
             c["floors"] = sm.get("floors")
             c["direction"] = sm.get("direction")
+        try:
+            d["causal"] = self.head_causal(L, h)
+        except (OSError, ValueError, GneError):
+            d["causal"] = []
         return d
+
+    # --- CHANGE-06 G: 因果スクリーニング(gne heads causal)と強さの配分(gne heads allocate) ------------------------
+    def _causal_paths(self, name: str) -> tuple[Path, Path, Path]:
+        from ..causal import causal_paths
+        if not re.fullmatch(r"[\w.\-]+", name or ""):
+            raise GneError("BAD_ARGS", f"因果スクリーニングの名前 {name!r} が不正です")
+        pj, ps = causal_paths(self.s, name)
+        return pj, ps, pj.with_name(f"{name}.alloc.json")
+
+    def causal_rows(self, name: str) -> list[dict]:
+        """<name>.causal.jsonl の全行(ablate と marginal)。"""
+        from ..causal import load_causal
+        pj, _, _ = self._causal_paths(name)
+        return self._get(("causal_rows", name), [pj], lambda: load_causal(self.s, name) if pj.exists() else [])
+
+    def causal_summary(self, name: str) -> dict | None:
+        _, ps, _ = self._causal_paths(name)
+        return self._get(("causal_sum", name), [ps], lambda: json.loads(ps.read_text(encoding="utf-8")) if ps.exists() else None)
+
+    def causal_alloc(self, name: str) -> dict | None:
+        """gne heads allocate の結果(<name>.alloc.json)。無ければ(読めなければ)None。"""
+        _, _, pa = self._causal_paths(name)
+
+        def build():
+            try:
+                return json.loads(pa.read_text(encoding="utf-8")) if pa.exists() else None
+            except ValueError:
+                return None
+        return self._get(("causal_alloc", name), [pa], build)
+
+    def causal_list(self) -> list[dict]:
+        """保存済みの因果スクリーニング(新しい順)。地図の overlay causal:<name>(ablate)・eta:<name>(marginal)と
+        HEAD パネルの Causal に使う。モードごとの層と行の数、配分の結果があるかも添える。"""
+        from ..causal import list_causal
+        out = []
+        for x in list_causal(self.s):
+            try:
+                rows = self.causal_rows(x["name"])
+            except (OSError, ValueError, GneError):
+                continue
+            layers: dict[str, set] = {}
+            for r in rows:
+                layers.setdefault(r.get("mode") or "ablate", set()).add(int(r["layer"]))
+            al = self.causal_alloc(x["name"])
+            out.append({**x, "modes": sorted(set(x.get("modes") or []) | set(layers)),
+                        "layers": {m: sorted(v) for m, v in layers.items()},
+                        "n_rows": {m: sum(1 for r in rows if (r.get("mode") or "ablate") == m) for m in layers},
+                        "alloc": al is not None, "recommended": al.get("recommended") if al else None})
+        out.sort(key=lambda x: x.get("updated") or "", reverse=True)
+        return out
+
+    def causal_one(self, name: str) -> dict:
+        """1 つの因果スクリーニング: まとめ(.causal.json)、全ヘッドの行、配分の結果(あれば)。"""
+        s = self.causal_summary(name)
+        rows = self.causal_rows(name)
+        if s is None and not rows:
+            raise GneError("NOT_FOUND", f"因果スクリーニング {name} がありません", "gne heads causal で作れます")
+        s = s or {}
+        return {"name": name, "direction": s.get("direction"), "score_layers": s.get("score_layers"), "primary": s.get("primary"),
+                "base_scores": s.get("base_scores"), "layer_rows": s.get("layer_rows") or [],
+                "modes": sorted(set((s.get("modes") or {}).keys()) | {r.get("mode") or "ablate" for r in rows}),
+                "spearman_ablate_marginal": s.get("spearman_ablate_marginal"), "updated": s.get("updated"),
+                "n_a": s.get("n_a"), "n_b": s.get("n_b"), "rows": rows, "alloc": self.causal_alloc(name)}
+
+    def head_causal(self, L: int, h: int) -> list[dict]:
+        """開いたヘッドの、保存済みの因果スクリーニングごとの行(ablate・marginal)と、そのモードでの順位。"""
+        out = []
+        for x in self.causal_list():
+            rows = self.causal_rows(x["name"])
+            mine = [r for r in rows if r["layer"] == L and r["head"] == h]
+            if not mine:
+                continue
+            rank = {}
+            for r in mine:
+                m = r.get("mode") or "ablate"
+                key = "eta" if m == "marginal" else "causal_max"
+                same = sorted((y for y in rows if (y.get("mode") or "ablate") == m), key=lambda y: -(y.get(key) or 0))
+                rank[m] = {"rank": 1 + next(i for i, y in enumerate(same) if y is r), "n": len(same)}
+            s = self.causal_summary(x["name"]) or {}
+            out.append({"name": x["name"], "direction": x.get("direction"), "primary": x.get("primary"),
+                        "score_layers": x.get("score_layers"), "base_scores": s.get("base_scores"), "rows": mine, "rank": rank})
+        return out
+
+    # --- CHANGE-06 G: 方向(gne direction)の速い物差し。direction ビュー・recipe タブの proj の方向 ------------------
+    def directions_list(self) -> list[dict]:
+        """gne direction で作った方向セット(逆引きの方向は入れない)。基準層(gne direction score で記録したもの)など。"""
+        from ..direction import base_layer_of
+        d = self.s.store.direction_dir(self.s.meta.model_id)
+        out = []
+        for p in sorted(d.glob("*.npz")):
+            if p.name.endswith(".tmp.npz"):
+                continue
+            name = p.name.split(".")[0]
+            try:
+                ds = self.s.direction_set(name)
+            except (OSError, ValueError, KeyError, GneError):
+                continue
+            if ds.path.resolve() != p.resolve():                 # 同じ名前の逆引きの方向など
+                continue
+            src = ds.meta.get("source")
+            out.append({"name": name, "layers": sorted(ds.raw), "base_layer": base_layer_of(ds),
+                        "positions": ds.meta.get("positions"), "base_positions": ds.meta.get("base_positions"),
+                        "method": ds.meta.get("method"), "source": src, "contrast_ok": bool(src) and Path(str(src)).exists(),
+                        "n": {"A": ds.meta.get("n_rows_A"), "B": ds.meta.get("n_rows_B")}})
+        return out
+
+    def direction_one(self, name: str) -> dict:
+        """方向セット 1 つ: 一覧の項目に、層どうしの方向の cos(行列)と、層ごとの mean_A − mean_B の長さ。モデルは使わない。"""
+        if not re.fullmatch(r"[\w.\-]+", name or ""):
+            raise GneError("BAD_ARGS", f"方向の名前 {name!r} が不正です")
+        it = next((x for x in self.directions_list() if x["name"] == name), None)
+        if it is None:
+            raise GneError("NOT_FOUND", f"方向 {name} がありません", "gne direction --contrast <対照集合> で作れます")
+        ds = self.s.direction_set(name)
+
+        def build():
+            Ls = sorted(ds.raw)
+            U = np.stack([ds.unit(L) for L in Ls]).astype(np.float64)
+            return {"cos": np.round(U @ U.T, 5).tolist(), "norm": [float(np.linalg.norm(ds.raw[L])) for L in Ls]}
+        return {**it, **self._get(("direction_cos", name), [ds.path], build)}
+
+    def recipe_extras(self, name: str) -> dict:
+        """保存したレシピの、proj のユニット(CHANGE-06)が使う方向の既定(default_direction)と方向の層(direction_layer)。"""
+        import yaml
+        p = self.s.store.recipes_dir() / f"{name}.yaml"
+
+        def build():
+            try:
+                d = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+            except (OSError, ValueError, yaml.YAMLError):
+                d = {}
+            return {"default_direction": d.get("default_direction") or None, "direction_layer": str(d.get("direction_layer") or "own")}
+        return self._get(("recipe_extras", name), [p], build)
+
+    # --- 方向とヘッドの一括(head_pipeline のジョブ、Session.heads_pipeline): direction ビューの「JSON から作る」 ----------
+    def _pipeline_path(self, name: str) -> Path:
+        if not re.fullmatch(r"[\w.\-]+", name or ""):
+            raise GneError("BAD_ARGS", f"名前 {name!r} が不正です")
+        return self.s.store.heads_dir(self.s.meta.model_id) / f"{name}.pipeline.json"
+
+    def _pipeline(self, name: str, p: Path) -> dict:
+        return self._get(("pipeline", name), [p], lambda: json.loads(p.read_text(encoding="utf-8")))
+
+    def pipelines_list(self) -> list[dict]:
+        """保存済みの一括の結果(新しい順): 名前・質問の数・推す組・目標・かかった時間・更新時刻。"""
+        import time
+        d = self.s.store.heads_dir(self.s.meta.model_id)
+        out = []
+        for p in sorted(d.glob("*.pipeline.json"), key=lambda q: -q.stat().st_mtime):
+            name = p.name[:-len(".pipeline.json")]
+            try:
+                x = self._pipeline(name, p)
+            except (OSError, ValueError):
+                continue
+            out.append({"name": name, "n_prompts": x.get("n_prompts"), "recommended": x.get("recommended"),
+                        "target": x.get("target"), "seconds": x.get("seconds"),
+                        "updated": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(p.stat().st_mtime))})
+        return out
+
+    def pipeline_one(self, name: str) -> dict:
+        """一括の結果 1 件。入力に使った対照集合(<root>/contrasts/ に保存したもの)が読めれば spec として添える
+        (UI の入力欄に戻して、設定を変えて流し直すため)。"""
+        import time
+
+        import yaml
+        p = self._pipeline_path(name)
+        if not p.exists():
+            raise GneError("NOT_FOUND", f"一括の結果 {name} がありません", "direction ビューの「JSON から方向とヘッドを作る」で作れます")
+        x = self._pipeline(name, p)
+        spec = None
+        c = Path(str(x.get("contrast") or ""))
+        try:
+            if c.suffix in (".yaml", ".yml") and c.exists() and c.resolve().parent == self.s.store.contrast_dir().resolve():
+                spec = yaml.safe_load(c.read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError):
+            spec = None
+        return {**x, "path": str(p), "spec": spec, "updated": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(p.stat().st_mtime))}
+
+    # --- 強さの候補(heads_candidates のジョブ、Session.heads_candidates): direction ビューの「強さの候補」 -------------
+    def _candidates_name(self, name: str) -> str:
+        """名前だけを受け付ける(Session.candidates_path はパスも受けるので、UI からはファイルの場所を指させない)。"""
+        if not re.fullmatch(r"[\w.\-]+", name or ""):
+            raise GneError("BAD_ARGS", f"候補の名前 {name!r} が不正です")
+        if not (self.s.store.heads_dir(self.s.meta.model_id) / f"{name}.candidates.json").exists():
+            raise GneError("NOT_FOUND", f"候補の結果 {name} がありません", "パイプラインの結果の「候補を作る」で作れます")
+        return name
+
+    def candidates_list(self) -> list[dict]:
+        return self.s.candidates_list()
+
+    def candidates_one(self, name: str) -> dict:
+        """候補の結果(集計した後なら scores・best も)と、いま付いている点の数(n_scored)。"""
+        p = self.s.candidates_path(self._candidates_name(name))
+        d = json.loads(p.read_text(encoding="utf-8"))
+        sp = Path((d.get("judge") or {}).get("scores") or "")
+        n = len(self.s._read_scores(sp)) if sp.name and sp.exists() else 0
+        return {**d, "path": str(p), "n_scored": n}
+
+    def candidates_blind(self, name: str) -> dict:
+        """名前を伏せた採点の項目(番号・質問・返事)と、いま付いている点、採点基準。どの候補かは返さない。"""
+        return self.s.candidates_blind(self._candidates_name(name))
+
+    def candidates_score(self, name: str, scores) -> dict:
+        """点({番号: [P, C]} か「番号 P C」の行)を採点のファイルに足して集計し直す。同時に来ても書き込みは 1 つずつ。"""
+        if not isinstance(scores, dict | str):
+            raise GneError("BAD_ARGS", "scores は {番号: [P, C]} か「番号 P C」の行です")
+        if isinstance(scores, dict) and not all(isinstance(v, list | tuple) and len(v) == 2 for v in scores.values()):
+            raise GneError("BAD_ARGS", "scores の値は [P, C] です")
+        name = self._candidates_name(name)
+        with self._guard_scores:
+            d = self.s.heads_candidates_tally(name, scores=scores)
+        return {**d, "n_scored": len(self.s._read_scores(Path(d["judge"]["scores"])))}
 
     # --- 検索(header): 当たったトークンと、その lens の中での順位を添えて、強い順に --------------------------------
     def search(self, q: str, *, mode: str = "lens", limit: int = 500) -> dict:

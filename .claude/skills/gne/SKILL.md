@@ -4,7 +4,7 @@ description: >-
   gguf-neuron-explorer(gne)で GGUF モデルの MLP ニューロンを調べて押す・性格(ペルソナ)のレシピを作るときの手引き。
   道具の地図(CLI・MCP・Python API・Web UI・OpenAI 互換 API)、判断の原則、ヤンデレ・ツンデレをニューロンで作ってきた手順と
   はまりどころ(Qwen3.8-27B・Saluki 27B・LFM3-1.7B・LFM3-Omni-2B)をまとめたもの。
-  gne のコマンド(steer・sweep・rank・lens・reverse・direction・gain・ablate・eval・export-cvec・serve・mcp)を使うとき、
+  gne のコマンド(steer・sweep・rank・lens・reverse・direction・gain・ablate・heads・eval・export-cvec・serve・mcp)を使うとき、
   「ニューロンを探して」「性格を出したい」「ヤンデレ/ツンデレ/○○っぽくしたい」「レシピを作って・詰めて」「control vector にして」
   「新しいモデルで試して」「能力が落ちないか確かめて」と言われたら、このリポジトリでの作業なら必ず最初にこのスキルを読む。
   Use this skill for any neuron search, steering, persona recipe or control-vector work with gne, even if gne is not named.
@@ -13,13 +13,14 @@ description: >-
 # gne(gguf-neuron-explorer)で調べて、押して、性格を作る
 
 gne は GGUF モデルの MLP ニューロンを、llama.cpp(llama-cpp-python)の上で調べて押す道具。
-押し方は 3 種類ある。どれもレシピ(YAML)に書いて、`steer`・`chat`・`eval`・UI・OpenAI 互換 API で同じように使える。
+ニューロンの押し方は 3 種類あり、attention ヘッドの書き込みの、方向に沿った分だけを変えるやり方もある。どれもレシピ(YAML)に書いて、`steer`・`chat`・`eval`・UI・OpenAI 互換 API で同じように使える。
 
 | 押し方 | 書き方 | 何が起きるか | 向いていること |
 |---|---|---|---|
 | add | `L:N:+0.5` | ニューロンの書き込みの向き(W_down の列)を、全位置に一定量足す | ゼロから話題や性格を出す |
 | gain | `L:N:x2`・`L:N:x0` | そのニューロンの出力を k 倍する(LoRA) | もうある振る舞いを強める・消す。光っていないと何も起きない |
 | direction | `L:dir:NAME:+0.3` | 対照集合の平均差の方向を足す | ニューロン単位では断片しか見つからない性格・口調 |
+| ヘッドの方向成分 | `L:Hh:sS@NAME` | ヘッドが残差に書くベクトルのうち、方向に沿った分だけを (1 − s) 倍にする(LoRA)。他の分には触らない | すでに出ている振る舞いを消す・弱める。元があれば負の s で強める。ゼロからは作れない |
 
 dose は既定で rel(その層の残差の大きさに対する比)。0.5 で話題が混ざり、0.8 で話題が置き換わり、1.0 を超えると崩れ始める(Qwen3.5-4B の目安。小さいモデルと 2bit 量子化は崩れやすい)。
 
@@ -51,8 +52,11 @@ dose は既定で rel(その層の残差の大きさに対する比)。0.5 で�
 | 試す | `steer --compare`・`chat` | `steer` | `--compare` で無介入と並べる |
 | 方向を作る | `direction --select auto` | `direction` | 性格は `--positions response` |
 | 方向を消す | `ablate` | `ablate_export` | abliteration(LoRA か bake) |
+| 方向の分かれ方・基準層 | `direction score` | `direction_score` | 生成なし。層ごとの cohen_d と、介入したときの点数の変化 |
+| 効くヘッドを探す・強さを配る | `heads causal`・`heads allocate` | `heads_causal`・`heads_allocate` | 生成なし。止めたとき・強めたときの点数の変化から、少ないヘッドの組を作る |
+| 全体の倍率を返事で決める | `heads candidates`(`--tally`) | `heads_candidates`・`heads_candidates_tally` | 組 × 倍率で返事を作り、どの候補か伏せた採点のファイルを書いて集計する |
 | 副作用を測る | `eval` | `eval` | 能力・ppl・言語の混入・性格の変化量 |
-| 書き出す | `export-cvec`・`gain`・`bake` | `export_cvec`・`gain_export`・`bake` | llama.cpp の `--control-vector`・`--lora` |
+| 書き出す | `export-cvec`・`gain`・`headproj export`・`bake` | `export_cvec`・`gain_export`・`headproj_export`・`bake` | llama.cpp の `--control-vector`・`--lora` |
 | 人と一緒に見る | `serve` | `ui_highlight`・`ui_note`・`ui_open` | 127.0.0.1 だけで待ち受ける |
 | 他のアプリから使う | `serve --openai` | — | `extra_body={"gne": {"recipe": ..., "when": ...}}` |
 
@@ -112,6 +116,7 @@ dose は既定で rel(その層の残差の大きさに対する比)。0.5 で�
 - **レシピはモデルが変わると効き方が変わる。** 同じ系列の微調整(Saluki → Qwen)は移ったが、音声などで学習し直した LFM3-Omni では、同じ番号のニューロンなのに LFM3 のレシピがほとんど効かなかった。
 - **MoE の層の add はニューロン押しではない**(CHANGE-05)。`L:Ee:Nn:+d` は書き込み方向を全トークンに足すだけ。選ばれたときだけ効くのは gain(`x2`)。まず `gne experts contrast` で専門家を絞り、その中のニューロンを gain で試す。専門家 1 つを消しても system で作った性格はあまり減らない。
 - **ヘッドは重みだけから決めた向きでは押せない**(F124・F125)。ニューロンの書き込みは重みで決まる 1 本の向きだが、ヘッドの書き込みは注目したトークンの値ベクトルで決まる。指示のない会話でヘッドの gain を上げても性格は出ない。ヘッドを調べるときは `gne heads listen --heads L:Ha-b --system … --direction …`(UI のヘッドのパネルの Listen)で、返事のトークンがどのトークンに注目し、どのトークンが方向に寄与したかを見る。system を読んだときの attention の出力の差分ベクトルに語のニューロンを重ねると、性格の点は量に比例して上がるが、自然さも同じだけ下がる(Omni では ×0.2 で同点)。
+- **ヘッドの方向成分は、ヘッドがいま書いている分しか動かせない**(verification.md §20)。system で頼んだ evil を 2 個のヘッドで止めるのはうまくいき、能力も ppl も落ちなかった。一方で、同じヘッドを負の s で強めても、指示のない会話では何も起きなかった。ニューロンや方向の小さな押しで先に性格が出ていれば増幅でき、弱い増幅なら同じくらいの性格を ppl の悪化を抑えて出せたが、能力の落ち方はニューロンだけのときと同じで、強く増幅すると崩れた。強さは生成なしの物差し(`direction score`・`heads causal`・`heads allocate`)で決め、報告は出力から測った値(判定の一致率・能力・ppl)とランダムなヘッドの対照でする。
 - **多ターンの会話の写しは DRY で止める**(F122)。レシピの `sampling` に `dry_multiplier: 0.8` を足すと、前の返事をそのまま繰り返すのが止まる(音声の会話で 12 本中 12 本、写し 0)。llama-server でも `--dry-multiplier` で同じ。
 - **長い会話では、押す位置で保ち方が変わる**(F118・F120)。ユーザーの発話にも足す押し方(全位置・`skip-replies`)は長いコンテキストでも薄れず(system だけより安定)、`assistant`・`gen` は長い貼り付けで薄れる。ベクトルだけなら `skip-replies` が長短とも少し良い。どの押し方でも、短い雑談では自分の前の返事を写して同じ返事を繰り返す(過去の返事を押さなくても直らない)。1 発話の採点だけで決めず、長い会話でも比べる。
 - **小さいモデルは温度を下げる。** LFM3 は温度 1.0 だと押さなくても崩れる(0.3 で使った)。greedy は強めると反復に落ちやすいので、採点はサンプリングで行う。

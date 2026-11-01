@@ -133,17 +133,20 @@ def lora_tensors(weights, by_layer: dict[int, list[tuple[int, float]]]) -> dict[
     return out
 
 
-def export_gain_lora(weights, recipe: Recipe, path: str | Path) -> dict:
-    """gain ユニット(ニューロンの ffn_up とヘッドの W_O)を LoRA アダプタ GGUF に書く。"""
+def export_gain_lora(weights, recipe: Recipe, path: str | Path, *,
+                     extra: dict[str, tuple[np.ndarray, np.ndarray]] | None = None, extra_meta: dict | None = None) -> dict:
+    """gain ユニット(ニューロンの ffn_up とヘッドの W_O)を LoRA アダプタ GGUF に書く。extra は同じファイルに入れる
+    書き込み行列の LoRA(ヘッドの方向成分の射影 CHANGE-06。同じテンソルのヘッドの gain とは A・B を連結して 1 つにする)。"""
+    from .headproj import merge_tensors
     by_layer = gain_by_layer(recipe.units)
     heads = head_gain_by_layer(recipe.units)
     experts = expert_gain_by_layer(recipe.units)
     shared = shared_gain_by_layer(recipe.units)
-    if not by_layer and not heads and not experts and not shared:
+    if not by_layer and not heads and not experts and not shared and not extra:
         raise GneError("BAD_RECIPE", "gain のユニットがありません(例 --unit 14:8949:x2、ヘッドは 21:H7:x0、専門家のニューロンは 12:E3:N5:x0)")
     m = weights.meta
     tens = lora_tensors(weights, by_layer) if by_layer else {}
-    htens = head_lora_tensors(weights, heads)
+    htens = merge_tensors(head_lora_tensors(weights, heads), extra or {})
     etens = expert_lora_tensors(weights, experts)
     stens = {}
     for L, nk in shared.items():                                 # shared expert は dense と同じ 2D
@@ -160,6 +163,8 @@ def export_gain_lora(weights, recipe: Recipe, path: str | Path) -> dict:
     w.add_name(f"{m.name} gain" + (f" {recipe.name}" if recipe.name else ""))
     w.add_key_value("gne.recipe", json.dumps(recipe.to_dict(), ensure_ascii=False), GGUFValueType.STRING)
     w.add_key_value("gne.source_model_id", m.model_id, GGUFValueType.STRING)
+    if extra_meta is not None:
+        w.add_key_value("gne.headproj", json.dumps(extra_meta, ensure_ascii=False), GGUFValueType.STRING)
     for L, (A, B) in tens.items():
         w.add_tensor(f"blk.{L}.ffn_up.weight.lora_a", A)
         w.add_tensor(f"blk.{L}.ffn_up.weight.lora_b", B)
@@ -181,6 +186,8 @@ def export_gain_lora(weights, recipe: Recipe, path: str | Path) -> dict:
     if heads:
         out["heads"] = {str(L): [[h, k] for h, k in hk] for L, hk in heads.items()}
         out["head_rank"] = {str(L): int(htens[weights.head_block(L, hk[0][0])[0]][0].shape[0]) for L, hk in heads.items()}
+    if extra:
+        out["proj_rank"] = {name.split(".")[1]: int(B.shape[1]) for name, (_, B) in extra.items()}
     if experts:
         out["experts"] = {str(L): [[e, n, k] for e, n, k in enk] for L, enk in experts.items()}
     if shared:
@@ -192,7 +199,7 @@ def _patch_targets(weights, recipe: Recipe) -> list[tuple[str, object, float, st
     """スケールパッチで書ける操作の一覧 [(テンソル, 行 / 専門家, k か delta, 種類)]。ヘッドの gain(W_O の列)のように
     列方向の操作があるか、テンソルの型がパッチに対応していなければ None。"""
     from .patch import supported
-    if head_gain_by_layer(recipe.units):
+    if head_gain_by_layer(recipe.units) or recipe.proj_units:    # 列方向(ヘッドの gain・方向成分の射影)はパッチで書けない
         return None
     out = []
     for L, nk in gain_by_layer(recipe.units).items():
@@ -250,24 +257,29 @@ def bake_gain_patch(weights, recipe: Recipe, dst: str | Path) -> dict:
             "bytes": Path(dst).stat().st_size, "method": "patch", "patch_bytes": ps.n_bytes, "ops": ps.ops}
 
 
-def bake_gain_gguf(weights, recipe: Recipe, dst: str | Path, *, requant: str = "q8_0") -> dict:
+def bake_gain_gguf(weights, recipe: Recipe, dst: str | Path, *, requant: str = "q8_0",
+                   extra: dict[str, tuple[np.ndarray, np.ndarray]] | None = None, extra_meta: dict | None = None,
+                   via_f16: bool = False) -> dict:
     """W_up[L] の行(ニューロン)と W_O の列ブロック(ヘッド)を k 倍した GGUF を作る。書き換えたテンソルだけ
     Q8_0(requant="q8_0")か F16 にし、他は生バイトのまま写す。requant="patch" はスケールパッチ(量子化を保ったまま
     ちょうど k 倍、bake_gain_patch)、"auto" はパッチで書ければパッチ、書けなければ Q8_0。専門家全体の gain と route は
-    パッチだけ。"""
+    パッチだけ。extra は書き込み行列に足す LoRA の変化量 B @ A(ヘッドの方向成分の射影、CHANGE-06)。gain と同じテンソルなら、
+    どちらも元の重みから計算した変化量を足す(LoRA を並べて当てたのと同じ)。"""
     if requant in ("patch", "auto"):
-        if requant == "patch" or _patch_targets(weights, recipe) is not None:
+        if requant == "patch" or (_patch_targets(weights, recipe) is not None and not extra):
             return bake_gain_patch(weights, recipe, dst)
         requant = "q8_0"
+    extra = extra or {}
     if any(u.kind == "expert" for u in recipe.units):
         raise GneError("BAD_RECIPE", "専門家全体の gain と route はスケールパッチでだけ書けます", "--requant patch(か auto)")
     by_layer = gain_by_layer(recipe.units)
     heads = head_gain_by_layer(recipe.units)
-    if not by_layer and not heads:
+    if not by_layer and not heads and not extra:
         raise GneError("BAD_RECIPE", "gain のユニットがありません")
     if by_layer:
         _check(weights, by_layer)
     head_tensors = {weights.head_block(L, hk[0][0])[0]: L for L, hk in heads.items()}
+    head_tensors.update({name: int(name.split(".")[1]) for name in extra})
     if requant not in ("q8_0", "f16"):
         raise GneError("BAD_ARGS", "--requant は q8_0 か f16 です")
     if Path(weights.path).resolve() == Path(dst).resolve():
@@ -275,6 +287,8 @@ def bake_gain_gguf(weights, recipe: Recipe, dst: str | Path, *, requant: str = "
     Path(dst).parent.mkdir(parents=True, exist_ok=True)
     tag = f" +gain:{recipe.name}" if recipe.name else " +gain"
     w = copy_gguf_header(weights, dst, tag=tag, recipe=recipe)
+    if extra_meta is not None:
+        w.add_key_value("gne.headproj", json.dumps(extra_meta, ensure_ascii=False), GGUFValueType.STRING)
     plan, modified = [], []
     for t in weights.reader.tensors:
         hit = t.name.startswith("blk.") and t.name.endswith(".ffn_up.weight")
@@ -286,10 +300,14 @@ def bake_gain_gguf(weights, recipe: Recipe, dst: str | Path, *, requant: str = "
                 W[n] *= k
         elif t.name in head_tensors:
             L = head_tensors[t.name]
-            W = np.array(weights.head_writer_matrix(L), dtype=np.float32, copy=True)
-            for h, k in heads[L]:
+            W0 = weights.head_writer_matrix(L)
+            W = np.array(W0, dtype=np.float32, copy=True)
+            for h, k in heads.get(L, []):
                 _, lo, hi = weights.head_block(L, h)
                 W[:, lo:hi] *= k
+            if t.name in extra:                                   # 方向成分の射影: W + B @ A(A は元の W から作った r̂ᵀW)
+                A, B = extra[t.name]
+                W += (B.astype(np.float64) @ A.astype(np.float64)).astype(np.float32)
         if W is not None:
             if requant == "f16":
                 data, qt = W.astype(np.float16), GGMLQuantizationType.F16
@@ -299,6 +317,10 @@ def bake_gain_gguf(weights, recipe: Recipe, dst: str | Path, *, requant: str = "
             modified.append({"tensor": t.name, "from": t.tensor_type.name, "to": qt.name})
         else:
             plan.append((t.name, t.data, t.tensor_type))
+    if extra:                                                     # CHANGE-06 E.2: 書き換えたテンソルと元の型
+        rec = [{**m, "op": "rewrite"} if not via_f16 else {**m, "to": m["from"], "via": "f16+llama-quantize", "op": "rewrite"}
+               for m in modified]                         # via_f16: 中間は F16、llama-quantize で元の型に戻る
+        w.add_key_value("gne.patches", json.dumps(rec, ensure_ascii=False), GGUFValueType.STRING)
     for name, data, qt in plan:
         w.add_tensor_info(name, data.shape, data.dtype, data.nbytes, raw_dtype=qt)
     w.write_header_to_file()

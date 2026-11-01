@@ -303,3 +303,31 @@ Qwen3.5-4B Q8_0、`gne direction --select auto --mode add`(12 プロンプト、
 | `gne stats act`(granite、2 層、約 3,700 トークン) | 1.5 秒 | 専門家ごとの積算を含む |
 | 専門家 1 つの W_down の dequantize(LFM2 の Q6_K、2048 × 1792) | 0.03 秒 | 層全体(32 個)は 1.1 秒 |
 
+
+## CHANGE-06(2026-11-01、同じ環境)
+
+対照集合は `configs/contrast/evil.yaml`(A・B 各 12 会話、生成プロンプトの最後のトークンで測る)。B 側への影響は全 12 例で測った。
+
+| 工程 | 0.6B(GPU) | 4B(GPU) | 0.6B(CPU) | 備考 |
+|---|---|---|---|---|
+| `direction score`(1 条件、生成なし、3 層) | 0.22 秒 | 0.49 秒 | 約 3.5 秒 | A・B の 24 会話の prefill |
+| 同じ、全層(基準層を選ぶ) | 0.66 秒 | 1.3 秒 | 7.2 秒 | 26 層 / 30 層 |
+| `heads causal --mode ablate` 層単位(1 層) | 0.27 秒 | 0.64 秒 | — | 層の全ヘッドを止める LoRA の書き出し・読み込みを含む |
+| 同じ、ヘッド 1 個 | 0.34 秒 | 0.71 秒 | 約 4.6 秒 | |
+| `heads causal --mode marginal`(ヘッド 1 個、効きにくい例 8 件) | 0.35 秒 | 0.76 秒 | 約 5.5 秒 | |
+| `heads allocate`(1 組、二分探索込み) | 0.43 秒 | 2.6 秒 | 約 30 秒 | 全体(最初の組・効きにくい例・効率)は 3.3 秒 / 11 秒 |
+| LoRA 書き出し / 焼き込み(Q8_0) | 0.02 秒 / 4.2 秒 | 0.13 秒 / 10 秒 | | 焼き込みは書き換えない全テンソルの写しが大半 |
+| `eval --compare-methods`(4 方式、既定のタスク集) | 18 秒 | | 98 秒(ミニのタスク集) | 二分探索と、方式ごとの eval(無介入の測定は 1 回) |
+| `eval --random-controls 4`(倍率 1、既定のタスク集) | 30 秒 | | | |
+
+生成を伴わない工程(物差し・因果・配分)は 1 条件が 1 秒未満(4B、GPU)で、調整のループの大半を占める部分が速い。27B はまだ測っていない(GPU を別の処理が使っていた)。変更指示の目安(27B で 1 条件が十数秒を超えたら例数と測定位置を削る)は、4B の 0.49 秒からの外挿では十分に下回る見込み。
+
+V28(ablate と marginal の順位の不一致): 同じ 6 ヘッド(0.6B、L8・L12・L16 の直接の寄与の上位)で、ablate の causal と marginal の効率 η(L16 H8・H1 を s = 2 にした組から s を 3 上げる)の順位相関は Spearman +0.71。1 位が入れ替わった(ablate は L16 H8、η は L16 H13)。`gne heads causal --mode marginal` の出力の `spearman_ablate_marginal` に毎回出る。詳細は `docs/verification.md` §20.4。
+
+Qwen3.5-4B(GPU、attention と線形注意が混ざる)で CLI の手順を通した: `direction` 3 秒、`direction score` 2.4 秒(基準層 L20、cohen_d 12.7)、`heads causal`(層単位 31 層 → 上位 4 層 L0・L11・L15・L16 の全ヘッド、物差し L20・L25・L30)74 秒、`heads causal --mode marginal`(31 ヘッド)20 秒、`heads allocate --n-heads 4,3,2` 40 秒(推したのは L15 H8 s4.2・L15 H2 s2.8 の 2 個)。この 31 ヘッドでの ablate と marginal の順位相関は Spearman −0.14 で、0.6B(+0.71)よりさらに一致しなかった。
+
+4B の 2 ヘッドの組の `eval --doses 0,1 --random-controls 8`(既定のタスク集)は 115 秒、`eval --compare-methods`(4 方式、8 段の粗い探索 + 二分探索)は 48〜69 秒。結果は `docs/verification.md` §20.9。
+
+`gne heads pipeline`(0.6B、GPU、evil の 12 問を 3 回並べた 36 問、止めて測る段階は 16 問、層ごとの上位 2 層、組は 3 個と 2 個): 全体で 45 秒(方向 3 秒、因果 22 秒、残りが基準層と配分)。止めると中立の側が大きく崩れる L0(ずれ 1.15)は層選びから外れ、L9 の 2 個の組を推した。
+
+`gne heads candidates`(0.6B、GPU、2 ヘッドの組 1 つ × 倍率 4 段 + 無介入 = 5 候補、evil の 12 問を両側で、120 トークン、llama-server の既定のサンプリング): 120 本の生成で 13 秒(見積もりは 26 秒)。時間は返事の数 × 長さにほぼ比例し、組を 3 つにすると候補は 13 個になる。採点のファイルの書き出しと集計は 0.1 秒未満。

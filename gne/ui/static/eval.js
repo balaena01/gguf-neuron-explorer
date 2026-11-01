@@ -1,6 +1,8 @@
 // eval ビュー(CHANGE-01 A、本体設計 §6.14): レシピの倍率ごとの副作用。x = 倍率、y = 性格の変化量と能力の低下など(%)。
 // 保存済みの eval(<root>/evals/<model_id>/)を選んで見るか、今のレシピでジョブ eval を投げる。Canvas 2D。
 // 反応性(CHANGE-04 F)を測った eval では、トリガーあり・なし・差の列(ヘッドの対照があればその p95 と null)と線を足す。
+// CHANGE-06 G: 方向を使うレシピの eval では方向の指標の列(A 側の点数の下がり方・直交成分のずれ・判定の一致率、対照があれば null)。
+// 方式の比較(eval --compare-methods)は方式ごとの表、ヘッド数の曲線(eval --alloc)は x = ヘッド数の小さな折れ線 3 つと表。
 import { getJSON } from "./api.js";
 import { t } from "./i18n.js";
 import { esc } from "./panels.js";
@@ -11,6 +13,12 @@ const L0 = 46, R0 = 16, T0 = 12, B0 = 34, H = 260;
 const fmt = (x, d = 2) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : (+x).toFixed(d));
 const pct = (x, d = 1) => (x === null || x === undefined ? "—" : `${fmt(x * 100, d)}%`);
 
+// 保存した結果の種類(session.evals の kind と同じ見分け方)
+function kindOf(d) {
+  if (d.recipe && d.suite) return "eval";
+  return "target_from" in d ? "compare-methods" : "alloc" in d ? "nheads" : "neurons" in d ? "compare-ablation" : "other";
+}
+
 function series(d) {
   const s = [
     { key: "novelty", label: t("性格の変化量(無介入に無い語の割合)"), color: C.amber, v: (r) => r.persona.novelty * 100 },
@@ -18,6 +26,9 @@ function series(d) {
     { key: "ppl", label: t("ppl の悪化(%、100 で頭打ち)"), color: C.ppl, dash: [4, 4], v: (r) => Math.min(100, Math.max(0, r.ppl_worse_pct)) },
   ];
   if (d.judge) s.push({ key: "judge", label: t("judge(1〜5 を 0〜100 に)"), color: C.judge, v: (r) => (r.judge === null ? null : ((r.judge - 1) / 4) * 100) });
+  if (d.direction_metrics && d.direction_metrics.behavior) {          // 方向を使うレシピ(CHANGE-06 F): 判定の一致率
+    s.push({ key: "rate", label: t("判定の一致率(%)"), color: C.react, dash: [2, 3], v: (r) => (r.rate === undefined || r.rate === null ? null : r.rate * 100) });
+  }
   if (d.reactivity) {                                                 // 反応性(CHANGE-04 F): トリガーあり − なしの判定の一致率(負は 0 に)
     s.push({ key: "reactivity", label: t("反応性(トリガーあり − なし、%)"), color: C.react, v: (r) => (r.reactivity ? Math.max(0, r.reactivity.reactivity * 100) : null) });
     if (d.reactivity.head_controls) {
@@ -36,10 +47,12 @@ function series(d) {
 }
 
 export class EvalView {
-  constructor(root, { recipe, onRun }) {
+  constructor(root, { recipe, onRun, onLoadProj, onLoadRecipe }) {
     this.root = root;
     this.recipe = recipe;              // UI のレシピ(recipe.js の Recipe)
     this.onRun = onRun;                // (params) → ジョブ eval を投げる
+    this.onLoadProj = onLoadProj || (() => {});       // (名前, ["L:Hh:sS@NAME"]) → ヘッド数の曲線の組をレシピに読み込む
+    this.onLoadRecipe = onLoadRecipe || (() => {});   // (レシピの dict) → 方式の比較の行のレシピを読み込む
     this.list = [];
     this.data = null;
     this.dose = null;                  // 下に出力の例を出す倍率
@@ -66,8 +79,10 @@ export class EvalView {
     this.$("#evx-go").disabled = !(r && r.units.length);
     try { this.list = await getJSON("/api/evals"); } catch { this.list = []; }
     const pick = this.$("#evx-pick");
+    const tag = (k) => ({ "compare-methods": ` · ${t("方式の比較")}`, nheads: ` · ${t("ヘッド数の曲線")}`, "compare-ablation": ` · ${t("消去の比較")}`,
+                          other: ` · ${t("その他")}` }[k] || "");
     pick.innerHTML = this.list.length
-      ? this.list.map((x) => `<option value="${esc(x.name)}">${esc(x.name)}(${esc((x.created || "").replace("T", " ").slice(0, 16))})</option>`).join("")
+      ? this.list.map((x) => `<option value="${esc(x.name)}">${esc(x.name)}(${esc((x.created || "").replace("T", " ").slice(0, 16))}${tag(x.kind)})</option>`).join("")
       : `<option value="">${t("(なし)")}</option>`;
     const name = select || (this.data && this.data.name) || (this.list[0] && this.list[0].name);
     if (name && this.list.some((x) => x.name === name)) { pick.value = name; await this.load(name); }
@@ -78,8 +93,10 @@ export class EvalView {
     if (!name) { this.data = null; this.render(); return; }
     try { this.data = await getJSON(`/api/evals/${encodeURIComponent(name)}`); }
     catch (e) { this.data = null; this.$("#evx-body").innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
-    const ds = this.data.rows.map((r) => r.dose);
-    if (!ds.includes(this.dose)) this.dose = ds[ds.length - 1];
+    if (kindOf(this.data) === "eval") {
+      const ds = this.data.rows.map((r) => r.dose);
+      if (!ds.includes(this.dose)) this.dose = ds[ds.length - 1];
+    }
     this.render();
   }
 
@@ -98,13 +115,24 @@ export class EvalView {
   render() {
     const body = this.$("#evx-body");
     const d = this.data;
+    this.cv = null;
+    this.nh = null;
     if (!d) { body.innerHTML = `<p class="muted note">${t("eval がまだありません。上の「今のレシピで eval」で作ります(gne eval / MCP の eval でも)。")}</p>`; return; }
+    const kind = kindOf(d);
+    if (kind === "compare-methods") { this.renderMethods(body, d); return; }
+    if (kind === "nheads") { this.renderNheads(body, d); return; }
+    if (kind !== "eval") {
+      body.innerHTML = `<p class="muted note">${t("この種類の結果の表示はありません。中身をそのまま出します。")}</p>
+        <details open><summary class="muted note">JSON</summary><pre class="mono note evx-raw">${esc(JSON.stringify(d, null, 1).slice(0, 40000))}</pre></details>`;
+      return;
+    }
     const th = d.suite.thresholds;
     // ユニットの名前(MoE は E37 N511・S N5・E3、CHANGE-05 G)。route は保存の形では delta
     const who = (u) => (u.kind === "head" ? `H${u.head}` : u.kind === "random" ? `random${u.seed}` : u.kind === "direction" ? `dir:${u.direction}`
       : u.kind === "expert_neuron" ? `E${u.expert} N${u.neuron}` : u.kind === "shared" ? `S N${u.neuron}` : u.kind === "expert" ? `E${u.expert}` : `N${u.neuron}`);
     const pm = (x) => `${x >= 0 ? "+" : "−"}${fmt(Math.abs(x), 2)}`;
     const units = d.recipe.units.map((u) => (u.mode === "query" ? `L${u.layer} H${u.head} query ${u.direction}→${String(u.seek || "").split("/").pop().replace(/\.ya?ml$/, "")} ×${fmt(u.k, 2)}`
+      : u.mode === "proj" ? `L${u.layer} H${u.head} s${+(+u.k).toFixed(3)} @${u.direction || d.recipe.default_direction || "?"}`
       : u.mode === "gain" ? `L${u.layer} ${who(u)} ×${fmt(u.k, 2)}`
       : u.mode === "route" ? `L${u.layer} ${who(u)} route ${pm(u.delta ?? u.dose)}`
       : `L${u.layer} ${who(u)} ${pm(u.dose)}`));
@@ -118,6 +146,17 @@ export class EvalView {
         hc ? (x.ctrl ? `<td class="muted">${x.ctrl.p95 === null ? "—" : `${x.ctrl.p95 >= 0 ? "+" : "−"}${pct(Math.abs(x.ctrl.p95), 0)}`}</td><td class="${x.null_pct >= 0.95 ? "ok" : "ng"}">${fmt(x.null_pct, 2)}</td>`
           : "<td></td><td></td>") : ""}`;
     };
+    // 方向の指標(CHANGE-06 F): A 側の点数の下がり方、直交成分のずれ(A・B)、判定の一致率とその減少。対照があれば null
+    const dm = d.direction_metrics, hasDir = d.rows.some((r) => r.dir_drop_a !== undefined), rc = !!d.random_controls;
+    const nullTd = (x) => `<td class="${x === null || x === undefined ? "" : x >= 0.95 ? "ok" : "ng"}">${fmt(x, 2)}</td>`;
+    const dirCells = (r) => (hasDir ? `<td>${fmt(r.dir_drop_a, 2)}</td><td>${fmt(r.drift_orth_a, 3)}</td><td>${fmt(r.drift_orth_b, 3)}</td>${
+      dm && dm.behavior ? `<td>${pct(r.rate, 0)}</td><td>${pct(r.rate_drop, 0)}</td>` : ""}${
+      rc ? (r.ctrl ? `${nullTd(r.dir_null_pct)}${nullTd(r.drift_orth_b_null_pct)}${dm && dm.behavior ? nullTd(r.rate_null_pct) : ""}` : `<td></td><td></td>${dm && dm.behavior ? "<td></td>" : ""}`) : ""}` : "");
+    const dirHead = hasDir ? `<th title="${t("A 側の点数の下がり方(無介入 − 介入、方向の物差しの層)")}">${t("A 下がり")}</th><th title="${t("A 側の残差の差のうち方向に直交する成分(ずれの大きさ ÷ 残差のノルム)")}">A ⊥</th><th title="${t("B 側(関係のない入力)の残差の差のうち方向に直交する成分。小さいほど他を壊さない")}">B ⊥</th>${
+      dm && dm.behavior ? `<th title="${t("対照集合の検証プロンプトで性格の判定(validate.match)に当たった割合")}">${t("一致率")}</th><th title="${t("判定の一致率の減少(無介入 − 介入)")}">${t("一致減")}</th>` : ""}${
+      rc ? `<th title="${t("A 側の下がり方が対照(同数・同じ s のランダムなヘッド)の何割より大きいか")}">${t("下がり null")}</th><th title="${t("B 側の直交成分のずれが対照の何割より大きいか(大きいほど他を壊している)")}">B⊥ null</th>${
+        dm && dm.behavior ? `<th title="${t("一致率の減少が対照の何割より大きいか")}">${t("一致 null")}</th>` : ""}` : ""}` : "";
+    const notes = [...(d.notes || [])];
     const ok = d.rows.filter((r) => r.shippable && r.dose > 0).map((r) => r.dose);
     const rows = d.rows.map((r) => `<tr class="${r.dose === this.dose ? "on" : ""}" data-dose="${r.dose}">
         <td>${fmt(r.dose, 2)}</td><td>${pct(r.capability)}</td><td>${fmt(r.capability_drop_pt, 1)}</td>
@@ -125,20 +164,22 @@ export class EvalView {
         <td>${pct(r.mix_zh + r.mix_other, 2)}</td><td>${fmt(r.persona.novelty, 2)}</td><td>${fmt(r.persona.distinct4, 2)}</td>
         <td>${pct(r.persona.capped, 0)}</td>${d.judge ? `<td>${fmt(r.judge, 2)}</td>` : ""}${d.random_controls ? (r.ctrl
           ? `<td class="muted">${fmt(r.ctrl_novelty_p95, 2)}</td><td class="${r.novelty_null_pct >= 0.95 ? "ok" : "ng"}">${fmt(r.novelty_null_pct, 2)}</td><td class="muted">${fmt(r.ctrl_capability_drop_p50, 1)}</td><td class="muted">${fmt(r.ctrl_ppl_worse_p50, 1)}%</td>`
-          : "<td></td><td></td><td></td><td></td>") : ""}${rxCells(r)}
+          : "<td></td><td></td><td></td><td></td>") : ""}${rxCells(r)}${dirCells(r)}
         <td class="${r.shippable ? "ok" : "ng"}">${r.shippable ? t("配布可") : Object.entries(r.ok).filter(([, v]) => !v).map(([k]) => ({ capability: t("能力"), ppl: "ppl", mix: t("混入") }[k])).join("・") + " ×"}</td></tr>`).join("");
     body.innerHTML = `
       <p class="note mono">${esc(units.join(" · "))} <span class="muted">· when=${esc(d.when)} · ${t("{n} タスク", { n: d.suite.n_tasks })} · ${fmt(d.seconds, 0)} s${d.random_controls ? ` · ${t("対照 {n} 本", { n: d.random_controls })}` : ""}${
-        rx ? ` · ${t("反応性 {name}({n} 対)", { name: esc(rx.name), n: rx.n_pairs })}${hc ? ` · ${t("ヘッドの対照 {n} 本", { n: rx.head_controls })}` : ""}` : ""}</span></p>
+        rx ? ` · ${t("反応性 {name}({n} 対)", { name: esc(rx.name), n: rx.n_pairs })}${hc ? ` · ${t("ヘッドの対照 {n} 本", { n: rx.head_controls })}` : ""}` : ""}${
+        dm ? ` · ${t("方向 {d}(物差しの層 {L})", { d: esc(dm.direction), L: (dm.layers || []).map((L) => `L${L}`).join(", ") })}${dm.behavior ? ` · ${t("判定の一致率(無介入 {p})", { p: pct(dm.base_rate, 0) })}` : ""}` : ""}</span></p>
+      ${notes.length ? `<ul class="evx-notes">${notes.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : ""}
       <p class="note">${ok.length ? t("配布可の最大倍率: {d}", { d: fmt(Math.max(...ok), 2) }) : t("配布可の倍率はありません(0 を除く)")}
         <span class="muted">${t("基準: 能力 −{c}pt 以内・ppl +{p}% 以内・混入が増えない", { c: th.capability_drop_pt, p: th.ppl_worse_pct })}</span></p>
       <div class="evx-legend note">${series(d).map((s) => `<span><i style="background:${s.color}${s.thin ? ";opacity:.45;height:1px" : ""}"></i>${esc(s.label)}</span>`).join("")}
         <span><i class="dot" style="background:${C.ok}"></i>${t("配布可")}</span></div>
       <canvas id="evx-canvas"></canvas>
-      <table class="evx mono"><thead><tr><th>${t("倍率")}</th><th>${t("能力")}</th><th>${t("低下pt")}</th><th>ppl</th><th>${t("悪化")}</th><th>${t("混入")}</th>
+      <div class="evx-scroll"><table class="evx mono"><thead><tr><th>${t("倍率")}</th><th>${t("能力")}</th><th>${t("低下pt")}</th><th>ppl</th><th>${t("悪化")}</th><th>${t("混入")}</th>
         <th title="${t("無介入の出力に無い語の割合(プロンプトごとの平均)")}">${t("新語")}</th><th title="distinct-4">d4</th><th title="${t("max_tokens で打ち切られた割合")}">${t("打切")}</th>${d.judge ? "<th>judge</th>" : ""}${d.random_controls ? `<th title="${t("同じ大きさのランダムな向きの対照レシピの新語の 95% 点")}">${t("対照p95")}</th><th title="${t("新語が対照の何割より多いか(0.95 未満は対照と区別できない)")}">null</th><th title="${t("対照の能力の低下(中央値、pt)")}">${t("対照低下")}</th><th title="${t("対照の ppl の悪化(中央値)")}">${t("対照悪化")}</th>` : ""}${rx ? `<th title="${t("トリガーありのプロンプトで性格の判定(validate.match)に当たった割合")}">${t("あり")}</th><th title="${t("トリガーなしのプロンプトで判定に当たった割合")}">${t("なし")}</th><th title="${t("反応性 = あり − なし({n} 対)", { n: rx.n_pairs })}">${t("反応性")}</th>${
-          hc ? `<th title="${t("レシピのヘッドを同じ k のランダムなヘッドに替えた対照の反応性の 95% 点")}">${t("対照p95")}</th><th title="${t("反応性が対照の何割より大きいか(0.95 未満は対照と区別できない)")}">null</th>` : ""}` : ""}<th></th></tr></thead>
-        <tbody>${rows}</tbody></table>
+          hc ? `<th title="${t("レシピのヘッドを同じ k のランダムなヘッドに替えた対照の反応性の 95% 点")}">${t("対照p95")}</th><th title="${t("反応性が対照の何割より大きいか(0.95 未満は対照と区別できない)")}">null</th>` : ""}` : ""}${dirHead}<th></th></tr></thead>
+        <tbody>${rows}</tbody></table></div>
       <div id="evx-sample"></div>`;
     for (const tr of body.querySelectorAll("tr[data-dose]")) tr.addEventListener("click", () => { this.dose = +tr.dataset.dose; this.render(); });
     this.cv = body.querySelector("#evx-canvas");
@@ -157,11 +198,104 @@ export class EvalView {
       ${s.persona.map((x) => `<p class="note"><span class="muted mono">${esc(x.id)}</span> ${esc(x.text)}</p>`).join("")}
       ${s.failed.length ? `<details><summary class="muted note">${t("落ちたタスク({n})", { n: r.failed.exact.length + r.failed.format.length })}</summary>${
         s.failed.map((x) => `<p class="note"><span class="muted mono">${esc(x.id)}</span> ${esc(x.text)}</p>`).join("")}</details>` : ""}
+      ${(r.notes || []).length ? `<ul class="evx-notes">${r.notes.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : ""}
+      ${r.direction && r.direction.layers ? `<details><summary class="muted note">${t("方向の指標(物差しの層ごと)")}</summary><table class="evx mono"><thead><tr><th>${t("層")}</th><th>A</th><th>B</th>
+        <th>${t("A 下がり")}</th><th>B Δ</th><th>A ∥</th><th>A ⊥</th><th>B ∥</th><th>B ⊥</th></tr></thead><tbody>${Object.entries(r.direction.layers).map(([L, x]) =>
+          `<tr><td>L${esc(L)}</td><td>${fmt(x.score_a, 2)}</td><td>${fmt(x.score_b, 2)}</td><td>${fmt(x.drop_a, 2)}</td><td>${fmt(x.delta_b, 2)}</td><td>${fmt(x.drift_par_a, 3)}</td><td>${fmt(x.drift_orth_a, 3)}</td><td>${fmt(x.drift_par_b, 3)}</td><td>${fmt(x.drift_orth_b, 3)}</td></tr>`).join("")}</tbody></table></details>` : ""}
       ${r.reactivity && r.reactivity.samples && r.reactivity.samples.length ? `<details><summary class="muted note">${t("反応性の例(トリガーあり / なし)")}</summary>${
         r.reactivity.samples.map((x) => `<p class="note"><span class="muted mono">${t("あり")}</span> ${esc(x.with)}<br><span class="muted mono">${t("なし")}</span> ${esc(x.without)}</p>`).join("")}</details>` : ""}`;
   }
 
+  // --- 方式の比較(CHANGE-06 F.3): 効果(A 側の点数)をそろえたときの副作用。外した方式は理由を出す -----------------------
+  renderMethods(body, d) {
+    const label = (m) => ({ ablate: t("全層の射影消去"), proj: t("ヘッドの方向成分(proj)"), head_gain: t("ヘッドの丸ごと倍率"), neurons: t("ニューロンの消去") }[m] || m);
+    const live = d.rows.filter((r) => !r.excluded && Number.isFinite(r.drift_orth_b));
+    const best = live.length ? live.reduce((a, b) => (b.drift_orth_b < a.drift_orth_b ? b : a)) : null;
+    const hasRate = d.rows.some((r) => r.rate !== undefined && r.rate !== null);
+    const nCol = 9 + (hasRate ? 2 : 0);
+    const rows = d.rows.map((r, i) => (r.excluded
+      ? `<tr><td class="l">${esc(label(r.method))}</td><td class="desc">${esc(r.desc || "")}</td><td>${fmt(r.alpha, 3)}</td><td>${fmt(r.score_a, 2)}</td>
+          <td class="excl" colspan="${nCol - 4}">${t("除外")}: ${esc(r.excluded)}</td></tr>`
+      : `<tr class="${r === best ? "best" : ""}"><td class="l">${esc(label(r.method))}</td><td class="desc">${esc(r.desc || "")}</td><td>${fmt(r.alpha, 3)}</td><td>${fmt(r.score_a, 2)}</td>
+          <td>${fmt(r.drift_orth_b, 3)}</td><td>${fmt(r.capability_drop_pt, 1)}</td><td>${r.ppl_worse_pct >= 0 ? "+" : ""}${fmt(r.ppl_worse_pct, 1)}%</td><td>${pct(r.mix_increase, 2)}</td>${
+          hasRate ? `<td>${pct(r.rate, 0)}</td><td>${pct(r.rate_drop, 0)}</td>` : ""}<td class="${r.shippable ? "ok" : "ng"}">${r.shippable ? t("配布可") : "×"}${
+          r.recipe ? ` <button class="small" data-rc="${i}" title="${t("この方式のレシピを recipe タブに読み込む")}">${t("レシピに")}</button>` : ""}</td></tr>`)).join("");
+    body.innerHTML = `
+      <p class="note mono">${t("方式の比較")} · ${t("方向 {d}", { d: esc(d.direction || "—") })} · ${t("物差しの層 L{L}", { L: d.score_layer ?? "—" })} · ${
+        t("目標の A 側の点数 {v}({src})", { v: fmt(d.target, 2), src: d.target_from === "match_effect" ? "--match-effect" : t("このレシピの水準") })} · ${
+        t("無介入 A {a} / B {b}", { a: fmt(d.base_score_a, 2), b: fmt(d.base_score_b, 2) })}${d.base_rate !== undefined && d.base_rate !== null ? ` · ${t("判定の一致率(無介入 {p})", { p: pct(d.base_rate, 0) })}` : ""}<span class="muted"> · ${fmt(d.seconds, 0)} s</span></p>
+      <p class="muted note">${t("同じ方向を、方式ごとに強さ α を合わせて A 側の点数を目標までそろえ、副作用を比べる。B ⊥ = 関係のない入力(B 側)の残差の、方向に直交する成分のずれ(小さいほど他を壊さない)。緑の行 = B ⊥ が最も小さい方式。")}</p>
+      <div class="evx-scroll"><table class="evx mono evx-methods"><thead><tr><th class="l">${t("方式")}</th><th class="l">${t("説明")}</th><th title="${t("目標にそろえた強さ")}">α</th><th title="${t("A 側の点数(物差しの層)")}">A</th>
+        <th title="${t("B 側の残差の直交成分のずれ")}">B ⊥</th><th>${t("低下pt")}</th><th>${t("悪化")}</th><th title="${t("混入の増加")}">${t("混入")}</th>${
+        hasRate ? `<th>${t("一致率")}</th><th>${t("一致減")}</th>` : ""}<th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    for (const b of body.querySelectorAll("[data-rc]")) b.addEventListener("click", () => this.onLoadRecipe(d.rows[+b.dataset.rc].recipe));
+  }
+
+  // --- ヘッド数の曲線(CHANGE-06 F.4): gne heads allocate の組をヘッド数ごとに eval。推奨の組に印 ------------------------
+  renderNheads(body, d) {
+    const rows = [...d.rows].sort((a, b) => a.n_heads - b.n_heads);
+    const rec = rows.find((r) => r.recommended);
+    const tr = rows.map((r, i) => `<tr class="${r.recommended ? "rec" : ""}"><td>${r.n_heads}${r.recommended ? ` <span class="badge">${t("推奨")}</span>` : ""}</td>
+        <td>${fmt(r.s_max, 2)}</td><td>${r.remain ?? "—"}</td><td>${fmt(r.capability_drop_pt, 1)}</td><td>${r.ppl_worse_pct >= 0 ? "+" : ""}${fmt(r.ppl_worse_pct, 1)}%</td>
+        <td>${pct(r.mix_increase, 2)}</td><td>${fmt(r.dir_drop_a, 2)}</td><td>${fmt(r.drift_orth_b, 3)}</td><td>${pct(r.rate, 0)}</td>
+        <td class="${r.shippable ? "ok" : r.shippable === false ? "ng" : ""}">${r.shippable ? t("配布可") : r.shippable === false ? "×" : ""}</td>
+        <td class="units">${esc((r.units || []).join(" "))}</td><td>${(r.units || []).length ? `<button class="small" data-nh="${i}" title="${t("この組(proj のユニット)で今のレシピを置き換える")}">${t("レシピに")}</button>` : ""}</td></tr>`).join("");
+    const notes = rows.flatMap((r) => (r.notes || []).map((x) => `${t("{n} ヘッド", { n: r.n_heads })}: ${x}`));
+    body.innerHTML = `
+      <p class="note mono">${t("ヘッド数の曲線")} · ${t("方向 {d}", { d: esc(d.direction || "—") })} · ${t("配分 {a}", { a: esc(String(d.alloc || "").split("/").pop()) })}${
+        d.score_layer !== undefined ? ` · ${t("L{L} の点数を {v} まで", { L: d.score_layer, v: fmt(d.target, 2) })}` : ""}${rec ? ` · ${t("推奨 {n} ヘッド", { n: rec.n_heads })}` : ""}${
+        d.random_controls ? ` · ${t("対照 {n} 本", { n: d.random_controls })}` : ""}<span class="muted"> · ${fmt(d.seconds, 0)} s</span></p>
+      ${notes.length ? `<ul class="evx-notes">${notes.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : ""}
+      <p class="muted note">${t("x = ヘッドの数(gne heads allocate の組)。少ないヘッドほど 1 ヘッドの s が大きくなる。残り = 目標に届かず残った効きにくい例の数。白の破線 = 推奨の組。")}</p>
+      <canvas id="evx-nh"></canvas>
+      <div class="evx-scroll"><table class="evx mono"><thead><tr><th>${t("ヘッド数")}</th><th>s max</th><th title="${t("目標に届かず残った例の数")}">${t("残り")}</th><th>${t("低下pt")}</th><th>${t("悪化")}</th><th>${t("混入")}</th>
+        <th title="${t("A 側の点数の下がり方")}">${t("A 下がり")}</th><th title="${t("B 側の残差の直交成分のずれ")}">B ⊥</th><th>${t("一致率")}</th><th></th><th class="l">${t("ユニット")}</th><th></th></tr></thead><tbody>${tr}</tbody></table></div>`;
+    for (const b of body.querySelectorAll("[data-nh]")) {
+      b.addEventListener("click", () => { const r = rows[+b.dataset.nh]; this.onLoadProj(`${d.name || "nheads"}-n${r.n_heads}`, r.units); });
+    }
+    this.nh = { cv: body.querySelector("#evx-nh"), rows, rec };
+    this.drawNheads();
+  }
+
+  // 小さな折れ線 3 つ(能力の低下・B ⊥・残り)。x はヘッド数で共通、y はそれぞれの単位
+  drawNheads() {
+    const x = this.nh;
+    if (!x || !x.cv || !x.cv.isConnected) return;
+    const panels = [[t("能力の低下(pt)"), (r) => r.capability_drop_pt, C.minus, 1], [t("B ⊥(B 側の直交成分のずれ)"), (r) => r.drift_orth_b, C.judge, 3],
+                    [t("残り(届かなかった例の数)"), (r) => r.remain, C.amber, 1]];
+    const PH = 104, w = Math.max(320, this.root.clientWidth - 24), H2 = PH * panels.length + 26, dpr = window.devicePixelRatio || 1, cv = x.cv;
+    cv.width = w * dpr; cv.height = H2 * dpr; cv.style.width = `${w}px`; cv.style.height = `${H2}px`;
+    const g = cv.getContext("2d");
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, w, H2);
+    const ns = x.rows.map((r) => r.n_heads), n0 = Math.min(...ns), n1 = Math.max(...ns);
+    const LP = 64, X = (n) => LP + (n1 === n0 ? (w - LP - R0) / 2 : ((n - n0) / (n1 - n0)) * (w - LP - R0 - 10));
+    g.font = "11px ui-monospace, monospace";
+    panels.forEach(([label, f, col, dg], pi) => {
+      const top = pi * PH + 24, bot = top + PH - 30;                      // 見出しは枠の上、目盛りは左
+      const vs = x.rows.map(f).filter((v) => v !== null && v !== undefined && Number.isFinite(+v));
+      const mx = Math.max(0, ...vs), lo = Math.min(0, ...vs);
+      const hi = mx <= 0 ? 1 : vs.every((v) => Number.isInteger(+v)) ? Math.ceil(mx * 1.15) : mx * 1.15;   // 数(残り)は整数の目盛り
+      const Y = (v) => top + (1 - (v - lo) / (hi - lo || 1)) * (bot - top);
+      g.fillStyle = col; g.textAlign = "left"; g.fillText(label, LP, top - 8);
+      g.strokeStyle = C.grid; g.lineWidth = 1;
+      for (const v of [lo, (lo + hi) / 2, hi]) { g.beginPath(); g.moveTo(LP, Y(v)); g.lineTo(w - R0, Y(v)); g.stroke(); g.fillStyle = C.muted; g.textAlign = "right"; g.fillText(fmt(v, dg), LP - 6, Y(v) + 4); }
+      if (x.rec) { g.strokeStyle = "#f2f5f8"; g.setLineDash([3, 3]); g.beginPath(); g.moveTo(X(x.rec.n_heads), top); g.lineTo(X(x.rec.n_heads), bot); g.stroke(); g.setLineDash([]); }
+      const pts = x.rows.map((r) => [r.n_heads, f(r)]).filter(([, v]) => v !== null && v !== undefined && Number.isFinite(+v));
+      g.strokeStyle = col; g.fillStyle = col; g.lineWidth = 2;
+      g.beginPath();
+      pts.forEach(([n, v], i) => (i ? g.lineTo(X(n), Y(v)) : g.moveTo(X(n), Y(v))));
+      g.stroke();
+      for (const [n, v] of pts) { g.beginPath(); g.arc(X(n), Y(v), x.rec && n === x.rec.n_heads ? 4.5 : 3, 0, 2 * Math.PI); g.fill(); }
+      g.lineWidth = 1;
+    });
+    g.textAlign = "center";
+    for (const n of ns) { g.fillStyle = x.rec && n === x.rec.n_heads ? C.text : C.muted; g.fillText(`${n}`, X(n), H2 - 8); }
+    g.textAlign = "left"; g.fillStyle = C.muted; g.fillText(t("ヘッド数"), 8, H2 - 8);
+  }
+
   draw() {
+    if (this.nh) { this.drawNheads(); return; }
     const cv = this.cv, d = this.data;
     if (!cv || !d || !cv.isConnected) return;
     const w = Math.max(320, this.root.clientWidth - 24), dpr = window.devicePixelRatio || 1;

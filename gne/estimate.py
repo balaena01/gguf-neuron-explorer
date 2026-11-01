@@ -141,7 +141,7 @@ def estimate(session, kind: str, params: dict) -> dict:
     elif kind == "direction":
         from .direction import candidate_layers, load_contrast
         cs, val = load_contrast(p["contrast"])
-        n_conv = 2 * len(cs.user_prompts)
+        n_conv = len(cs.prompts("A")) + len(cs.prompts("B"))
         sec = n_conv * sp.setprefill / 1000 * 2
         if p.get("positions") == "response":
             sec += 2 * sp.gen(len(cs.user_prompts), int(p.get("response_tokens", 96)))
@@ -188,6 +188,67 @@ def estimate(session, kind: str, params: dict) -> dict:
         n_l = m.n_layer
         sec = 2 * sp.gen(n, int(p.get("max_tokens", 96))) + 2 * n * (1 + n_l) * 2 * sp.setprefill / 1000
         detail = {"prompts": n, "prefills": 2 * n * (1 + n_l)}
+    elif kind in ("heads_causal", "heads_allocate"):          # CHANGE-06: 生成なし。1 回 = A 側 + B 側(16 例)の prefill
+        from .reverse import ContrastSet
+        from .steer import GneError
+        src = p.get("contrast")
+        if src is None and p.get("direction"):
+            try:
+                src = session.direction_set(p["direction"]).meta.get("source")
+            except GneError:
+                src = None
+        n_a = len(ContrastSet.load(src).user_prompts) if src and Path(src).exists() else 32
+        b = int(p.get("b_examples", 16)) or n_a
+        n_head = max((li.n_head for li in session.weights.arch.layers if li.head_dim), default=1)
+        n_hl = sum(1 for li in session.weights.arch.layers if li.head_dim and li.head_writer)
+        if kind == "heads_causal":
+            if p.get("mode", "ablate") == "marginal":
+                trials = 1 + 30
+                per_a = int(p.get("hard", 16))
+            else:
+                auto = p.get("layers", "auto") == "auto" and p.get("candidates") in (None, "all")
+                trials = (n_hl + int(p.get("top_layers", 4)) * n_head) if auto else n_hl * n_head
+                per_a = n_a
+        else:
+            nh = len(p.get("n_heads") or (6, 5, 4))
+            trials = 20 + int(p.get("pool", 30)) + nh * 16
+            per_a = int(p.get("hard", 16))
+        sec = trials * (per_a + b) * sp.setprefill / 1000 * 1.2
+        detail = {"trials": trials, "prefills_per_trial": per_a + b}
+    elif kind == "head_pipeline":                               # 方向(全部の質問)+ 物差し + 因果 + 配分(間引いた質問)
+        spec = p.get("spec") or {}
+        if not isinstance(spec, dict):
+            import yaml
+            sp_path = Path(str(spec))
+            spec = (json.loads(sp_path.read_text(encoding="utf-8")) if sp_path.suffix == ".json"
+                    else yaml.safe_load(sp_path.read_text(encoding="utf-8"))) if sp_path.exists() else {}
+        pipe = {**(spec.get("pipeline") or {}), **{k: v for k, v in p.items() if k != "spec"}}
+        n = max(len(spec.get("user_prompts") or []), len(spec.get("prompts_a") or []), len(spec.get("prompts_b") or [])) or 32
+        mx = min(n, int(pipe.get("max_examples") or 64))
+        b = min(16, mx)
+        n_head = max((li.n_head for li in session.weights.arch.layers if li.head_dim), default=1)
+        n_hl = sum(1 for li in session.weights.arch.layers if li.head_dim and li.head_writer)
+        trials_causal = n_hl + int(pipe.get("top_layers", 4)) * n_head
+        trials_alloc = 20 + 30 + len(pipe.get("n_heads") or (6, 5, 4)) * 16
+        hard = int(pipe.get("hard", 16))
+        prefills = 2 * n * 2 + 2 * mx + trials_causal * (mx + b) + trials_alloc * (hard + b)
+        sec = prefills * sp.setprefill / 1000 * 1.2
+        if pipe.get("positions") == "response":
+            sec += 2 * sp.gen(n, 96)
+        detail = {"prompts": n, "screened": mx, "trials": trials_causal + trials_alloc}
+    elif kind == "heads_candidates":                           # 候補(組 × 倍率 + 無介入)× 両側の質問を生成する
+        n_rows = len(p.get("n_heads") or []) or 3
+        ap = p.get("alloc")
+        if ap and not p.get("n_heads"):
+            pth = Path(str(ap))
+            if not pth.exists():
+                pth = session.store.heads_dir(session.meta.model_id) / f"{ap}.alloc.json"
+            if pth.exists():
+                n_rows = sum(1 for r in json.loads(pth.read_text(encoding="utf-8")).get("table", []) if not r.get("skipped"))
+        n_c = 1 + n_rows * len(p.get("scales") or (0.5, 0.75, 1.0, 1.25))
+        n_q = int(p.get("max_prompts", 24))
+        sec = n_c * 2 * sp.gen(n_q, int(p.get("max_tokens", 120)))
+        detail = {"candidates": n_c, "prompts_per_side": n_q, "replies": n_c * 2 * n_q}
     elif kind == "stats_resid":
         sec = 10.0 * sp.setprefill / REF["setprefill_ms"]
     return {"kind": kind, "seconds": None if sec is None else float(sec), "detail": detail, "speed": sp.to_dict(),

@@ -7,6 +7,9 @@
 // Details: W_O の列ブロックの logit lens(主成分 2 本の上位・下位の語)、当てたことのある gain、大きさ。
 // Listen: system + ユーザーの発話 + 返事を流し、返事のトークンが選んだヘッド(複数可、例 14:H0-3)で文脈のどのトークンに
 //   注目しているか(注目)と、各トークンの方向への寄与(注目 × ゲート × OV、gne heads listen)を文章の上に色で出す。
+// Causal(CHANGE-06 G): 保存済みの因果スクリーニング(gne heads causal)での、このヘッドの行(止めたときの下がり方・直接の寄与・
+//   ratio・効率 η・B 側への影響、物差しの層ごと)と、選んだスクリーニングの上位のヘッドの表(並べ替え・表示する物差しの層)、
+//   強さの配分(gne heads allocate)の組。見出しの「射影 s1」でこのヘッドの方向成分の射影(L:Hh:s1@方向)をレシピに足す。
 import { getJSON, postJSON } from "./api.js";
 import { t } from "./i18n.js";
 import { esc, toksHTML } from "./panels.js";
@@ -79,7 +82,7 @@ function shared(view, S) {
 }
 
 export class HeadPanel {
-  constructor(root, { onRecipe, inRecipe, onNamed, onOverlay, onGoto, directions }) {
+  constructor(root, { onRecipe, inRecipe, onNamed, onOverlay, onGoto, directions, onProj, inProj, onLoadProj, projDirections, causalList }) {
     this.root = root;
     this.onRecipe = onRecipe;          // (L, h, k) → レシピに足す・外す
     this.inRecipe = inRecipe;          // (L, h) → レシピの中の倍率 k か null
@@ -87,6 +90,14 @@ export class HeadPanel {
     this.onOverlay = onOverlay;        // (field) → 地図の色を heads:<name> に
     this.onGoto = onGoto;              // ({ layer, head }) → 別のヘッドを開く
     this.directions = directions || (() => []);   // 保存済みの方向の名前(Listen の「寄与」)
+    this.onProj = onProj || (() => {});            // (L, h, 方向) → 射影 s1 をレシピに足す・外す(CHANGE-06)
+    this.inProj = inProj || (() => null);          // (L, h) → レシピの射影のユニット { s, direction } か null
+    this.onLoadProj = onLoadProj || (() => {});    // (名前, ["L:Hh:sS@NAME"], 方向) → 強さの配分の組でレシピを置き換える
+    this.projDirections = projDirections || (() => []);   // proj に使える方向(gne direction の方向セット)
+    this.causalList = causalList || (() => []);    // 保存済みの因果スクリーニングの一覧(/api/model の causal)
+    this.causalSums = new Map();                   // 名前 → /api/causal/<name>(Causal タブ)
+    this._czPending = new Set();
+    this.cz = { name: null, sort: "causal_max", layer: null };   // Causal タブの選択(スクリーニング・並べ替え・物差しの層)
     this.lis = { heads: "", system: "", user: "", reply: "", dir: "", mode: "contrib", maxTokens: 64 };   // Listen の入力
     this.lres = null;                  // Listen の結果
     this.tab = "pattern";
@@ -132,7 +143,7 @@ export class HeadPanel {
         <div class="n-row"><input class="n-name h-name" placeholder="${t("名前(入力して Enter か欄の外で保存)")}" value="${esc(d.name || "")}" spellcheck="false">
           ${this.recipeButtons(d)}</div>
       </div>
-      <div class="tabs"><button data-tab="pattern">Pattern</button><button data-tab="contrast">Contrast${d.contrasts.length ? ` <span class="muted">${d.contrasts.length}</span>` : ""}</button><button data-tab="details">Details</button><button data-tab="listen">Listen</button></div>
+      <div class="tabs"><button data-tab="pattern">Pattern</button><button data-tab="contrast">Contrast${d.contrasts.length ? ` <span class="muted">${d.contrasts.length}</span>` : ""}</button><button data-tab="details">Details</button><button data-tab="listen">Listen</button><button data-tab="causal">Causal${(d.causal || []).length ? ` <span class="muted">${d.causal.length}</span>` : ""}</button></div>
       <div class="n-tab" id="h-tab"></div>`;
     for (const b of this.root.querySelectorAll(".tabs button")) {
       b.classList.toggle("on", b.dataset.tab === this.tab);
@@ -150,10 +161,13 @@ export class HeadPanel {
     name.addEventListener("keydown", (ev) => { if (ev.key === "Enter") save(); });
     name.addEventListener("blur", save);
     for (const b of this.root.querySelectorAll("[data-hk]")) b.addEventListener("click", () => { this.onRecipe(d.layer, d.head, +b.dataset.hk); this.render(); });
+    const pb = this.root.querySelector("[data-hp]");
+    if (pb) pb.addEventListener("click", () => { this.onProj(d.layer, d.head, pb.dataset.hp); this.render(); });
     const body = this.root.querySelector("#h-tab");
     if (this.tab === "contrast") this.contrast(body);
     else if (this.tab === "details") body.innerHTML = this.details();
     else if (this.tab === "listen") this.listen(body);
+    else if (this.tab === "causal") this.causal(body);
     else this.pattern(body);
   }
 
@@ -166,7 +180,20 @@ export class HeadPanel {
         on ? `${t("レシピ")} ×${k}` : t("×{k} レシピ", { k })}</button>`;
     };
     const other = cur !== null && cur !== 0 && cur !== 2 ? `<span class="muted mono h-cur" title="${t("レシピの中の倍率")}">${t("レシピ")} ×${fmt(cur, 2)}</span>` : "";
-    return `${b(0)}${b(2)}${other}`;
+    return `${b(0)}${b(2)}${other}${this.projButton(d)}`;
+  }
+
+  // 射影 s1(CHANGE-06): このヘッドの書き込みのうち方向 r̂ に沿った成分だけを消す。方向は、このヘッドの因果スクリーニング・
+  // ヘッドの対照分析の方向、無ければ最初の方向セット。レシピにあれば s と方向を出し、押すと外す
+  projButton(d) {
+    const dirs = this.projDirections();
+    const cur = this.inProj(d.layer, d.head);
+    if (cur) {
+      return `<button data-hp="${esc(cur.direction || "")}" class="on minus" title="${t("もう一度押すとレシピから外す(s と方向は recipe タブで変えられる)")}">${t("レシピ")} s${fmt(cur.s, 2)} @${esc(cur.direction || "")}</button>`;
+    }
+    const want = [...(d.causal || []).map((c) => c.direction), ...d.contrasts.map((c) => c.direction)].find((x) => x && dirs.includes(x)) || dirs[0];
+    if (!want) return "";
+    return `<button data-hp="${esc(want)}" title="${t("このヘッドの書き込みのうち方向 {d} に沿った成分だけを消す射影(L:Hh:s1@{d})をレシピに足す(s は recipe タブで変えられる)", { d: want })}">${t("射影 s1 レシピ")}</button>`;
   }
 
   // --- Pattern -------------------------------------------------------------------------------------
@@ -399,6 +426,131 @@ export class HeadPanel {
         this.run();
       });
     }
+  }
+
+  // --- Causal(CHANGE-06 G) -----------------------------------------------------------------------------
+  causal(el) {
+    const d = this.d, list = this.causalList(), mine = d.causal || [];
+    if (!list.length && !mine.length) {
+      el.innerHTML = `<p class="muted note">${t("因果スクリーニングはまだありません({cmd})。", { cmd: "<code>gne heads causal --direction NAME</code>" })}</p>`;
+      return;
+    }
+    const names = [...new Set([...mine.map((c) => c.name), ...list.map((c) => c.name)])];
+    const cz = this.cz;
+    if (!names.includes(cz.name)) { cz.name = names[0]; cz.layer = null; }
+    const sm = this.causalSums.get(cz.name);
+    if (sm === undefined && !this._czPending.has(cz.name)) {
+      const tok = this._token, name = cz.name;
+      this._czPending.add(name);
+      getJSON(`/api/causal/${encodeURIComponent(name)}`).then((x) => this.causalSums.set(name, x)).catch(() => this.causalSums.set(name, null))
+        .then(() => { this._czPending.delete(name); if (tok === this._token && this.tab === "causal") this.render(); });
+    }
+    const info = list.find((c) => c.name === cz.name) || mine.find((c) => c.name === cz.name) || {};
+    const SL = (sm && sm.score_layers) || info.score_layers || [], P = (sm && sm.primary) ?? info.primary;
+    if (cz.layer === null || !SL.includes(cz.layer)) cz.layer = P ?? SL[0] ?? null;
+    const at = cz.layer;
+    const sel = `<select id="cz-name">${names.map((n) => `<option${n === cz.name ? " selected" : ""}>${esc(n)}</option>`).join("")}</select>`;
+    const modes = info.modes || (sm ? sm.modes : []) || [];
+    const ov = `${modes.includes("ablate") ? `<button class="small" data-czov="causal" title="${t("地図の板の上辺のヘッドを、止めたときの下がり方(causal_max)で色付けする")}">${t("地図: 効き")}</button>` : ""}${
+      modes.includes("marginal") ? `<button class="small" data-czov="eta" title="${t("地図の板の上辺のヘッドを、効率 η で色付けする")}">${t("地図: 効率 η")}</button>` : ""}`;
+    const head = sm ? `<p class="muted note mono">${t("方向 {d}", { d: esc(sm.direction || "—") })} · ${t("物差しの層")} ${SL.map((L) => (L === P ? `<b>L${L}</b>` : `L${L}`)).join(" ")} · A ${sm.n_a ?? "—"} / B ${sm.n_b ?? "—"}${
+      sm.spearman_ablate_marginal !== null && sm.spearman_ablate_marginal !== undefined ? ` · ${t("順位相関(ablate・marginal)")} ${fmt(sm.spearman_ablate_marginal, 2)}` : ""} · ${esc((sm.updated || "").replace("T", " "))}</p>` : "";
+    const layerSel = SL.length > 1 ? `<label class="muted" title="${t("表に出す下がり方・寄与・η の物差しの層(太字 = 主の層)")}">${t("物差しの層")} <select id="cz-layer">${
+      SL.map((L) => `<option value="${L}"${L === at ? " selected" : ""}>L${L}${L === P ? " *" : ""}</option>`).join("")}</select></label>` : "";
+    el.innerHTML = `<div class="list-tools cz-tools">${sel}${ov}${layerSel}</div>${head}
+      ${this.causalMine(mine.find((c) => c.name === cz.name), at, P)}
+      ${sm ? this.causalTop(sm, at, P) : sm === undefined ? `<p class="muted">${t("読み込み中…")}</p>` : `<p class="err">${t("読み込めませんでした")}</p>`}`;
+    const $ = (q) => el.querySelector(q);
+    $("#cz-name").addEventListener("change", (ev) => { cz.name = ev.target.value; cz.layer = null; this.render(); });
+    const ls = $("#cz-layer");
+    if (ls) ls.addEventListener("change", (ev) => { cz.layer = +ev.target.value; this.render(); });
+    for (const b of el.querySelectorAll("[data-czov]")) b.addEventListener("click", () => this.onOverlay(`${b.dataset.czov}:${cz.name}`));
+    for (const th of el.querySelectorAll("th[data-czsort]")) th.addEventListener("click", () => { cz.sort = th.dataset.czsort; this.render(); });
+    for (const tr of el.querySelectorAll("tr[data-go]")) {
+      tr.addEventListener("click", () => { const [L, h] = tr.dataset.go.split(":").map(Number); this.onGoto({ layer: L, head: h, tab: "causal" }); });
+    }
+    for (const b of el.querySelectorAll("[data-alloc]")) {
+      b.addEventListener("click", () => {
+        const row = sm.alloc.table.find((x) => String(x.n_heads) === b.dataset.alloc);
+        if (row) this.onLoadProj(`${cz.name}-n${row.n_heads}`, row.units, sm.alloc.direction || sm.direction);
+      });
+    }
+  }
+
+  // このヘッドの行(ablate と marginal)。at = 表示する物差しの層、P = 主の層
+  causalMine(c, at, P) {
+    const d = this.d;
+    if (!c) return `<p class="muted note">${t("L{L} H{h} はこのスクリーニングで測っていません(層単位のスクリーニングで選ばれた層のヘッドだけを測ります)。", { L: d.layer, h: d.head })}</p>`;
+    const k = String(at), drops = (r) => Object.entries(r.score_drop || {}).map(([L, v]) => `${+L === P ? "<b>" : ""}L${L} ${sgn(v, 2)}${+L === P ? "</b>" : ""}`).join(" · ");
+    const out = [`<h4>${t("このヘッド(L{L} H{h})", { L: d.layer, h: d.head })}</h4>`];
+    for (const r of c.rows) {
+      const m = r.mode || "ablate", rk = (c.rank || {})[m];
+      const contrib = (r.contrib_by_layer || {})[k], drop = (r.score_drop || {})[k];
+      const ratio = Number.isFinite(drop) && Number.isFinite(contrib) && Math.abs(contrib) > 1e-9 ? drop / contrib : null;
+      const b = `<tr><td>${t("B 側の点数の変化")}</td><td class="mono">${sgn(r.b_side_delta, 3)}</td><td>${t("B 側の直交成分のずれ")}</td><td class="mono">${fmt(r.drift_orth_b, 3)}</td></tr>`;
+      if (m === "marginal") {
+        out.push(`<div class="h-con"><h4><b>${t("効率(marginal)")}</b> <span class="mono">${rk ? `#${rk.rank}/${rk.n}` : ""} · η ${fmt((r.eta_by_layer || {})[k] ?? r.eta, 3)}</span>${
+          r.in_base ? ` <span class="badge">${t("いまの組")}</span>` : ""}${r.excluded ? ` <span class="badge minus" title="${t("B 側の変化が上限を超えたので配分から外した")}">${t("除外")}</span>` : ""}</h4>
+          <table class="kv h-met"><tr><td>η(L${esc(k)})</td><td class="mono">${fmt((r.eta_by_layer || {})[k] ?? r.eta, 3)}</td><td>Δs</td><td class="mono">${fmt(r.delta_s, 1)}</td></tr>
+          <tr><td>${t("下がり方")}</td><td class="mono" colspan="3">${drops(r)}</td></tr>${b}</table></div>`);
+      } else {
+        out.push(`<div class="h-con"><h4><b>${t("止める(ablate)")}</b> <span class="mono">${rk ? `#${rk.rank}/${rk.n}` : ""} · causal_max ${fmt(r.causal_max, 2)}</span></h4>
+          <table class="kv h-met"><tr><td title="${t("出力を 0 にしたときの A 側の点数の下がり方")}">causal(L${esc(k)})</td><td class="mono">${sgn(drop, 3)}</td>
+            <td title="${t("無介入でこのヘッドが物差しの層の方向に直接書く量(A 側の平均)")}">${t("直接の寄与")}(L${esc(k)})</td><td class="mono">${sgn(contrib, 3)}</td></tr>
+          <tr><td title="${t("causal ÷ 直接の寄与。1 より大きい = 後段のユニットを通る間接の経路、1 より小さい = 補い合い")}">ratio</td><td class="mono">${fmt(ratio, 2)}</td><td>causal_max</td><td class="mono">${fmt(r.causal_max, 3)}</td></tr>
+          <tr><td>${t("下がり方")}</td><td class="mono" colspan="3">${drops(r)}</td></tr>${b}</table></div>`);
+      }
+    }
+    out.push(`<p class="muted note">${t("下がり方 = 介入の前 − 後の A 側の点数(正 = このヘッドが A 側の向きに押していた)。ratio > 1 は間接の経路、< 1 は補い合い。η = いまの組から s を Δs 上げたときの、効きにくい例での下がり方 ÷ Δs。")}</p>`);
+    return out.join("");
+  }
+
+  // 選んだスクリーニングの上位のヘッド(ablate と marginal を 1 行にまとめる)。並べ替え: causal_max・causal・contrib・ratio・η
+  causalTop(sm, at, P) {
+    const d = this.d, k = String(at), cz = this.cz;
+    const by = new Map();
+    for (const r of sm.rows) {
+      const key = `${r.layer}:${r.head}`;
+      if (!by.has(key)) by.set(key, { layer: r.layer, head: r.head, kind: r.kind, a: null, m: null });
+      by.get(key)[(r.mode || "ablate") === "marginal" ? "m" : "a"] = r;
+    }
+    const val = (x, what) => {
+      const a = x.a, m = x.m, base = a || m;
+      const drop = a ? (a.score_drop || {})[k] : null, contrib = base ? (base.contrib_by_layer || {})[k] : null;
+      return { causal_max: a ? a.causal_max : null, causal: drop, contrib,
+               ratio: Number.isFinite(drop) && Number.isFinite(contrib) && Math.abs(contrib) > 1e-9 ? drop / contrib : null,
+               eta: m ? (m.eta_by_layer || {})[k] ?? m.eta : null }[what];
+    };
+    const rows = [...by.values()].sort((x, y) => (val(y, cz.sort) ?? -Infinity) - (val(x, cz.sort) ?? -Infinity));
+    const th = (key, label, tip) => `<th data-czsort="${key}" class="${cz.sort === key ? "on" : ""}" title="${esc(tip)}">${label}${cz.sort === key ? " ▾" : ""}</th>`;
+    const body = rows.slice(0, 40).map((x, i) => {
+      const b = x.a || x.m;
+      return `<tr data-go="${x.layer}:${x.head}" class="${x.layer === d.layer && x.head === d.head ? "sel" : ""}${x.m && x.m.excluded ? " rnd" : ""}"><td>${i + 1}</td><td>L${x.layer} H${x.head}</td>
+        <td>${fmt(val(x, "causal_max"), 2)}</td><td>${fmt(val(x, "causal"), 2)}</td><td>${fmt(val(x, "contrib"), 2)}</td><td>${fmt(val(x, "ratio"), 2)}</td>
+        <td>${fmt(val(x, "eta"), 3)}${x.m && x.m.in_base ? "*" : ""}</td><td>${fmt(b.b_side_delta, 2)}</td><td>${fmt(b.drift_orth_b, 3)}</td></tr>`;
+    }).join("");
+    const lr = (sm.layer_rows || []).slice().sort((a, b) => (b.causal_max ?? 0) - (a.causal_max ?? 0));
+    const lrows = lr.map((r) => `<tr><td>L${r.layer}</td><td>${r.kind === "attn" ? "attn" : "linear"}</td><td>${r.n_heads ?? "—"}</td><td>${fmt(r.causal_max, 2)}</td>
+      <td>${fmt((r.score_drop || {})[k], 2)}</td><td>${fmt(r.b_side_delta, 2)}</td><td>${fmt(r.drift_orth_b, 3)}</td></tr>`).join("");
+    return `<h4>${t("このスクリーニングの上位({n} ヘッド)", { n: by.size })}</h4>
+      <div class="cz-scroll"><table class="rank mono h-top cz-top"><tr><th>#</th><th>${t("ヘッド")}</th>${th("causal_max", "causal_max", t("止めたときの下がり方の、物差しの層での最大"))}${
+        th("causal", `causal L${esc(k)}`, t("止めたときの下がり方(表示中の物差しの層)"))}${th("contrib", `contrib L${esc(k)}`, t("直接の寄与(表示中の物差しの層)"))}${
+        th("ratio", "ratio", t("causal ÷ 直接の寄与(表示中の物差しの層)"))}${th("eta", `η L${esc(k)}`, t("効率 η(marginal、表示中の物差しの層)。* = いまの組のヘッド"))}<th title="${t("B 側の点数の変化")}">B Δ</th><th title="${t("B 側の直交成分のずれ")}">B ⊥</th></tr>${body}</table></div>
+      <p class="muted note">${t("見出しをクリックで並べ替え、行をクリックでそのヘッドを開く。灰色 = 配分から外したヘッド。")}</p>
+      ${lrows ? `<details><summary class="muted note">${t("層単位のスクリーニング({n} 層、層のヘッドを全部止めたとき)", { n: lr.length })}</summary>
+        <table class="kv mono cz-layers"><tr><th>${t("層")}</th><th>kind</th><th>${t("ヘッド")}</th><th>causal_max</th><th>L${esc(k)}</th><th>B Δ</th><th>B ⊥</th></tr>${lrows}</table></details>` : ""}
+      ${this.allocHTML(sm)}`;
+  }
+
+  // 強さの配分(gne heads allocate)の組。ヘッド数ごとの s の最大・残った例の数・B 側のずれ。行のボタンでレシピに読み込む
+  allocHTML(sm) {
+    const al = sm.alloc;
+    if (!al || !(al.table || []).length) return "";
+    const rows = al.table.filter((r) => !r.skipped).map((r) => `<tr class="${r.recommended ? "on" : ""}"><td>${r.n_heads}${r.recommended ? ` <span class="badge">${t("推奨")}</span>` : ""}</td>
+      <td>${fmt(r.s_max, 2)}</td><td>${r.remain ?? "—"}</td><td>${fmt(r.a_max, 2)}</td><td>${fmt(r.b_drift_orth, 3)}</td><td>${fmt(r.b_side_delta, 2)}</td>
+      <td class="w">${esc((r.units || []).join(" "))}</td><td><button class="small" data-alloc="${r.n_heads}" title="${t("この組(proj のユニット)で今のレシピを置き換える")}">${t("レシピに読み込む")}</button></td></tr>`).join("");
+    return `<h4>${t("強さの配分(gne heads allocate、L{L} の点数を {v} まで)", { L: al.score_layer ?? "—", v: fmt(al.target, 2) })}</h4>
+      <div class="cz-scroll"><table class="kv mono cz-alloc"><tr><th>${t("ヘッド数")}</th><th>s max</th><th title="${t("目標に届かず残った例の数")}">${t("残り")}</th><th title="${t("A 側の点数の最大")}">A max</th><th title="${t("B 側の直交成分のずれ")}">B ⊥</th><th title="${t("B 側の点数の変化")}">B Δ</th><th>${t("ユニット")}</th><th></th></tr>${rows}</table></div>`;
   }
 
   // --- Listen --------------------------------------------------------------------------------------

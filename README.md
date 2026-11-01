@@ -114,6 +114,16 @@ gne heads show 15 2                                           # one head: rank, 
 gne heads listen --heads 14:H0-3 --system @persona.txt -u "I had lunch with a coworker." --direction wr_mix14   # attention from the reply, per-token contributions
 gne steer --unit 15:H2:x2 -p "I had lunch with Emily today." --compare   # head gain (LoRA on W_O)
 gne eval --recipe R --reactivity configs/contrast/yandere_react.yaml --head-controls 8
+
+gne direction score --name evil                               # A/B separation per layer, records the base layer (no generation)
+gne heads causal --name evil                                  # which heads move the direction score when stopped (no generation)
+gne heads allocate --name evil --target -3 --n-heads 6,5,4    # strengths by efficiency, sets with fewer heads compared
+gne heads candidates --alloc evil --prompts held_out.yaml     # replies for each set × scale, written out for blind scoring
+gne heads candidates --tally evil                             # tally the scores per candidate
+gne steer --recipe ~/.gne/heads/<model_id>/evil.alloc-n4.yaml --system "You are a cruel AI." -p "Who are you?" --compare   # only the chosen heads' component along the direction
+gne eval --recipe ~/.gne/heads/<model_id>/evil.alloc-n4.yaml --random-controls 16   # vs random heads with the same strengths
+gne eval --recipe R --compare-methods                         # full ablation / head component / head gain / neuron erase at the same effect
+gne headproj export --recipe R                                # rank-1 LoRA per layer (--bake rewrites only those tensors)
 ```
 
 `export-cvec --verify` also checks that `llama-completion --control-vector` gives the same greedy output as `gne`. It looks for `llama-completion` in `build/` and on `PATH`, or you can pass `--llama-completion`.
@@ -138,6 +148,7 @@ units:
   - {layer: 13, neuron: 7956, mode: gain, k: 0} # gain: remove this neuron's output (×0)
   - {layer: 16, kind: direction, direction: evil, dose: +0.3}   # add a direction from gne direction
   - {layer: 15, kind: head, head: 2, mode: gain, k: 2}           # attention head: scale its output (×2)
+  - {layer: 16, kind: head, head: 8, mode: proj, direction: evil, s: 6}   # attention head: change only its write along a direction (s = 1 removes it)
 ablate: {direction: refusal, scale: 1.0}        # project a direction out of every residual writer (LoRA)
 sampling: {temperature: 1.0, top_k: 20, top_p: 0.95, min_p: 0.05, presence_penalty: 0.9}   # how to try it (no seed)
 ```
@@ -196,6 +207,22 @@ gne steer -m M --unit 12:E37:N511:x2 -p "..." --compare
 
 A scale patch rewrites the fp16 scales inside the quantization blocks of the affected rows, so a row or an expert's slab becomes exactly k times the original (k = 0 writes zero bytes). It works for Q4_0 to Q8_0, Q2_K to Q6_K, the IQ types except IQ1_M, and F16/BF16/F32. Patches go to a working copy under `~/.gne/work/` (the original GGUF is never touched) and are reverted after each use; reloading the copy takes about 0.3 s for a 1.4 GB model and 0.9 s for 5 GB. `steer`, `eval`, the UI chat and the OpenAI-compatible endpoint apply them automatically. Column directions (`W_down[:, n]`) cannot be patched this way. Inside MoE layers, sweeps, lenses and reverse lookups number neurons `e × n_ff_exp + n`.
 
+### Changing only one direction in a few heads
+
+A direction made with `gne direction` can also be applied to single attention heads. Each head adds a vector to the residual stream at every token. A `proj` unit splits that vector into the part that lies along the direction and the rest, and changes only the first part: with strength `s`, the head's write along the direction becomes `1 − s` times what it was, so `s = 1` removes it, `s = 2` flips it, and a negative `s` strengthens it. Everything else the head writes is left alone. That is the difference from a head gain (`L:Hh:xk`), which scales the whole output, including all the information that has nothing to do with the direction. Because the change is proportional to what the head writes for the current input, it acts where the head is writing along the direction and does little elsewhere. The same property sets its limit: it cannot create a behavior the heads are not already writing. Strengthening the heads that carry a persona does nothing in a plain conversation, and only works when something else, such as a system prompt or a small neuron or direction push, starts the behavior first.
+
+The heads and their strengths are chosen without generating any text. `gne direction score` reads both sides of the contrast set up to the point where the reply would begin and measures, layer by layer, how far apart they are along the direction; the layer where they separate best is recorded as the base layer. `gne heads causal` then stops whole layers of heads, and afterwards single heads in the layers that matter, and records how much the score drops, next to how much the head writes along the direction directly. Heads in later layers can matter even though they write nothing along the base layer's direction, so the drop is also measured a few layers further on. In `marginal` mode the same command starts from a current set and raises one head's strength a little at a time, which gives its efficiency; this ranking usually differs from the one you get by stopping heads. `gne heads allocate` spreads strength over the heads in proportion to that efficiency, scales the whole set until the examples that resist most reach a target score, and builds sets with fewer heads so that you can keep the smallest one that does as well as the larger ones.
+
+`gne heads pipeline --spec file.json` runs these steps in one go from a single file that holds the contrast set (and, optionally, the settings): it builds the direction from all the questions, records the base layer, screens layers and then single heads, and allocates the strengths. The questions can number in the hundreds; the steps that stop heads use an evenly spaced subset (64 by default), because each trial reads every question it uses. Layers and heads whose removal shakes the neutral side's residual by more than half its size are left out, since they break the model rather than act on the direction; stopping all heads of the first layer usually does this. Without a target, the strengths aim at the point halfway between the two sides' average scores.
+
+Strengths chosen without generating text are not always right for actual replies, since the score is an amount along the direction and can drift away from how strongly the behavior shows and how natural the text reads. The last step is therefore to read replies. `gne heads candidates --alloc NAME` takes each set in the allocation's comparison table, multiplies its strengths by a few overall factors (0.5, 0.75, 1 and 1.25 by default), and has every candidate, together with the unmodified model, answer the questions of both sides. All candidates share one random seed, so the replies differ only because of the intervention. A positive factor removes the A-side behavior, so its A-side replies are the ones to read; a negative factor flips the sign and strengthens the behavior, so its B-side replies are read instead. For each candidate the command reports the share of replies that match `validate.match`, how much the wording repeats, and how often the replies on the side that is not being read changed from the unmodified ones. It then mixes the replies to be read into one file without saying which candidate wrote which, and adds a scoring guide. A person or another model gives each reply a score from 1 to 5 for how strongly the behavior shows (P) and for how natural it is (C). `--tally` ranks the candidates by the mean of the smaller of 6 − P and C for removal ("the behavior is gone and the reply is natural") and of the smaller of P and C for strengthening. Questions that were used to choose the strengths make the candidates look better than they are, so pass questions that were not used with `--prompts`. To try a small neuron push that the heads then amplify, `--with-recipe` adds a recipe to every candidate, the unmodified one included. In the UI, the form under the comparison table in the direction view's "Build direction and heads from JSON" tab makes candidates, and the "Strength candidates" tab lays the replies out question by question or shows them one at a time, names hidden, to be scored with the number keys. Each score is saved as it is given, so scoring can stop and resume; once everything is scored, the tab shows the tally with buttons that load the best candidate into the recipe panel or try it in the one-column chat.
+
+The two sides of a contrast set are usually made with system prompts. Only one of them has to be written: a side without a system prompt reads the questions with no system prompt at all, so a contrast set with only `system_a` compares the persona against the model as it normally answers. A contrast set can also make one side, or both, by applying a recipe (`recipe_a`, `recipe_b`), or give each side its own questions (`prompts_a`, `prompts_b`), so that the unmodified model reads two kinds of questions and the direction is the difference between them; `configs/contrast/ja_vs_en.yaml` compares questions asked in Japanese with the same questions asked in English. When the questions differ, the direction also picks up whatever else differs between them, such as topic and length, so keep those as close as you can. The difference between the sides is then the recipe's own effect, so `gne direction` builds the direction that a neuron recipe produces, and `gne direction score` and `gne heads causal` find the heads that carry it while the recipe is applied. `configs/contrast/evil_neurons.yaml` does this for the evil neuron recipe on Qwen3.5-4B. The tools that compare one reply read under two system prompts (`gne heads contrast`, `gne writers`, `gne experts contrast`) do not accept such a contrast set.
+
+The result is an ordinary recipe with units such as `16:H8:s6@evil`. Heads of one layer that share a direction fold into a rank-1 LoRA, so the adapter stays small; `gne headproj export` (the same as `gne gain`) writes it, and `--bake` rewrites only the tensors involved. A control vector cannot express it. Before relying on a recipe, check it against controls. `gne eval --random-controls N` applies the same strengths to randomly chosen heads; `gne eval --compare-methods` brings full-layer ablation, the same heads scaled whole, and the removal of the top neurons to the same score and compares their side effects; and `gne eval --alloc NAME --n-heads 6,5,4,3` shows how the side effects change as heads are dropped. The score is measured along the same direction that was used to pick the heads, so report results with a measure taken from the output, such as the contrast set's `validate.match`, capability and perplexity.
+
+On Qwen3.5-4B, two heads chosen this way stopped the persona that the evil system prompt asks for (judged in 83% of replies before, none after) without changing capability or perplexity. Brought to the same score, full-layer ablation raised perplexity by 15%, and scaling the same two heads cost 14 points of capability. [docs/head-component-steering.md](docs/head-component-steering.md) explains the method in more detail.
+
 ### Across quantizations
 
 A neuron found on one quant carries over to other quants of the same model. Checked with L22 N2742 (the "alien" neuron, found on Qwen3.5-4B Q8_0):
@@ -222,17 +249,20 @@ gne serve -m models/Qwen3.5-4B-Q8_0.gguf      # http://127.0.0.1:8791
 
 ![Neuron panel with up/downstream wiring in the front view](docs/images/ui-neuron.png)
 
-The UI has four views:
+The main views are:
 - **map:** every layer as a sheet of neurons, with overlays.
 - **layers:** per-layer summaries.
-- **eval:** saved evals as a chart and a table per dose, sample outputs, and a button to eval the current recipe.
+- **direction:** how well a saved direction separates the two sides of its contrast set at each layer, where the base layer is, and the per-example scores at a chosen layer. Its second tab takes a contrast set as JSON (pasted, loaded from a file, or started from a template) and runs the whole search for heads with one button: it makes the direction, picks the base layer, screens layers and heads, and allocates the strengths. The result shows each step with a short explanation, the heads that were left out and why, how the ranking by efficiency differs from the ranking by stopping heads, and the sets with fewer heads, each of which can be loaded into the recipe tab or sent to eval.
+- **eval:** saved evals as a chart and a table per dose, sample outputs, and a button to eval the current recipe. Comparisons of methods and of sets with fewer heads appear here too.
 - **embed:** a UMAP of rollout texts.
 
 Click a neuron or a list row to open its panel, which has four tabs:
 - **Examples:** rollouts per prompt and dose.
-- **Chat:** live 3-column steering, with a `when` selector and a system prompt field. The recipe tab can add an ablation (direction, scale, layers). With a model that can hear, the 🎤 button records your voice in the browser and sends it as the user turn (press, speak, press again; text in the box goes along). 🔊 reads the right column's reply aloud with the browser's voice. The microphone works when the UI is opened at `http://127.0.0.1` or `localhost`.
+- **Chat:** live 3-column steering, with a `when` selector and a system prompt field. A switch above it changes to a single column that generates only the steered reply (the recipe applied, or the neuron pushed +), which is three times faster and suits long conversations; changing the number of columns clears the conversation. The recipe tab can add an ablation (direction, scale, layers). With a model that can hear, the 🎤 button records your voice in the browser and sends it as the user turn (press, speak, press again; text in the box goes along). 🔊 reads the right column's reply aloud with the browser's voice. The microphone works when the UI is opened at `http://127.0.0.1` or `localhost`.
 - **Details:** lens results, per-dose metrics, connections, and the evals that include the neuron.
 - **Web:** the multi-hop wiring.
+
+The head panel opens when you click the marks along the top edge of a sheet. Besides the attention pattern and the contrast results, its Causal tab shows how much each head moved a direction's score when it was stopped or strengthened, and the map can be colored by those values. The recipe tab holds head units of this kind with a slider for the strength.
 
 To compute missing data (lenses, sweeps, connections, layouts), right-click a layer label. Jobs run in the background and give way to chat when it needs the GPU. The language switch is at the top right; you can also open the UI with `?lang=en` or `?lang=ja`.
 
@@ -273,7 +303,7 @@ The server keeps no state, so the strength can change at any point in a conversa
 claude mcp add gne -- gne mcp --model /path/to/model.gguf
 ```
 
-The tools are `model_overview`, `layer_summary`, `neuron`, `search`, `steer`, `steer_lens`, `fires`, `reverse`, `recipe_save`, `export_cvec`, `gain_export`, `bake`, `eval`, `direction`, `ablate_export`, `head`, `heads_contrast`, `attention`, `set_name` and `job_start` / `job_status` / `job_cancel`.
+The tools are `model_overview`, `layer_summary`, `neuron`, `search`, `steer`, `steer_lens`, `fires`, `reverse`, `recipe_save`, `export_cvec`, `gain_export`, `bake`, `eval`, `direction`, `ablate_export`, `head`, `heads_contrast`, `attention`, `direction_score`, `heads_causal`, `heads_allocate`, `headproj_export`, `set_name` and `job_start` / `job_status` / `job_cancel`.
 
 If the web UI is open, add `--ui-url http://127.0.0.1:8791`. With it, the agent can highlight and annotate neurons and open them in the browser (`ui_highlight`, `ui_note`, `ui_open`). When the UI already holds the model on the same GPU, also add `--n-gpu-layers 0`.
 
@@ -300,6 +330,7 @@ The documentation is in Japanese:
 - [docs/measurements.md](docs/measurements.md): timings and throughput.
 - [docs/agent_playbook.md](docs/agent_playbook.md): how to read the results.
 - [docs/setup.md](docs/setup.md): CUDA / ROCm under WSL, one environment per GPU, and workers.
+- [docs/head-component-steering.md](docs/head-component-steering.md): changing only the component of a few causally chosen attention heads along a direction (`mode: proj`, `gne direction score`, `gne heads causal`, `gne heads allocate`, `gne eval --compare-methods`), and how it relates to full ablation.
 - [docs/persona_workflow.md](docs/persona_workflow.md): building a persona from neurons, step by step (with the scripts in `examples/persona_neurons/` and the yandere case as the worked example), and deriving attention heads and neurons from example dialogues.
 
 ## License

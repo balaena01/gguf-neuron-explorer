@@ -118,6 +118,16 @@ gne heads show 15 2                                           # ヘッド 1 個�
 gne heads listen --heads 14:H0-3 --system @persona.txt -u "I had lunch with a coworker." --direction wr_mix14   # 返事からの注目と、トークンごとの寄与
 gne steer --unit 15:H2:x2 -p "I had lunch with Emily today." --compare   # ヘッドの gain(W_O の LoRA)
 gne eval --recipe R --reactivity configs/contrast/yandere_react.yaml --head-controls 8
+
+gne direction score --name evil                               # 層ごとの A/B の分かれ方。基準層を記録する(生成なし)
+gne heads causal --name evil                                  # 止めると方向の点数が下がるヘッド(生成なし)
+gne heads allocate --name evil --target -3 --n-heads 6,5,4    # 効率で強さを配り、ヘッド数を減らした組を比べる
+gne heads candidates --alloc evil --prompts held_out.yaml     # 組 × 倍率で返事を作り、どの候補か伏せた採点のファイルを書く
+gne heads candidates --tally evil                             # 書いた採点を候補ごとに集計する
+gne steer --recipe ~/.gne/heads/<model_id>/evil.alloc-n4.yaml --system "You are a cruel AI." -p "Who are you?" --compare   # 選んだヘッドの書き込みの方向成分だけを変える
+gne eval --recipe ~/.gne/heads/<model_id>/evil.alloc-n4.yaml --random-controls 16   # 同じ強さのランダムなヘッドと比べる
+gne eval --recipe R --compare-methods                         # 全層射影・ヘッドの方向成分・ヘッドの倍率・ニューロンの消去を、効き目をそろえて比べる
+gne headproj export --recipe R                                # 層ごとに階数 1 の LoRA(--bake はそのテンソルだけ書き換える)
 ```
 
 `export-cvec --verify` を付けると、`llama-completion --control-vector` の greedy 出力が `gne` と一致するかも確かめます。`llama-completion` は `build/` と `PATH` から探します（`--llama-completion` で指定もできます）。
@@ -142,6 +152,7 @@ units:
   - {layer: 13, neuron: 7956, mode: gain, k: 0} # gain: このニューロンの出力を消す(×0)
   - {layer: 16, kind: direction, direction: evil, dose: +0.3}   # gne direction で作った方向を足す
   - {layer: 15, kind: head, head: 2, mode: gain, k: 2}           # attention ヘッドの出力を k 倍(×2)
+  - {layer: 16, kind: head, head: 8, mode: proj, direction: evil, s: 6}   # attention ヘッドの書き込みのうち、方向に沿った分だけを変える（s = 1 で消える）
 ablate: {direction: refusal, scale: 1.0}        # 方向を残差に書き込む重みから消す(LoRA)
 sampling: {temperature: 1.0, top_k: 20, top_p: 0.95, min_p: 0.05, presence_penalty: 0.9}   # 試すときのサンプリング(seed は持たない)
 ```
@@ -206,6 +217,22 @@ gne steer -m M --unit 12:E37:N511:x2 -p "..." --compare
 
 スケールパッチは、対象の行の量子化ブロックの中の fp16 のスケールを書き換えるので、行や専門家のスラブがちょうど k 倍になります（k = 0 はゼロバイト）。Q4_0〜Q8_0、Q2_K〜Q6_K、IQ1_M 以外の IQ 系、F16・BF16・F32 で使えます。パッチは `~/.gne/work/` の作業用コピーに当て（元の GGUF は触りません）、使うたびに戻します。コピーの読み直しは 1.4 GB のモデルで約 0.3 秒、5 GB で約 0.9 秒です。`steer`・`eval`・UI のチャット・OpenAI 互換の API は自動で当てます。列方向（`W_down[:, n]`）はこの方法では書けません。MoE の層の sweep・lens・逆引きでは、ニューロンを `e × n_ff_exp + n` の通し番号で数えます。
 
+### 少数のヘッドの、方向に沿った分だけを変える
+
+`gne direction` で作った方向は、attention ヘッド 1 個ずつにも当てられます。ヘッドは毎トークン、残差にベクトルを 1 本足しています。`proj` のユニットは、このベクトルを「方向に沿った分」と「それ以外」に分けて、前者だけを変えます。強さを `s` とすると、方向に沿った分が元の `1 − s` 倍になります。`s = 1` で消え、`s = 2` で向きが反転し、`s` が負なら強まります。それ以外の分には触りません。ここがヘッドの gain（`L:Hh:xk`）との違いで、gain は方向と関係のない情報も含めて、出力をまるごと倍にします。変化の大きさは、いまの入力でそのヘッドが方向に沿って書いている量に比例するので、そのヘッドが方向に沿って書いている場面でだけ効き、ほかではあまり変わりません。同じ理由で限界もあります。ヘッドがもともと書いていない振る舞いは作れません。性格を運んでいるヘッドを強めても、指示のない会話では何も起きず、system の指示や、ニューロン・方向による小さな押しで性格が先に出ているときにだけ効きます。
+
+ヘッドと強さは、文章を生成せずに決めます。`gne direction score` は、対照集合の両側を返事が始まる直前まで読ませ、層ごとに両側が方向に沿ってどれだけ離れているかを測ります。一番よく分かれる層が基準層として記録されます。`gne heads causal` は、まず層ごとにヘッドをまとめて止め、効いている層ではヘッドを 1 個ずつ止めて、点数がどれだけ下がるかを、そのヘッドが方向に沿って直接書いている量と並べて記録します。後ろの層のヘッドは基準層の方向には何も書かなくても効くことがあるので、下がり方は数層先でも測ります。`marginal` モードでは、いまの組から 1 個のヘッドの強さを少しずつ上げ、効率を測ります。この順位は、止めたときの順位とたいてい違います。`gne heads allocate` は、効率に比例して強さを配り、いちばん効きにくい例が目標の点数に届くまで組全体の大きさを合わせます。ヘッドの数を減らした組も作るので、大きい組と同じくらい効く一番小さい組を選べます。
+
+`gne heads pipeline --spec ファイル.json` は、対照集合(と、任意で設定)を書いた 1 つのファイルから、ここまでの流れを 1 回で回します。質問を全部使って方向を作り、基準層を記録し、層ごと、続いてヘッド 1 個ずつ止めて効き目を測り、強さを配ります。質問は何百個でもかまいません。ヘッドを止めて測る段階では、1 回の試行で使う質問を全部読ませるので、質問を等間隔に間引いた一部（既定 64 個）を使います。止めると中立の側の残差が自分の大きさの半分以上動く層とヘッドは、方向に効いているのではなくモデルを壊しているだけなので、候補から外します（最初の層のヘッドを全部止めると、たいていこうなります）。目標を指定しなければ、両側の平均点のちょうど真ん中を目指して強さを配ります。
+
+生成せずに決めた強さが、実際の返事でちょうどよいとは限りません。点数は方向に沿った量なので、返事に出る振る舞いの強さや自然さとはずれることがあります。そこで最後は返事を読んで決めます。`gne heads candidates --alloc 名前` は、配分の比較表にある組それぞれの強さ全体に倍率(既定は 0.5・0.75・1・1.25)をかけた候補を作り、何もしないモデルと一緒に、両側の質問へ返事を書かせます。乱数の種はすべての候補で同じなので、返事の違いは介入だけから来ます。正の倍率は A 側の振る舞いを消す向きなので A 側の返事を、負の倍率は符号を返して強める向きなので B 側の返事を見ます。候補ごとに、`validate.match` に合う返事の割合、同じ言い回しの繰り返し、見ていない側の返事が何もしないときから変わった割合を出し、見る側の返事を、どの候補のものか分からないように混ぜて 1 つのファイルに並べ、採点の基準を添えます。採点は人でも別のモデルでもよく、振る舞いの強さ(P)と自然さ(C)をそれぞれ 1〜5 で付けます。`--tally` で集計すると、消す向きの候補は「振る舞いが消えて、しかも自然か」(6 − P と C の小さいほう)、強める向きの候補は「振る舞いが出て、しかも自然か」(P と C の小さいほう)の平均で並びます。強さを決めるのに使った質問で比べると良く見えすぎるので、使っていない質問を `--prompts` で渡してください。ニューロンで少しだけ性格を出し、それをヘッドで増幅する組み合わせを試すときは、`--with-recipe` で渡したレシピが、何もしない候補も含めたすべての候補に重なります。UI では、direction ビューの「JSON から方向とヘッドを作る」タブで比較表の下のフォームから候補を作り、「強さの候補」タブで、返事を質問ごとに並べたり、1 本ずつ名前を伏せたまま数字キーで採点したりできます。採点は 1 本ごとに保存されるので、途中でやめても続きから付けられ、付け終わると集計と、いちばん良い候補をレシピに読み込むボタン・1 列のチャットで試すボタンが出ます。
+
+対照集合の両側は、ふつうは system プロンプトで作ります。書くのは片方だけでもかまいません。system を書かなかった側は system なしで質問を読むので、`system_a` だけを書けば、その性格と、ふだんどおりに答えるモデルとを比べることになります。片側か両側を、レシピを当てて作ることもできます（`recipe_a`・`recipe_b`）。側ごとに別の質問を書くこともでき（`prompts_a`・`prompts_b`）、そのときは何もしないモデルに 2 種類の質問を読ませ、その差を方向にします。`configs/contrast/ja_vs_en.yaml` は、日本語で聞いた質問と、同じ質問を英語で聞いたものを比べる例です。質問が違うと、話題や長さのような狙っていない違いも方向に混ざるので、それ以外はできるだけそろえてください。こうすると両側の差はレシピそのものの効き目になるので、`gne direction` でニューロンのレシピが作る方向を求め、レシピを当てたまま `gne direction score` と `gne heads causal` で、その方向を運ぶヘッドを探せます。`configs/contrast/evil_neurons.yaml` は、Qwen3.5-4B の evil のニューロンのレシピでこれをする例です。同じ返事を 2 つの system で読ませて比べる道具（`gne heads contrast`・`gne writers`・`gne experts contrast`）には、この形の対照集合は使えません。
+
+できあがるのは、`16:H8:s6@evil` のようなユニットを持つふつうのレシピです。同じ層で同じ方向を使うヘッドは階数 1 の LoRA にまとまるので、アダプタは小さく済みます。`gne headproj export`（`gne gain` と同じ）で書き出し、`--bake` を付けると関係するテンソルだけを書き換えます。control vector では表せません。使う前に、対照と比べて確かめます。`gne eval --random-controls N` は同じ強さをランダムに選んだヘッドに当てます。`gne eval --compare-methods` は、全層の射影消去・同じヘッドの出力をまるごと倍にしたもの・上位ニューロンの消去を同じ点数にそろえて、副作用を比べます。`gne eval --alloc 名前 --n-heads 6,5,4,3` は、ヘッドを減らしていったときに副作用がどう変わるかを出します。点数はヘッドを選ぶのに使った方向そのもので測っているので、結果を伝えるときは、対照集合の `validate.match` の一致率・能力・perplexity のような、出力から測った値を使ってください。
+
+Qwen3.5-4B では、こうして選んだ 2 個のヘッドで、evil の system が求める性格が止まりました（判定に当たる返事が 83% から 0 に）。能力と perplexity は変わりませんでした。同じ点数にそろえると、全層の射影消去は perplexity が 15% 悪化し、同じ 2 個のヘッドをまるごと倍にすると能力が 14 ポイント落ちました。手法の詳しい説明は [docs/head-component-steering.md](docs/head-component-steering.md) にあります。
+
 ### 量子化を変えても効くか
 
 ある量子化で見つけたニューロンは、同じモデルのほかの量子化でもそのまま効きます。Qwen3.5-4B の Q8_0 で見つけた L22 N2742(「宇宙人」ニューロン)で確かめました。
@@ -232,17 +259,20 @@ gne serve -m models/Qwen3.5-4B-Q8_0.gguf      # http://127.0.0.1:8791
 
 ![正面ビューで上流・下流の配線とニューロンのパネルを開いたところ](docs/images/ui-neuron.png)
 
-ビューは 4 つあります。
+主なビューは次のとおりです。
 - **map:** 全層をニューロンのシートで並べ、値を重ねます。
 - **layers:** 層ごとのまとめです。
-- **eval:** 保存した eval を、倍率ごとのグラフと表、出力の例で見ます。今のレシピの eval もここから始められます。
+- **direction:** 保存した方向が、対照集合の両側を層ごとにどれだけ分けているか、基準層がどこか、選んだ層での例ごとの点数を見ます。もう 1 つのタブでは、対照集合を JSON で渡して（貼り付け、ファイル、ひな形から）、ボタン 1 つでヘッド探しを最後まで回せます。方向を作り、基準層を選び、層とヘッドを止めて効き目を測り、強さを配ります。結果には各段階の短い説明、外したヘッドとその理由、止めたときの順位と効率の順位がどう入れ替わったか、ヘッドを減らした組の比較が出ます。どの組もレシピのタブに読み込んだり、eval に回したりできます。
+- **eval:** 保存した eval を、倍率ごとのグラフと表、出力の例で見ます。今のレシピの eval もここから始められます。方式の比較や、ヘッドを減らした組の比較もここに出ます。
 - **embed:** rollout の文の UMAP です。
 
 ニューロンか一覧の行をクリックすると、パネルが開きます。タブは 4 つです。
 - **Examples:** プロンプトと dose ごとの生成例
-- **Chat:** その場で押す 3 列チャット（`when` と system を選べます）。recipe タブで方向の消去（方向・倍率・層）も足せます。音声を聞けるモデルなら、🎤 でブラウザから声で話しかけられます（押して話し、もう一度押すと送ります。入力欄の文も一緒に送ります）。🔊 で右の列の返事をブラウザの音声で読み上げます。マイクは `http://127.0.0.1` か `localhost` で開いたときに使えます
+- **Chat:** その場で押す 3 列チャット（`when` と system を選べます）。上の切り替えで 1 列にすると、押した側（レシピありか、ニューロンを + で押した返事）だけを生成します。生成が 3 分の 1 で済むので、長い会話を試すのに向きます。列の数を変えると会話は消えます。recipe タブで方向の消去（方向・倍率・層）も足せます。音声を聞けるモデルなら、🎤 でブラウザから声で話しかけられます（押して話し、もう一度押すと送ります。入力欄の文も一緒に送ります）。🔊 で右の列の返事をブラウザの音声で読み上げます。マイクは `http://127.0.0.1` か `localhost` で開いたときに使えます
 - **Details:** lens の結果・dose ごとの指標・つながり・そのニューロンを含む eval
 - **Web:** 何段かたどった配線
+
+シートの上辺の刻みをクリックすると、ヘッドのパネルが開きます。注目のパターンや対照分析の結果のほかに、Causal タブで、ヘッドを止めたり強めたりしたときに方向の点数がどれだけ動いたかを見られ、地図をその値で色分けできます。recipe タブには、この種類のヘッドのユニットを、強さのスライダーつきで置けます。
 
 足りないデータ（lens・sweep・connections・配置）は、層のラベルを右クリックすると計算できます。ジョブは裏で動き、チャットが GPU を使うときは譲ります。言語は右上で切り替えます。URL に `?lang=ja` / `?lang=en` を付けて開くこともできます。
 
@@ -299,7 +329,7 @@ r = client.chat.completions.create(
 claude mcp add gne -- gne mcp --model /path/to/model.gguf
 ```
 
-ツールは `model_overview`・`layer_summary`・`neuron`・`search`・`steer`・`steer_lens`・`fires`・`reverse`・`recipe_save`・`export_cvec`・`gain_export`・`bake`・`eval`・`direction`・`ablate_export`・`head`・`heads_contrast`・`attention`・`set_name`・`job_start` / `job_status` / `job_cancel` です。
+ツールは `model_overview`・`layer_summary`・`neuron`・`search`・`steer`・`steer_lens`・`fires`・`reverse`・`recipe_save`・`export_cvec`・`gain_export`・`bake`・`eval`・`direction`・`ablate_export`・`head`・`heads_contrast`・`attention`・`direction_score`・`heads_causal`・`heads_allocate`・`headproj_export`・`set_name`・`job_start` / `job_status` / `job_cancel` です。
 
 Web UI を開いているなら `--ui-url http://127.0.0.1:8791` を付けます。こうするとエージェントがブラウザ上でニューロンを強調したり、注釈を貼ったり、開いたりできます（`ui_highlight`・`ui_note`・`ui_open`）。同じ GPU に UI がモデルを載せているときは、`--n-gpu-layers 0` も付けます。
 
@@ -325,6 +355,7 @@ python -m pytest -q
 - [docs/measurements.md](docs/measurements.md): 速度の実測
 - [docs/agent_playbook.md](docs/agent_playbook.md): 結果の読み方
 - [docs/setup.md](docs/setup.md): WSL での CUDA・ROCm、GPU ごとの環境とワーカー
+- [docs/head-component-steering.md](docs/head-component-steering.md): 因果で選んだ数個の attention ヘッドの、方向に沿った成分だけを変える手法(`mode: proj`、`gne direction score`、`gne heads causal`、`gne heads allocate`、`gne eval --compare-methods`)と、全層射影との関係
 - [docs/persona_workflow.md](docs/persona_workflow.md): 性格をニューロンで作る手順（`examples/persona_neurons/` のスクリプトと、ヤンデレでたどった道）と、お手本の会話から attention ヘッドとニューロンを導く手順
 
 ## ライセンス

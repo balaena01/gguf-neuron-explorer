@@ -1,0 +1,34 @@
+# 側ごとに別の質問を読む対照集合の例。何もしないモデルに、A = 日本語の質問、B = 英語の質問を読ませ、その差から
+# 「日本語で答える状態」の向きを作る(system もレシピも使わない)。質問の中身(話題・長さ)は両側でそろえてある。
+# prompts_a / prompts_b は数が違ってもよい。片側だけ書けば、もう片側は user_prompts を読む。
+# validate.match は「足して日本語が出るか」を見る判定(--select auto --mode add は、書いていなければ B 側の質問に足して見る)
+name: ja_vs_en
+prompts_a:
+  - "今日の天気はどうですか？"
+  - "おすすめの本を教えてください。"
+  - "週末は何をしたらいいですか？"
+  - "好きな食べ物は何ですか？"
+  - "朝ごはんに何を食べるといいですか？"
+  - "海についてどう思いますか？"
+  - "仕事のやる気を出すにはどうすればいいですか？"
+  - "猫と犬はどちらが好きですか？"
+  - "旅行に行くならどこがいいですか？"
+  - "よく眠るためのこつを教えてください。"
+  - "新しい趣味を始めたいです。何がいいですか？"
+  - "友達の誕生日に何を贈ればいいですか？"
+prompts_b:
+  - "How is the weather today?"
+  - "Can you recommend a book?"
+  - "What should I do this weekend?"
+  - "What is your favorite food?"
+  - "What is a good breakfast?"
+  - "What do you think about the sea?"
+  - "How can I get motivated at work?"
+  - "Do you like cats or dogs?"
+  - "Where should I go if I travel?"
+  - "Give me some tips for sleeping well."
+  - "I want to start a new hobby. What would be good?"
+  - "What should I give my friend for their birthday?"
+validate:
+  match: "[ぁ-んァ-ン]"
+  target: "answers in Japanese"

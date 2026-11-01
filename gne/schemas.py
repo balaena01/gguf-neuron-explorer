@@ -178,7 +178,7 @@ class UnitModel(_Strict):
     rho: float | None
     add: float | None
     down_norm: float | None
-    mode: Literal["add", "gain", "query"] = "add"     # §6.16、query は CHANGE-04 E
+    mode: Literal["add", "gain", "query", "route", "proj"] = "add"     # §6.16、query は CHANGE-04 E、route は CHANGE-05、proj は CHANGE-06
     k: float | None = None
     direction: str | None = None              # §6.17 方向のユニット
     diff_rel: float | None = None             # ‖平均差‖ / ρ_L
@@ -194,6 +194,8 @@ class RecipeModel(_Strict):
     units: list[dict[str, Any]]
     ablate: dict[str, Any] | None = None      # §6.17
     sampling: dict[str, float] | None = None  # 試すときのサンプリング(seed なし)
+    default_direction: str | None = None      # CHANGE-06: proj のユニットの方向の既定
+    direction_layer: Literal["own", "base"] = "own"
 
 
 class Generation(_Strict):
@@ -283,6 +285,13 @@ class GainOut(Envelope):                        # §6.16 gne gain
     method: str | None = None                              # CHANGE-05 bake: "patch"(スケールパッチ)
     patch_bytes: int | None = None
     ops: list[dict[str, Any]] | None = None
+    proj_rank: dict[str, int] | None = None                # CHANGE-06: 方向成分の射影の層ごとの階数
+    proj_layers: dict[str, dict[str, Any]] | None = None   # CHANGE-06: 層 → {heads, rank, directions, folded}
+    sidecar: str | None = None                             # CHANGE-06 bake: <out>.headproj.json
+    requant: str | None = None                             # CHANGE-06 bake --via-f16
+    llama_quantize: str | None = None
+    intermediate_bytes: int | None = None
+    verify: dict[str, Any] | None = None                   # CHANGE-06 V26(headproj export --bake --verify)
 
 
 class EvalRow(_Strict):                         # §6.14 gne eval の 1 倍率
@@ -309,6 +318,18 @@ class EvalRow(_Strict):                         # §6.14 gne eval の 1 倍率
     ctrl_ppl_worse_p50: float | None = None
     novelty_null_pct: float | None = None
     reactivity: dict[str, Any] | None = None    # CHANGE-04 F: with / without / reactivity / increase(・ctrl・null_pct)
+    direction: dict[str, Any] | None = None     # CHANGE-06 F.1: 方向を使うレシピの点数の変化と直交成分のずれ(層ごと)
+    dir_drop_a: float | None = None
+    drift_par_a: float | None = None
+    drift_orth_a: float | None = None
+    drift_par_b: float | None = None
+    drift_orth_b: float | None = None
+    rate: float | None = None                   # 対照集合の validate.match の一致率(A 側)
+    rate_drop: float | None = None
+    dir_null_pct: float | None = None           # CHANGE-06 F.2: 同数・同じ s のランダムなヘッドに対する null_pct
+    drift_orth_b_null_pct: float | None = None
+    rate_null_pct: float | None = None
+    notes: list[str] | None = None              # V29: 対照を超えていないときの明示
 
 
 class EvalOut(Envelope):
@@ -325,6 +346,9 @@ class EvalOut(Envelope):
     seconds: float
     random_controls: int = 0                    # CHANGE-03 A: 倍率ごとの対照レシピの本数
     reactivity: dict[str, Any] | None = None    # CHANGE-04 F: 反応性に使った対照集合
+    control_pool: str | None = None             # CHANGE-06 F.2: proj の対照のヘッドの母集団
+    direction_metrics: dict[str, Any] | None = None   # CHANGE-06 F.1
+    notes: list[str] | None = None
 
 
 class DirectionLayer(_Strict):
@@ -346,6 +370,7 @@ class DirectionOut(Envelope):                   # §6.17 gne direction
     validation: dict[str, Any]                 # 対照集合の validate(層選びの判定)
     select: dict[str, Any] | None
     seconds: float
+    sides: dict[str, Any] | None = None        # レシピで A / B を作った対照集合のとき、側ごとの system とレシピ
 
 
 class AblateOut(Envelope):                      # §6.17 gne ablate
@@ -841,6 +866,186 @@ class HeadNameOut(Envelope):
     name: str | None
 
 
+class DirectionScoreOut(Envelope):              # CHANGE-06 B(gne direction score)
+    direction: str
+    path: str
+    contrast: str
+    contrast_sha: str
+    positions: str
+    subset: str
+    n: dict[str, int]
+    layers: list[dict[str, Any]]
+    best_layer: int | None
+    base_layer: int | None
+    base_recorded: bool
+    base_manual: bool | None = None
+    values: dict[str, dict[str, list[float]]]
+    values_after: dict[str, dict[str, list[float]]] | None
+    prompts: list[str]
+    prompts_b: list[str] | None = None          # 側ごとに質問が違う対照集合の B 側
+    intervention: dict[str, Any] | None
+    seconds: float
+
+
+class CausalRow(_Strict):                       # CHANGE-06 C の 1 ヘッド
+    layer: int
+    head: int
+    kind: Literal["attn", "linear"]
+    mode: Literal["ablate", "marginal"]
+    score_drop: dict[str, float]
+    causal: float
+    causal_max: float
+    b_side_delta: float | None = None
+    drift_par_b: float | None = None
+    drift_orth_b: float | None = None
+    contrib_by_layer: dict[str, float]
+    contrib: float | None
+    ratio: float | None
+    delta_s: float | None = None
+    eta: float | None = None
+    eta_by_layer: dict[str, float] | None = None
+    in_base: bool | None = None
+    excluded: bool | None = None
+    seconds: float
+
+
+class HeadsCausalOut(Envelope):                 # CHANGE-06 C(gne heads causal)
+    name: str
+    path: str
+    summary_path: str
+    direction: str
+    contrast: str
+    contrast_sha: str
+    mode: Literal["ablate", "marginal"]
+    score_layers: list[int]
+    primary: int
+    positions: str
+    subset: str
+    n_a: int
+    n_b: int
+    direction_layer: str
+    base_scores: dict[str, dict[str, float]]
+    updated: str
+    max_examples: int | None = None
+    drift_max: float | None = None
+    layers: list[dict[str, Any]] | None
+    layer_rows: list[dict[str, Any]] | None = None
+    rows: list[CausalRow]
+    n_rows: int
+    hard: dict[str, Any] | None = None
+    base_units: list[str] | None = None
+    spearman_ablate_marginal: float | None = None
+    n_compared: int | None = None
+    seconds: float
+
+
+class HeadsAllocateOut(Envelope):               # CHANGE-06 D(gne heads allocate)
+    name: str
+    path: str
+    direction: str
+    contrast_sha: str
+    score_layer: int
+    score_layers: list[int]
+    max_examples: int | None = None
+    drift_max: float | None = None
+    target: float
+    positions: str
+    subset: str
+    direction_layer: str
+    proportional_to: str
+    from_zero: bool
+    delta_s: float
+    s_max: float
+    remain_threshold: float
+    n_a: int
+    n_b: int
+    base_a_mean: float
+    base_b_mean: float
+    initial: dict[str, Any] | None
+    current: list[str]
+    hard: dict[str, Any]
+    eta: list[dict[str, Any]]
+    table: list[dict[str, Any]]
+    recommended: int | None
+    seconds: float
+
+
+class HeadsPipelineOut(Envelope):               # gne heads pipeline(方向 → 基準層 → 因果 → 配分)
+    name: str
+    path: str
+    contrast: str
+    n_prompts: int
+    n_prompts_b: int | None = None              # 側ごとに質問が違うときの B 側の数
+    sides: dict[str, Any]
+    settings: dict[str, Any]
+    direction: dict[str, Any]
+    score: dict[str, Any]
+    causal: dict[str, Any]
+    allocate: dict[str, Any]
+    target: float
+    target_from: str
+    recommended: dict[str, Any] | None
+    seconds: float
+    updated: str | None = None
+
+
+class CandidateRow(BaseModel):
+    name: str                                   # base(無介入)か n{ヘッド数}x{倍率}
+    n_heads: int
+    scale: float
+    units: list[str]
+    recipe: str | None
+    recommended: bool = False
+    rate_a: float | None = None                 # validate.match に合う返事の割合
+    rate_b: float | None = None
+    d4_a: float                                 # 4-gram の重複の少なさ(1 = 繰り返し無し)
+    d4_b: float
+    same_as_base_a: float                       # 無介入と同じ返事の割合(同じ種なので、変わらなければ一致する)
+    same_as_base_b: float
+    judge_sides: str                            # 採点のファイルに入れた側
+    goal: str | None                            # remove(正の倍率、A 側で消す)/ add(負の倍率、B 側で強める)
+
+
+class HeadsCandidatesOut(Envelope):             # gne heads candidates(強さの候補を作り、名前を伏せた採点ファイルを書く)
+    name: str
+    path: str
+    alloc: str
+    direction: str
+    contrast: str
+    held_out: dict[str, bool]
+    with_recipe: str | None
+    when: str
+    sampling: dict[str, Any] | None
+    max_tokens: int
+    scales: list[float]
+    prompts: dict[str, list[str]]
+    match: str | None
+    target: str
+    candidates: list[CandidateRow]
+    replies: dict[str, list[str]]               # "候補|側" → 返事
+    judge: dict[str, Any]
+    scores: dict[str, dict[str, dict[str, float]]] | None   # 候補 → 側 → n・P・C・min_PC・P_ge3(集計の後)
+    scores_missing: list[int] | None = None
+    best: dict[str, dict[str, Any]] | None = None   # remove / add → いちばん良い候補(value)と無介入の同じ点(base)
+    updated: str
+    seconds: float
+
+
+class HeadprojCheckOut(Envelope):               # CHANGE-06 V24・V25(gne headproj check)
+    layer: int
+    head: int
+    block: list[int]
+    out_tensor: str
+    direction: str
+    direction_from: int
+    dir_cos_head: float | None
+    rows: list[dict[str, Any]]
+    gain: dict[str, Any]
+    v24: bool
+    v25: bool
+    ok: bool
+
+
 COMMAND_SCHEMAS: dict[str, type[Envelope]] = {
     "chat": ChatOut, "neuron": NeuronOut,
     "sweep": SweepOut, "rank": RankOut,
@@ -853,4 +1058,7 @@ COMMAND_SCHEMAS: dict[str, type[Envelope]] = {
     "experts contrast": ExpertsContrastOut, "experts show": ExpertOut, "experts sweep": ExpertsSweepOut,
     "heads query": HeadsQueryOut,
     "connections": ConnectionsOut, "worker": WorkerOut, "writers": WritersOut, "writers-export": WritersExportOut,
+    "direction score": DirectionScoreOut, "heads causal": HeadsCausalOut, "heads allocate": HeadsAllocateOut,
+    "headproj export": GainOut, "headproj check": HeadprojCheckOut, "heads pipeline": HeadsPipelineOut,
+    "heads candidates": HeadsCandidatesOut,
 }

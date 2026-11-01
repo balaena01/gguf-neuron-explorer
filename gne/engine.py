@@ -459,6 +459,19 @@ class Engine:
             self._loras[key] = a
         return a
 
+    def drop_lora(self, path: str | Path) -> bool:
+        """読み込んだ LoRA を解放する(因果スクリーニングのように一時的な LoRA を何百個も当てるとき、CHANGE-06)。
+        先に全コンテキストからアダプタを外す。読み込んでいなければ False。"""
+        key = str(Path(path).resolve())
+        a = self._loras.pop(key, None)
+        if a is None:
+            return False
+        for c in (self._steer, self._probe, self._attn_probe):
+            if c is not None:
+                C.llama_set_adapters_lora(c.ptr, None, 0, None)
+        C.llama_adapter_lora_free(a)
+        return True
+
     def set_lora(self, ctx: _Ctx, loras: list[tuple[str | Path, float]] | None) -> None:
         """コンテキストに LoRA アダプタを当てる([(パス, 倍率)])。None / 空で外す。"""
         if not loras:

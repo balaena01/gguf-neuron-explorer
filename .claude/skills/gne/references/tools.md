@@ -111,11 +111,42 @@ gne steer --unit 15:H2:x2 -p "..." --compare         # ヘッドの gain(W_O の
 gne eval --recipe R --reactivity configs/contrast/yandere_react.yaml --head-controls 8
 ```
 
-- 住所は `L{l} H{h}`、ユニットは `L:Hh:xk`(gain だけ)。線形注意の層(Qwen3.5 の Gated DeltaNet)のヘッドも同じ扱いで、書き込み行列は `ssm_out`。
+- 住所は `L{l} H{h}`、ユニットは `L:Hh:xk`(gain)と `L:Hh:sS@NAME`(方向に沿った分だけ、次の節)。線形注意の層(Qwen3.5 の Gated DeltaNet)のヘッドも同じ扱いで、書き込み行列は `ssm_out`。
 - 捕捉は flash attention を切った ctx で行う(`kq_soft_max-L` はそのときだけ見える)。1 会話 512 トークンまで。
 - 床は中立どうし(system_b と同じくらいの長さの別の中立の system_b2)の差。trigger_mass は共通部分の中のトリガーの割合。
 - 時間: 4B の 880 ヘッド × 10 プロンプトで 9 秒。
 - (実験的)`gne heads query --layer 15 --head 2 --direction yandere_react --seek configs/contrast/yandere_react.yaml`: attn_q に rank-1 の LoRA を足し、ペルソナの方向が入ったときだけトリガーを見に行かせる(V17)。レシピは `{layer, kind: head, head, mode: query, direction, seek, scale}`。4B の L15 H2 で、ペルソナありの注目 0.0015 → 0.29(scale 4)、なしは 0.022 のまま。返事の性格への効きは未確認。
+
+### ヘッドの、方向に沿った分だけを変える
+
+```bash
+gne direction score --name evil                       # 層ごとの A/B の分かれ方(cohen_d)。基準層を記録する。生成なし
+gne heads causal --name evil                          # 層ごと → 効く層のヘッド 1 個ずつ止めて、点数の下がり方
+gne heads causal --name evil --mode marginal --base-unit 15:H8:s2   # いまの組から s を上げたときの効率
+gne heads allocate --name evil --target 0 --n-heads 4,3,2   # 効率で強さを配り、ヘッドの数を減らした組を比べる
+gne steer --unit 15:H8:s4.2@evil --unit 15:H2:s2.8@evil --system "..." -p "..." --compare
+gne eval --recipe R --random-controls 16              # 同じ強さをランダムなヘッドに当てた対照
+gne eval --recipe R --compare-methods                 # 全層の射影消去・ヘッドの丸ごと倍率・ニューロンの消去と、点数をそろえて比べる
+gne eval --alloc evil --n-heads 4,3,2                 # 配分で作った組をヘッドの数ごとに評価
+gne headproj export --recipe R                        # 層ごとに階数 1 の LoRA(--bake で関係するテンソルだけ書き換え)
+gne heads pipeline --spec spec.json                   # 上の direction → score → causal → allocate を 1 回で(UI の direction ビューからも)
+gne heads candidates --alloc evil --prompts held_out.yaml   # 比較表の組 × 倍率(既定 0.5,0.75,1,1.25)で返事を作り、伏せた採点のファイルを書く
+gne heads candidates --tally evil                     # round_01.scores.txt(「番号 P C」)を候補ごとに集計する
+```
+
+ヘッドが残差に書くベクトルのうち、方向に沿った分だけを `1 − s` 倍にする。`s = 1` で消え、`s = 2` で反転、負の `s` で強まる。それ以外の分には触らないので、同じ効き目なら出力を丸ごと倍にする gain より副作用が小さい。4B の evil(system で頼んだ性格)では、2 個のヘッドで判定が 83% から 0 になり、能力も ppl も変わらなかった。同じ点数にそろえると、全層の射影消去は ppl が 15% 悪化し、同じヘッドの丸ごと倍率は能力が 14pt 落ちた。
+
+変化の量は、そのヘッドがいまの入力で方向に沿って書いている量に比例する。だから、もともと書いていない振る舞いは作れない。性格を運ぶヘッドを負の s で強めても、指示のない会話では何も起きない。ニューロンや方向の小さな押しで先に性格が出ていれば増幅でき、弱い増幅なら同じくらいの性格を ppl の悪化を抑えて出せた。ただし能力の落ち方はニューロンだけのときと同じで、強く増幅すると崩れる(verification.md §20.10)。
+
+`heads pipeline` の spec は対照集合の中身(name・user_prompts・system か recipe)に、任意で `pipeline: {target, n_heads, hard, top_layers, max_examples}`。質問は何百個でもよく、止めて測る段階は 64 個に間引く。止めると中立の側が大きく崩れる層(最初の層など)とヘッドは自動で外れる。目標を省くと A と B の平均の真ん中。
+
+`heads candidates` は、生成なしで決めた組の全体の倍率を、返事を読んで決めるためのもの。正の倍率は A 側の振る舞いを消す向きで A 側の返事を、負の倍率(`--scales -0.5,-1`)は B 側で強める向きで B 側の返事を、どの候補か伏せて `<root>/heads/<model_id>/<名前>.cand/round_01.txt` に並べ、基準 `RUBRIC.md` を添える。種は全部の候補で同じ。P(振る舞いの強さ)と C(自然さ)を 1〜5 で付け、`--tally` で消す向きは min(6 − P, C)、強める向きは min(P, C) の平均で並べる。調整に使っていない質問を `--prompts` で渡す(渡さないと注意が出る)。`--with-recipe` のレシピ(ニューロンの種火など)は無介入の base も含めた全候補に重なる。採点は `references/judging.md` と同じく、1 回の比較を同じ採点役で、鍵を見る前に付ける。
+
+対照集合は、system を片方だけ書いてもよく(省いた側は system なし)、側ごとに別の質問 `prompts_a` / `prompts_b` を読ませることもできる(例 `configs/contrast/ja_vs_en.yaml`、何もしないモデルに 2 種類の質問を読ませる)。
+
+対照集合は、system の代わりに `recipe_a`(と `recipe_b`)で両側を作れる(例 `configs/contrast/evil_neurons.yaml`)。ニューロンのレシピが作った振る舞いの方向を作り、そのレシピを当てたまま効くヘッドを探すときに使う。heads contrast・writers・experts contrast には使えない。
+
+強さはすべて生成なしの物差しで決め、生成を伴う eval は確定した候補だけに使う。点数はヘッドを選んだ方向そのもので測っているので、報告は validate.match の一致率・能力・ppl のような、出力から測った値でする。止めたときの順位(ablate)と、強めたときの効率の順位(marginal)は一致しないことが多い(4B で相関 −0.14)。
 
 ## 4. 確かめる
 
@@ -127,12 +158,13 @@ gne eval --recipe R --doses 0,0.5,0.75,1 --when assistant --name R_as
 - ppl = 参照テキスト 3 本を、全位置に押して読ませる。when に関係なく同じ数字。
 - 配布可の基準: 能力 −5pt・ppl +10%・言語の混入が増えない。
 - `--random-controls N`: 各倍率で同じ大きさのランダムな対照レシピも測る(時間は約 N 倍)。新語が対照 p95 を超えるか(null ≥ 0.95)、能力・ppl の悪化が対照と同程度か(同程度なら悪化は向きではなく大きさのせい)。
+- 方向を使うレシピ(方向のユニット・ablate・ヘッドの方向成分)では、行に方向の点数の下がり方と、残差の差のうち方向と直交する成分のずれ(A 側・B 側)も出る。ヘッドの方向成分のレシピの対照は、同じ数のヘッドをランダムに選んで同じ強さを当てたもの。
 
 ## 5. 書き出す
 
 ```bash
 gne export-cvec --recipe R            # → ~/.gne/export/R.cvec.gguf(--verify で llama-completion と照合)
-gne gain --recipe R                   # gain ユニット → LoRA GGUF
+gne gain --recipe R                   # gain ユニットとヘッドの方向成分のユニット → LoRA GGUF(gne headproj export も同じ)
 gne bake --recipe R --out dst.gguf    # FFN バイアスに焼き付け(対応 arch のみ)
 llama-cli -m M --control-vector ~/.gne/export/R.cvec.gguf
 llama-cli -m M --control-vector-scaled ~/.gne/export/R.cvec.gguf:0.6
@@ -154,6 +186,8 @@ OpenAI 互換 API は `extra_body={"gne": {"recipe": "NAME", "scale": 0.7, "when
 MCP のツール(MoE): `expert`・`experts_contrast`・`experts_sweep`(ジョブ)・`moe_route`・`expert_patch`。
 
 MCP のツール: `model_overview`・`layer_summary`・`neuron`・`search`・`steer`・`steer_lens`・`fires`・`reverse`・`direction`・`recipe_save`・`export_cvec`・`gain_export`・`bake`・`eval`・`ablate_export`・`set_name`・`job_start`/`job_status`/`job_cancel`、UI があれば `ui_highlight`・`ui_note`・`ui_open`。
+
+MCP のツール(ヘッドの方向成分): `direction_score`・`heads_causal`(ジョブ)・`heads_allocate`(ジョブ)・`headproj_export`。`eval` に `compare_methods`・`alloc`・`n_heads`・`control_pool`。
 
 ## 7. Python API(`gne.api.Session`)
 
@@ -186,4 +220,8 @@ Qwen3.5-4B Q8_0・RTX 3080(README)と、その後に測ったもの。
 | `sweep` `main_rel` | 約 6.4 秒/ニューロン(全層の総当たりは 16 時間) |
 | `reverse` | 約 6 秒、`--verify` 20 候補で約 4 分 |
 | `eval`(55 タスク × 5 倍率) | all で約 41 秒、27B では 1〜5 分 |
+| `direction score`(1 条件、24 会話) | 4B で 0.5 秒、全層で 1.3 秒 |
+| `heads causal`(層ごと + 上位 4 層の全ヘッド) | 4B で約 75 秒(1 回 0.7 秒) |
+| `heads allocate`(3 組) | 4B で約 40 秒 |
+| `heads candidates`(5 候補 × 24 本 × 120 トークン) | 0.6B で約 13 秒(見積もり 26 秒)。返事の数と長さに比例する |
 | `tune.py` 1 回(128 本) | 27B で生成 5〜8 分(assistant は 1 本ずつなので遅い)、1.7B で 2〜3 分。採点は 2〜5 分 |

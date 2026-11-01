@@ -71,6 +71,14 @@ class Store:
         """attention ヘッド(CHANGE-04)の対照分析の置き場所。"""
         return self._dir("heads", model_id)
 
+    def contrast_dir(self) -> Path:
+        """UI や JSON から受け取った対照集合を書いておく場所(方向の source から引けるように)。"""
+        return self._dir("contrasts")
+
+    def hard_dir(self, model_id: str) -> Path:
+        """効きにくい例(CHANGE-06 D、gne heads allocate)の置き場所。"""
+        return self._dir("hard", model_id)
+
     def eval_dir(self, model_id: str) -> Path:
         """gne eval(§6.14)の結果の置き場所。"""
         return self._dir("evals", model_id)

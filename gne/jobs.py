@@ -114,11 +114,20 @@ def _sweep_rank(s, layer: int, **p) -> dict:
     return {"sweep": {k_: v for k_, v in r.items() if k_ != "units"}, "rank": {k_: v for k_, v in k.items() if k_ != "units"}}
 
 
-def _eval(s, recipe: str | None = None, units: list[str] | None = None, dose_unit: str | None = None, **p) -> dict:
-    """eval(§6.14)。recipe は保存したレシピの名前、units は単発指定(どちらか)。"""
+def _eval(s, recipe: str | None = None, units: list[str] | None = None, dose_unit: str | None = None,
+          compare_methods: bool = False, match_effect: float | None = None, score_layer: int | None = None,
+          alloc: str | None = None, n_heads: list[int] | None = None, **p) -> dict:
+    """eval(§6.14)。recipe は保存したレシピの名前、units は単発指定(どちらか)。compare_methods は方式の比較(CHANGE-06 F.3)、
+    alloc は heads allocate の組のヘッド数ごとの評価(F.4、recipe も units も要らない)。"""
+    if alloc:
+        return s.eval_alloc_curve(alloc, n_heads=n_heads, suite=p.get("suite"), when=p.get("when"),
+                                  random_controls=int(p.get("random_controls") or 0))
     if bool(recipe) == bool(units):
         raise GneError("BAD_ARGS", "recipe(名前)か units のどちらかを渡してください")
     r = s.recipe(path=s.recipe_path(recipe)) if recipe else s.recipe(units=list(units), dose_unit=dose_unit)
+    if compare_methods:
+        return s.eval_compare_methods(r, match_effect=match_effect, score_layer=score_layer, suite=p.get("suite"),
+                                      when=p.get("when"))
     d = s.eval(r, **p)
     return {k: v for k, v in d.items() if k != "samples"}
 
@@ -144,6 +153,11 @@ def standard_kinds() -> dict[str, Callable[..., dict]]:
         "experts_contrast": lambda s, **p: s.experts_contrast(**p),
         "experts_sweep": lambda s, layer, **p: s.experts_sweep(layer, **p),
         "ablate": lambda s, direction, out, **p: s.ablate(direction, out, **p),
+        "heads_causal": lambda s, direction, **p: s.heads_causal(direction, **p),        # CHANGE-06 C
+        "heads_allocate": lambda s, direction, **p: s.heads_allocate(direction, **p),    # CHANGE-06 D
+        "head_pipeline": lambda s, spec, **p: s.heads_pipeline(spec, **p),             # 方向 → 基準層 → 因果 → 配分
+        "heads_candidates": lambda s, alloc, **p: s.heads_candidates(alloc, **p),       # 組 × 倍率で生成 → 採点のファイル
+        "headproj_export": lambda s, recipe, out, **p: s.headproj_export(s.recipe(path=s.recipe_path(recipe)), out, **p),
     }
 
 

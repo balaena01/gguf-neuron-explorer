@@ -11,6 +11,8 @@ import { Mic } from "./mic.js";
 // MoE(CHANGE-05): "12:E37:N511:+0.8" → "L12 E37 N511 +0.8"、"12:E3:x0" → "L12 E3 ×0"、"12:E3:route:+2" → "L12 E3 route +2"、
 // "12:S:N5:+0.5" → "L12 S N5 +0.5"
 export const unitLabel = (spec) => {
+  const pj = String(spec).match(/^(\d+):H(\d+):s([^@]+)(?:@(.+))?$/i);      // ヘッドの方向成分の射影(CHANGE-06)
+  if (pj) return `L${pj[1]} H${pj[2]} s${+(+pj[3]).toFixed(4)}${pj[4] ? ` @${pj[4]}` : ""}`;
   const p = spec.split(":"), last = p[p.length - 1], mid = p.slice(1, -1);
   const who = mid[0] === "dir" ? `dir:${mid.slice(1).join(":")}` : mid.map((x) => (/^\d+$/.test(x) ? `N${x}` : x)).join(" ");
   if (last.startsWith("x")) return `L${p[0]} ${who} ×${+(+last.slice(1)).toFixed(4)}`;
@@ -27,6 +29,7 @@ const SP_PRESETS = {
 const SP_FIELDS = [["temperature", "温度", 0.05], ["top_k", "top-k", 1], ["top_p", "top-p", 0.01], ["min_p", "min-p", 0.01],
                    ["presence_penalty", "presence", 0.1]];
 const SP_KEY = "gne.chat.sampling";            // このブラウザに覚えておく(使えなければ覚えない)
+const COLS_KEY = "gne.chat.single";            // 1 列(+ の列だけ)で話すか
 
 export class ChatPanel {
   constructor({ recipe, onStatus }) {
@@ -58,6 +61,19 @@ export class ChatPanel {
     this.mic = new Mic();              // 音声で話しかける(mic.js)
     this.micTimer = null;
     this.speak = false;                // 右の列の返事をブラウザの音声で読み上げる
+    this.single = false;               // 1 列: レシピ(またはこのニューロンの +)を当てた返事だけを生成する
+    try { this.single = localStorage.getItem(COLS_KEY) === "1"; } catch { /* 覚えていなくても使える */ }
+  }
+
+  // 列の数を切り替える。履歴は列ごとなので、会話があれば確かめてから消す
+  setSingle(on) {
+    if (on === this.single || this.busy) return;
+    if (this.turns.length && !window.confirm(tr("列の数を変えると、今の会話を消します。切り替えますか?"))) { this.render(); return; }
+    this.single = on;
+    this.turns = [];
+    this.status = "";
+    try { localStorage.setItem(COLS_KEY, on ? "1" : "0"); } catch { /* 置けなくても使える */ }
+    this.render();
   }
 
   // NEURON パネルが別のニューロンを開いたとき。ニューロンを相手にした会話はやり直す
@@ -109,17 +125,21 @@ export class ChatPanel {
     return { body: { sampling: { ...v, seed } }, label: `${samplingLabel(v)} · seed ${seed}` };
   }
 
+  // 列。cls は見た目(minus / 無介入 / plus)。1 列のときは plus の列だけ
   columns() {
+    let cols;
     if (this.target === "recipe") {                // − 列はレシピ全体の符号を反転したもの(− のユニットだけ、ではない)
       const s = this.scale;
-      return [{ label: tr("レシピ×({s})", { s: `−${fmt(s, 2)}` }), units: this.recipe.specs(-s), ablate: this.recipe.ablateAt(-s) },
-              { label: tr("0(無介入)"), units: [] },
-              { label: tr("レシピ×({s})", { s: `+${fmt(s, 2)}` }), units: this.recipe.specs(s), ablate: this.recipe.ablateAt(s) }];
+      cols = [{ label: tr("レシピ×({s})", { s: `−${fmt(s, 2)}` }), units: this.recipe.specs(-s), ablate: this.recipe.ablateAt(-s), cls: "minus" },
+              { label: tr("0(無介入)"), units: [], cls: "" },
+              { label: tr("レシピ×({s})", { s: `+${fmt(s, 2)}` }), units: this.recipe.specs(s), ablate: this.recipe.ablateAt(s), cls: "plus" }];
+    } else {
+      const { layer: L, n } = this.neuron, d = this.dose, x = this.detail;
+      const who = x && x.expert !== undefined && x.expert !== null ? `E${x.expert}:N${x.expert_neuron}` : n;   // MoE の層は L:Ee:Nn(方向押し)
+      cols = [{ label: `−${fmt(d, 2)}`, units: [`${L}:${who}:-${d}`], cls: "minus" }, { label: tr("0(無介入)"), units: [], cls: "" },
+              { label: `+${fmt(d, 2)}`, units: [`${L}:${who}:+${d}`], cls: "plus" }];
     }
-    const { layer: L, n } = this.neuron, d = this.dose, x = this.detail;
-    const who = x && x.expert !== undefined && x.expert !== null ? `E${x.expert}:N${x.expert_neuron}` : n;   // MoE の層は L:Ee:Nn(方向押し)
-    return [{ label: `−${fmt(d, 2)}`, units: [`${L}:${who}:-${d}`] }, { label: tr("0(無介入)"), units: [] },
-            { label: `+${fmt(d, 2)}`, units: [`${L}:${who}:+${d}`] }];
+    return this.single ? [cols[2]] : cols;
   }
 
   mount(el) {
@@ -157,9 +177,11 @@ export class ChatPanel {
             ? `<span class="badge push" title="${tr("MoE の専門家のニューロンの add は書き込み方向の押し(専門家が選ばれたかに関係なく全トークンに足す)。選ばれたときだけ効く gain は NEURON の ×0 / ×2 からレシピで試す")}">${tr("方向押し")}</span>` : ""}`;
     const turns = this.turns.map((t, ti) => `
       <div class="ch-user"><span class="muted">${tr("あなた")}</span> ${t.audio ? `🎤 <audio controls src="data:audio/wav;base64,${t.audio}"></audio><span class="muted note">${tr("{s} 秒の音声", { s: fmt(t.seconds, 1) })}</span> ` : ""}${esc(t.user)}${t.labels.join() !== cols.map((c) => c.label).join() ? `<span class="muted note">(${t.labels.map(esc).join(" / ")})</span>` : ""}${t.sp ? `<span class="muted note ch-sp-used">${esc(t.sp)}</span>` : ""}</div>
-      <div class="ch-row">${t.replies.map((r, ci) => `<div class="ch-cell ${["minus", "", "plus"][ci] || ""}" data-t="${ti}" data-c="${ci}">${this.cellHTML(t, ci)}</div>`).join("")}</div>`).join("");
+      <div class="ch-row">${t.replies.map((r, ci) => `<div class="ch-cell ${(t.cls || ["minus", "", "plus"])[ci] || ""}" data-t="${ti}" data-c="${ci}">${this.cellHTML(t, ci)}</div>`).join("")}</div>`).join("");
+    const colSeg = `<span class="seg" title="${tr("3 列: −・無介入・+ を並べて比べる / 1 列: + の列(レシピありか、このニューロンを + で押した返事)だけで話す。1 列は生成が 3 分の 1 で、長い会話を試すのに向く")}">${
+      [["3", tr("3 列")], ["1", tr("1 列")]].map(([v, l]) => `<button data-cols="${v}"${(this.single ? "1" : "3") === v ? ' class="on"' : ""}${this.busy ? " disabled" : ""}>${l}</button>`).join("")}</span>`;
     return `
-      <div class="ch-tools">${amount}<span class="muted">max</span><input id="ch-max" type="number" min="1" max="2048" value="${this.maxTokens}">
+      <div class="ch-tools">${colSeg}${amount}<span class="muted">max</span><input id="ch-max" type="number" min="1" max="2048" value="${this.maxTokens}">
         <span class="muted" title="${tr("足す位置: all = 全位置 / gen = 生成中だけ(プロンプトの理解を壊さない)/ assistant = assistant の発話だけ / skip-replies = 過去の返事以外(過去の返事は素のまま読む)/ after = 出力にその文字列が出てから / ramp = 倍率を a から b へ変える")}">when</span><select id="ch-when">${
           ["all", "gen", "assistant", "skip-replies", "after", "ramp"].map((w) => `<option value="${w}"${this.when === w ? " selected" : ""}>${w}</option>`).join("")}</select>${
           this.when === "after" || this.when === "ramp" ? `<input id="ch-when-x" size="8" value="${esc(this.whenArg)}" placeholder="${this.when === "after" ? tr("結論:") : "1.5-0.5"}">` : ""}
@@ -167,10 +189,11 @@ export class ChatPanel {
       <div class="ch-tools">${this.samplingHTML()}</div>
       <div class="ch-tools"><span class="muted">system</span><input id="ch-system" class="ch-system" value="${esc(this.system)}" placeholder="${tr("空なら無し(音声で話すなら Respond in text.)")}">
         <label class="muted" title="${tr("右の列の返事を、ブラウザの音声で読み上げる")}"><input type="checkbox" id="ch-speak"${this.speak ? " checked" : ""}> 🔊 ${tr("読み上げ")}</label></div>
-      <div class="ch-log">
-        <div class="ch-row ch-head">${cols.map((c, i) => `<div class="${["minus", "", "plus"][i]}">${esc(c.label)}${
+      <div class="ch-log${this.single ? " single" : ""}">
+        <div class="ch-row ch-head">${cols.map((c) => `<div class="${c.cls}">${esc(c.label)}${
           this.target === "recipe" && c.units.length ? `<div class="ch-units muted">${c.units.map((u) => `<span class="u">${esc(unitLabel(u))}</span>`).join(" · ")}</div>` : ""}</div>`).join("")}</div>
-        ${turns || `<p class="muted note">${tr("同じ発話を 3 列で生成します(左から −、無介入、+)。返答は列ごとに別の履歴になります。")}</p>`}
+        ${turns || `<p class="muted note">${this.single ? tr("+ の列(レシピありか、このニューロンを + で押した返事)だけで話します。比べたいときは 3 列に切り替えてください。")
+          : tr("同じ発話を 3 列で生成します(左から −、無介入、+)。返答は列ごとに別の履歴になります。")}</p>`}
       </div>
       <div class="ch-input"><textarea id="ch-text" rows="2" placeholder="${tr("メッセージ(Ctrl+Enter で送る)")}"${this.busy ? " disabled" : ""}>${esc(this.draft)}</textarea>
         <button id="ch-send"${this.busy ? " disabled" : ""}>${tr("送る")}</button><button id="ch-mic" class="${this.mic.recording ? "rec" : ""}" title="${tr("音声で話しかける(押して話し、もう一度押すと送る。入力欄の文も一緒に送る)")}"${this.busy ? " disabled" : ""}>${this.mic.recording ? `■ ${tr("止めて送る")}` : `🎤 ${tr("話す")}`}</button><button id="ch-stop"${this.busy ? "" : " disabled"}>${tr("止める")}</button></div>
@@ -230,6 +253,7 @@ export class ChatPanel {
     const wx = $("#ch-when-x");
     if (wx) wx.addEventListener("change", (ev) => { this.whenArg = ev.target.value.trim(); });
     $("#ch-reset").addEventListener("click", () => { this.turns = []; this.status = ""; this.render(); });
+    for (const b of this.el.querySelectorAll("[data-cols]")) b.addEventListener("click", () => this.setSingle(b.dataset.cols === "1"));
     const text = $("#ch-text");
     text.addEventListener("input", () => { this.draft = text.value; });
     text.addEventListener("keydown", (ev) => { if (ev.key === "Enter" && (ev.ctrlKey || ev.metaKey)) this.send(text.value); });
@@ -279,7 +303,8 @@ export class ChatPanel {
     const cols = this.columns();
     const sp = this.samplingBody();
     const turn = { user, audio: audio ? audio.b64 : null, seconds: audio ? audio.seconds : null,
-                   labels: cols.map((c) => c.label), replies: cols.map(() => ""), finish: cols.map(() => null), sp: sp.label };
+                   labels: cols.map((c) => c.label), cls: cols.map((c) => c.cls), replies: cols.map(() => ""), finish: cols.map(() => null),
+                   sp: sp.label };
     this.draft = "";
     const prev = this.turns.slice();
     this.turns.push(turn);
@@ -320,7 +345,7 @@ export class ChatPanel {
         else if (ev.type === "error") { this.status = `${tr("エラー")}: ${ev.error.message}`; this.failed = true; }
         else if (ev.type === "done") {
           if (!this.failed) {
-            this.status = tr("{s} 秒で 3 列を生成(うち GPU 待ち {w} 秒)", { s: fmt(ev.seconds, 1), w: fmt(this.waited, 1) });
+            this.status = tr("{s} 秒で {n} 列を生成(うち GPU 待ち {w} 秒)", { s: fmt(ev.seconds, 1), n: cols.length, w: fmt(this.waited, 1) });
             this.speakReply(turn.replies[turn.replies.length - 1]);
           }
         }

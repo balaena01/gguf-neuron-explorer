@@ -157,6 +157,48 @@ def _utf8(b: bytes) -> bool:
         return False
 
 
+@pytest.fixture(autouse=True)
+def _close_sessions(monkeypatch):
+    """テストの中で作った Session を、テストの終わりに閉じる(module の fixture のサーバの Session は対象外)。閉じないと
+    0.6B のモデルが 1 つずつ GPU に残り、ファイルの後半で VRAM(12 GB)が尽きて、ブラウザの WebGL や後のテストが遅くなって落ちる。
+    その Session でアプリ(create_app)を作っていれば、走っているジョブを止め、モデルの処理の終わりを GPU の調停で待ってから
+    閉じる(60 秒まで。終わらなければ閉じずに進む)。"""
+    import gne.ui.server as ui_server
+    from gne.api import Session
+    sessions, apps = [], []
+    init, make = Session.__init__, ui_server.create_app
+
+    def track_init(self, *a, **kw):
+        init(self, *a, **kw)
+        sessions.append(self)
+
+    def track_app(*a, **kw):
+        app = make(*a, **kw)
+        apps.append(app)
+        return app
+    monkeypatch.setattr(Session, "__init__", track_init)
+    monkeypatch.setattr(ui_server, "create_app", track_app)
+    yield
+    by_session = {id(app.state.session): app for app in apps}
+    for app in apps:
+        for j in app.state.live.jobs.list():
+            if j.status in ("queued", "running"):
+                app.state.live.jobs.cancel(j.id)
+    for s in sessions:
+        app = by_session.get(id(s))
+        if app is None:
+            s.close()
+            continue
+        closed = threading.Event()
+
+        def close(s=s, arbiter=app.state.live.arbiter, closed=closed):
+            with arbiter.interactive():
+                s.close()
+            closed.set()
+        threading.Thread(target=close, daemon=True).start()
+        closed.wait(60)
+
+
 def _free_port() -> int:
     with socket.socket() as so:
         so.bind(("127.0.0.1", 0))
@@ -559,6 +601,39 @@ def test_chat_mic_sends_wav(server, browser):
     ctx.close()
 
 
+def test_chat_single_column_in_browser(server, browser):
+    """チャットの 1 列: + の列(レシピあり)だけを生成し、3 列に戻すときは確かめてから会話を消す。選んだ列の数は覚える。"""
+    pg = browser.new_page()
+    pg.goto(server + "/")
+    pg.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
+    pg.evaluate("window.gne.recipe.clear()")
+    pg.fill("#jump", "L6 N100")
+    pg.press("#jump", "Enter")
+    pg.wait_for_function("document.querySelector('#neuron-body .n-id')", timeout=30000)
+    pg.click("#neuron-body [data-rc='1']")
+    pg.click("#list-tabs button[data-tab=recipe]")
+    pg.click("#rc-chat")
+    pg.wait_for_selector("#ch-text", timeout=30000)
+    pg.click("[data-cols='1']")
+    assert pg.evaluate("document.querySelectorAll('.ch-head > div').length") == 1
+    assert pg.evaluate("document.querySelector('.ch-log').classList.contains('single')")
+    pg.fill("#ch-max", "6")
+    pg.dispatch_event("#ch-max", "change")
+    pg.fill("#ch-text", "Hello")
+    pg.click("#ch-send")
+    pg.wait_for_function("!document.querySelector('#ch-send').disabled", timeout=120000)
+    cells = pg.evaluate("[...document.querySelectorAll('.ch-cell')].map(e => e.className)")
+    assert len(cells) == 1 and "plus" in cells[0]
+    assert "秒で 1 列を生成" in pg.evaluate("document.querySelector('#ch-status').textContent")
+    assert pg.evaluate("localStorage.getItem('gne.chat.single')") == "1"
+    asked = []
+    pg.on("dialog", lambda d: (asked.append(d.message), d.accept()))
+    pg.click("[data-cols='3']")
+    pg.wait_for_function("document.querySelectorAll('.ch-head > div').length === 3", timeout=5000)
+    assert asked and pg.evaluate("document.querySelectorAll('.ch-cell').length") == 0
+    pg.close()
+
+
 @pytest.mark.model
 def test_u2_recipe_chat_fires_in_browser(server, browser):
     pg = browser.new_page(viewport={"width": 1500, "height": 860})
@@ -595,7 +670,7 @@ def test_u2_recipe_chat_fires_in_browser(server, browser):
     pg.dispatch_event("#fi-text", "input")
     pg.click("#fi-run")
     pg.wait_for_function("document.querySelector('#fi-list tr[data-l]')", timeout=60000)
-    assert pg.evaluate("window.gne.overlay.field").startswith("fires:")
+    pg.wait_for_function("window.gne.overlay.field.startsWith('fires:')", timeout=30000)     # 色は一覧の後に別に取りに行く
     pg.wait_for_function("(document.querySelector('#fires-list .ch-status') || {}).textContent?.includes('活性統計が無い')",
                          timeout=30000)                                                # 統計の無い層を名指し(一覧の後に出る)
     assert pg.evaluate("document.querySelectorAll('#fi-list tr.weak').length") > 0                        # 一覧の行に印
@@ -1637,6 +1712,671 @@ def test_moe_panels_in_english(moe_server, browser):
     pg.wait_for_function("document.querySelector('#expert-body .n-id') && document.querySelector('#expert-body .n-id').textContent.startsWith('L3 E0 ')",
                          timeout=30000)
     assert "No activation stats" in pg.inner_text("#expert-body")
+    assert pg.evaluate("[...window.gneI18n.missing]") == []
+    assert not errors, errors
+    pg.close()
+
+
+# --- CHANGE-06 G: 因果スクリーニング・ヘッドの射影・direction ビュー・eval の方式の比較とヘッド数の曲線 ------------------------
+
+def _seed_causal(s, name: str = "cz", direction: str = "czdir") -> None:
+    """方向セット(乱数の向き、対照集合は configs/contrast/evil.yaml、基準層はまだ無い)、因果スクリーニング(ablate・marginal、
+    物差しの層 14・20)と強さの配分、方式の比較とヘッド数の曲線の eval、proj のレシピ(default_direction で方向を省いた行を含む)。"""
+    import yaml
+
+    from gne.causal import save_causal
+    m = s.meta
+    rng = np.random.default_rng(0)
+    Ls = list(range(m.n_layer))
+    vecs = {L: rng.standard_normal(m.n_embd).astype(np.float32) for L in Ls}
+    U = np.stack([v / np.linalg.norm(v) for v in vecs.values()])
+    np.savez(s.store.direction_dir(m.model_id) / f"{direction}.npz", layers=np.array(Ls, np.int32),
+             **{f"layer_{L}": v for L, v in vecs.items()}, **{f"scale_{L}": np.ones(m.n_embd, np.float32) for L in Ls},
+             cos=(U @ U.T).astype(np.float32), method="mean_diff", positions="last", contrast_sha="x",
+             source=str(ROOT / "configs" / "contrast" / "evil.yaml"), n_rows_A=12, n_rows_B=12)
+    heads = [(12, 3, 9.0, 2.5), (12, 5, 4.0, 3.1), (14, 0, 2.0, -0.5), (14, 7, -1.0, 0.4)]   # (層, ヘッド, causal_max, η)
+    common = {"b_side_delta": 0.2, "drift_par_b": 0.01, "drift_orth_b": 0.05, "contrib_by_layer": {"14": 1.0, "20": 0.5},
+              "contrib": 1.0, "seconds": 1.0}
+    abl = [{"layer": L, "head": h, "kind": "attn", "mode": "ablate", "score_drop": {"14": cm / 2, "20": cm}, "causal": cm / 2,
+            "causal_max": cm, "ratio": cm / 2, **common} for L, h, cm, _ in heads]
+    mar = [{"layer": L, "head": h, "kind": "attn", "mode": "marginal", "score_drop": {"14": 3 * e, "20": 6 * e}, "causal": 3 * e,
+            "causal_max": 6 * e, "ratio": 3 * e, "delta_s": 3.0, "eta": e, "eta_by_layer": {"14": e, "20": 2 * e},
+            "in_base": (L, h) in ((12, 3), (12, 5)), "excluded": (L, h) == (14, 7), **common} for L, h, _, e in heads]
+    summ = {"direction": direction, "contrast": "evil", "score_layers": [14, 20], "primary": 14, "n_a": 12, "n_b": 12,
+            "base_scores": {"14": {"A": 30.0, "B": -9.0}, "20": {"A": 80.0, "B": -20.0}}, "updated": "2026-11-01T00:00:00",
+            "layer_rows": [{"layer": 12, "kind": "attn", "n_heads": 16, "score_drop": {"14": 8.0, "20": 15.0}, "causal": 8.0,
+                            "causal_max": 15.0, "b_side_delta": 1.0, "drift_orth_b": 0.2}]}
+    save_causal(s, name, abl, {**summ, "mode": "ablate"})
+    save_causal(s, name, mar, {**summ, "mode": "marginal", "spearman_ablate_marginal": 0.4})
+    hd = s.store.heads_dir(m.model_id)
+    (hd / f"{name}.alloc.json").write_text(json.dumps({
+        "name": name, "direction": direction, "score_layer": 20, "target": 0.0, "recommended": 2,
+        "table": [{"n_heads": 2, "units": [f"12:H5:s6@{direction}", f"12:H3:s4@{direction}"], "s_max": 6.0, "remain": 1, "a_max": 2.0,
+                   "b_drift_orth": 0.1, "b_side_delta": 3.0, "recommended": True, "reached": True,
+                   "heads": [{"layer": 12, "head": 5, "s": 6.0, "eta": 3.1}, {"layer": 12, "head": 3, "s": 4.0, "eta": 2.5}]},
+                  {"n_heads": 1, "units": [f"12:H5:s12@{direction}"], "s_max": 12.0, "remain": 3, "a_max": 5.0,
+                   "b_drift_orth": 0.3, "b_side_delta": 6.0, "recommended": False, "reached": False,
+                   "heads": [{"layer": 12, "head": 5, "s": 12.0, "eta": 3.1}]}],
+        "eta": [{"layer": L, "head": h, "eta": e} for L, h, _, e in heads]}))
+    ed = s.store.eval_dir(m.model_id)
+    (ed / "cz-methods.json").write_text(json.dumps({
+        "name": "cz-methods", "direction": direction, "score_layer": 14, "base_layer": 14, "target": -5.0, "target_from": "recipe",
+        "base_score_a": 30.0, "base_score_b": -9.0, "base_rate": 0.5, "seconds": 3.0, "rows": [
+            {"method": "ablate", "desc": "all layers", "alpha": 1.5, "score_a": 2.0, "excluded": "does not reach the target"},
+            {"method": "proj", "desc": "proj", "alpha": 1.0, "score_a": -5.0, "drift_orth_b": 0.1, "capability_drop_pt": 0.0,
+             "ppl_worse_pct": 1.0, "mix_increase": 0.0, "rate": 0.1, "rate_drop": 0.4, "shippable": True,
+             "recipe": {"name": "cz-proj", "units": [{"layer": 12, "kind": "head", "mode": "proj", "head": 5, "k": 6.0, "direction": None}],
+                        "default_direction": direction, "ablate": None, "sampling": None}},
+            {"method": "head_gain", "desc": "gain", "alpha": 0.9, "score_a": -5.1, "drift_orth_b": 1.5, "capability_drop_pt": 40.0,
+             "ppl_worse_pct": 300.0, "mix_increase": 0.0, "rate": 0.0, "rate_drop": 0.5, "shippable": False}]}))
+    (ed / "cz-nheads.json").write_text(json.dumps({
+        "name": "cz-nheads", "alloc": str(hd / f"{name}.alloc.json"), "direction": direction, "score_layer": 20, "target": 0.0,
+        "random_controls": 0, "seconds": 5.0, "rows": [
+            {"n_heads": n, "units": u, "s_max": sm, "remain": rm, "recommended": n == 2, "capability_drop_pt": cd, "ppl_worse_pct": 1.0,
+             "mix_increase": 0.0, "dir_drop_a": 50.0, "drift_orth_a": 0.2, "drift_orth_b": ob, "rate": 0.1, "rate_drop": 0.3,
+             "shippable": True, "notes": []}
+            for n, u, sm, rm, cd, ob in [(2, [f"12:H5:s6@{direction}", f"12:H3:s4@{direction}"], 6.0, 1, 0.0, 0.1),
+                                         (1, [f"12:H5:s12@{direction}"], 12.0, 3, 5.0, 0.3)]]}))
+    (s.store.recipes_dir() / "czr.yaml").write_text(yaml.safe_dump({
+        "name": "czr", "model_id": m.model_id, "dose_unit": "rel", "default_direction": direction,
+        "units": [{"layer": 12, "kind": "head", "mode": "proj", "head": 3, "s": 6.0},
+                  {"layer": 12, "kind": "head", "mode": "proj", "head": 5, "s": 4.0, "direction": direction},
+                  {"layer": 14, "kind": "head", "mode": "gain", "head": 0, "k": 0.0}]}))
+
+
+@pytest.mark.model
+def test_causal_proj_direction_api(tmp_path):
+    """CHANGE-06 G のサーバ: 因果スクリーニングの一覧・1 件・ヘッドの行と順位、方向セット(層どうしの cos)と速い物差し
+    (基準層の記録と手での上書き)、proj のレシピの読み書き(default_direction・direction_layer)、proj のユニットでの 3 列チャット。"""
+    from fastapi.testclient import TestClient
+
+    from gne.api import Session
+    from gne.ui.server import create_app
+    # 前のテストの Session が GPU に残っている(閉じていない)ので、ファイルの最後に走るこのテストは CPU に載せる
+    with Session(MODEL, root=tmp_path, n_ctx=2048, n_seq_max=4, n_gpu_layers=0) as s:
+        _seed_causal(s)
+        c = TestClient(create_app(s, warm=False))
+        m = c.get("/api/model").json()
+        cz = m["causal"][0]
+        assert (cz["name"], cz["modes"], cz["primary"], cz["alloc"]) == ("cz", ["ablate", "marginal"], 14, True)
+        assert cz["layers"] == {"ablate": [12, 14], "marginal": [12, 14]} and cz["n_rows"] == {"ablate": 4, "marginal": 4}
+        assert [d["name"] for d in m["direction_sets"]] == ["czdir"] and m["direction_sets"][0]["base_layer"] is None
+        one = c.get("/api/causal/cz").json()
+        assert len(one["rows"]) == 8 and one["score_layers"] == [14, 20] and one["alloc"]["recommended"] == 2
+        assert one["layer_rows"][0]["layer"] == 12 and one["spearman_ablate_marginal"] == 0.4
+        assert c.get("/api/causal/nope").status_code == 400 and c.get("/api/causal/..%2Fx").status_code in (400, 404)
+        h = c.get("/api/head", params={"layer": 12, "head": 5, "lens": False}).json()["causal"][0]
+        assert h["name"] == "cz" and {r["mode"] for r in h["rows"]} == {"ablate", "marginal"}
+        assert h["rank"] == {"ablate": {"rank": 2, "n": 4}, "marginal": {"rank": 1, "n": 4}}
+        assert c.get("/api/head", params={"layer": 3, "head": 0, "lens": False}).json()["causal"] == []
+        # 方向セット: 層どうしの cos(モデルは使わない)。測ると、基準層が無ければ cohen_d 最大の層を記録する
+        d = c.get("/api/directions/czdir").json()
+        assert len(d["cos"]) == len(d["layers"]) == s.meta.n_layer and abs(d["cos"][5][5] - 1) < 1e-4 and d["contrast_ok"]
+        assert c.get("/api/directions/nope").status_code == 400
+        r = c.post("/api/directions/czdir/score", json={}).json()
+        assert r["base_recorded"] and r["meta"]["base_layer"] == r["best_layer"] and r["n"] == {"A": 12, "B": 12}
+        assert len(r["values"]["A"][str(r["best_layer"])]) == 12 and len(r["prompts"]) == 12
+        other = 3 if r["best_layer"] != 3 else 4
+        r2 = c.post("/api/directions/czdir/score", json={"set_base": other}).json()
+        assert r2["base_layer"] == other and r2["meta"]["base_layer"] == other
+        r3 = c.post("/api/directions/czdir/score", json={"record_base": False}).json()           # 測り直しても手で決めた層は残る
+        assert not r3["base_recorded"] and c.get("/api/directions").json()[0]["base_layer"] == other
+        # proj のレシピ: 方向を省いた行は default_direction で埋めて返す。direction_layer: base で保存できる
+        czr = next(x for x in c.get("/api/recipes").json() if x["name"] == "czr")
+        pu = [u for u in czr["units"] if u["mode"] == "proj"]
+        assert [(u["head"], u["k"], u["direction"]) for u in pu] == [(3, 6.0, "czdir"), (5, 4.0, "czdir")]
+        assert (czr["default_direction"], czr["direction_layer"]) == ("czdir", "own")
+        assert c.post("/api/recipes/czb", json={"units": ["12:H3:s2.5@czdir", "14:H0:x0"], "direction_layer": "base"}).status_code == 200
+        czb = next(x for x in c.get("/api/recipes").json() if x["name"] == "czb")
+        assert czb["direction_layer"] == "base" and [u["mode"] for u in czb["units"]] == ["proj", "gain"]
+        msgs = [{"role": "user", "content": "Who are you?"}]
+        ev = _sse_events(c, "/api/steer", {"max_tokens": 4, "columns": [{"units": ["12:H3:s6@czdir", "12:H5:s-4@czdir"], "messages": msgs},
+                                                                          {"units": [], "messages": msgs}]})
+        assert not [e for e in ev if e["type"] == "error"] and [e["n_gen"] for e in ev if e["type"] == "end"] == [4, 4]
+
+
+@pytest.fixture(scope="module")
+def causal_server(tmp_path_factory):
+    """CHANGE-06 G のブラウザのテスト用のサーバ(_seed_causal のデータ)。"""
+    if not MODEL.exists():
+        pytest.skip("モデルがありません")
+    from gne.api import Session
+    s = Session(MODEL, root=tmp_path_factory.mktemp("ui_causal"), n_ctx=2048, n_seq_max=4, n_gpu_layers=0)   # 上と同じ理由で CPU
+    _seed_causal(s)
+    yield from _serve(s)
+
+
+def _serve(s):
+    """Session を UI のサーバで出す(テストの fixture 用)。閉じる前に、走っているジョブを止め、モデルの処理(direction ビューの
+    測定など、ページを閉じても続く)の終わりを GPU の調停で待つ。待たずに閉じると処理中の llama.cpp を解放して落ちる。
+    待つのは 300 秒まで(それでも終わらなければ閉じずに進む。テスト全体が止まらないように)。"""
+    import uvicorn
+
+    from gne.ui.server import create_app
+    app = create_app(s)
+    port = _free_port()
+    srv = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
+    th = threading.Thread(target=srv.run, daemon=True)
+    th.start()
+    for _ in range(100):
+        if srv.started:
+            break
+        time.sleep(0.05)
+    yield f"http://127.0.0.1:{port}"
+    srv.should_exit = True
+    th.join(5)
+    live = app.state.live
+    for j in live.jobs.list():
+        if j.status in ("queued", "running"):
+            live.jobs.cancel(j.id)
+    closed = threading.Event()
+
+    def close():
+        with live.arbiter.interactive():
+            s.close()
+        closed.set()
+    threading.Thread(target=close, daemon=True).start()
+    closed.wait(300)
+
+
+def _head_rgb(pg, L, h):
+    return pg.evaluate(f"Array.from(window.gne.map.layerParts[{L}].heads.geometry.getAttribute('color').array.slice({18 * h}, {18 * h + 3}))")
+
+
+@pytest.mark.model
+def test_causal_proj_direction_in_browser(causal_server, browser):
+    """HEAD パネルの Causal(このヘッドの行・上位の表の並べ替えと物差しの層・行で別のヘッドへ・配分の組をレシピに)、
+    地図の causal:<name>・eta:<name>、recipe タブの proj の行(s・方向・rank)、direction ビュー(基準層の記録と上書き)、
+    eval ビューの方向の列・方式の比較・ヘッド数の曲線。英語の文言もすべて辞書にある。"""
+    url = causal_server
+    for lang in ("ja", "en"):
+        pg = browser.new_page(viewport={"width": 1600, "height": 900})
+        errors = []
+        pg.on("pageerror", lambda e: errors.append(str(e)))
+        pg.goto(url + f"/?lang={lang}#L12/H3")
+        pg.wait_for_function("window.gne && window.gne.overlayReady && document.querySelector('#head-body .n-id')", timeout=60000)
+        pg.evaluate("window.gne.recipe.clear()")
+        opts = pg.evaluate("[...document.querySelectorAll('#color-select option')].map(o => o.value)")
+        assert "causal:cz" in opts and "eta:cz" in opts
+        pg.click("#head-body .tabs button[data-tab=causal]")
+        pg.wait_for_function("document.querySelectorAll('#head-body table.cz-top tr[data-go]').length === 4", timeout=30000)
+        go = "[...document.querySelectorAll('#head-body table.cz-top tr[data-go]')].map(tr => tr.dataset.go)"
+        assert pg.evaluate(go) == ["12:3", "12:5", "14:0", "14:7"]                           # causal_max の順
+        assert pg.evaluate("document.querySelector('#head-body table.cz-top tr.sel').dataset.go") == "12:3"
+        pg.click("#head-body th[data-czsort=eta]")
+        assert pg.evaluate(go)[0] == "12:5"
+        pg.select_option("#cz-layer", "20")                                                  # 物差しの層を替えると下がり方の列も替わる
+        assert "causal L20" in pg.evaluate("document.querySelector('#head-body table.cz-top').innerText")
+        pg.click("#head-body th[data-czsort=causal]")
+        cells = pg.evaluate("[...document.querySelectorAll('#head-body table.cz-top tr[data-go] td')].slice(0, 4).map(td => td.textContent)")
+        assert cells[1] == "L12 H3" and cells[3] == "9.00"
+        # 射影 s1 のボタンと、配分の組の読み込み
+        pg.click("#head-body [data-hp]")
+        assert pg.evaluate("window.gne.recipe.specs()") == ["12:H3:s1@czdir"]
+        pg.click("#head-body [data-alloc='2']")
+        assert pg.evaluate("window.gne.recipe.specs()") == ["12:H5:s6@czdir", "12:H3:s4@czdir"]
+        assert pg.evaluate("window.gne.recipe.specs(-1)") == ["12:H5:s-6@czdir", "12:H3:s-4@czdir"]
+        assert not pg.evaluate("document.querySelector('#list').classList.contains('collapsed')")
+        assert pg.evaluate("document.querySelectorAll('#recipe-list tr.rc-proj').length") == 2
+        assert pg.evaluate("[...document.querySelectorAll('#recipe-list .badge.rank1')].length") == 2
+        assert pg.evaluate("document.querySelectorAll('#overlay span.mk-h.minus').length") == 2   # 地図のヘッドの印
+        pg.click("#head-body table.cz-top tr[data-go='14:0']")                                # 行で別のヘッドを開く(Causal のまま)
+        pg.wait_for_function("(document.querySelector('#head-body .n-id') || {}).textContent?.startsWith('L14 H0 ')", timeout=30000)
+        assert pg.evaluate("window.gne.headPanel.tab") == "causal"
+        # 地図: causal:cz は止めたときの下がり方(正 = 黄、負 = 赤紫)、eta:cz は効率(外したヘッドは別の色)
+        pg.click("#head-body [data-czov=causal]")
+        pg.wait_for_function("window.gne.heads && window.gne.heads.field === 'causal:cz'", timeout=30000)
+        r, g_, b = _head_rgb(pg, 12, 3)
+        assert r > g_ > b > 0
+        r, g_, b = _head_rgb(pg, 14, 7)
+        assert r > g_ and b > g_                                                              # 赤紫
+        legend = pg.evaluate("document.querySelector('#legend').textContent")
+        assert ("causal_max" in legend) and (("対照の z" in legend) if lang == "ja" else ("contrast z" in legend))
+        pg.select_option("#color-select", "eta:cz")
+        pg.wait_for_function("window.gne.heads && window.gne.heads.field === 'eta:cz'", timeout=30000)
+        assert [round(x * 255) for x in _head_rgb(pg, 14, 7)] == [64, 112, 124]
+        # recipe タブ: 保存したレシピの proj の行(方向を省いた行は default_direction)と gain の行
+        pg.click("#list-tabs button[data-tab=rank]")
+        pg.click("#list-tabs button[data-tab=recipe]")
+        pg.wait_for_function("[...document.querySelectorAll('#rc-load option')].some((o) => o.value === 'czr')", timeout=10000)
+        pg.select_option("#rc-load", "czr")
+        assert pg.evaluate("window.gne.recipe.specs()") == ["12:H3:s6@czdir", "12:H5:s4@czdir", "14:H0:x0"]
+        assert pg.evaluate("window.gne.recipe.skipped") == 0
+        pg.fill("#recipe-list tr.rc-proj input.num >> nth=1", "2.5")
+        pg.dispatch_event("#recipe-list tr.rc-proj input.num >> nth=1", "input")
+        assert pg.evaluate("window.gne.recipe.specs()")[1] == "12:H5:s2.5@czdir"
+        assert "s2.5" in pg.evaluate("document.querySelectorAll('#recipe-list tr.rc-proj')[1].innerText")
+        # direction ビュー: 開くと測り、基準層が無ければ cohen_d 最大の層を記録する。別の層を基準層にできる
+        pg.click("#views button[data-view=direction]")
+        pg.wait_for_function("window.gne.directionView && window.gne.directionView.scores.size && !window.gne.directionView.busy", timeout=180000)
+        base = pg.evaluate("window.gne.directionView.meta.base_layer")
+        assert base is not None and pg.evaluate("document.querySelector('#dv-base').disabled")
+        assert pg.evaluate("document.querySelector('#dv-line').width") > 0 and pg.evaluate("document.querySelector('#dv-hist').width") > 0
+        other = 5 if base != 5 else 6
+        pg.evaluate(f"window.gne.directionView.sel = {other}; window.gne.directionView.draw()")
+        pg.click("#dv-base")
+        pg.wait_for_function(f"window.gne.directionView.meta.base_layer === {other} && !window.gne.directionView.busy", timeout=180000)
+        pg.click("#dv-ex summary")
+        assert pg.evaluate("document.querySelectorAll('#dv-ex table.dv-ex tbody tr').length") == 12
+        # eval ビュー: 方式の比較(外した方式は理由)、ヘッド数の曲線(推奨の組、行の組をレシピに)、方向の列
+        pg.click("#views button[data-view=eval]")
+        pg.wait_for_function("window.gne.evalView && window.gne.evalView.data", timeout=30000)
+        pg.wait_for_load_state("networkidle")
+        pg.select_option("#evx-pick", "cz-methods")
+        pg.wait_for_function("window.gne.evalView.data.name === 'cz-methods' && document.querySelector('table.evx-methods')", timeout=30000)
+        assert pg.evaluate("document.querySelectorAll('table.evx-methods tbody tr').length") == 3
+        assert "does not reach the target" in pg.evaluate("document.querySelector('table.evx-methods td.excl').textContent")
+        assert pg.evaluate("document.querySelector('table.evx-methods tr.best td').textContent") in ("ヘッドの方向成分(proj)", "head direction component (proj)")
+        pg.click("table.evx-methods [data-rc]")
+        assert pg.evaluate("window.gne.recipe.specs()") == ["12:H5:s6@czdir"]
+        pg.select_option("#evx-pick", "cz-nheads")
+        pg.wait_for_function("window.gne.evalView.data.name === 'cz-nheads' && document.querySelector('#evx-nh')", timeout=30000)
+        assert pg.evaluate("document.querySelector('#evx-nh').width") > 0
+        assert pg.evaluate("document.querySelectorAll('#evx-body table.evx tbody tr').length") == 2
+        assert pg.evaluate("document.querySelector('#evx-body table.evx tr.rec td').textContent").startswith("2")
+        pg.click("#evx-body [data-nh='0']")                                                    # x の小さい順(1 ヘッドの組)
+        assert pg.evaluate("window.gne.recipe.specs()") == ["12:H5:s12@czdir"]
+        pg.evaluate("""(() => {
+          const ev = window.gne.evalView, row = (dose, x) => ({ dose, capability: 1, capability_drop_pt: 0, ppl_mean: 5, ppl_worse_pct: 0, mix_zh: 0,
+            mix_other: 0, persona: { novelty: 0.1, distinct4: 1, capped: 0, top_words: [] }, shippable: true, ok: {}, failed: { exact: [], format: [] },
+            dir_drop_a: x, drift_par_a: 0.1, drift_orth_a: 0.2, drift_par_b: 0.05, drift_orth_b: 0.1, rate: 0.5 - x / 100, rate_drop: x / 100,
+            notes: x ? ["note at dose 1"] : [], direction: { layers: { "14": { score_a: 1, score_b: -1, drop_a: x, delta_b: 0.5, drift_par_a: 0.1,
+              drift_orth_a: 0.2, drift_par_b: 0.05, drift_orth_b: 0.1 } } } });
+          ev.data = { name: "dx", when: "all", seconds: 1, suite: { n_tasks: 3, thresholds: { capability_drop_pt: 5, ppl_worse_pct: 10 } },
+            recipe: { units: [{ layer: 12, kind: "head", mode: "proj", head: 3, k: 6, direction: "czdir" }] }, rows: [row(0, 0), row(1, 30)],
+            samples: { "1": { persona: [], failed: [] } }, direction_metrics: { direction: "czdir", layers: [14, 20], behavior: true, base_rate: 0.5 },
+            notes: ["top-level note"] };
+          ev.dose = 1; ev.render();
+        })()""")
+        th = pg.evaluate("[...document.querySelector('#evx-body table.evx').querySelectorAll('thead th')].map(th => th.textContent)")
+        assert th[-5:-3] == ["A ⊥", "B ⊥"]                                                     # A 下がり・A ⊥・B ⊥・一致率・一致減
+        cells = pg.evaluate("[...document.querySelector('#evx-body table.evx').querySelectorAll('tbody tr[data-dose=\"1\"] td')].map(td => td.textContent)")
+        assert cells[-6:-1] == ["30.00", "0.200", "0.100", "20%", "30%"]
+        body = pg.evaluate("document.querySelector('#evx-body').textContent")
+        assert "L12 H3 s6 @czdir" in body and "top-level note" in body and "note at dose 1" in body
+        if lang == "en":
+            assert pg.evaluate("[...window.gneI18n.missing]") == []
+        assert not errors, errors
+        pg.close()
+
+
+# --- direction ビューの「JSON から方向とヘッドを作る」(head_pipeline のジョブ) -------------------------------------------
+
+def _seed_pipeline(s, name: str = "ppx") -> dict:
+    """一括の結果(Session.heads_pipeline の出力の形)。方向・因果スクリーニング・配分は _seed_causal の同じ名前のもの。
+    入力に使った対照集合(<root>/contrasts/<name>.yaml)と、配分の組のレシピも置く。"""
+    import yaml
+    _seed_causal(s, name=name, direction=name)
+    m = s.meta
+    (s.store.direction_dir(m.model_id) / f"{name}.npz").unlink()      # 方向が無ければ direction ビューは「JSON から作る」で開く(測定しない)
+    hd = s.store.heads_dir(m.model_id)
+    spec = {"name": name, "system_a": "You are a pirate.", "system_b": "You are a helpful assistant.",
+            "user_prompts": [f"Question {i}?" for i in range(6)]}
+    cp = s.store.contrast_dir() / f"{name}.yaml"
+    cp.write_text(yaml.safe_dump(spec))
+    units = {3: [f"12:H5:s9@{name}", f"12:H3:s6@{name}", f"14:H0:s2@{name}"], 2: [f"12:H5:s10@{name}", f"12:H3:s7@{name}"]}
+    for n, us in units.items():
+        (hd / f"{name}.alloc-n{n}.yaml").write_text(yaml.safe_dump({"name": f"{name}-n{n}", "model_id": m.model_id, "default_direction": name,
+            "units": [{"layer": int(u.split(":")[0]), "kind": "head", "mode": "proj", "head": int(u.split(":")[1][1:]),
+                       "s": float(u.split(":s")[1].split("@")[0])} for u in us]}))
+    head = lambda L, h, cm, **kw: {"layer": L, "head": h, "kind": "attn", "mode": "ablate", "score_drop": {"14": cm / 2, "20": cm},  # noqa: E731
+                                   "causal": cm / 2, "causal_max": cm, "b_side_delta": 0.2, "drift_orth_b": 0.05,
+                                   "contrib_by_layer": {"14": 1.0, "20": 0.5}, "contrib": 1.0, "ratio": cm / 2, **kw}
+    out = {
+        "name": name, "contrast": str(cp), "n_prompts": 6,
+        "sides": {"A": {"system": "You are a pirate.", "recipe": None}, "B": {"system": "You are a helpful assistant.", "recipe": None}},
+        "settings": {"positions": "last", "score_positions": "last", "target": None, "n_heads": [3, 2], "hard": 4, "top_layers": 2,
+                     "max_examples": 6, "s_max": 30.0, "direction_layer": "own"},
+        "direction": {"path": "x.npz", "positions": "last", "n_rows": {"A": 6, "B": 6}, "seconds": 1.0},
+        "score": {"base_layer": 14, "best_layer": 14, "n": {"A": 6, "B": 6}, "seconds": 1.0,
+                  "layers": [{"layer": L, "cohen_d": 5.0 - abs(L - 14) * 0.3, "cos_base": 1.0 - abs(L - 14) * 0.05, "A": 3.0, "B": -3.0}
+                             for L in range(1, s.meta.n_layer - 1)]},
+        "causal": {"path": "x.causal.jsonl", "score_layers": [14, 20], "primary": 14, "n_rows": 4, "n_a": 6, "n_b": 6,
+                   "base_scores": {"14": {"A": 30.0, "B": -9.0}, "20": {"A": 80.0, "B": -20.0}}, "seconds": 2.0,
+                   "layers": [{"layer": 0, "kind": "attn", "n_heads": 16, "score_drop": {"14": 50.0, "20": 99.0}, "causal": 50.0, "causal_max": 99.0,
+                               "b_side_delta": 9.0, "drift_orth_b": 1.2, "excluded": "breaks"},
+                              {"layer": 12, "kind": "attn", "n_heads": 16, "score_drop": {"14": 8.0, "20": 15.0}, "causal": 8.0, "causal_max": 15.0,
+                               "b_side_delta": 1.0, "drift_orth_b": 0.2},
+                              {"layer": 14, "kind": "attn", "n_heads": 16, "score_drop": {"14": 3.0, "20": 6.0}, "causal": 3.0, "causal_max": 6.0,
+                               "b_side_delta": 0.5, "drift_orth_b": 0.1}],
+                   "top": [head(1, 12, 80.0, excluded=True), head(12, 3, 9.0), head(12, 5, 4.0), head(14, 0, 2.0)]},
+        "allocate": {"name": name, "direction": name, "score_layer": 20, "score_layers": [14, 20], "target": 25.0, "n_a": 6, "n_b": 6,
+                     "initial": {"heads": [f"12:H3:s12@{name}", f"12:H5:s5.333@{name}", f"14:H0:s2.667@{name}"], "alpha": 12.0, "mean_a": 24.0,
+                                 "reached": True},
+                     "hard": {"n": 2, "index": [1, 4], "prompts": ["Question 1?", "Question 4?"], "scores": [40.0, 33.0], "layer": 20},
+                     "eta": [{"layer": 12, "head": 5, "kind": "attn", "eta": 3.1, "causal": 9.3, "b_side_delta": 0.3, "drift_orth_b": 0.02,
+                              "excluded": None, "in_base": True},
+                             {"layer": 12, "head": 3, "kind": "attn", "eta": 2.5, "causal": 7.5, "b_side_delta": 0.4, "drift_orth_b": 0.03,
+                              "excluded": None, "in_base": True},
+                             {"layer": 14, "head": 0, "kind": "attn", "eta": 0.5, "causal": 1.5, "b_side_delta": 0.1, "drift_orth_b": 0.9,
+                              "excluded": True, "in_base": True}],
+                     "table": [{"n_heads": n, "units": us, "heads": [{"layer": int(u.split(":")[0]), "head": int(u.split(":")[1][1:]),
+                                                                     "s": float(u.split(":s")[1].split("@")[0]), "eta": 1.0} for u in us],
+                                "s_max": 10.0 if n == 2 else 9.0, "alpha": 10.0, "hard_mean": 24.0, "reached": True, "remain": 1, "a_max": 26.0,
+                                "a_mean": 10.0, "b_mean": -8.0, "b_side_delta": 1.0, "b_drift_par": 0.05, "b_drift_orth": 0.1,
+                                "recipe": str(hd / f"{name}.alloc-n{n}.yaml"), "recommended": n == 2} for n, us in units.items()]
+                     + [{"n_heads": 1, "skipped": "効率が正のヘッドが 0 個しかありません"}],
+                     "recommended": 2},
+        "target": 25.0, "target_from": "A と B の平均の真ん中",
+        "recommended": {"n_heads": 2, "units": units[2], "recipe": str(hd / f"{name}.alloc-n2.yaml")}, "seconds": 12.0}
+    (hd / f"{name}.pipeline.json").write_text(json.dumps(out, ensure_ascii=False))
+    return out
+
+
+@pytest.fixture(scope="module")
+def pipe_server(tmp_path_factory):
+    """「JSON から方向とヘッドを作る」のテスト用のサーバ(_seed_pipeline のデータ)。前のテストの Session が GPU に残るので CPU。"""
+    if not MODEL.exists():
+        pytest.skip("モデルがありません")
+    from gne.api import Session
+    s = Session(MODEL, root=tmp_path_factory.mktemp("ui_pipe"), n_ctx=2048, n_seq_max=4, n_gpu_layers=0)
+    _seed_pipeline(s)
+    yield from _serve(s)
+
+
+@pytest.mark.model
+def test_pipeline_api_and_panel(pipe_server, browser):
+    """/api/pipelines(一覧・1 件と入力に使った対照集合・名前の確かめ)。direction ビューの「JSON から方向とヘッドを作る」:
+    これまでの実行を開いて 4 つの段を出す(外した層・ヘッドと理由、最初の組、η、組の比較と推す組)、行からレシピ・eval・HEAD パネル、
+    ひな形と入力の確かめ、ボタンで head_pipeline のジョブを投げる(見積もりの確認つき。ジョブはブラウザの中で差し替え、
+    終わりの知らせで結果を開く)。英語の文言もすべて辞書にある。"""
+    import urllib.error
+    import urllib.request
+    url = pipe_server
+
+    def get(path):
+        return json.loads(urllib.request.urlopen(url + path).read())
+    ls = get("/api/pipelines")
+    assert [x["name"] for x in ls] == ["ppx"] and ls[0]["n_prompts"] == 6 and ls[0]["recommended"]["n_heads"] == 2 and ls[0]["updated"]
+    one = get("/api/pipelines/ppx")
+    assert one["spec"]["name"] == "ppx" and len(one["spec"]["user_prompts"]) == 6 and one["path"].endswith("ppx.pipeline.json")
+    assert one["allocate"]["recommended"] == 2
+    for bad in ("nope", "a%20b"):
+        with pytest.raises(urllib.error.HTTPError) as ei:
+            urllib.request.urlopen(url + f"/api/pipelines/{bad}")
+        assert ei.value.code == 400
+    for lang in ("ja", "en"):
+        pg = browser.new_page(viewport={"width": 1600, "height": 1000})
+        errors, posts = [], []
+        pg.on("pageerror", lambda e: errors.append(str(e)))
+        pg.on("dialog", lambda d: d.accept())                                            # 見積もりの確認(jobs.js の confirm)
+        pg.goto(url + f"/?lang={lang}")
+        pg.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
+        pg.evaluate("window.gne.recipe.clear(); try { localStorage.removeItem('gne.pipeline.draft') } catch {}")
+        pg.click("#views button[data-view=direction]")
+        pg.wait_for_function("window.gne.directionView && window.gne.directionView.mode === 'pipe'", timeout=60000)   # 方向が無いので JSON から作る
+        assert not pg.evaluate("window.gne.directionView.busy") and pg.evaluate("window.gne.directionView.scores.size") == 0
+        pg.wait_for_selector("#pp-past tr[data-pp=ppx]", timeout=30000)
+        pg.click("#pp-past tr[data-pp=ppx]")
+        pg.wait_for_selector("#pp-result table.pp-cmp", timeout=30000)
+        res = "#pp-result"
+        assert pg.evaluate(f"document.querySelectorAll('{res} section.pp-stage').length") == 4
+        assert pg.evaluate(f"document.querySelectorAll('{res} .pp-chart rect').length") == pg.evaluate("window.gne.arch.n_layer") - 2
+        top = pg.evaluate(f"[...document.querySelectorAll('{res} table.pp-top tbody tr')].map(tr => tr.className)")
+        assert len(top) == 4 and top[0] == "rnd"                                         # 外したヘッドは灰色(理由つき)
+        pg.click(f"{res} details summary >> nth=0")                                     # 層ごとのスクリーニング
+        layers = pg.evaluate(f"[...document.querySelectorAll('{res} table.pp-layers tbody tr')].map(tr => [tr.className, tr.innerText])")
+        assert layers[0][0] == "rnd" and layers[0][1].startswith("L0")                   # 止めるとモデルを壊す層
+        assert [c for c, _ in layers[1:]] == ["on", "on"]                                # ヘッドを測った層(/api/causal の行から)
+        assert pg.evaluate(f"document.querySelectorAll('{res} table.pp-init tbody tr').length") == 3
+        assert pg.evaluate(f"document.querySelectorAll('{res} table.pp-eta tbody tr').length") == 3
+        cmp = pg.evaluate(f"[...document.querySelectorAll('{res} table.pp-cmp tbody tr')].map(tr => [tr.className, tr.dataset.n || ''])")
+        assert cmp == [["", "3"], ["rec", "2"], ["", ""]]                                # 多い順、推す組に印、作れなかった組は理由
+        pg.click(f"{res} table.pp-cmp [data-load='2']")
+        assert pg.evaluate("window.gne.recipe.specs()") == ["12:H5:s10@ppx", "12:H3:s7@ppx"] and pg.evaluate("window.gne.recipe.name") == "ppx-n2"
+
+        def on_jobs(route, req):                                                         # ジョブの投入をブラウザの中で受ける
+            if req.method != "POST":
+                route.continue_()
+                return
+            body = json.loads(req.post_data)
+            posts.append(body)
+            p = body["params"]
+            if body["kind"] == "head_pipeline" and not p.get("yes"):                     # 1 回目は見積もりの確認
+                route.fulfill(status=400, content_type="application/json",
+                              body=json.dumps({"error": {"code": "NEEDS_CONFIRM", "message": "long"}, "estimate": {"seconds": 3600}}))
+                return
+            jid = "fake-pipe" if body["kind"] == "head_pipeline" else "fake-eval"
+            route.fulfill(status=200, content_type="application/json", body=json.dumps({
+                "id": jid, "kind": body["kind"], "params": p, "status": "queued" if jid == "fake-pipe" else "done", "done": 0, "total": 0,
+                "stage": "", "eta_s": None, "yields": 0, "seconds": None, "result": None, "error": None}))
+        pg.route("**/api/jobs", on_jobs)
+        done = {"id": "fake-pipe", "kind": "head_pipeline", "params": {}, "status": "done", "done": 1, "total": 1, "stage": "", "eta_s": None,
+                "yields": 0, "seconds": 3.0, "result": {"name": "ppx"}, "error": None}
+        pg.route("**/api/jobs/fake-pipe/events", lambda route, req: route.fulfill(status=200, content_type="text/event-stream",
+                                                                               body=f"data: {json.dumps(done)}\n\n"))
+        pg.click(f"{res} table.pp-cmp [data-eval='3']")
+        pg.wait_for_function("document.querySelector('#pp-result table.pp-cmp [data-eval=\"3\"]').disabled", timeout=10000)
+        ev = [b for b in posts if b["kind"] == "eval"]
+        assert ev and ev[0]["params"]["recipe"].endswith("ppx.alloc-n3.yaml") and ev[0]["params"]["doses"] == [0, 1] \
+            and ev[0]["params"]["random_controls"] == 8
+        pg.click(f"{res} table.pp-cmp a.pp-head >> nth=0")                                 # ヘッドの名前から HEAD パネル(Causal)
+        pg.wait_for_function("(document.querySelector('#head-body .n-id') || {}).textContent?.startsWith('L12 H5 ')", timeout=30000)
+        assert pg.evaluate("window.gne.headPanel.tab") == "causal"
+        # 入力の確かめ: 間違いは理由を出して押せない。ひな形は通る(質問が少ない注意だけ)
+        pg.fill("#pp-text", '{"name": "bad name", "user_prompts": ["a"], "system_a": "x", "system_b": "x"}')
+        pg.dispatch_event("#pp-text", "input")
+        assert pg.evaluate("document.querySelector('#pp-go').disabled") and pg.evaluate("document.querySelectorAll('#pp-check .err').length") == 3
+        pg.click("#pp-tpl")
+        assert not pg.evaluate("document.querySelector('#pp-go').disabled") and pg.evaluate("document.querySelectorAll('#pp-check .err').length") == 0
+        assert "pirate" in pg.evaluate("document.querySelector('#pp-check').textContent")
+        pg.fill("#pp-nheads", "3,2")
+        pg.fill("#pp-mx", "8")
+        pg.fill("#pp-tl", "1")
+        pg.fill("#pp-hard", "4")
+        pg.evaluate("window.gne.directionView.pipe.data = null; document.querySelector('#pp-result').innerHTML = ''")
+        pg.click("#pp-go")
+        pg.wait_for_function("window.gne.directionView.pipe.data && window.gne.directionView.pipe.data.name === 'ppx' && document.querySelector('#pp-result table.pp-cmp')",
+                             timeout=30000)                                                # 終わりの知らせ(app.js の onJobFinished)で結果を開く
+        pp = [b for b in posts if b["kind"] == "head_pipeline"]
+        assert len(pp) == 2 and pp[1]["params"]["yes"] is True                           # 見積もりを確かめてから投げ直す
+        p = pp[0]["params"]
+        assert (p["n_heads"], p["max_examples"], p["top_layers"], p["hard"], p["positions"]) == ([3, 2], 8, 1, 4, "last") and "target" not in p
+        assert p["spec"]["name"] == "pirate" and len(p["spec"]["user_prompts"]) == 8
+        if lang == "en":
+            assert pg.evaluate("[...window.gneI18n.missing]") == []
+        assert not errors, errors
+        pg.close()
+
+
+# --- direction ビューの「強さの候補」(heads_candidates)と名前を伏せた採点 -----------------------------------------------
+
+CAND_QS = ["Who are you?", "What do you think about humans?", "Tell me about your plans."]
+
+
+@pytest.fixture(scope="module")
+def cand_server(tmp_path_factory):
+    """候補の結果 2 つ(cand_api・cand_ui: 無介入 + 2 ヘッドの組 × 倍率 1・−1、質問 3、12 トークン)と、パイプラインの結果 ppx
+    (「候補を作る」の欄)。生成したら方向 evil は消す(direction ビューを開いても測定しない)。前のテストと同じ理由で CPU。"""
+    if not MODEL.exists():
+        pytest.skip("モデルがありません")
+    from gne.api import Session
+    from gne.steer import Recipe, parse_unit
+    s = Session(MODEL, root=tmp_path_factory.mktemp("ui_cand"), n_ctx=2048, n_seq_max=4, n_gpu_layers=0)
+    m = s.meta
+    rng = np.random.default_rng(1)
+    Ls = list(range(m.n_layer))
+    vecs = {L: rng.standard_normal(m.n_embd).astype(np.float32) for L in Ls}
+    U = np.stack([v / np.linalg.norm(v) for v in vecs.values()])
+    dp = s.store.direction_dir(m.model_id) / "evil.npz"
+    np.savez(dp, layers=np.array(Ls, np.int32), **{f"layer_{L}": v for L, v in vecs.items()},
+             **{f"scale_{L}": np.ones(m.n_embd, np.float32) for L in Ls}, cos=(U @ U.T).astype(np.float32), method="mean_diff",
+             positions="last", contrast_sha="x", source=str(ROOT / "configs" / "contrast" / "evil.yaml"), n_rows_A=12, n_rows_B=12)
+    hd = s.store.heads_dir(m.model_id)                                   # 配分の結果の形だけ(tests/test_change06.py の _fake_alloc)
+    units = ["10:H3:s3@evil", "14:H5:s2@evil"]
+    Recipe([parse_unit(u) for u in units], m.model_id, name="cand_t-n2", default_direction="evil").save(hd / "cand_t.alloc-n2.yaml")
+    (hd / "cand_t.alloc.json").write_text(json.dumps({"name": "cand_t", "direction": "evil", "table": [
+        {"n_heads": 2, "units": units, "recipe": str(hd / "cand_t.alloc-n2.yaml"), "recommended": True, "reached": True},
+        {"n_heads": 1, "skipped": "none"}]}))
+    for name in ("cand_api", "cand_ui"):
+        s.heads_candidates("cand_t", prompts=CAND_QS, scales=[1.0, -1.0], max_prompts=3, max_tokens=12, seed=3, name=name)
+    dp.unlink()
+    _seed_pipeline(s)
+    yield from _serve(s)
+
+
+@pytest.mark.model
+def test_candidates_api(cand_server):
+    """/api/candidates: 一覧・1 件・名前を伏せた項目(どの候補かは返さない)・点を足して集計(悪い点と名前は 400)。
+    点を同時に送っても書き込みは失われない。全部付けると向きごとにいちばん良い候補が出る。"""
+    import urllib.error
+    import urllib.request
+    from concurrent.futures import ThreadPoolExecutor
+    url = cand_server
+
+    def get(path):
+        return json.loads(urllib.request.urlopen(url + path).read())
+
+    def post(path, body):
+        req = urllib.request.Request(url + path, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+        return json.loads(urllib.request.urlopen(req).read())
+
+    def status(path, body=None):
+        try:
+            urllib.request.urlopen(urllib.request.Request(url + path, data=None if body is None else json.dumps(body).encode(),
+                                                          headers={"Content-Type": "application/json"}))
+        except urllib.error.HTTPError as e:
+            return e.code
+        return 200
+    ls = {x["name"]: x for x in get("/api/candidates")}
+    assert {"cand_api", "cand_ui"} <= set(ls) and ls["cand_api"]["n_judge"] == 12 and not ls["cand_api"]["scored"]
+    d = get("/api/candidates/cand_api")
+    assert [c["name"] for c in d["candidates"]] == ["base", "n2x1", "n2x-1"] and d["n_scored"] == 0 and d["scores"] is None
+    assert [(c["goal"], c["judge_sides"]) for c in d["candidates"]] == [(None, "AB"), ("remove", "A"), ("add", "B")]
+    assert d["held_out"] == {"A": True, "B": True} and d["prompts"]["A"] == CAND_QS and len(d["replies"]["n2x1|A"]) == 3
+    b = get("/api/candidates/cand_api/blind")
+    assert sorted(it["id"] for it in b["items"]) == list(range(1, 13)) and b["scores"] == {} and "P" in b["rubric"]
+    assert all(set(it) == {"id", "prompt", "text"} for it in b["items"])                # どの候補・どちら側かは返さない
+    assert status("/api/candidates/nope") == 400 and status("/api/candidates/nope/blind") == 400
+    assert status("/api/candidates/a%20b") == 400 and status("/api/candidates/..%2Fx") in (400, 404)
+    assert status("/api/candidates/cand_api/scores", {"scores": {"1": [9, 3]}}) == 400
+    assert status("/api/candidates/cand_api/scores", {"scores": {"99": [3, 3]}}) == 400
+    assert status("/api/candidates/cand_api/scores", {"scores": {"1": [3]}}) == 400
+    with ThreadPoolExecutor(6) as ex:                                                    # 同時に 6 本(1 本ずつ書くので失われない)
+        list(ex.map(lambda i: post("/api/candidates/cand_api/scores", {"scores": {str(i): [3, 4]}}), range(1, 7)))
+    r = get("/api/candidates/cand_api")
+    assert r["n_scored"] == 6 and get("/api/candidates/cand_api/blind")["scores"]["6"] == [3, 4]
+    key = json.loads((Path(r["judge"]["dir"]) / "round_01.key.json").read_text(encoding="utf-8"))
+    by = {k["id"]: (k["cand"], k["side"]) for k in key}
+    rest = {str(i): ([1, 5] if by[i] == ("n2x1", "A") else [5, 4] if by[i] == ("n2x-1", "B") else [3, 3]) for i in range(7, 13)}
+    full = post("/api/candidates/cand_api/scores", {"scores": rest})
+    assert full["n_scored"] == 12 and full["scores_missing"] == [] and set(full["best"]) == {"remove", "add"}
+    assert full["best"]["remove"]["name"] == "n2x1" and full["best"]["add"]["name"] == "n2x-1"
+    assert get("/api/candidates/cand_api")["best"] == full["best"] and {x["name"]: x for x in get("/api/candidates")}["cand_api"]["scored"]
+
+
+@pytest.mark.model
+def test_candidates_blind_scoring_in_browser(cand_server, browser):
+    """direction ビューの「強さの候補」: 要約の表、返事を並べる(名前を伏せると番号だけ)、名前を伏せて採点する(ボタンとキー、
+    戻る、保存して続きから)、全部付けると集計といちばん良い候補、そのレシピの読み込みと 1 列チャット。パイプラインの結果の
+    「候補を作る」で heads_candidates のジョブを投げる(ブラウザの中で受け、終わりの知らせで候補を開く)。英語の文言も辞書にある。"""
+    url = cand_server
+    pg = browser.new_page(viewport={"width": 1600, "height": 1000})
+    errors, posts = [], []
+    pg.on("pageerror", lambda e: errors.append(str(e)))
+    pg.on("dialog", lambda d: d.accept())
+    pg.goto(url + "/")
+    pg.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
+    pg.evaluate("window.gne.recipe.clear()")
+    pg.click("#views button[data-view=direction]")
+    pg.wait_for_function("window.gne.directionView && window.gne.directionView.mode === 'pipe'", timeout=60000)
+    pg.click("#dv-mode button[data-m=cand]")
+    pg.wait_for_selector("#cd-list tr[data-cd=cand_ui]", timeout=30000)
+    pg.click("#cd-list tr[data-cd=cand_ui]")
+    pg.wait_for_selector("table.cd-sum", timeout=30000)
+    rows = pg.evaluate("[...document.querySelectorAll('table.cd-sum tbody tr')].map(tr => tr.cells[0].textContent.trim() + ' ' + tr.cells[2].textContent)")
+    assert rows == ["base A", "base B", "n2x1 推奨 A", "n2x-1 B"] and not pg.evaluate("document.querySelector('#cd-result .pp-warn')")
+    pg.click("#cd-mode button[data-cm=grid]")                                         # 返事を並べる: 名前を伏せると番号だけ
+    labs = pg.evaluate("[...document.querySelector('.cd-q').querySelectorAll('.cd-lab')].map(e => e.textContent.trim())")
+    assert labs == ["#1", "#2", "#3"] and "n2x" not in pg.evaluate("document.querySelector('#cd-body').innerText")
+    pg.click("#cd-named")
+    assert {x.split()[0] for x in pg.evaluate("[...document.querySelector('.cd-q').querySelectorAll('.cd-lab')].map(e => e.textContent.trim())")} \
+        == {"base", "n2x1", "n2x-1"}
+    pg.click("#cd-side button[data-sd=B]")
+    assert pg.evaluate("document.querySelector('.cd-prompt').textContent").startswith("B1")
+    # 名前を伏せて採点する
+    pg.click("#cd-mode button[data-cm=score]")
+    pg.wait_for_selector(".cd-score", timeout=30000)
+    cand = "window.gne.directionView.cand"
+    n = pg.evaluate(f"{cand}.blind.items.length")
+    assert n == 12 and "n2x" not in pg.evaluate("document.querySelector('#cd-body').innerText")
+    first = pg.evaluate(f"{cand}.blind.items[{cand}.pos].id")
+    pg.click(".cd-pc [data-p='4']")
+    pg.click(".cd-pc [data-c='3']")                                                     # 両方そろうと保存して次へ
+    pg.wait_for_function(f"{cand}.data.n_scored === 1", timeout=30000)
+    assert pg.evaluate(f"{cand}.blind.scores['{first}']") == [4, 3] and pg.evaluate(f"{cand}.pos") == 1
+    pg.keyboard.press("ArrowLeft")                                                      # 戻ると付けた点が出る
+    assert pg.evaluate(f"{cand}.pos") == 0 and pg.evaluate("document.querySelector('.cd-pc [data-p=\"4\"]').classList.contains('on')")
+    pg.keyboard.press("ArrowRight")
+    pg.keyboard.press("2")
+    pg.keyboard.press("Escape")                                                         # 付けかけを消す
+    assert pg.evaluate(f"{cand}.cur.P") is None
+    pg.close()                                                                          # 途中でやめて、続きから
+    pg = browser.new_page(viewport={"width": 1600, "height": 1000}, locale="en-US")
+    pg.on("pageerror", lambda e: errors.append(str(e)))
+    pg.on("dialog", lambda d: d.accept())
+    pg.goto(url + "/?lang=en")
+    pg.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
+    pg.evaluate("window.gne.recipe.clear()")
+    pg.click("#views button[data-view=direction]")
+    pg.wait_for_function("window.gne.directionView && window.gne.directionView.mode === 'pipe'", timeout=60000)
+    pg.click("#dv-mode button[data-m=cand]")
+    pg.wait_for_selector("#cd-list tr[data-cd=cand_ui]", timeout=30000)
+    pg.click("#cd-list tr[data-cd=cand_ui]")
+    pg.wait_for_selector("table.cd-sum", timeout=30000)
+    pg.click("#cd-mode button[data-cm=score]")
+    pg.wait_for_selector(".cd-score", timeout=30000)
+    assert pg.evaluate(f"{cand}.pos") == 1 and pg.evaluate(f"{cand}.nScored()") == 1        # 1 本目は付いているので 2 本目から
+    for i in range(n - 1):
+        pg.keyboard.press(str(1 + i % 5))
+        pg.keyboard.press("4")
+    pg.wait_for_function(f"{cand}.done && {cand}.data.n_scored === {n} && document.querySelector('#cd-done table.cd-sum')", timeout=60000)
+    best = pg.evaluate(f"{cand}.data.best")
+    assert set(best) == {"remove", "add"} and pg.evaluate("document.querySelectorAll('#cd-done .cd-best').length") == 2
+    assert pg.evaluate("document.querySelectorAll('#cd-done table.cd-sum tr.best').length") == 2
+    c = next(x for x in pg.evaluate(f"{cand}.data.candidates") if x["name"] == best["remove"]["name"])
+    want = [f"{u.split(':')[0]}:{u.split(':')[1]}:s{float(u.split(':s')[1].split('@')[0]) * c['scale']:g}@evil" for u in c["units"]]
+    pg.click("#cd-done .cd-best >> nth=0 >> [data-load]")
+    assert pg.evaluate("window.gne.recipe.specs()") == want and pg.evaluate("window.gne.recipe.name") == f"cand_ui-{c['name']}"
+    pg.click("#cd-done .cd-best >> nth=1 >> [data-chat]")                             # 強める向き: 負の倍率のまま 1 列チャットへ
+    pg.wait_for_function("window.gne.chat && window.gne.chat.single && document.querySelector('#ch-text')", timeout=30000)
+    assert all(":s-" in x for x in pg.evaluate("window.gne.recipe.specs()"))
+    # パイプラインの結果の「候補を作る」: ジョブの引数と、終わりの知らせで候補を開く
+    def on_jobs(route, req):
+        if req.method != "POST":
+            route.continue_()
+            return
+        body = json.loads(req.post_data)
+        posts.append(body)
+        route.fulfill(status=200, content_type="application/json", body=json.dumps({
+            "id": "fake-cand", "kind": body["kind"], "params": body["params"], "status": "queued", "done": 0, "total": 0, "stage": "",
+            "eta_s": None, "yields": 0, "seconds": None, "result": None, "error": None}))
+    done = {"id": "fake-cand", "kind": "heads_candidates", "params": {}, "status": "done", "done": 1, "total": 1, "stage": "", "eta_s": None,
+            "yields": 0, "seconds": 2.0, "result": {"name": "cand_ui"}, "error": None}
+    pg.route("**/api/jobs", on_jobs)
+    pg.route("**/api/jobs/fake-cand/events", lambda route, req: route.fulfill(status=200, content_type="text/event-stream",
+                                                                           body=f"data: {json.dumps(done)}\n\n"))
+    pg.click("#views button[data-view=direction]")
+    pg.click("#dv-mode button[data-m=pipe]")
+    pg.wait_for_selector("#pp-past tr[data-pp=ppx]", timeout=30000)
+    pg.click("#pp-past tr[data-pp=ppx]")
+    pg.wait_for_selector("#pc-go", timeout=30000)
+    pg.fill("#pc-scales", "0.5,0, 1")
+    pg.dispatch_event("#pc-scales", "input")
+    pg.click("#pc-go")
+    assert pg.evaluate("document.querySelector('#pc-status').classList.contains('err')") and not posts   # 0 は使えない
+    for sel, v in (("#pc-scales", "0.5,1,-1"), ("#pc-mp", "5"), ("#pc-mt", "40"), ("#pc-seed", "7"), ("#pc-qa", "Q1?\nQ2?\n\n"), ("#pc-qb", "R1?"),
+                   ("#pc-with", "seed_r"), ("#pc-nheads", "2")):
+        pg.fill(sel, v)
+        pg.dispatch_event(sel, "input")
+    pg.select_option("#pc-sp", "greedy")
+    pg.dispatch_event("#pc-sp", "change")
+    pg.click("#pc-jb")
+    pg.click("#pc-go")
+    pg.wait_for_function(f"window.gne.directionView.mode === 'cand' && {cand}.data && {cand}.data.name === 'cand_ui'", timeout=30000)
+    assert len(posts) == 1 and posts[0]["kind"] == "heads_candidates"
+    assert posts[0]["params"] == {"alloc": "ppx", "scales": [0.5, 1, -1], "max_prompts": 5, "max_tokens": 40, "sampling": "greedy", "seed": 7,
+                                  "judge_b": True, "n_heads": [2], "prompts": {"A": ["Q1?", "Q2?"], "B": ["R1?"]}, "with_recipe": "seed_r"}
     assert pg.evaluate("[...window.gneI18n.missing]") == []
     assert not errors, errors
     pg.close()

@@ -298,7 +298,8 @@ export class LayerMap {
     this._overlayDirty = true;
   }
 
-  // レシピのヘッドの印(CHANGE-04 G)。units: [{ layer, head, k }]。k < 1 は赤紫(弱める・消す)、k > 1 は黄(強める)
+  // レシピのヘッドの印(CHANGE-04 G)。units: [{ layer, head, k, label?, cls? }]。k < 1 は赤紫(弱める・消す)、k > 1 は黄(強める)。
+  // ヘッドの方向成分の射影(CHANGE-06)は label(L16 H8 s6 @evil)と cls(s > 0 は minus)を渡す
   setHeadMarks(units) {
     this.headMarks = units || [];
     this._overlayDirty = true;
@@ -814,10 +815,10 @@ export class LayerMap {
     for (const m of this.headMarks) {
       const p = at(m.layer, m.head);
       if (!p) continue;
-      const cls = m.k < 1 ? "minus" : m.k > 1 ? "plus" : "zero";
+      const cls = m.cls || (m.k < 1 ? "minus" : m.k > 1 ? "plus" : "zero");
       box(p, cls);
       if (this.front !== null) continue;
-      const text = `L${m.layer} H${m.head} ×${+(+m.k).toFixed(2)}`, x = p.x + 8, w = text.length * 7 + 10;
+      const text = m.label || `L${m.layer} H${m.head} ×${+(+m.k).toFixed(2)}`, x = p.x + 8, w = text.length * 7 + 10;
       let y = p.y - 12;
       while (marked.some((q) => x < q.x + q.w + 4 && q.x < x + w + 4 && Math.abs(q.y - y) < 17)) y -= 18;
       marked.push({ x, y, w });

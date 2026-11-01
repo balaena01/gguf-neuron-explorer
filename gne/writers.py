@@ -71,6 +71,7 @@ def writer_contributions(session, contrast: str | Path, *, name: str | None = No
     from .evalx import _generate
     t0 = time.perf_counter()
     cs, _ = load_contrast(contrast)
+    cs.require_systems("gne writers")
     name = name or cs.name
     e, w = session.engine, session.weights
     m = session.meta

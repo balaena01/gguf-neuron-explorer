@@ -172,34 +172,58 @@ def embed_projection(weights, R: np.ndarray, *, chunk: int = 16384) -> np.ndarra
     return out
 
 
-def write_ablation_lora(weights, rs: dict[str, np.ndarray], rows: dict[str, np.ndarray], path: str | Path, *,
-                        meta: dict | None = None, scale: float = 1.0, embed: tuple[np.ndarray, np.ndarray] | None = None) -> dict:
-    """rows[テンソル名] = rᵀW(in,)、rs[テンソル名] = そのテンソルで消す単位ベクトル r を LoRA GGUF に書く。
-    embed = (E r (n_vocab,), r) なら token_embd の LoRA も入れる(tied でないモデルだけ)。"""
+def write_lora_tensors(weights, tensors: dict[str, tuple[np.ndarray, np.ndarray]], path: str | Path, *, name: str,
+                       kv: dict[str, str] | None = None, dtype=np.float32) -> dict:
+    """LoRA アダプタ GGUF を書く(ablate・ヘッドの方向成分の射影 CHANGE-06・因果スクリーニングで共用)。
+    tensors[テンソル名] = (lora_a, lora_b)。ふつうのテンソルは lora_a (r, in)・lora_b (n_embd, r)(numpy の形。
+    W x + B (A x))、token_embd は lora_a (n_vocab, r)・lora_b (n_embd, r)(get_rows の後に足す向き)。
+    adapter.lora.alpha は書かない(倍率 = アダプタの倍率。層ごとに r が違っても 1 倍)。dtype=np.float16 で半分の大きさ
+    (スクリーニングの一時ファイル用)。kv は gne.* のメタデータ(JSON の文字列)。"""
     m = weights.meta
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     w = GGUFWriter(str(path), arch=m.arch)
     w.add_type("adapter")
     w.add_string("adapter.type", "lora")
-    w.add_name(f"{m.name} ablate" + (f" {meta['direction']}" if meta and meta.get("direction") else ""))
-    w.add_key_value("gne.ablate", json.dumps({**(meta or {}), "scale": scale, "embed": embed is not None},
-                                             ensure_ascii=False), GGUFValueType.STRING)
+    w.add_name(name)
+    for k, v in (kv or {}).items():
+        w.add_key_value(k, v, GGUFValueType.STRING)
     w.add_key_value("gne.source_model_id", m.model_id, GGUFValueType.STRING)
-    if embed is not None:
-        if not embed_in_lora(weights):
-            raise GneError("BAD_ARGS", "出力層が埋め込みと共有(tied)のモデルでは、LoRA に埋め込みを入れられません")
-        ea, er = embed
-        w.add_tensor("token_embd.weight.lora_a", np.asarray(ea, dtype=np.float32).reshape(-1, 1))
-        w.add_tensor("token_embd.weight.lora_b", (-scale * np.asarray(er, dtype=np.float32)).reshape(-1, 1))
-    for name in sorted(rows, key=lambda n: (int(n.split(".")[1]), n)):
-        w.add_tensor(f"{name}.lora_a", np.asarray(rows[name], dtype=np.float32).reshape(1, -1))
-        w.add_tensor(f"{name}.lora_b", (-scale * np.asarray(rs[name], dtype=np.float32)).reshape(-1, 1))
+
+    def order(n: str):
+        parts = n.split(".")
+        return (int(parts[1]) if parts[0] == "blk" else -1, n)
+    for tname in sorted(tensors, key=order):
+        A, B = tensors[tname]
+        w.add_tensor(f"{tname}.lora_a", np.ascontiguousarray(A, dtype=dtype))
+        w.add_tensor(f"{tname}.lora_b", np.ascontiguousarray(B, dtype=dtype))
     w.write_header_to_file()
     w.write_kv_data_to_file()
     w.write_tensors_to_file()
     w.close()
-    return {"path": str(path), "n_tensors": len(rows) + (embed is not None), "embed": embed is not None,
-            "bytes": Path(path).stat().st_size}
+    return {"path": str(path), "n_tensors": len(tensors), "bytes": Path(path).stat().st_size,
+            "rank": {n: int(np.asarray(B).shape[1]) for n, (_, B) in tensors.items()}}
+
+
+def write_ablation_lora(weights, rs: dict[str, np.ndarray], rows: dict[str, np.ndarray], path: str | Path, *,
+                        meta: dict | None = None, scale: float = 1.0, embed: tuple[np.ndarray, np.ndarray] | None = None) -> dict:
+    """rows[テンソル名] = rᵀW(in,)、rs[テンソル名] = そのテンソルで消す単位ベクトル r を LoRA GGUF に書く。
+    embed = (E r (n_vocab,), r) なら token_embd の LoRA も入れる(tied でないモデルだけ)。"""
+    m = weights.meta
+    tensors: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    if embed is not None:
+        if not embed_in_lora(weights):
+            raise GneError("BAD_ARGS", "出力層が埋め込みと共有(tied)のモデルでは、LoRA に埋め込みを入れられません")
+        ea, er = embed
+        tensors["token_embd.weight"] = (np.asarray(ea, dtype=np.float32).reshape(-1, 1),
+                                        (-scale * np.asarray(er, dtype=np.float32)).reshape(-1, 1))
+    for name in rows:
+        tensors[name] = (np.asarray(rows[name], dtype=np.float32).reshape(1, -1),
+                         (-scale * np.asarray(rs[name], dtype=np.float32)).reshape(-1, 1))
+    rep = write_lora_tensors(weights, tensors, path,
+                             name=f"{m.name} ablate" + (f" {meta['direction']}" if meta and meta.get("direction") else ""),
+                             kv={"gne.ablate": json.dumps({**(meta or {}), "scale": scale, "embed": embed is not None},
+                                                          ensure_ascii=False)})
+    return {"path": rep["path"], "n_tensors": rep["n_tensors"], "embed": embed is not None, "bytes": rep["bytes"]}
 
 
 def export_ablation_lora(weights, r: np.ndarray | dict[int, np.ndarray], path: str | Path, *,
@@ -386,6 +410,15 @@ def bake_via_f16(weights, r, dst: str | Path, *, layers=None, scale: float = 1.0
                  llama_quantize: str | None = None, imatrix: str | None = None, keep_f16: bool = False,
                  progress: Progress | None = None) -> dict:
     """書き換えるテンソルを F16 で書いた中間の GGUF を作り、llama-quantize で元の量子化型に戻す。"""
+    return requant_via_f16(weights, lambda mid: bake_ablation_gguf(weights, r, mid, layers=layers, scale=scale, embed=embed,
+                                                                   requant="f16", meta=meta, progress=progress),
+                           dst, llama_quantize=llama_quantize, imatrix=imatrix, keep_f16=keep_f16)
+
+
+def requant_via_f16(weights, write_mid: Callable[[Path], dict], dst: str | Path, *, llama_quantize: str | None = None,
+                    imatrix: str | None = None, keep_f16: bool = False) -> dict:
+    """write_mid(中間のパス) で書き換えたテンソルだけ F16 の GGUF を書かせ、llama-quantize で全テンソルを元の型に戻す
+    (ablate と、ヘッドの方向成分の焼き込み CHANGE-06 で共用)。"""
     lq = find_llama_quantize(llama_quantize)
     if lq is None:
         raise GneError("TOOL_NOT_FOUND", "llama-quantize が見つかりません",
@@ -400,8 +433,7 @@ def bake_via_f16(weights, r, dst: str | Path, *, layers=None, scale: float = 1.0
                        "元のモデルを作ったときの imatrix を --imatrix で渡すか、--requant q8_0 を使ってください")
     dst = Path(dst)
     mid = dst.with_name(dst.name + ".f16.part")
-    rep = bake_ablation_gguf(weights, r, mid, layers=layers, scale=scale, embed=embed, requant="f16", meta=meta,
-                             progress=progress)
+    rep = write_mid(mid)
     tt = dst.with_name(dst.name + ".tensor-types.txt")
     tensor_types_file(weights, tt)
     cmd = [lq, "--tensor-type-file", str(tt)]

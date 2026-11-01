@@ -42,8 +42,11 @@ def _with_dose(recipe: Recipe, dose: float | None, sign: float) -> Recipe:
     # ablate(§6.17)は − の列で scale を反転する(負の scale はその方向を強める)
     # query(ヘッドの条件付きクエリ操作)は − の列では外す(scale 0)
     # route(専門家のルーターのバイアス、CHANGE-05)は − の列で delta の符号を反転する
+    # proj(ヘッドの方向成分の射影、CHANGE-06)は − の列で s の符号を反転する(方向成分を強める)
     units = [Unit(u.layer, u.neuron, 0.0, u.kind, u.seed, "gain", u.k if sign > 0 else 2 - u.k, head=u.head, expert=u.expert)
              if u.mode == "gain" else
+             Unit(u.layer, None, 0.0, "head", None, "proj", u.k * sign, u.direction, u.head)
+             if u.mode == "proj" else
              Unit(u.layer, None, 0.0, "head", None, "query", u.k if sign > 0 else 0.0, u.direction, u.head, u.seek)
              if u.mode == "query" else
              Unit(u.layer, None, u.dose * sign, "expert", mode="route", expert=u.expert)
@@ -53,7 +56,7 @@ def _with_dose(recipe: Recipe, dose: float | None, sign: float) -> Recipe:
     ab = recipe.ablate
     if ab is not None and sign < 0:
         ab = AblateSpec(ab.direction, -ab.scale, ab.layers, ab.from_layer)
-    return Recipe(units, recipe.model_id, recipe.dose_unit, recipe.name, recipe.when, ab)
+    return recipe.like(units, ablate=ab, sampling=None)
 
 
 def make_columns(recipe: Recipe | None, *, dose: float | None = None, left: Recipe | None = None,

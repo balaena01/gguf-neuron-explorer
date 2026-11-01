@@ -5,11 +5,14 @@
 // CHANGE-04 G: 板の上辺の刻み = ヘッド(hover・クリックで HEAD パネル)、overlay heads:<name> と fires のヘッドの注目、レシピのヘッド。
 // CHANGE-05 G: MoE の専門家(EXPERT パネル、jump の L12 E37)、overlay expert_usage・experts:<name>、fires で選ばれた専門家のタイルの枠、
 // MoE のニューロン(通し番号 = 専門家 × 幅 + n)を NEURON パネルで開き、レシピに L:Ee:Nn で足す。
+// CHANGE-06 G: overlay causal:<name>・eta:<name>(因果スクリーニング)、HEAD パネルの Causal、レシピのヘッドの射影(L:Hh:sS@NAME)、
+// direction ビュー(方向の速い物差し: 層ごとの cohen_d・基準層・A/B の点数の分布)。
 import { LayerCache, getBin, getJSON, loadVocab } from "./api.js";
 import { AgentLink } from "./agent.js";
 import { LANG, setLang, t, translateDOM } from "./i18n.js";
 import { ChatPanel } from "./chat.js";
 import { EmbedView } from "./embed.js";
+import { DirectionView } from "./direction.js";
 import { EvalView } from "./eval.js";
 import { WritersView } from "./writers.js";
 import { FiresPanel } from "./fires.js";
@@ -17,11 +20,11 @@ import { JobsBar, KIND, computeMenu } from "./jobs.js";
 import { LayersView } from "./layers.js";
 import { syntheticArch } from "./layout.js";
 import { LayerMap } from "./map.js";
-import { FIELDS, colorize, colorizeHeads, colorizeHits, emphasisFactor, emphasize, fieldLabel, globalScale, layersWith, legendHTML } from "./overlay.js";
+import { FIELDS, colorize, colorizeHeads, colorizeHits, emphasisFactor, emphasize, fieldLabel, globalScale, headField, layersWith, legendHTML } from "./overlay.js";
 import { HeadPanel } from "./heads.js";
 import { ExpertPanel } from "./experts.js";
 import { NeuronPanel, RankList, SearchList, esc, toksHTML } from "./panels.js";
-import { Recipe, RecipePanel } from "./recipe.js";
+import { Recipe, RecipePanel, parseProj } from "./recipe.js";
 
 const $ = (s) => document.querySelector(s);
 const params = new URLSearchParams(location.search);
@@ -86,11 +89,23 @@ function headTooltipHTML(h) {
     const r = ho.info.get(`${L}:${h.head}`);
     if (r) lines.push(`<span class="t-k">color</span><span class="t-v" style="margin:0">z ${fmt(r.z, 2)} · #${r.rank}/${ho.n} · null ${fmt(r.null_pct, 2)}${
       r.trigger_mass !== null && r.trigger_mass !== undefined ? ` · trigger ${fmt(r.trigger_mass, 3)}` : ""}${r.dir_cos !== null && r.dir_cos !== undefined ? ` · dir_cos ${fmt(r.dir_cos, 3)}` : ""}</span>`);
+  } else if (ho && (ho.field.startsWith("causal:") || ho.field.startsWith("eta:"))) {               // 因果スクリーニング(CHANGE-06 G)
+    const r = ho.info.get(`${L}:${h.head}`), P = ho.scale.primary;
+    if (r && ho.field.startsWith("causal:")) {
+      lines.push(`<span class="t-k">color</span><span class="t-v" style="margin:0">causal_max ${fmt(r.causal_max, 2)} · #${r.rank}/${ho.n} · L${P} ${fmt(r.causal, 2)} · contrib ${fmt(r.contrib, 2)} · ratio ${fmt(r.ratio, 2)}${
+        r.b_side_delta !== null && r.b_side_delta !== undefined ? ` · B ${fmt(r.b_side_delta, 2)}` : ""}</span>`);
+    } else if (r) {
+      lines.push(`<span class="t-k">color</span><span class="t-v" style="margin:0">η ${fmt(r.eta, 3)} · #${r.rank}/${ho.n}${r.in_base ? ` · ${t("いまの組")}` : ""}${
+        r.excluded ? ` · ${t("除外")}` : ""}${r.b_side_delta !== null && r.b_side_delta !== undefined ? ` · B ${fmt(r.b_side_delta, 2)}` : ""}</span>`);
+    }
   } else if (ho && v && Number.isFinite(v[h.head])) {
     lines.push(`<span class="t-k">color</span><span class="t-v" style="margin:0">${t("注目 {v}({tok} へ)", { v: fmt(v[h.head], 3), tok: esc(ho.label || "") })}</span>`);
   }
   const r = state.recipe && state.recipe.hasHead(L, h.head);
   if (r) lines.push(`<span class="t-k">recipe</span><span class="t-v" style="margin:0">×${fmt(r.k, 2)}</span>`);
+  for (const u of state.recipe ? state.recipe.projs().filter((x) => x.layer === L && x.head === h.head) : []) {
+    lines.push(`<span class="t-k">recipe</span><span class="t-v" style="margin:0">s${fmt(u.s, 2)} @${esc(u.direction || "")}</span>`);
+  }
   if (state.model) lines.push(`<span class="t-wait">${t("クリックで HEAD パネル")}</span>`);
   return lines.join("<br>");
 }
@@ -195,6 +210,7 @@ function updateStatus() {
     ? (embedView && embedView.data ? `${embedView.data.points.length.toLocaleString()} rollouts (embed)` : "— (embed)")
     : state.view === "layers" ? "(layers)"                                // 層の数は左にある
     : state.view === "eval" ? "(eval)"
+    : state.view === "direction" ? "(direction)"
     : `${t("{n} 点", { n: (map?.nPoints ?? 0).toLocaleString() })} · ${map && map.fps !== null ? map.fps.toFixed(0) : "—"} fps`;
 }
 
@@ -212,7 +228,7 @@ function legend() {
     : `<b>${esc(fieldLabel(o.field))}</b> ${legendHTML(o.field, o.scale || {}, { threshold: o.threshold, nHits: o.hits ? o.hits.length : 0, floors })}`;
   const fh = state.heads && state.heads.field === "fires_heads"                                  // fires のヘッドの注目(点の色と一緒に出す)
     ? `<div><b>${esc(fieldLabel("fires_heads"))}</b> ${legendHTML("fires_heads", state.heads.scale)}</div>` : "";
-  const litWhat = o.field.startsWith("heads:") ? t("光るヘッドの数(最多の層で最も明るい)") : t("光る点の数(最多の層で最も明るい)");
+  const litWhat = headField(o.field) ? t("光るヘッドの数(最多の層で最も明るい)") : t("光る点の数(最多の層で最も明るい)");
   const frame = o.field === "none" ? "" : `<div>${it(`${t("シートの枠")}: `, sw("#252b33"), t("データ無し"))}${it(sw("#5e4a26"), "→", sw("#f0b850"), litWhat)}` +
     (o.factor < 1 ? itl(t("(光る点が全体の {p}% あるので、点は一律に暗くし、数は枠で示す)", { p: Math.round(0.02 / o.factor * 100) })) : "") +
     (o.weak && o.weak.size ? itl(t("({layers} は活性統計が無く文章内 p99 で割ったので、枠の比較から外した)", { layers: [...o.weak].map((L) => `L${L}`).join(", ") })) : "") + "</div>";
@@ -225,6 +241,7 @@ function legend() {
     ? [it(ring("#f2d24b"), t("レシピ +")), it(ring("#c94fa7"), t("レシピ −(大きさ = |dose|)"))] : [])
     .concat(state.focus ? [it(ring("#ffffff"), t("開いているニューロン"))] : [])
     .concat(state.recipe && state.recipe.heads().length ? [it(hbox("#f2d24b"), hbox("#c94fa7"), t("レシピのヘッド(黄 = 強める ×k > 1、赤紫 = 弱める・消す ×k < 1)"))] : [])
+    .concat(state.recipe && state.recipe.projs().length ? [it(hbox("#c94fa7"), t("レシピのヘッドの射影(s > 0 = 方向成分を引く、黄 = s < 0 で強める)"))] : [])
     .concat(state.headFocus ? [it(hbox("#ffffff"), t("開いているヘッド"))] : [])
     .concat(rx.some((u) => u.kind === "expert") ? [it(tile("#f2d24b"), tile("#c94fa7"), t("レシピの専門家(黄 = 強める・選ばれやすく、赤紫 = 弱める・消す・選ばれにくく)"))] : [])
     .concat(state.expertFocus ? [it(tile("#ffffff"), t("開いている専門家"))] : [])
@@ -266,7 +283,9 @@ function fillColorSelect() {
     const n = state.model && k !== "none" ? layersWith(k, state.model).length : 0;
     const dis = k !== "none" && !n;
     return `<option value="${esc(k)}"${dis ? " disabled" : ""}>${esc(fieldLabel(k))}${k === "none" ? "" : dis ? ` (${t("データ無し")})` : ` (${t("{n} 層", { n })})`}</option>`;
-  }).join("") + heads.map((h) => `<option value="${esc(`heads:${h.name}`)}">${esc(fieldLabel(`heads:${h.name}`))} (${t("{n} ヘッド", { n: h.n_heads })})</option>`).join("");
+  }).join("") + heads.map((h) => `<option value="${esc(`heads:${h.name}`)}">${esc(fieldLabel(`heads:${h.name}`))} (${t("{n} ヘッド", { n: h.n_heads })})</option>`).join("")
+    + (state.model ? state.model.causal || [] : []).flatMap((c) => [["causal", "ablate"], ["eta", "marginal"]]   // 因果スクリーニング(CHANGE-06 G)
+      .filter(([, m]) => (c.n_rows || {})[m]).map(([k, m]) => `<option value="${esc(`${k}:${c.name}`)}">${esc(fieldLabel(`${k}:${c.name}`))} (${t("{n} ヘッド", { n: c.n_rows[m] })})</option>`)).join("");
   const f = state.overlay.field;
   if (f.startsWith("search:") || f.startsWith("fires:")) sel.insertAdjacentHTML("beforeend", `<option value="${esc(f)}">${esc(fieldLabel(f))}</option>`);
   sel.value = state.overlay.field;
@@ -282,6 +301,8 @@ async function refreshModel() {
   state.model.runs = m.runs;
   state.model.heads = m.heads;
   state.model.writers = m.writers;
+  state.model.causal = m.causal;
+  state.model.direction_sets = m.direction_sets;
   await refreshExperts();
 }
 
@@ -293,6 +314,7 @@ async function refreshExperts() {
 
 // --- ヘッドの色(CHANGE-04 G): 板の上辺の帯。heads:<name> は対照分析の z、fires_heads は fires で選んだトークンへの注目 ----------
 const headsCache = new LayerCache((name) => getJSON(`/api/heads/${encodeURIComponent(name)}`));
+const causalCache = new LayerCache((name) => getJSON(`/api/causal/${encodeURIComponent(name)}`));   // CHANGE-06 G
 const firesHeadsCache = new LayerCache(async (fid) => {
   const r = await getBin(`/api/fires/${fid}/heads`);
   const [n, T] = r.shape.split(",").map(Number);
@@ -304,8 +326,8 @@ function colorHeads() {
   const ho = state.heads, cols = new Map(), lit = new Map();
   if (!ho) { state.map.setHeadColors(null); return lit; }
   for (const [L, v] of ho.values) {
-    const c = colorizeHeads(ho.field === "fires_heads" ? "fires_heads" : "heads", v,
-                            { ...ho.scale, nullPct: ho.nulls ? ho.nulls.get(L) : null });
+    const c = colorizeHeads(ho.field === "fires_heads" ? "fires_heads" : headField(ho.field), v,
+                            { ...ho.scale, nullPct: ho.nulls ? ho.nulls.get(L) : null, excluded: ho.excluded ? ho.excluded.get(L) : null });
     cols.set(L, c);
     lit.set(L, c.lit);
   }
@@ -338,8 +360,33 @@ function clearRouted() {
   updateTileFrames();
 }
 
+// overlay causal:<name>(ablate の causal_max)・eta:<name>(marginal の η)。因果スクリーニングの行(CHANGE-06 G)
+async function applyCausalOverlay(field, tok) {
+  const kind = headField(field), name = field.slice(kind.length + 1);
+  causalCache.done.delete(name);                                  // 作り直したかもしれないので取り直す
+  const d = await causalCache.get(name);
+  if (tok !== overlayToken) return null;
+  const mode = kind === "eta" ? "marginal" : "ablate", key = kind === "eta" ? "eta" : "causal_max";
+  const rows = d.rows.filter((r) => (r.mode || "ablate") === mode).sort((a, b) => (b[key] ?? -Infinity) - (a[key] ?? -Infinity));
+  const values = new Map(), excluded = new Map(), info = new Map();
+  let mx = 0;
+  rows.forEach((r, i) => {
+    const li = state.arch.layers[r.layer];
+    if (!li || !(r.head < li.n_head)) return;
+    if (!values.has(r.layer)) { values.set(r.layer, new Float32Array(li.n_head).fill(NaN)); excluded.set(r.layer, new Uint8Array(li.n_head)); }
+    const x = r[key];
+    values.get(r.layer)[r.head] = x ?? NaN;
+    if (r.excluded) excluded.get(r.layer)[r.head] = 1;
+    else if (Number.isFinite(x)) mx = Math.max(mx, Math.abs(x));
+    info.set(`${r.layer}:${r.head}`, { ...r, rank: i + 1 });
+  });
+  state.heads = { field, values, excluded, info, n: rows.length, scale: { max: mx, primary: d.primary } };
+  return colorHeads();
+}
+
 // overlay heads:<name>: 対照分析の全ヘッドの z。点(ニューロン)は塗らない
 async function applyHeadsOverlay(field, tok) {
+  if (headField(field) !== "heads") return applyCausalOverlay(field, tok);
   const name = field.slice(6);
   headsCache.done.delete(name);                                   // 作り直したかもしれないので取り直す
   const d = await headsCache.get(name);
@@ -425,7 +472,7 @@ async function applyOverlay(field) {
   $("#cos-thr-wrap").classList.toggle("hidden", !field.startsWith("cos:") && !field.startsWith("writers:"));
   clearHeads();
   clearRouted();
-  if (field.startsWith("heads:") && state.model) {                       // ヘッドの対照分析: 板の上辺の帯だけを塗る
+  if (headField(field) && state.model) {                                 // ヘッドの対照分析・因果スクリーニング: 板の上辺の帯だけを塗る
     o.values = new Map(); o.metas = new Map(); o.factor = 1;
     state.map.resetColors(); state.map.setStructureDim(0.35);
     state.note = t("{f} を読み込み中 {a}/{b}", { f: fieldLabel(field), a: 0, b: 1 });
@@ -614,7 +661,7 @@ function closeSearch() {
 }
 
 // --- LIST・NEURON ----------------------------------------------------------------------------------------
-let rank, neuron, layersView, searchList, chat, firesPanel, recipePanel, jobsBar, embedView, evalView, agent, headPanel, writersView, expertPanel;
+let rank, neuron, layersView, searchList, chat, firesPanel, recipePanel, jobsBar, embedView, evalView, agent, headPanel, writersView, expertPanel, directionView;
 
 function expand(id) {
   const p = $(`#${id}`);
@@ -677,6 +724,24 @@ function openExpert({ layer, expert }) {
   return true;
 }
 
+// 強さの候補(CHANGE-06)のその倍率のヘッドの射影をレシピに読み込む。候補に重ねたレシピ(with_recipe)が保存したレシピに
+// あれば、そのユニットも一緒に入れる(無ければ入れずに、そう返す)
+async function loadCandidate({ name, specs, direction, withRecipe }) {
+  let units = specs.map((x) => parseProj(x, direction)).filter(Boolean), note = null;
+  if (withRecipe) {
+    const stem = String(withRecipe).split("/").pop().replace(/\.ya?ml$/, "");
+    let saved = [];
+    try { saved = await getJSON("/api/recipes"); } catch { saved = []; }
+    const x = saved.find((r) => r.name === stem && r.this_model);
+    if (x) units = [...x.units, ...units];
+    else note = t("重ねたレシピ {r} は保存したレシピに無いので、ヘッドの射影だけを読み込みました", { r: stem });
+  }
+  state.recipe.load(name, units, null, null);
+  expand("list");
+  listTab("recipe");
+  return note;
+}
+
 // レシピ全体を 3 列チャットで(recipe タブ・EXPERT パネル)。where = チャットを置くニューロン(無ければ開いているもの、レシピの最初)
 function startRecipeChat(where = null) {
   const u = state.recipe.neurons()[0], m = state.recipe.moe().find((x) => x.kind === "expert_neuron");
@@ -708,6 +773,13 @@ async function onJobFinished(j) {
   const what = `${KIND[j.kind] || j.kind}${L !== undefined ? ` L${L}` : ""}`;
   state.flash = { text: `${t({ done: "完了", error: "失敗", cancelled: "中止" }[j.status])}: ${what}`, until: Date.now() + 10000 };   // 結果を先に(状態表示は狭いので)
   updateStatus();
+  if (j.kind === "head_pipeline" || j.kind === "heads_candidates") {    // 一括と強さの候補: direction ビューに結果を出す
+    if (j.status === "done") {
+      if (j.kind === "head_pipeline") causalCache.clear();
+      state.lastResult = j.result && j.result.name ? { kind: j.kind, name: j.result.name } : state.lastResult;
+    }
+    if (directionView) directionView.jobEnded(j);
+  }
   if (j.status !== "done" || !state.model) return;
   if (L !== undefined) { unitsCache.done.delete(L); hoverCache.done.delete(L); }
   await refreshModel();
@@ -724,6 +796,11 @@ async function onJobFinished(j) {
     headsCache.clear();
     if (headPanel && state.headFocus) { headPanel.sums.clear(); headPanel.open(state.headFocus); }
   }
+  if (j.kind === "heads_causal" || j.kind === "heads_allocate") {        // 因果スクリーニング・強さの配分(CHANGE-06 G)
+    causalCache.clear();
+    if (headPanel && state.headFocus) { headPanel.causalSums.clear(); headPanel.open(state.headFocus); }
+  }
+  if (j.kind === "direction" && directionView) directionView.refresh();
   if ((j.kind === "experts_contrast" || j.kind === "experts_sweep" || j.kind === "stats_act") && expertPanel && state.expertFocus) {
     expertPanel.open(state.expertFocus);                                 // 専門家の対照分析・使用統計(CHANGE-05 G): 開いている専門家を取り直す
   }
@@ -742,7 +819,9 @@ function recipeChanged(r) {
     layer: u.layer, neuron: u.expert * state.arch.layers[u.layer].n_ff + u.neuron, dose: u.mode === "gain" ? u.k - 1 : u.dose,
     label: `L${u.layer} E${u.expert} N${u.neuron} ${u.mode === "gain" ? `×${+(+u.k).toFixed(2)}` : `${u.dose >= 0 ? "+" : "−"}${+Math.abs(u.dose).toFixed(2)}`}` }));
   state.map.setMarks([...r.neurons().map((u) => ({ layer: u.layer, neuron: u.neuron, dose: u.dose })), ...moeN]);   // 方向のユニットは印なし
-  state.map.setHeadMarks(r.heads().map((u) => ({ layer: u.layer, head: u.head, k: u.k })));          // ヘッドは板の上辺の刻みに
+  state.map.setHeadMarks([...r.heads().map((u) => ({ layer: u.layer, head: u.head, k: u.k })),          // ヘッドは板の上辺の刻みに
+    ...r.projs().map((u) => ({ layer: u.layer, head: u.head, k: 1, cls: u.s > 0 ? "minus" : u.s < 0 ? "plus" : "zero",   // 射影(CHANGE-06)
+                               label: `L${u.layer} H${u.head} s${+(+u.s).toFixed(2)}${u.direction ? ` @${u.direction}` : ""}` }))]);
   updateTileFrames();                                                                                 // 専門家全体はタイルの枠に
   $("#recipe-count").textContent = r.units.length ? `(${r.units.length})` : "";
   legend();
@@ -762,7 +841,7 @@ function onLayerChanged(L) {
 async function setView(v) {
   state.view = v;
   for (const x of document.querySelectorAll("#views button")) x.classList.toggle("on", x.dataset.view === v);
-  const ph = $("#view-placeholder"), lv = $("#layers-view"), ev = $("#embed-view"), xv = $("#eval-view"), wv = $("#writers-view");
+  const ph = $("#view-placeholder"), lv = $("#layers-view"), ev = $("#embed-view"), xv = $("#eval-view"), wv = $("#writers-view"), dv = $("#direction-view");
   $("#map-wrap").classList.toggle("not-map", v !== "map");
   document.body.classList.toggle("view-other", v !== "map");             // 地図専用の header の部品を薄く
   if (state.map) state.map.setActive(v === "map");
@@ -771,6 +850,34 @@ async function setView(v) {
   ev.classList.toggle("hidden", v !== "embed");
   xv.classList.toggle("hidden", v !== "eval");
   wv.classList.toggle("hidden", v !== "writers");
+  dv.classList.toggle("hidden", v !== "direction");
+  if (v === "direction") {                                                 // 方向の速い物差し(CHANGE-06 G)
+    if (!state.model) { dv.innerHTML = `<p class="muted" style="padding:16px">${t("合成の構造には direction ビューのデータがありません")}</p>`; return; }
+    if (!directionView) {
+      directionView = new DirectionView(dv, {
+        onChanged: async () => { await refreshModel(); fillColorSelect(); },   // 基準層を記録・上書きした
+        pipeline: {                                                       // JSON から方向とヘッドを作る(head_pipeline のジョブ)
+          onRun: (kind, params) => jobsBar.start(kind, params),
+          onOpenHead: (u) => openHead(u),
+          onLoadProj: (name, specs, dir) => { state.recipe.loadProj(name, specs, dir); expand("list"); listTab("recipe"); },
+          onEval: (params) => startJob("eval", params),
+          onOverlay: (field) => { setView("map"); applyOverlay(field); },
+        },
+        candidates: {                                                     // 強さの候補(heads_candidates)の候補を使う
+          onLoadCandidate: (c) => loadCandidate(c),
+          onChatCandidate: async (c) => { const note = await loadCandidate(c); chat.setSingle(true); startRecipeChat(); return note; },
+        },
+      });
+      state.directionView = directionView;                               // 自動テスト用
+      await directionView.refresh();
+      const lr = state.lastResult;                                       // ビューを開く前に終わった一括・候補
+      if (lr && lr.kind === "head_pipeline") { directionView.setMode("pipe"); directionView.pipe.open(lr.name); }
+      else if (lr) directionView.openCandidates(lr.name);
+      return;
+    }
+    await directionView.refresh();
+    return;
+  }
   if (v === "writers") {                                                   // 書き手の強さ(gne writers)
     if (!state.model) { wv.innerHTML = `<p class="muted" style="padding:16px">${t("合成の構造には writers がありません")}</p>`; return; }
     if (!writersView) {
@@ -787,7 +894,13 @@ async function setView(v) {
   if (v === "eval") {
     if (!state.model) { xv.innerHTML = `<p class="muted" style="padding:16px">${t("合成の構造には eval がありません")}</p>`; return; }
     if (!evalView) {
-      evalView = new EvalView(xv, { recipe: state.recipe, onRun: (p) => startJob("eval", p) });
+      evalView = new EvalView(xv, { recipe: state.recipe, onRun: (p) => startJob("eval", p),          // CHANGE-06 G: 組・方式のレシピを読み込む
+                                    onLoadProj: (name, specs) => { state.recipe.loadProj(name, specs); expand("list"); listTab("recipe"); },
+                                    onLoadRecipe: (rd) => {
+                                      const us = (rd.units || []).map((u) => (u.mode === "proj" && !u.direction ? { ...u, direction: rd.default_direction } : u));
+                                      state.recipe.load(rd.name || "", us, rd.ablate, rd.sampling, rd.direction_layer);
+                                      expand("list"); listTab("recipe");
+                                    } });
       state.evalView = evalView;                                         // 自動テスト用
     }
     await evalView.refresh();
@@ -956,6 +1069,7 @@ async function main() {
       nFF: (L) => state.arch.layers[L].n_ff,
       unitWords: (L, n) => { const us = unitsCache.peek(L); const u = us && us.byN.get(n); return u ? u.words.slice(0, 3).join(" · ") : ""; },
       directions: () => (state.model ? state.model.directions : []),
+      projDirections: () => (state.model ? (state.model.direction_sets || []).map((x) => x.name) : []),
       onOpenHead: (u) => openHead(u),
       headKind: (L) => mixerLabel(state.arch.layers[L]),
     });
@@ -966,6 +1080,18 @@ async function main() {
         if (!$("#recipe-list").classList.contains("hidden")) recipePanel.render();
       },
       inRecipe: (L, h) => { const u = state.recipe.hasHead(L, h); return u ? u.k : null; },
+      onProj: (L, h, dir) => {                                           // 射影 s1(CHANGE-06)。もう一度押すと外す
+        if (state.recipe.hasProj(L, h)) state.recipe.removeProj(L, h); else state.recipe.addProj(L, h, 1, dir);
+        if (!$("#recipe-list").classList.contains("hidden")) recipePanel.render();
+      },
+      inProj: (L, h) => state.recipe.hasProj(L, h) || null,
+      onLoadProj: (name, specs, dir) => {                                 // 強さの配分の組をレシピに読み込む
+        state.recipe.loadProj(name, specs, dir);
+        expand("list");
+        listTab("recipe");
+      },
+      projDirections: () => (state.model ? (state.model.direction_sets || []).map((x) => x.name) : []),
+      causalList: () => (state.model ? state.model.causal || [] : []),
       onNamed: (names) => { state.model.names = names; },
       onOverlay: (field) => { if (state.view !== "map") setView("map"); applyOverlay(field); },
       directions: () => (state.model ? state.model.directions : []),

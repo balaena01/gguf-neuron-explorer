@@ -6,6 +6,9 @@ U2: 3 列チャット(SSE)、fires、reads you、レシピ、cvec の書き出�
 U5: エージェント連携。MCP の ui_* が POST /api/ui/{highlight,note,open,clear} を叩き、ブラウザへ SSE(/api/ui/events)。
 CHANGE-04 G: ヘッドの調書(/api/head)・名前、保存済みのヘッドの対照分析(/api/heads)、注目のパターン(/api/attention)、
 fires の文章でのヘッドの注目(/api/fires/{id}/heads)。GPU を使うものは live.Live の調停を通す。
+CHANGE-06 G: 因果スクリーニングと強さの配分(/api/causal)、方向セットと速い物差し(/api/directions、.../score は GPU)、
+方向とヘッドの一括の結果(/api/pipelines。実行は head_pipeline のジョブ)、強さの候補と名前を伏せた採点(/api/candidates。
+生成は heads_candidates のジョブ)。
 ローカル専用なので、Host が 127.0.0.1 / localhost 以外の要求(DNS rebinding)と、別のオリジンからの書き込み(POST / DELETE)は断る。
 大きい配列は JSON にせず octet-stream で返し、形は X-Shape、付帯情報は X-Meta(JSON)に入れる(§8.2)。
 """
@@ -82,7 +85,8 @@ def create_app(session, *, warm: bool = True, openai: bool = False) -> FastAPI:
                 "arch_warnings": ov["arch_warnings"], "bake": ov["bake"], "recipes": ov["recipes"],
                 "directions": ov["directions"], "names": data.names(), "layouts": data.layouts(), "runs": data.run_list(),
                 "connections": data.connections().meta if data.connections() is not None else None,
-                "heads": data.heads_list(), "writers": data.writers_list()}
+                "heads": data.heads_list(), "writers": data.writers_list(),
+                "causal": data.causal_list(), "direction_sets": data.directions_list()}       # CHANGE-06 G
 
     @app.get("/api/vocab")
     def vocab():
@@ -171,6 +175,61 @@ def create_app(session, *, warm: bool = True, openai: bool = False) -> FastAPI:
     def heads_one(name: str):
         return data.heads_one(name)
 
+    # --- CHANGE-06 G: 因果スクリーニング・強さの配分(HEAD パネルの Causal、地図の causal:<name>・eta:<name>)、
+    # 方向の速い物差し(direction ビュー) --------------------------------------------------------------------------
+    @app.get("/api/causal")
+    def causal_list():
+        return data.causal_list()
+
+    @app.get("/api/causal/{name}")
+    def causal_one(name: str):
+        return data.causal_one(name)
+
+    @app.get("/api/directions")
+    def directions():
+        return data.directions_list()
+
+    @app.get("/api/directions/{name}")
+    def direction_one(name: str):
+        return data.direction_one(name)
+
+    @app.get("/api/pipelines")
+    def pipelines():
+        """方向とヘッドの一括(head_pipeline のジョブ)の保存済みの結果。"""
+        return data.pipelines_list()
+
+    @app.get("/api/pipelines/{name}")
+    def pipeline_one(name: str):
+        return data.pipeline_one(name)
+
+    @app.get("/api/candidates")
+    def candidates():
+        """強さの候補(heads_candidates のジョブ)の保存済みの結果。"""
+        return data.candidates_list()
+
+    @app.get("/api/candidates/{name}")
+    def candidates_one(name: str):
+        return data.candidates_one(name)
+
+    @app.get("/api/candidates/{name}/blind")
+    def candidates_blind(name: str):
+        """名前を伏せた採点の項目。どの候補の返事かは返さない。"""
+        return data.candidates_blind(name)
+
+    @app.post("/api/candidates/{name}/scores")
+    def candidates_scores(name: str, scores: dict | str = Body(..., embed=True)):
+        """点を足して集計した結果(Session.heads_candidates_tally)。"""
+        return data.candidates_score(name, scores)
+
+    @app.post("/api/directions/{name}/score")
+    def direction_score(name: str, set_base: int | None = Body(None), record_base: bool | None = Body(None),
+                        layers: list[int] | None = Body(None)):
+        """gne direction score(Session.direction_score)。モデルを流すので GPU の調停を通す。set_base で基準層を手で上書きする。
+        層を省くと全層を測り、基準層がまだ無ければ cohen_d が最大の層を記録する(record_base=False で記録しない)。"""
+        data.direction_one(name)                                 # 名前を確かめる(無ければ 404 相当)
+        r, warns = live._gpu(lambda: session.direction_score(name, layers=layers, set_base=set_base, record_base=record_base))
+        return {**r, "warnings": warns, "meta": data.direction_one(name)}
+
     # --- CHANGE-05 G: MoE の専門家(EXPERT パネル、地図の expert_usage・experts:<name>) -----------------------
     @app.get("/api/expert")
     def expert(layer: int, expert: int):
@@ -240,11 +299,21 @@ def create_app(session, *, warm: bool = True, openai: bool = False) -> FastAPI:
 
     @app.get("/api/recipes")
     def recipes():
-        return live.recipes()
+        out = []
+        for x in live.recipes():                     # CHANGE-06: proj のユニットの方向の既定と、方向の層(own / base)
+            ex = data.recipe_extras(x["name"])
+            for u in x["units"]:
+                if u.get("mode") == "proj" and not u.get("direction"):
+                    u["direction"] = ex["default_direction"]
+            out.append({**x, **ex})
+        return out
 
     @app.post("/api/recipes/{name}")
     def recipe_save(name: str, units: list[str] = Body(...), ablate: dict | None = Body(None),
-                    sampling: dict | None = Body(None)):
+                    sampling: dict | None = Body(None), direction_layer: str | None = Body(None)):
+        if direction_layer and direction_layer != "own":                     # CHANGE-06: proj に基準層の方向を当てるレシピ
+            r = session.recipe(units=list(units) or None, dose_unit="rel", name=name, ablate=ablate, direction_layer=direction_layer)
+            return session.recipe_save(name, r, sampling=sampling)
         return session.recipe_save(name, units, ablate=ablate, sampling=sampling)
 
     @app.get("/api/evals")
