@@ -7,7 +7,7 @@
 // 組の比較の下の「候補を作る」で heads_candidates のジョブを投げる(組 × 全体の倍率の返事を作り、名前を伏せて採点する。
 // 結果は同じビューの「強さの候補」に出る)。
 import { getJSON } from "./api.js";
-import { t } from "./i18n.js";
+import { LANG, t } from "./i18n.js";
 import { esc } from "./panels.js";
 
 const fmt = (x, d = 2) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : (+x).toFixed(d));
@@ -126,8 +126,11 @@ export class PipelinePanel {
       <p class="muted note pp-help">${t("1 つの JSON(対照集合と同じ中身)から、方向 → 基準層 → 因果スクリーニング → 強さの配分 を 1 回のジョブで回します。A と B は system_a / system_b(system の文)か recipe_a / recipe_b(レシピの名前・パス・ユニットのリスト)で作ります。片側の system を省くと system なしで読ませます。")}</p>
       <div class="pp-in">
         <label class="muted">${t("JSON ファイル")} <input type="file" id="pp-file" accept=".json,application/json"></label>
-        <button class="small" id="pp-tpl" title="${t("小さな例を入力欄に入れる")}">${t("ひな形")}</button>
+        <label class="muted" title="${t("用途別のテンプレート(configs/pipeline/)。選ぶと入力欄に入る")}">${t("ひな形")}
+          <select id="pp-tpl-sel"><option value="small">${t("小さな例(海賊、system を両側に)")}</option></select></label>
+        <button class="small" id="pp-tpl" title="${t("選んだひな形を入力欄に入れる")}">${t("入れる")}</button>
         <span class="muted note">${t("または下に貼り付け")}</span></div>
+      <div id="pp-tpl-about" class="muted note"></div>
       <textarea id="pp-text" class="mono" rows="9" spellcheck="false" placeholder='{"name": "…", "system_a": "…", "system_b": "…", "user_prompts": ["…", "…", "…", "…"]}'></textarea>
       <div id="pp-check" class="note"></div>
       <div class="pp-set">
@@ -148,14 +151,43 @@ export class PipelinePanel {
       const f = ev.target.files && ev.target.files[0];
       if (!f) return;
       ta.value = await f.text();
+      this.$("#pp-tpl-about").textContent = "";
       this.check();
     });
-    this.$("#pp-tpl").addEventListener("click", () => { ta.value = JSON.stringify(TEMPLATE, null, 2); this.check(); });
+    this.templates = [];                         // 用途別のテンプレート(/api/pipeline-templates)
+    this.tplText = null;                         // 最後に入れたひな形の文字列(書き換えていなければ確かめずに差し替える)
+    const sel = this.$("#pp-tpl-sel");
+    this.$("#pp-tpl").addEventListener("click", () => this.insertTemplate(sel.value, false));
+    sel.addEventListener("change", () => this.insertTemplate(sel.value, true));
+    getJSON("/api/pipeline-templates").then((list) => {
+      this.templates = Array.isArray(list) ? list : [];
+      for (const x of this.templates) {
+        const o = document.createElement("option");
+        o.value = x.file;
+        o.textContent = (x[LANG] && x[LANG].title) || (x.ja && x.ja.title) || x.file;
+        sel.appendChild(o);
+      }
+    }).catch(() => { /* テンプレートが無くても小さな例は使える */ });
     this.$("#pp-go").addEventListener("click", () => this.run());
     this.check();
   }
 
   status(s, err = false) { const el = this.$("#pp-status"); el.textContent = s; el.classList.toggle("err", err); }
+
+  // ひな形を入力欄に入れる(key = "small" か configs/pipeline/ のファイル名)。選び直したときは、書きかけの JSON を消す前に確かめる
+  insertTemplate(key, ask) {
+    const ta = this.$("#pp-text"), about = this.$("#pp-tpl-about");
+    const x = this.templates.find((y) => y.file === key);
+    const spec = x ? x.spec : TEMPLATE;
+    const cur = ta.value.trim();
+    if (ask && cur && cur !== this.tplText && !window.confirm(t("入力欄の JSON をひな形で置き換えます。よいですか?"))) return;
+    ta.value = JSON.stringify(spec, null, 2);
+    this.tplText = ta.value.trim();
+    const a = x ? (x[LANG] && x[LANG].text) || (x.ja && x.ja.text) || "" : "";
+    about.textContent = a;
+    about.title = x ? `configs/pipeline/${x.file}` : "";
+    this.check();
+  }
 
   // 入力欄を確かめて要約を出す。spec の pipeline が変わったら、その値を設定の欄に入れる
   check() {
@@ -164,7 +196,7 @@ export class PipelinePanel {
     const c = checkSpec(text);
     this.checked = c;
     const el = this.$("#pp-check");
-    if (!c.spec && !c.errors.length) { el.innerHTML = `<span class="muted">${t("JSON を読み込むか貼り付けてください(「ひな形」で例が入ります)")}</span>`; }
+    if (!c.spec && !c.errors.length) { el.innerHTML = `<span class="muted">${t("JSON を読み込むか貼り付けてください(「ひな形」で用途別の例を選べます)")}</span>`; }
     else {
       const s = c.summary;
       el.innerHTML = `${s ? `<div class="pp-sum"><b>${esc(String(c.spec.name ?? ""))}</b> · ${t("質問 {n} 個", { n: s.n })}<br>A: ${esc(s.A)}<br>B: ${esc(s.B)}${

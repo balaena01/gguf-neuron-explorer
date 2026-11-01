@@ -486,6 +486,30 @@ def test_pipeline_spec_checks(tmp_path):
     assert est["seconds"] and est["detail"]["prompts"] == 300 and est["detail"]["screened"] == 32
 
 
+def test_pipeline_templates_are_valid(tmp_path):
+    """configs/pipeline/ の用途別のテンプレートは、そのまま heads pipeline の spec として通る(about は説明だけ)。"""
+    import re
+    from gne.api import Session
+    from gne.direction import load_contrast
+    files = sorted((ROOT / "configs" / "pipeline").glob("*.json"))
+    assert len(files) == 4
+    for f in files:
+        d = json.loads(f.read_text(encoding="utf-8"))
+        about = d.pop("about")
+        assert about["ja"]["title"] and about["en"]["title"] and about["ja"]["text"] and about["en"]["text"]
+        assert re.fullmatch(r"[\w.\-]+", d["name"])
+        assert set(d.get("pipeline") or {}) <= set(Session.PIPELINE_DEFAULTS)
+        for u in d.get("recipe_a") or []:
+            parse_unit(u)
+        p = tmp_path / f"{d['name']}.yaml"
+        p.write_text(yaml.safe_dump({k: v for k, v in d.items() if k != "pipeline"}, allow_unicode=True), encoding="utf-8")
+        cs, val = load_contrast(p)
+        assert min(len(cs.prompts("A")), len(cs.prompts("B"))) >= 16
+        assert val.match and val.target and re.compile(val.match)
+        held = set(val.prompts) if val.explicit else set()
+        assert not held & (set(cs.prompts("A")) | set(cs.prompts("B")))      # 確かめ用の質問は調整に使う質問と重ならない
+
+
 @pytest.mark.model
 def test_pipeline_runs_end_to_end(session, tmp_path):
     """対照集合の表から、方向 → 基準層 → 因果 → 配分 が 1 回で回り、結果とレシピが残る。止めて測る段階は間引いた質問で。"""

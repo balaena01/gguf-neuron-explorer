@@ -1673,6 +1673,7 @@ class Session:
         if not isinstance(spec, dict):
             raise GneError("BAD_ARGS", "spec は対照集合の表(name・user_prompts・system_a / system_b か recipe_a / recipe_b)です")
         spec = dict(spec)
+        spec.pop("about", None)                    # テンプレート(configs/pipeline/)の説明。対照集合には入れない
         pipe = {**self.PIPELINE_DEFAULTS, **(spec.pop("pipeline", None) or {}),
                 **{k: v for k, v in over.items() if v is not None}}
         unknown = sorted(set(pipe) - set(self.PIPELINE_DEFAULTS) - {"name"})

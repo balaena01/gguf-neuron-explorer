@@ -289,7 +289,7 @@ A 側と B 側のそれぞれで点数を出す。生成しないので 1 条件
 | 3.2 基準層・後段の層とのコサイン、3.3 速い物差し | `gne direction score --name <方向>`(`direction_score`) | なし |
 | 3.4 因果で絞る | `gne heads causal --name <方向>`(層単位 → ヘッド単位、`heads_causal`) | なし |
 | 3.5〜3.6 組を作り、効率で配り直す・ヘッド数を減らす | `gne heads allocate --name <方向> --target <点数>`(`heads_allocate`) | なし |
-| 3.2〜3.6 をまとめて回す | `gne heads pipeline --spec <JSON>`(`heads_pipeline`、UI の direction ビューで JSON を読み込んでも回せる) | なし |
+| 3.2〜3.6 をまとめて回す | `gne heads pipeline --spec <JSON>`(`heads_pipeline`、UI の direction ビューで JSON を読み込んでも回せる。用途別のひな形は `configs/pipeline/`) | なし |
 | 全体の倍率を返事で決める | `gne heads candidates --alloc <配分>`(組 × 倍率で返事を作り、どの候補か伏せた採点のファイルを書く)→ 採点 → `gne heads candidates --tally <名前>`(`heads_candidates`・`heads_candidates_tally`、UI のパイプラインのタブからも) | あり |
 | 3.7 書き出す | `gne headproj export --recipe <レシピ>`(`--bake` で焼き込み、`--verify` で LoRA 版との一致) | なし |
 | 3.8 評価する(ランダム対照・全層射影との比較) | `gne eval --recipe <レシピ> --random-controls 16`、`gne eval --recipe <レシピ> --compare-methods`、`gne eval --alloc <方向> --n-heads 6,5,4,3`(`eval`) | あり |

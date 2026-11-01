@@ -193,6 +193,11 @@ def create_app(session, *, warm: bool = True, openai: bool = False) -> FastAPI:
     def direction_one(name: str):
         return data.direction_one(name)
 
+    @app.get("/api/pipeline-templates")
+    def pipeline_templates():
+        """用途別の質問集のテンプレート(configs/pipeline/、「ひな形」で選ぶ)。"""
+        return data.pipeline_templates()
+
     @app.get("/api/pipelines")
     def pipelines():
         """方向とヘッドの一括(head_pipeline のジョブ)の保存済みの結果。"""

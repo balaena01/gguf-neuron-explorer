@@ -138,7 +138,7 @@ gne heads candidates --tally evil                     # round_01.scores.txt(「�
 
 変化の量は、そのヘッドがいまの入力で方向に沿って書いている量に比例する。だから、もともと書いていない振る舞いは作れない。性格を運ぶヘッドを負の s で強めても、指示のない会話では何も起きない。ニューロンや方向の小さな押しで先に性格が出ていれば増幅でき、弱い増幅なら同じくらいの性格を ppl の悪化を抑えて出せた。ただし能力の落ち方はニューロンだけのときと同じで、強く増幅すると崩れる(verification.md §20.10)。
 
-`heads pipeline` の spec は対照集合の中身(name・user_prompts・system か recipe)に、任意で `pipeline: {target, n_heads, hard, top_layers, max_examples}`。質問は何百個でもよく、止めて測る段階は 64 個に間引く。止めると中立の側が大きく崩れる層(最初の層など)とヘッドは自動で外れる。目標を省くと A と B の平均の真ん中。
+`heads pipeline` の spec は対照集合の中身(name・user_prompts・system か recipe)に、任意で `pipeline: {target, n_heads, hard, top_layers, max_examples}`。用途別のひな形は `configs/pipeline/`(system の性格・2 つの性格の差・レシピの性格・質問の種類の差。`about` は説明だけで、読むときに捨てる。UI の「ひな形」でも選べる)。質問は何百個でもよく、止めて測る段階は 64 個に間引く。止めると中立の側が大きく崩れる層(最初の層など)とヘッドは自動で外れる。目標を省くと A と B の平均の真ん中。
 
 `heads candidates` は、生成なしで決めた組の全体の倍率を、返事を読んで決めるためのもの。正の倍率は A 側の振る舞いを消す向きで A 側の返事を、負の倍率(`--scales -0.5,-1`)は B 側で強める向きで B 側の返事を、どの候補か伏せて `<root>/heads/<model_id>/<名前>.cand/round_01.txt` に並べ、基準 `RUBRIC.md` を添える。種は全部の候補で同じ。P(振る舞いの強さ)と C(自然さ)を 1〜5 で付け、`--tally` で消す向きは min(6 − P, C)、強める向きは min(P, C) の平均で並べる。調整に使っていない質問を `--prompts` で渡す(渡さないと注意が出る)。`--with-recipe` のレシピ(ニューロンの種火など)は無介入の base も含めた全候補に重なる。採点は `references/judging.md` と同じく、1 回の比較を同じ採点役で、鍵を見る前に付ける。
 

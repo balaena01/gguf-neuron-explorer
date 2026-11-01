@@ -2095,11 +2095,15 @@ def test_pipeline_api_and_panel(pipe_server, browser):
         with pytest.raises(urllib.error.HTTPError) as ei:
             urllib.request.urlopen(url + f"/api/pipelines/{bad}")
         assert ei.value.code == 400
+    tpl = get("/api/pipeline-templates")                                   # 用途別のテンプレート(configs/pipeline/)
+    assert [x["spec"]["name"] for x in tpl] == ["evil_sys", "cold_vs_warm", "evil_neurons_4b", "ja_vs_en"]
+    assert all("about" not in x["spec"] and x["ja"]["title"] and x["en"]["text"] for x in tpl)
     for lang in ("ja", "en"):
         pg = browser.new_page(viewport={"width": 1600, "height": 1000})
         errors, posts = [], []
         pg.on("pageerror", lambda e: errors.append(str(e)))
-        pg.on("dialog", lambda d: d.accept())                                            # 見積もりの確認(jobs.js の confirm)
+        accept = lambda d: d.accept()                                                    # noqa: E731
+        pg.on("dialog", accept)                                                          # 見積もりの確認(jobs.js の confirm)
         pg.goto(url + f"/?lang={lang}")
         pg.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
         pg.evaluate("window.gne.recipe.clear(); try { localStorage.removeItem('gne.pipeline.draft') } catch {}")
@@ -2159,6 +2163,21 @@ def test_pipeline_api_and_panel(pipe_server, browser):
         assert pg.evaluate("document.querySelector('#pp-go').disabled") and pg.evaluate("document.querySelectorAll('#pp-check .err').length") == 3
         pg.click("#pp-tpl")
         assert not pg.evaluate("document.querySelector('#pp-go').disabled") and pg.evaluate("document.querySelectorAll('#pp-check .err').length") == 0
+        assert "pirate" in pg.evaluate("document.querySelector('#pp-check').textContent")
+        # 用途別のひな形: 選ぶと入る(説明つき)。書き換えた入力欄は、確かめて断れば残る。小さな例に戻せる
+        pg.wait_for_function("document.querySelectorAll('#pp-tpl-sel option').length === 5", timeout=10000)
+        pg.select_option("#pp-tpl-sel", "question_kinds.json")
+        assert pg.evaluate("JSON.parse(document.querySelector('#pp-text').value).name") == "ja_vs_en"
+        assert pg.evaluate("document.querySelector('#pp-tpl-about').textContent").strip()
+        assert not pg.evaluate("document.querySelector('#pp-go').disabled")
+        pg.fill("#pp-text", '{"name": "mine"}')
+        pg.dispatch_event("#pp-text", "input")
+        pg.remove_listener("dialog", accept)
+        pg.once("dialog", lambda d: d.dismiss())
+        pg.select_option("#pp-tpl-sel", "recipe_persona.json")
+        assert pg.evaluate("document.querySelector('#pp-text').value") == '{"name": "mine"}'
+        pg.on("dialog", accept)
+        pg.select_option("#pp-tpl-sel", "small")
         assert "pirate" in pg.evaluate("document.querySelector('#pp-check').textContent")
         pg.fill("#pp-nheads", "3,2")
         pg.fill("#pp-mx", "8")

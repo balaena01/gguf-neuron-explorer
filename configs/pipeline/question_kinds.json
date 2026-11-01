@@ -1,0 +1,61 @@
+{
+  "about": {
+    "order": 4,
+    "ja": {
+      "title": "質問の種類の違い(言語・話題・形式。側ごとに別の質問)",
+      "text": "system もレシピも使わず、何もしないモデルに 2 種類の質問を読ませ、その差を方向にする。例は日本語と英語(中身は翻訳どうし)。狙った違い以外(話題・長さ)は両側でそろえる。validate.prompts は A 側にしか使われないので、候補づくりで調整に使っていない質問は、フォームの A と B の欄に分けて入れる。"
+    },
+    "en": {
+      "title": "Two kinds of questions (language, topic, format; separate questions per side)",
+      "text": "No system prompt and no recipe: the unmodified model reads two kinds of questions and the direction is the difference between them. The example compares Japanese and English (the questions are translations of each other). Keep everything else, such as topic and length, the same on both sides. validate.prompts is used only for side A, so for candidates put questions that were not used for tuning into the form's A and B boxes."
+    }
+  },
+  "name": "ja_vs_en",
+  "prompts_a": [
+    "今日の天気はどうですか？",
+    "おすすめの本を教えてください。",
+    "週末は何をしたらいいですか？",
+    "好きな食べ物は何ですか？",
+    "朝ごはんに何を食べるといいですか？",
+    "海についてどう思いますか？",
+    "仕事のやる気を出すにはどうすればいいですか？",
+    "猫と犬はどちらが好きですか？",
+    "旅行に行くならどこがいいですか？",
+    "よく眠るためのこつを教えてください。",
+    "新しい趣味を始めたいです。何がいいですか？",
+    "友達の誕生日に何を贈ればいいですか？",
+    "風邪をひいたときはどうすればいいですか？",
+    "簡単な料理を教えてください。",
+    "雨の日に楽しめることは何ですか？",
+    "運動を続けるこつはありますか？"
+  ],
+  "prompts_b": [
+    "How is the weather today?",
+    "Can you recommend a book?",
+    "What should I do this weekend?",
+    "What is your favorite food?",
+    "What is a good breakfast?",
+    "What do you think about the sea?",
+    "How can I get motivated at work?",
+    "Do you like cats or dogs?",
+    "Where should I go if I travel?",
+    "Give me some tips for sleeping well.",
+    "I want to start a new hobby. What would be good?",
+    "What should I give my friend for their birthday?",
+    "What should I do when I catch a cold?",
+    "Can you teach me an easy recipe?",
+    "What can I enjoy on a rainy day?",
+    "How can I keep exercising regularly?"
+  ],
+  "validate": {
+    "match": "[ぁ-んァ-ン]",
+    "target": "answers in Japanese"
+  },
+  "pipeline": {
+    "n_heads": [
+      6,
+      5,
+      4
+    ]
+  }
+}

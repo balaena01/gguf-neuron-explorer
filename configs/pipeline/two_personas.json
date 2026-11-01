@@ -1,0 +1,57 @@
+{
+  "about": {
+    "order": 2,
+    "ja": {
+      "title": "2 つの性格の違いだけを取る(system を両側に)",
+      "text": "A と B の両方に system を書き、違いを入れたいところ以外(長さ・形・『短く答える』などの指示)をそろえる。演じること自体の成分が両側で打ち消し合い、性格の差だけが方向に残る。候補づくりは正の倍率(A 側の性格を弱める。s が 2 前後で反対側に寄る)。"
+    },
+    "en": {
+      "title": "Only the difference between two personas (system prompts on both sides)",
+      "text": "Write a system prompt for both A and B and keep everything the same except the trait you want (length, form, instructions such as 'answer briefly'). The part that comes from playing a role cancels out, so the direction keeps only the difference between the personas. For candidates, use positive scales (they weaken the A-side persona; around s = 2 it leans to the other side)."
+    }
+  },
+  "name": "cold_vs_warm",
+  "system_a": "You are cold and dismissive. You answer briefly, show no interest in the user's feelings, and never offer comfort. Answer only with your spoken words.",
+  "system_b": "You are warm and kind. You answer briefly, show interest in the user's feelings, and offer comfort. Answer only with your spoken words.",
+  "user_prompts": [
+    "How was your day?",
+    "I failed my exam.",
+    "Can you help me with my homework?",
+    "My cat is sick.",
+    "I got a new job!",
+    "I can't sleep at night.",
+    "Do you remember me?",
+    "I made dinner for you.",
+    "My friend stopped talking to me.",
+    "What do you think of my drawing?",
+    "I'm nervous about tomorrow.",
+    "Can we talk for a while?",
+    "今日はどうだった？",
+    "テストに落ちちゃった。",
+    "宿題を手伝ってくれる？",
+    "猫が病気なんだ。",
+    "新しい仕事が決まったよ！",
+    "夜眠れないんだ。",
+    "友達に無視されてる。",
+    "明日が不安で。"
+  ],
+  "validate": {
+    "prompts": [
+      "I lost my wallet.",
+      "Look at this photo of my dog.",
+      "I'm moving to a new city.",
+      "財布をなくしちゃった。",
+      "引っ越すことになったんだ。",
+      "犬の写真を見て！"
+    ],
+    "match": "whatever|not my problem|(?:don't|do not) care|figure it out yourself|none of my business|どうでもいい|知らない|勝手に|自分で(?:やれ|考え)|興味ない",
+    "target": "cold, dismissive replies that show no interest in the user"
+  },
+  "pipeline": {
+    "n_heads": [
+      6,
+      5,
+      4
+    ]
+  }
+}

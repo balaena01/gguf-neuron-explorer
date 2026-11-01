@@ -663,6 +663,23 @@ class UIData:
                         "updated": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(p.stat().st_mtime))})
         return out
 
+    @staticmethod
+    def pipeline_templates() -> list[dict]:
+        """用途別の質問集のテンプレート(configs/pipeline/*.json): ファイル名・説明(about の ja / en)・中身(about を除く)。"""
+        from ..store import CONFIGS
+        out = []
+        for p in sorted((CONFIGS / "pipeline").glob("*.json")):
+            try:
+                d = json.loads(p.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(d, dict):
+                continue
+            about = d.pop("about", None) or {}
+            out.append({"file": p.name, "order": about.get("order", 99), "ja": about.get("ja") or {}, "en": about.get("en") or {},
+                        "spec": d})
+        return sorted(out, key=lambda x: (x["order"], x["file"]))
+
     def pipeline_one(self, name: str) -> dict:
         """一括の結果 1 件。入力に使った対照集合(<root>/contrasts/ に保存したもの)が読めれば spec として添える
         (UI の入力欄に戻して、設定を変えて流し直すため)。"""
