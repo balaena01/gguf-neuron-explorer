@@ -2063,6 +2063,8 @@ def _fieldtest_text(d: dict) -> str:
         for sec in ("long", "tools"):
             rows += [{"section": sec, "metric": k, "label": k, "reference": None, "target": v, "worse": False}
                      for k, v in (run.get(sec) or {}).items() if not k.startswith("n")]
+        for name, m in (run.get("bench") or {}).items():
+            rows += [{"section": f"bench:{name}", "metric": k, "label": k, "reference": None, "target": v, "worse": False} for k, v in m.items() if k != "n"]
         for name, m in (run.get("prompts") or {}).items():
             rows += [{"section": f"prompts:{name}", "metric": k, "label": k, "reference": None, "target": v, "worse": False}
                      for k, v in m.items() if k != "n"]
@@ -2071,10 +2073,13 @@ def _fieldtest_text(d: dict) -> str:
     for r in rows:
         if r["section"] != cur:
             cur = r["section"]
-            head = title.get(cur) or f"質問集 {cur.split(':', 1)[-1]}({d['settings']['prompts'].get(cur.split(':', 1)[-1], '?')} 問、{d['settings']['prompt_tokens']} トークンまで)"
+            key = cur.split(":", 1)[-1]
+            head = title.get(cur) or (f"ベンチマーク {key}({(d['settings'].get('bench') or {}).get(key, '?')} 問、{d['settings'].get('bench_tokens')} トークンまで)" if cur.startswith("bench:")
+                                      else f"質問集 {key}({d['settings']['prompts'].get(key, '?')} 問、{d['settings']['prompt_tokens']} トークンまで)")
             lines.append(head)
             lines.append(f"  {'':<26} {'比較':>9} {'対象':>9}")
         lines.append(f"  {r['label']:<26} {fmt(r['section'], r['metric'], r['reference']):>9} {fmt(r['section'], r['metric'], r['target']):>9}"
+                     + (f"  片方だけ正解: 比較 {r['only_reference']} / 対象 {r['only_target']}(p = {r['p']:.3f})" if "only_target" in r else "")
                      + ("  ← 悪化" if r.get("worse") else ""))
     if d["same_level"] is not None:
         lines.append("結論: すべて同程度(割合は 2 問ぶん、perplexity は 1% までの差を同程度とみなす)" if d["same_level"]
@@ -2100,17 +2105,22 @@ def fieldtest_cmd(c: Common, holder: dict,
                   server_args: Optional[str] = typer.Option(None, "--server-args", help="llama-server に足す引数"),
                   ppl: bool = typer.Option(True, "--ppl/--no-ppl", help="perplexity も測る"),
                   skip_long: bool = typer.Option(False, "--skip-long"), skip_tools: bool = typer.Option(False, "--skip-tools"),
+                  bench: Optional[str] = typer.Option(None, "--bench", help="ベンチマーク(カンマ区切り): gsm8k(既定 250 問)・mmlu_pro(既定 300 問)。データは取得して <root>/fieldtest/data に置く"),
+                  bench_n: Optional[int] = typer.Option(None, "--bench-n", help="ベンチマークの問題数(種を固定して選ぶ)"),
+                  bench_tokens: int = typer.Option(4096, "--bench-tokens", help="ベンチマークの返事の上限"),
                   yes: bool = _YES):
     """実地テスト: 本番と同じ動かし方(llama-server、思考あり、サンプリングあり)で、長い作業・ツール呼び出し・質問集・perplexity を測り、
     ファイルどうしを比べる。eval は同じファイルの倍率違いを短い問題で見るもの。こちらは焼き込んだファイルをそのまま測れる。"""
     s = holder["session"] = c.session()
     args = {"against": str(against) if against else None, "lora": lora, "prompts": list(prompts or []), "long_tokens": long_tokens,
             "prompt_tokens": prompt_tokens, "n_parallel": n_parallel, "skip_long": skip_long, "skip_tools": skip_tools,
-            "long_tasks": str(long_tasks) if long_tasks else None, "tool_tasks": str(tool_tasks) if tool_tasks else None}
+            "long_tasks": str(long_tasks) if long_tasks else None, "tool_tasks": str(tool_tasks) if tool_tasks else None,
+            "bench": bench, "bench_n": bench_n}
     _gate(s, "fieldtest", args, yes, None)
     d = s.fieldtest(against=against, lora=lora, name=name, prompts=list(prompts or []), match=match, long_tasks=long_tasks, tool_tasks=tool_tasks,
                     long_tokens=long_tokens, tool_tokens=tool_tokens, prompt_tokens=prompt_tokens, temperature=temperature, n_parallel=n_parallel,
-                    reasoning_effort=reasoning_effort, llama_server=llama_server, server_args=server_args, ppl=ppl, skip_long=skip_long, skip_tools=skip_tools)
+                    reasoning_effort=reasoning_effort, llama_server=llama_server, server_args=server_args, ppl=ppl, skip_long=skip_long, skip_tools=skip_tools,
+                    bench=bench, bench_n=bench_n, bench_tokens=bench_tokens)
     return d, _fieldtest_text(d), 0
 
 if __name__ == "__main__":

@@ -389,15 +389,17 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
     @srv.tool()
     async def fieldtest(model: str | None = None, against: str | None = None, lora: str | None = None, name: str | None = None,
                         prompts: dict[str, Any] | None = None, match: str | None = None, long_tokens: int = 3072, tool_tokens: int = 1536,
-                        prompt_tokens: int = 1536, n_parallel: int = 4, llama_server: str | None = None, ppl: bool = True) -> dict:
+                        prompt_tokens: int = 1536, n_parallel: int = 4, llama_server: str | None = None, ppl: bool = True,
+                        bench: list[str] | None = None, bench_n: int | None = None) -> dict:
         """実地テストをジョブで投げる(job_status で結果)。本番と同じ動かし方(llama-server、思考あり、サンプリングあり)で、長い作業
         (上限で切れた割合・ループ・本文が空)、ツール呼び出し(呼ぶか・名前・引数・不要なときに呼ばない・結果の後に続ける)、質問集
-        (prompts は {名前: ファイルか質問のリスト}、match で一致率)、perplexity を測り、against のファイルと比べる(compare の worse、
+        (prompts は {名前: ファイルか質問のリスト}、match で一致率)、ベンチマーク(bench: gsm8k・mmlu_pro の正答率と、片方だけ正解の数)、perplexity を測り、against のファイルと比べる(compare の worse、
         same_level)。焼き込んだファイルもそのまま測れる。model を省くと読み込んでいるモデル。走っている間はそのモデルを GPU から下ろし、
         ほかの GPU の処理は待たされる。27B で質問集 200 問を足して 1 ファイル 30〜45 分。生成した文章は結果に入らず、replies_path に書く。"""
         try:
             p = {"model": model, "against": against, "lora": lora, "name": name, "prompts": prompts, "match": match, "long_tokens": long_tokens,
-                 "tool_tokens": tool_tokens, "prompt_tokens": prompt_tokens, "n_parallel": n_parallel, "llama_server": llama_server, "ppl": ppl}
+                 "tool_tokens": tool_tokens, "prompt_tokens": prompt_tokens, "n_parallel": n_parallel, "llama_server": llama_server, "ppl": ppl,
+                 "bench": bench, "bench_n": bench_n}
             return jobs.start("fieldtest", {k: v for k, v in p.items() if v is not None}).view()
         except Exception as e:  # noqa: BLE001
             return _err(e)

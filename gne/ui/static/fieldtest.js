@@ -33,6 +33,8 @@ export class FieldtestPanel {
         <label class="muted" title="${t("ツール呼び出しの返事の上限")}">${t("ツールのトークン")} <input id="ft-tool" type="number" min="16" max="65536" value="1536"></label>
         <label class="muted" title="${t("質問集の返事の上限")}">${t("質問集のトークン")} <input id="ft-ptok" type="number" min="16" max="65536" value="1536"></label>
         <label class="muted" title="${t("参照テキストの perplexity も測る(gne でファイルを読み直す)")}"><input id="ft-ppl" type="checkbox" checked> perplexity</label>
+        <label class="muted" title="${t("能力を測るベンチマーク。データは初回に取得する。合わせて数時間かかる")}"><input id="ft-gsm8k" type="checkbox"> GSM8K</label>
+        <label class="muted" title="${t("能力を測るベンチマーク。データは初回に取得する。合わせて数時間かかる")}"><input id="ft-mmlu" type="checkbox"> MMLU-Pro</label>
         <button id="ft-go">${t("実地テストを走らせる")}</button> <span class="muted note" id="ft-status"></span></div>
       <div id="ft-list"></div><div id="ft-result"></div>`;
     this.$ = (s) => root.querySelector(s);
@@ -51,6 +53,8 @@ export class FieldtestPanel {
     const lines = this.$("#ft-prompts").value.split("\n").map((x) => x.trim()).filter(Boolean);
     if (lines.some((x) => !x.includes("="))) { this.status(t("質問集は 1 行に 名前=ファイル で書いてください"), true); return null; }
     if (lines.length) p.prompts = lines;
+    const bench = [["gsm8k", "#ft-gsm8k"], ["mmlu_pro", "#ft-mmlu"]].filter(([, s]) => this.$(s).checked).map(([k]) => k);
+    if (bench.length) p.bench = bench;
     return p;
   }
 
@@ -103,6 +107,7 @@ export class FieldtestPanel {
     const run = d.runs[d.runs.length - 1], out = [];
     const add = (section, o) => { for (const [k, v] of Object.entries(o || {})) if (!k.startsWith("n") || k === "no_tool_ok") out.push({ section, metric: k, label: k, reference: null, target: v, worse: false }); };
     add("long", run.long); add("tools", run.tools);
+    for (const [k, m] of Object.entries(run.bench || {})) add(`bench:${k}`, m);
     for (const [k, m] of Object.entries(run.prompts || {})) add(`prompts:${k}`, m);
     add("ppl", run.ppl);
     return out;
@@ -111,6 +116,7 @@ export class FieldtestPanel {
   render() {
     const d = this.data, st = d.settings || {}, rows = this.rows(d), hasRef = !!d.reference;
     const title = (s) => {
+      if (s.startsWith("bench:")) { const k = s.slice(6); return t("ベンチマーク {k}({n} 問)", { k: esc(k), n: (st.bench || {})[k] ?? "?" }); }
       if (s.startsWith("prompts:")) { const k = s.slice(8); return t("質問集 {k}({n} 問)", { k: esc(k), n: (st.prompts || {})[k] ?? "?" }); }
       if (s === "long") return t("長い作業({n} 問、{m} トークンまで)", { n: st.n_long ?? "?", m: st.long_tokens ?? "?" });
       if (s === "tools") return t("ツール呼び出し({n} 問)", { n: st.n_tools ?? "?" });
@@ -120,7 +126,7 @@ export class FieldtestPanel {
     const body = rows.map((r) => {
       const head = r.section !== cur ? `<tr class="ft-sec"><td class="l" colspan="${hasRef ? 3 : 2}">${title(r.section)}</td></tr>` : "";
       cur = r.section;
-      return `${head}<tr class="${r.worse ? "ft-worse" : ""}"><td class="l">${esc(t(r.label))}</td>${hasRef ? `<td>${fmtVal(r, r.reference)}</td>` : ""}<td>${fmtVal(r, r.target)}${r.worse ? ` <span class="ng">${t("悪化")}</span>` : ""}</td></tr>`;
+      return `${head}<tr class="${r.worse ? "ft-worse" : ""}"><td class="l">${esc(t(r.label))}</td>${hasRef ? `<td>${fmtVal(r, r.reference)}</td>` : ""}<td>${fmtVal(r, r.target)}${r.worse ? ` <span class="ng">${t("悪化")}</span>` : ""}${r.only_target !== undefined ? ` <span class="muted note">${t("片方だけ正解: 比較 {a} / 対象 {b}(p = {p})", { a: r.only_reference, b: r.only_target, p: (+r.p).toFixed(3) })}</span>` : ""}</td></tr>`;
     }).join("");
     this.$("#ft-result").innerHTML = `<h4>${t("{name} の結果", { name: esc(d.name) })} <span class="muted note mono">${esc((d.updated || "").replace("T", " ").slice(0, 16))} · ${t("{n} 分", { n: Math.round((d.seconds || 0) / 60) })}</span></h4>
       <p class="note">${t("対象")}: <span class="mono">${esc(d.target.file)}</span>${d.target.lora ? ` + LoRA` : ""}${hasRef ? ` · ${t("比較")}: <span class="mono">${esc(d.reference.file)}</span>` : ""}</p>

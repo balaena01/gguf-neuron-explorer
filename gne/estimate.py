@@ -267,10 +267,13 @@ def estimate(session, kind: str, params: dict) -> dict:
         vals = list(sets.values()) if isinstance(sets, dict) else [str(x).split("=", 1)[-1] for x in sets]
         n_q = sum(len(v) if isinstance(v, list) else _count(v) for v in vals)
         n_runs = 2 if (p.get("against") or p.get("lora")) else 1
+        bn = p.get("bench") or []
+        bn = [x for x in bn.split(",") if x.strip()] if isinstance(bn, str) else list(bn)
+        n_b = int(p.get("bench_n") or 0) * len(bn) or {"gsm8k": 250, "mmlu_pro": 300}.get(bn[0], 300) * len(bn) if bn else 0
         one = (sp.gen(n_long, int(p.get("long_tokens", 3072)), np_) * 0.7 + sp.gen(n_tool, 400, np_) * 2
-               + sp.gen(n_q, int(p.get("prompt_tokens", 1536)), np_) * 0.5 + 120)
+               + sp.gen(n_q, int(p.get("prompt_tokens", 1536)), np_) * 0.5 + sp.gen(n_b, 800, np_) + 120)
         sec = n_runs * one
-        detail = {"files": n_runs, "long_tasks": n_long, "tool_tasks": n_tool, "prompts": n_q}
+        detail = {"files": n_runs, "long_tasks": n_long, "tool_tasks": n_tool, "prompts": n_q, "bench": n_b}
     elif kind == "heads_candidates":                           # 候補(組 × 倍率 + 無介入)× 両側の質問を生成する
         n_rows = len(p.get("n_heads") or []) or 3
         ap = p.get("alloc")

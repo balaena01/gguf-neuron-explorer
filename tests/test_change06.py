@@ -1087,7 +1087,7 @@ def test_fieldtest_inputs_and_shipped_tasks(tmp_path):
 
 
 @pytest.mark.model
-def test_fieldtest_end_to_end_with_llama_server(session, tmp_path):
+def test_fieldtest_end_to_end_with_llama_server(session, tmp_path, monkeypatch):
     """本物の llama-server で通す(GNE_LLAMA_SERVER か build か PATH にあるとき): 2 ファイルを比べ、結果と文章を別のファイルに書く。
     走った後は読み込んでいたモデルに戻れ、llama-server は残らない。"""
     import subprocess
@@ -1101,11 +1101,16 @@ def test_fieldtest_end_to_end_with_llama_server(session, tmp_path):
     tools["tasks"] = [{"prompt": "What's the weather like in Osaka right now?", "expect": "get_weather"}, {"prompt": "What is 2 + 2?", "expect": None}]
     (tmp_path / "tools.json").write_text(json.dumps(tools))
     (tmp_path / "q.json").write_text(json.dumps(["Hello", "Who are you?"]))
+    monkeypatch.setattr(ft, "load_bench", lambda b, cache, n=None: [{"id": "1", "prompt": "What is 2 + 2? End with: Answer: <number>", "gold": "4"},
+                                                                    {"id": "2", "prompt": "What is 3 + 3? End with: Answer: <number>", "gold": "6"}])
     d = session.fieldtest(against=MODEL, name="ft_t", long_tasks=tmp_path / "long.json", tool_tasks=tmp_path / "tools.json",
-                          prompts=[f"mine={tmp_path / 'q.json'}"], match="hello", long_tokens=24, tool_tokens=24, prompt_tokens=24, n_parallel=2)
+                          prompts=[f"mine={tmp_path / 'q.json'}"], match="hello", long_tokens=24, tool_tokens=24, prompt_tokens=24, n_parallel=2,
+                          bench="gsm8k", bench_tokens=24)
     assert [r["label"] for r in d["runs"]] == ["reference", "target"] and d["compare"] and d["same_level"] is not None
     run = d["runs"][1]
     assert run["long"]["n"] == 2 and run["tools"]["n"] == 2 and run["prompts"]["mine"]["n"] == 2 and run["ppl"]["mean"] > 1
+    assert run["bench"]["gsm8k"]["n"] == 2 and run["bench_items"]["gsm8k"]["ids"] == ["1", "2"] and d["settings"]["bench"] == {"gsm8k": 2}
+    assert any(r["section"] == "bench:gsm8k" and r["metric"] == "accuracy" and "only_target" in r for r in d["compare"])
     # 同じファイル・同じ種なら perplexity は同じ
     ppl_row = next(r for r in d["compare"] if r["section"] == "ppl" and r["metric"] == "mean")
     assert abs(ppl_row["delta"]) < 1e-6 and not ppl_row["worse"]
@@ -1118,3 +1123,53 @@ def test_fieldtest_end_to_end_with_llama_server(session, tmp_path):
     me = str(os.getpid())
     kids = subprocess.run(["ps", "--ppid", me, "-o", "comm="], capture_output=True, text=True).stdout
     assert "llama-server" not in kids
+
+
+def test_fieldtest_bench_extract_score_and_compare(tmp_path):
+    """ベンチマーク: 答えの取り出し(Answer: の最後、boxed、無ければ不正解)、問題の選び方(種を固定、写しを使う)、片方だけ正解での比較。"""
+    from gne import fieldtest as ft
+    for text, want in (("Work... Answer: 1,234", "1,234"), ("first Answer: 3\nthen **Answer: $42**", "42"), ("so \\boxed{7.5}", "7.5"),
+                       ("Answer: **-3**", "-3"), ("no final line 12", None), ("", None)):
+        assert ft.extract_answer("gsm8k", text) == want, text
+    for text, want in (("reasoning\nAnswer: C", "C"), ("Answer: (B)", "B"), ("**Answer: J**", "J"), ("\\boxed{\\text{D}}", "D"),
+                       ("The answer: a good one", None), ("Answer: Absolutely", None)):
+        assert ft.extract_answer("mmlu_pro", text) == want, text
+    assert ft.is_correct("gsm8k", "1,234", "1234") and ft.is_correct("gsm8k", "42.0", "42") and not ft.is_correct("gsm8k", None, "1")
+    assert ft.is_correct("mmlu_pro", "C", "C") and not ft.is_correct("mmlu_pro", "c", "C")
+    assert ft.bench_item("gsm8k", 3, {"question": "Q?", "answer": "steps\n#### 1,000"})["gold"] == "1000"
+    it = ft.bench_item("mmlu_pro", 5, {"question": "Q?", "options": ["x", "y"], "answer": "B"})
+    assert it["gold"] == "B" and "A) x\nB) y" in it["prompt"] and it["id"] == "5"
+    calls = []
+
+    def fetch(ds, cfg, split, offset, length):
+        calls.append(offset)
+        return {"num_rows_total": 1000, "rows": [{"row_idx": i, "row": {"question": f"q{i}", "answer": f"#### {i}"}}
+                                                 for i in range(offset, min(1000, offset + length))]}
+    a = ft.load_bench("gsm8k", tmp_path, 40, fetch=fetch, pace=0)
+    assert len(a) == 40 and len({x["id"] for x in a}) == 40 and all(x["gold"] == x["id"] for x in a)
+    n_calls = len(calls)
+    assert ft.load_bench("gsm8k", tmp_path, 40, fetch=fetch, pace=0) == a and len(calls) == n_calls        # 2 回目は写しを使う
+    assert [x["id"] for x in ft.load_bench("gsm8k", tmp_path / "other", 40, fetch=fetch, pace=0)] == [x["id"] for x in a]   # 同じ種なら同じ問題
+    with pytest.raises(GneError):
+        ft.load_bench("nope", tmp_path)
+
+    def chat(messages, max_tokens, seed, tools=None):
+        q = messages[-1]["content"]
+        if "cut" in q:
+            return {"reasoning_content": "long"}, "length", max_tokens
+        return {"content": "Answer: 5" if "right" in q else "Answer: 6"}, "stop", 10
+    items = [{"id": "1", "prompt": "right", "gold": "5"}, {"id": "2", "prompt": "wrong", "gold": "5"}, {"id": "3", "prompt": "cut", "gold": "5"}]
+    m, its, recs = ft.run_bench(chat, "gsm8k", items, 32, 2, lambda n: None)
+    assert m["n"] == 3 and abs(m["accuracy"] - 1 / 3) < 1e-9 and abs(m["no_answer"] - 1 / 3) < 1e-9 and abs(m["hit_limit"] - 1 / 3) < 1e-9
+    assert its == {"ids": ["1", "2", "3"], "correct": [True, False, False]} and "content" in recs[0] and "content" not in its
+    assert ft.mcnemar_p(0, 0) == 1.0 and ft.mcnemar_p(5, 5) == 1.0 and ft.mcnemar_p(0, 6) < 0.05 and ft.mcnemar_p(1, 4) > 0.05
+
+    def run(correct):
+        ids = [str(i) for i in range(len(correct))]
+        return {"bench": {"b": {"n": len(ids), "accuracy": sum(correct) / len(ids), "no_answer": 0.0, "tokens": 9}}, "bench_items": {"b": {"ids": ids, "correct": correct}},
+                "long": {}, "tools": {}, "prompts": {}, "ppl": {}}
+    ref = run([True] * 100)
+    r = next(x for x in ft.compare(ref, run([True] * 97 + [False] * 3)) if x["metric"] == "accuracy")
+    assert r["only_reference"] == 3 and r["only_target"] == 0 and not r["worse"]              # 3 問では揺れの範囲
+    r = next(x for x in ft.compare(ref, run([True] * 90 + [False] * 10)) if x["metric"] == "accuracy")
+    assert r["worse"] and r["p"] < 0.05

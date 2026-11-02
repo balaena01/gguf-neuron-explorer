@@ -107,6 +107,7 @@ gne writers --contrast configs/contrast/yandere_rules.yaml [--ref-layer 22] [--r
 gne heads contrast --contrast configs/contrast/yandere_react.yaml [--direction NAME] [--sort trigger_mass]
 gne heads attention -t "I had lunch with Emily today." --layer 15 --head 2 [--chat --system "..."]
 gne heads show 15 2                                  # 調書(対照分析の順位・W_O ブロックの logit lens・当てた gain)
+gne heads name 15 2 NAME                             # ヘッドに名前を付ける(ニューロンと同じ names に "L:Hh" で入る)
 gne steer --unit 15:H2:x2 -p "..." --compare         # ヘッドの gain(W_O の列ブロックを k 倍、LoRA)
 gne eval --recipe R --reactivity configs/contrast/yandere_react.yaml --head-controls 8
 ```
@@ -134,6 +135,8 @@ gne heads candidates --alloc evil --prompts held_out.yaml   # 比較表の組 ×
 gne heads candidates --tally evil                     # round_01.scores.txt(「番号 P C」)を候補ごとに集計する
 gne heads refine --name evil --n-heads 2              # その組で残った質問だけで、組を当てたまま方向を作り直し、足すヘッドを探す
 gne headproj export --recipe R --bake --strip-meta     # 人に渡す版: gne.* のメタデータ・名前の印・横の json を残さない
+gne headproj export --recipe R --bake --via-f16        # F16 で書いて llama-quantize で元の型に戻す。IQ1・IQ2・IQ3_XXS は imatrix が要る(--imatrix、<モデル名>.imatrix.gguf が横にあれば自動)
+gne headproj export --recipe R --bake --into F16.gguf --requant keep   # 別の GGUF に焼き込む。方向は分析したモデル、書き換える行列は --into のもの(GPU は使わない)
 ```
 
 ヘッドが残差に書くベクトルのうち、方向に沿った分だけを `1 − s` 倍にする。`s = 1` で消え、`s = 2` で反転、負の `s` で強まる。それ以外の分には触らないので、同じ効き目なら出力を丸ごと倍にする gain より副作用が小さい。4B の evil(system で頼んだ性格)では、2 個のヘッドで判定が 83% から 0 になり、能力も ppl も変わらなかった。同じ点数にそろえると、全層の射影消去は ppl が 15% 悪化し、同じヘッドの丸ごと倍率は能力が 14pt 落ちた。
@@ -142,7 +145,7 @@ gne headproj export --recipe R --bake --strip-meta     # 人に渡す版: gne.* 
 
 `heads pipeline` の spec は対照集合の中身(name・user_prompts・system か recipe)に、任意で `pipeline: {target, n_heads, hard, top_layers, max_examples}`。用途別のひな形は `configs/pipeline/`(system の性格・2 つの性格の差・レシピの性格・質問の種類の差。`about` は説明だけで、読むときに捨てる。UI の「ひな形」でも選べる)。質問は何百個でもよく、止めて測る段階は 64 個に間引く。止めると中立の側が大きく崩れる層(最初の層など)とヘッドは自動で外れる。目標を省くと A と B の平均の真ん中(半分ほど消す)、`B` で B 側の平均(消し切る)。止めて同じ spec・同じ設定で流し直すと、作り済みの方向と因果を使い回して配分からやり直す(`--fresh` で作り直す)。返事を作らない段は、測るコンテキストを最長の会話に合わせて小さく作り、生成用のコンテキストを先に解放する(27B のような大きいモデルで VRAM があふれてメインメモリに逃げ、極端に遅くなるのを避ける)。
 
-`gne fieldtest -m 焼き込み --against 元 --llama-server <パス>` は配る前の確かめ。本番と同じ動かし方で長い作業・ツール呼び出し・質問集(`--prompts 名前=ファイル`、`--match`)・perplexity を測り、悪化した行に印を付ける。eval では見えない崩れを見る。
+`gne fieldtest -m 焼き込み --against 元 --llama-server <パス>` は配る前の確かめ。本番と同じ動かし方で長い作業・ツール呼び出し・質問集(`--prompts 名前=ファイル`、`--match`)・ベンチマーク(`--bench gsm8k,mmlu_pro`)・perplexity を測り、悪化した行に印を付ける。eval では見えない崩れを見る。
 
 `heads candidates` は、生成なしで決めた組の全体の倍率を、返事を読んで決めるためのもの。正の倍率は A 側の振る舞いを消す向きで A 側の返事を、負の倍率(`--scales -0.5,-1`)は B 側で強める向きで B 側の返事を、どの候補か伏せて `<root>/heads/<model_id>/<名前>.cand/round_01.txt` に並べ、基準 `RUBRIC.md` を添える。種は全部の候補で同じ。P(振る舞いの強さ)と C(自然さ)を 1〜5 で付け、`--tally` で消す向きは min(6 − P, C)、強める向きは min(P, C) の平均で並べる。調整に使っていない質問を `--prompts` で渡す(渡さないと注意が出る)。`--with-recipe` のレシピ(ニューロンの種火など)は無介入の base も含めた全候補に重なる。採点は `references/judging.md` と同じく、1 回の比較を同じ採点役で、鍵を見る前に付ける。
 
@@ -170,7 +173,7 @@ gne eval --recipe R --doses 0,0.5,0.75,1 --when assistant --name R_as
 
 ```bash
 gne export-cvec --recipe R            # → ~/.gne/export/R.cvec.gguf(--verify で llama-completion と照合)
-gne gain --recipe R                   # gain ユニットとヘッドの方向成分のユニット → LoRA GGUF(gne headproj export も同じ)
+gne gain --recipe R                   # gain ユニットとヘッドの方向成分のユニット → LoRA GGUF(gne headproj export でも書ける。--via-f16・--into・--imatrix はそちらだけ)
 gne bake --recipe R --out dst.gguf    # FFN バイアスに焼き付け(対応 arch のみ)
 llama-cli -m M --control-vector ~/.gne/export/R.cvec.gguf
 llama-cli -m M --control-vector-scaled ~/.gne/export/R.cvec.gguf:0.6

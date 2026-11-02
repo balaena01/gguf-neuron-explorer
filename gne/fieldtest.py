@@ -6,6 +6,7 @@ gne eval は同じファイルにレシピの倍率を掛けて、短い問題�
 - 長い作業: 上限で切れた割合、短い周期と長い周期のループ、本文が空の割合
 - ツール呼び出し: 呼ぶべきときに呼ぶか、名前と引数は正しいか、呼ばなくてよいときに呼ばないか、結果を返した後に続けられるか
 - 自分の質問集(任意): ループ、本文が空の割合、上限で切れた割合、正規表現の一致率
+- ベンチマーク(任意、GSM8K・MMLU-Pro): 正答率と、片方のファイルだけが正解した問題の数。データは取得して手元にだけ置く
 - perplexity: 参照テキストをそのまま読ませて測る(gne で読むので、焼き込んだファイルも直接測れる)
 
 1 つのファイルずつ順に GPU に載せる。生成した文章は別のファイルに書き、結果の表には数字だけを出す。"""
@@ -14,6 +15,7 @@ from __future__ import annotations
 
 import atexit
 import json
+import math
 import os
 import re
 import shutil
@@ -22,6 +24,7 @@ import socket
 import subprocess
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -172,6 +175,124 @@ def run_prompts(chat: ChatFn, prompts: Sequence, max_tokens: int, n_parallel: in
             "tokens": _mean([r["tokens"] for r in recs]), "error": _mean([r["finish"] == "error" for r in recs])}, recs
 
 
+# --- ベンチマーク(能力を配布ファイルで測る) -----------------------------------------------------------------
+
+BENCHES = {"gsm8k": {"dataset": "openai/gsm8k", "config": "main", "split": "test", "n": 250},
+           "mmlu_pro": {"dataset": "TIGER-Lab/MMLU-Pro", "config": "default", "split": "test", "n": 300}}
+_ROWS_URL = "https://datasets-server.huggingface.co/rows"
+_NUM = r"-?\d[\d,]*(?:\.\d+)?|-?\.\d+"
+_GSM_ANSWER = re.compile(rf"[Aa]nswer\s*[:：]\s*[*_\s]*\$?\s*({_NUM})")
+_GSM_BOXED = re.compile(rf"\\boxed\{{\s*\\?\$?\s*({_NUM})")
+_MC_ANSWER = re.compile(r"[Aa]nswer\s*[:：]\s*[*_\s]*\(?([A-J])\)?(?![A-Za-z])")
+_MC_BOXED = re.compile(r"\\boxed\{\s*(?:\\text\{\s*)?\(?([A-J])\)?")
+
+
+def _number(s: str) -> float | None:
+    try:
+        return float(str(s).replace(",", "").strip())
+    except ValueError:
+        return None
+
+
+def extract_answer(bench: str, text: str) -> str | None:
+    """返事の本文から答えを取り出す(「Answer: …」か \\boxed の最後のもの)。無ければ None(不正解に数える)。"""
+    pats = (_GSM_ANSWER, _GSM_BOXED) if bench == "gsm8k" else (_MC_ANSWER, _MC_BOXED)
+    for pat in pats:
+        got = pat.findall(text or "")
+        if got:
+            return got[-1]
+    return None
+
+
+def is_correct(bench: str, answer: str | None, gold: str) -> bool:
+    if answer is None:
+        return False
+    if bench == "gsm8k":
+        a, b = _number(answer), _number(gold)
+        return a is not None and b is not None and abs(a - b) < 1e-6
+    return answer == gold
+
+
+def bench_item(bench: str, idx: int, row: dict) -> dict:
+    if bench == "gsm8k":
+        gold = str(row["answer"]).split("####")[-1].strip().replace(",", "")
+        prompt = f"{row['question']}\n\nSolve the problem. End your reply with a final line of the form: Answer: <number>"
+    else:
+        opts = "\n".join(f"{chr(65 + i)}) {o}" for i, o in enumerate(row["options"]))
+        gold = str(row["answer"]).strip()
+        prompt = f"{row['question']}\n\n{opts}\n\nChoose the best option. End your reply with a final line of the form: Answer: <letter>"
+    return {"id": str(idx), "prompt": prompt, "gold": gold}
+
+
+def _fetch_rows(dataset: str, config: str, split: str, offset: int, length: int, retries: int = 8) -> dict:
+    q = urllib.parse.urlencode({"dataset": dataset, "config": config, "split": split, "offset": offset, "length": length})
+    err: Exception | None = None
+    for i in range(retries):
+        try:
+            with urllib.request.urlopen(f"{_ROWS_URL}?{q}", timeout=60) as r:
+                return json.load(r)
+        except (urllib.error.URLError, OSError, ValueError) as e:      # 429 は言われた時間だけ待つ
+            err = e
+            after = getattr(e, "headers", None) and e.headers.get("Retry-After")
+            wait = float(after) if after and str(after).replace(".", "", 1).isdigit() else 5.0 * 2 ** i
+            time.sleep(min(120.0, wait))
+    raise GneError("DOWNLOAD_FAILED", f"{dataset} を取得できません: {err}", "ネットワークを確かめてください(一度取得すれば手元の写しを使います)")
+
+
+def load_bench(bench: str, cache_dir: Path, n: int | None = None, seed: int = 0, fetch: Callable = _fetch_rows,
+               pace: float = 1.0) -> list[dict]:
+    """ベンチマークの問題を、種を固定して n 問選ぶ。最初の 1 回だけ取得し、<cache_dir>/ に写しを置く(リポジトリには入れない)。"""
+    if bench not in BENCHES:
+        raise GneError("BAD_ARGS", f"ベンチマーク {bench!r} はありません({', '.join(BENCHES)})")
+    b = BENCHES[bench]
+    n = int(n or b["n"])
+    path = Path(cache_dir) / f"{bench}-n{n}-s{seed}.json"
+    if path.is_file():
+        return json.loads(path.read_text(encoding="utf-8"))
+    first = fetch(b["dataset"], b["config"], b["split"], 0, 1)
+    total = int(first["num_rows_total"])
+    idx = sorted(int(x) for x in np.random.default_rng(seed).choice(total, size=min(n, total), replace=False))
+    rows: dict[int, dict] = {}
+    i = 0
+    while i < len(idx):                                 # 1 回で 100 行まで。近い番号はまとめて取る
+        start = idx[i]
+        if rows:
+            time.sleep(pace)                            # 続けて取るとレート制限(429)に当たる
+        got = fetch(b["dataset"], b["config"], b["split"], start, 100)
+        for r in got["rows"]:
+            rows[int(r["row_idx"])] = r["row"]
+        while i < len(idx) and idx[i] < start + 100:
+            i += 1
+    items = [bench_item(bench, k, rows[k]) for k in idx]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(items, ensure_ascii=False, indent=0), encoding="utf-8")
+    return items
+
+
+def run_bench(chat: ChatFn, bench: str, items: Sequence[dict], max_tokens: int, n_parallel: int, tick: Callable[[int], None],
+              seed: int = 5000) -> tuple[dict, dict, list[dict]]:
+    def one(i, it):
+        msg, fin, ntok = chat(turns(it["prompt"]), max_tokens, seed + i)
+        think, body = msg.get("reasoning_content") or "", msg.get("content") or ""
+        ans = extract_answer(bench, body)
+        return {"id": it["id"], "finish": fin, "tokens": ntok, "body_chars": len(body), "answer": ans, "gold": it["gold"],
+                "correct": is_correct(bench, ans, it["gold"]), "reasoning": think, "content": body}
+    recs = _map(one, list(items), n_parallel, tick)
+    m = {"n": len(recs), "accuracy": _mean([r["correct"] for r in recs]), "no_answer": _mean([r["answer"] is None for r in recs]),
+         "empty": _mean([r["body_chars"] == 0 for r in recs]), "hit_limit": _mean([r["finish"] == "length" for r in recs]),
+         "tokens": _mean([r["tokens"] for r in recs]), "error": _mean([r["finish"] == "error" for r in recs])}
+    return m, {"ids": [r["id"] for r in recs], "correct": [bool(r["correct"]) for r in recs]}, recs
+
+
+def mcnemar_p(only_a: int, only_b: int) -> float:
+    """片方だけが正解した問題の数からの、両側の正確な検定(差が無いなら半々に分かれるはず)。"""
+    n = only_a + only_b
+    if n == 0:
+        return 1.0
+    tail = sum(math.comb(n, k) for k in range(min(only_a, only_b) + 1)) / 2 ** n
+    return min(1.0, 2 * tail)
+
+
 # --- ファイルどうしの比較 ---------------------------------------------------------------------------------
 
 # (区画, 指標, 表の名前, よい向き)。よい向き: -1 = 小さいほどよい、+1 = 大きいほどよい、0 = 参考
@@ -182,6 +303,8 @@ TOOL_ROWS = [("called", "呼ぶべきときに呼んだ", 1), ("name_ok", "名�
              ("first_hit_limit", "最初の返事が上限で切れた", -1), ("followup_hit_limit", "結果の後が上限で切れた", -1), ("error", "エラー", -1)]
 PROMPT_ROWS = [("match", "一致率", 0), ("loop", "ループ", -1), ("empty", "本文が空", -1), ("hit_limit", "上限で切れた", -1),
                ("tokens", "トークン数", 0), ("error", "エラー", -1)]
+BENCH_ROWS = [("no_answer", "答えを取り出せなかった", -1), ("empty", "本文が空", -1), ("hit_limit", "上限で切れた", -1),
+              ("tokens", "トークン数", 0), ("error", "エラー", -1)]
 PPL_TOL = 0.01                                      # perplexity は 1% まで同程度
 TAIL_TOL = 0.05
 
@@ -209,6 +332,19 @@ def compare(ref: dict, tgt: dict) -> list[dict]:
         a, b = (ref.get("prompts") or {}).get(name) or {}, (tgt.get("prompts") or {}).get(name) or {}
         for key, label, sign in PROMPT_ROWS:
             add(f"prompts:{name}", key, label, sign, a.get(key), b.get(key), b.get("n") or a.get("n"), None)
+    for name in sorted(set(ref.get("bench") or {}) & set(tgt.get("bench") or {})):
+        a, b = ref["bench"][name], tgt["bench"][name]
+        ia, ib = (ref.get("bench_items") or {}).get(name) or {}, (tgt.get("bench_items") or {}).get(name) or {}
+        ca, cb = dict(zip(ia.get("ids", []), ia.get("correct", []))), dict(zip(ib.get("ids", []), ib.get("correct", [])))
+        both = set(ca) & set(cb)                    # 同じ問題どうしで比べる。悪化は、正答率が下がり、片方だけ正解の偏りが有意なときだけ
+        only_r, only_t = sum(ca[k] and not cb[k] for k in both), sum(cb[k] and not ca[k] for k in both)
+        p = mcnemar_p(only_r, only_t)
+        delta = None if a.get("accuracy") is None or b.get("accuracy") is None else b["accuracy"] - a["accuracy"]
+        rows.append({"section": f"bench:{name}", "metric": "accuracy", "label": "正答率", "reference": a.get("accuracy"), "target": b.get("accuracy"),
+                     "delta": delta, "tol": None, "only_reference": only_r, "only_target": only_t, "p": p,
+                     "worse": bool(delta is not None and delta < 0 and p < 0.05)})
+        for key, label, sign in BENCH_ROWS:
+            add(f"bench:{name}", key, label, sign, a.get(key), b.get(key), b.get("n"), None)
     pa, pb = ref.get("ppl") or {}, tgt.get("ppl") or {}
     for k in sorted(set(pa) | set(pb)):
         a, b = pa.get(k), pb.get(k)
@@ -374,7 +510,8 @@ def fieldtest(session, model: str | Path | None = None, *, against: str | Path |
               prompt_tokens: int = 1536, temperature: float = 0.6, top_p: float = 0.95, top_k: int = 20, presence_penalty: float = 0.0,
               n_parallel: int = 4, reasoning_effort: str | None = "medium", template_kwargs: dict | None = None,
               llama_server: str | None = None, server_args: Sequence[str] | str | None = None, ppl: bool = True,
-              skip_long: bool = False, skip_tools: bool = False) -> dict:
+              skip_long: bool = False, skip_tools: bool = False, bench: Sequence[str] | str | None = None, bench_n: int | None = None,
+              bench_tokens: int = 4096) -> dict:
     """model(既定はいま読んでいるモデル)を本番と同じ動かし方で測り、against のファイルと比べる。lora は model に当てる LoRA
     (パスか パス:倍率)。against を省いて lora を渡すと、同じファイルの LoRA なしと比べる。1 つずつ順に GPU に載せる。"""
     t0 = time.perf_counter()
@@ -407,7 +544,9 @@ def fieldtest(session, model: str | Path | None = None, *, against: str | Path |
     long_q = None if skip_long else load_long_tasks(long_tasks)
     tool_spec = None if skip_tools else load_tool_tasks(tool_tasks)
     sets = parse_prompt_sets(prompts)
-    if not long_q and not tool_spec and not sets and not ppl:
+    names = [x.strip() for x in bench.split(",") if x.strip()] if isinstance(bench, str) else list(bench or [])
+    benches = {b: load_bench(b, session.store.fieldtest_dir() / "data", bench_n) for b in names}   # 取得の失敗は GPU を動かす前に返す
+    if not long_q and not tool_spec and not sets and not benches and not ppl:
         raise GneError("BAD_ARGS", "測るものがありません")
     nm = name or re.sub(r"[^\w.\-]+", "_", target.name.removesuffix(".gguf"))
     if not re.fullmatch(r"[\w.\-]+", nm):
@@ -419,12 +558,12 @@ def fieldtest(session, model: str | Path | None = None, *, against: str | Path |
     if reasoning_effort:
         tkw.setdefault("reasoning_effort", reasoning_effort)
     sampling = {"temperature": temperature, "top_p": top_p, "top_k": top_k, "presence_penalty": presence_penalty}
-    n_ctx_slot = max(6144, max(long_tokens, tool_tokens, prompt_tokens) + 2048)
+    n_ctx_slot = max(6144, max(long_tokens, tool_tokens, prompt_tokens, bench_tokens if benches else 0) + 2048)
     out_dir = session.store.fieldtest_dir()
     from .evalx import load_suite
     n_ppl = (len(load_suite(None).ppl) if ppl else 0)
     plan = ([("reference", ref, None)] if ref is not None else []) + [("target", target, lora_arg)]
-    per_run = (len(long_q) if long_q else 0) + (len(tool_spec["tasks"]) if tool_spec else 0) + sum(len(v) for v in sets.values()) + n_ppl
+    per_run = (len(long_q) if long_q else 0) + (len(tool_spec["tasks"]) if tool_spec else 0) + sum(len(v) for v in sets.values()) + sum(len(v) for v in benches.values()) + n_ppl
     total, done = per_run * len(plan), 0
     prog = session.progress
 
@@ -444,7 +583,7 @@ def fieldtest(session, model: str | Path | None = None, *, against: str | Path |
             tr = time.perf_counter()
             run: dict = {"label": label, "model": str(path), "file": Path(path).name, "lora": lo}
             rec: dict = {}
-            if long_q or tool_spec or sets:
+            if long_q or tool_spec or sets or benches:
                 with LlamaServer(binary, path, lora=lo, n_parallel=n_parallel, n_ctx_slot=n_ctx_slot, ngl=session._engine_kw["n_gpu_layers"],
                                  template_kwargs=tkw or None, log=out_dir / f"{nm}.{label}.server.log", extra=server_args or ()) as srv:
                     chat = srv.chat_fn(sampling)
@@ -456,6 +595,10 @@ def fieldtest(session, model: str | Path | None = None, *, against: str | Path |
                     for k, q in sets.items():
                         run["prompts"][k], rec[f"prompts:{k}"] = run_prompts(chat, q, prompt_tokens, n_parallel,
                                                                              step(f"{label}: 質問集 {k}"), match)
+                    run["bench"], run["bench_items"] = {}, {}
+                    for k, q in benches.items():
+                        run["bench"][k], run["bench_items"][k], rec[f"bench:{k}"] = run_bench(chat, k, q, bench_tokens, n_parallel,
+                                                                                              step(f"{label}: {k}"))
             if ppl:
                 run["ppl"] = measure_ppl(session, path, lora_pair if lo else None, step(f"{label}: perplexity"))
             run["seconds"] = time.perf_counter() - tr
@@ -465,14 +608,15 @@ def fieldtest(session, model: str | Path | None = None, *, against: str | Path |
         session.no_yield = False
     tgt_run = runs[-1]
     ref_run = runs[0] if len(runs) > 1 else None
-    empty = {"long": {}, "tools": {}, "prompts": {}, "ppl": {}}
+    empty = {"long": {}, "tools": {}, "prompts": {}, "ppl": {}, "bench": {}, "bench_items": {}}
     rows = compare({**empty, **ref_run}, {**empty, **tgt_run}) if ref_run else None
     d = {"name": nm, "target": {k: tgt_run[k] for k in ("model", "file", "lora")},
          "reference": None if ref_run is None else {k: ref_run[k] for k in ("model", "file", "lora")},
          "settings": {"long_tokens": long_tokens, "tool_tokens": tool_tokens, "prompt_tokens": prompt_tokens, **sampling,
                       "n_parallel": n_parallel, "template_kwargs": tkw, "match": match, "llama_server": binary,
                       "n_long": len(long_q or []), "n_tools": len((tool_spec or {}).get("tasks") or []),
-                      "prompts": {k: len(v) for k, v in sets.items()}},
+                      "prompts": {k: len(v) for k, v in sets.items()}, "bench": {k: len(v) for k, v in benches.items()},
+                      "bench_tokens": bench_tokens},
          "runs": runs, "compare": rows, "same_level": None if rows is None else not any(r["worse"] for r in rows),
          "worse": [] if rows is None else [f"{r['section']}.{r['metric']}" for r in rows if r["worse"]],
          "updated": time.strftime("%Y-%m-%dT%H:%M:%S"), "seconds": time.perf_counter() - t0}

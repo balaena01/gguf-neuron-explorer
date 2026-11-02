@@ -2811,11 +2811,13 @@ def test_fieldtest_panel(refine_server, browser, tmp_path):
     url = refine_server
     from gne.store import Store  # noqa: F401
     done_row = {"name": "ftx", "target": {"model": "/m/a.gguf", "file": "a.gguf", "lora": None}, "reference": {"model": "/m/b.gguf", "file": "b.gguf", "lora": None},
-                "settings": {"n_long": 24, "n_tools": 40, "long_tokens": 3072, "prompts": {"mine": 100}},
+                "settings": {"n_long": 24, "n_tools": 40, "long_tokens": 3072, "prompts": {"mine": 100}, "bench": {"gsm8k": 250}},
                 "runs": [], "same_level": False, "worse": ["long.loop"], "updated": "2026-11-02T12:00:00", "seconds": 600,
                 "compare": [{"section": "long", "metric": "loop", "label": "短い周期のループ", "reference": 0.0, "target": 0.125, "delta": 0.125, "worse": True},
                             {"section": "tools", "metric": "called", "label": "呼ぶべきときに呼んだ", "reference": 1.0, "target": 1.0, "delta": 0.0, "worse": False},
                             {"section": "prompts:mine", "metric": "empty", "label": "本文が空", "reference": 0.02, "target": 0.02, "delta": 0.0, "worse": False},
+                            {"section": "bench:gsm8k", "metric": "accuracy", "label": "正答率", "reference": 0.97, "target": 0.96, "delta": -0.01, "worse": False,
+                             "only_reference": 4, "only_target": 2, "p": 0.688},
                             {"section": "ppl", "metric": "mean", "label": "全体(幾何平均)", "reference": 6.77, "target": 6.78, "delta": 0.01, "worse": False}]}
     for bad in ("nope", "x.replies"):
         with pytest.raises(urllib.error.HTTPError) as ei:
@@ -2856,12 +2858,14 @@ def test_fieldtest_panel(refine_server, browser, tmp_path):
         pg.fill("#ft-match", "abc")
         pg.fill("#ft-long", "2048")
         pg.uncheck("#ft-ppl")
+        pg.check("#ft-gsm8k")
         pg.click("#ft-go")
         pg.wait_for_selector("#ft-result .ft-table", timeout=15000)
         p = posts[0]["params"]
         assert posts[0]["kind"] == "fieldtest" and p == {"long_tokens": 2048, "tool_tokens": 1536, "prompt_tokens": 1536, "ppl": False, "model": "/m/a.gguf",
-                                                         "against": "/m/b.gguf", "match": "abc", "prompts": ["mine=/q/x.json"]}
-        assert pg.evaluate("document.querySelectorAll('#ft-result tr.ft-sec').length") == 4
+                                                         "against": "/m/b.gguf", "match": "abc", "prompts": ["mine=/q/x.json"], "bench": ["gsm8k"]}
+        assert pg.evaluate("document.querySelectorAll('#ft-result tr.ft-sec').length") == 5
+        assert "0.688" in pg.evaluate("document.querySelector('#ft-result').textContent")
         assert pg.evaluate("document.querySelectorAll('#ft-result tr.ft-worse').length") == 1
         assert "12.5%" in pg.evaluate("document.querySelector('#ft-result tr.ft-worse').textContent")
         assert "6.780" in pg.evaluate("document.querySelector('#ft-result').textContent")
