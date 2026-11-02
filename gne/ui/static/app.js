@@ -773,6 +773,7 @@ async function onJobFinished(j) {
   const what = `${KIND[j.kind] || j.kind}${L !== undefined ? ` L${L}` : ""}`;
   state.flash = { text: `${t({ done: "完了", error: "失敗", cancelled: "中止" }[j.status])}: ${what}`, until: Date.now() + 10000 };   // 結果を先に(状態表示は狭いので)
   updateStatus();
+  if (j.kind === "fieldtest" && evalView) evalView.ft.jobEnded(j);        // 実地テスト: eval ビューに結果を出す
   if (j.kind === "headproj_export" && recipePanel) recipePanel.lxDone(j);   // レシピのタブの LoRA・焼き込み
   if (j.kind === "head_pipeline" || j.kind === "heads_candidates" || j.kind === "heads_refine") {    // 一括・強さの候補・残りから追加: direction ビューに結果を出す
     if (j.status === "done") {
@@ -895,7 +896,7 @@ async function setView(v) {
   if (v === "eval") {
     if (!state.model) { xv.innerHTML = `<p class="muted" style="padding:16px">${t("合成の構造には eval がありません")}</p>`; return; }
     if (!evalView) {
-      evalView = new EvalView(xv, { recipe: state.recipe, onRun: (p) => startJob("eval", p),          // CHANGE-06 G: 組・方式のレシピを読み込む
+      evalView = new EvalView(xv, { recipe: state.recipe, onRun: (p) => startJob("eval", p), onRunJob: (kind, params) => jobsBar.start(kind, params),          // CHANGE-06 G: 組・方式のレシピを読み込む
                                     onLoadProj: (name, specs) => { state.recipe.loadProj(name, specs); expand("list"); listTab("recipe"); },
                                     onLoadRecipe: (rd) => {
                                       const us = (rd.units || []).map((u) => (u.mode === "proj" && !u.direction ? { ...u, direction: rd.default_direction } : u));

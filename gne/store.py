@@ -106,6 +106,9 @@ class Store:
     def export_dir(self) -> Path:
         return self._dir("export")
 
+    def fieldtest_dir(self) -> Path:
+        return self._dir("fieldtest")
+
     def save_meta(self, meta) -> Path:
         p = self._dir("models") / f"{meta.model_id}.json"
         d = asdict(meta)

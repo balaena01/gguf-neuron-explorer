@@ -250,6 +250,27 @@ def estimate(session, kind: str, params: dict) -> dict:
         sub = estimate(session, "head_pipeline", {"spec": spec})
         sec = (sub.get("seconds") or 0.0) + (2 * n_a + 3 * min(64, n_b)) * sp.setprefill / 1000 * 1.2
         detail = {"prompts_a": n_a, "remaining_guess": max(4, n_a // 3), "pipeline": sub.get("detail")}
+    elif kind == "fieldtest":                                  # 1 ファイルあたり: 長い作業 + ツール(2 往復)+ 質問集。多めに見る
+        import yaml
+        from .fieldtest import LONG_TASKS, TOOL_TASKS
+        np_ = int(p.get("n_parallel", 4))
+        def _count(path, key=None):
+            try:
+                pth = Path(str(path))
+                d = json.loads(pth.read_text(encoding="utf-8")) if pth.suffix == ".json" else yaml.safe_load(pth.read_text(encoding="utf-8"))
+                return len(d[key] if key else d)
+            except (OSError, ValueError, TypeError, KeyError):
+                return 0
+        n_long = 0 if p.get("skip_long") else _count(p.get("long_tasks") or LONG_TASKS)
+        n_tool = 0 if p.get("skip_tools") else _count(p.get("tool_tasks") or TOOL_TASKS, "tasks")
+        sets = p.get("prompts") or []
+        vals = list(sets.values()) if isinstance(sets, dict) else [str(x).split("=", 1)[-1] for x in sets]
+        n_q = sum(len(v) if isinstance(v, list) else _count(v) for v in vals)
+        n_runs = 2 if (p.get("against") or p.get("lora")) else 1
+        one = (sp.gen(n_long, int(p.get("long_tokens", 3072)), np_) * 0.7 + sp.gen(n_tool, 400, np_) * 2
+               + sp.gen(n_q, int(p.get("prompt_tokens", 1536)), np_) * 0.5 + 120)
+        sec = n_runs * one
+        detail = {"files": n_runs, "long_tasks": n_long, "tool_tasks": n_tool, "prompts": n_q}
     elif kind == "heads_candidates":                           # 候補(組 × 倍率 + 無介入)× 両側の質問を生成する
         n_rows = len(p.get("n_heads") or []) or 3
         ap = p.get("alloc")

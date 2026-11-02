@@ -1,0 +1,418 @@
+{
+ "tools": [
+  {
+   "type": "function",
+   "function": {
+    "name": "get_weather",
+    "description": "Get the current weather for a city.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "city": {
+       "type": "string"
+      },
+      "unit": {
+       "type": "string",
+       "enum": [
+        "celsius",
+        "fahrenheit"
+       ]
+      }
+     },
+     "required": [
+      "city"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "web_search",
+    "description": "Search the web and return the top results.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "query": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "query"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "calculator",
+    "description": "Evaluate an arithmetic expression exactly.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "expression": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "expression"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "read_file",
+    "description": "Read a text file from the user's workspace.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "path": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "path"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "write_file",
+    "description": "Write text to a file in the user's workspace.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "path": {
+       "type": "string"
+      },
+      "content": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "path",
+      "content"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "run_shell",
+    "description": "Run a shell command in the user's workspace and return its output.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "command": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "command"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "send_email",
+    "description": "Send an email.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "to": {
+       "type": "string"
+      },
+      "subject": {
+       "type": "string"
+      },
+      "body": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "to",
+      "subject",
+      "body"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "create_calendar_event",
+    "description": "Create an event in the user's calendar.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "title": {
+       "type": "string"
+      },
+      "start_time": {
+       "type": "string",
+       "description": "ISO 8601"
+      },
+      "duration_minutes": {
+       "type": "integer"
+      }
+     },
+     "required": [
+      "title",
+      "start_time"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "translate",
+    "description": "Translate text into another language.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "text": {
+       "type": "string"
+      },
+      "target_language": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "text",
+      "target_language"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "get_stock_price",
+    "description": "Get the latest price of a stock by ticker symbol.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "symbol": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "symbol"
+     ]
+    }
+   }
+  }
+ ],
+ "tasks": [
+  {
+   "prompt": "What's the weather like in Osaka right now?",
+   "expect": "get_weather"
+  },
+  {
+   "prompt": "Is it raining in London? Use fahrenheit.",
+   "expect": "get_weather"
+  },
+  {
+   "prompt": "札幌の今の天気を教えて",
+   "expect": "get_weather"
+  },
+  {
+   "prompt": "Search the web for the latest news about the James Webb Space Telescope.",
+   "expect": "web_search"
+  },
+  {
+   "prompt": "最新のRustのリリースノートをウェブで調べて",
+   "expect": "web_search"
+  },
+  {
+   "prompt": "Look up who won the most recent Nobel Prize in Physics.",
+   "expect": "web_search"
+  },
+  {
+   "prompt": "What is 48213 * 9177 - 31337? Use the calculator.",
+   "expect": "calculator"
+  },
+  {
+   "prompt": "計算機で (1234.5 / 3.2) + 987 を正確に計算して",
+   "expect": "calculator"
+  },
+  {
+   "prompt": "Compute 2 to the power of 40 exactly.",
+   "expect": "calculator"
+  },
+  {
+   "prompt": "Read the file notes/todo.md and summarize it.",
+   "expect": "read_file"
+  },
+  {
+   "prompt": "config/settings.yaml の中身を見せて",
+   "expect": "read_file"
+  },
+  {
+   "prompt": "Open README.md and tell me what the project does.",
+   "expect": "read_file"
+  },
+  {
+   "prompt": "Create a file hello.py that prints 'Hello, world!'.",
+   "expect": "write_file"
+  },
+  {
+   "prompt": "memo.txt に「明日10時に打ち合わせ」と書き込んで",
+   "expect": "write_file"
+  },
+  {
+   "prompt": "Save a shopping list with eggs, milk and bread to list.txt.",
+   "expect": "write_file"
+  },
+  {
+   "prompt": "List the files in the current directory.",
+   "expect": "run_shell"
+  },
+  {
+   "prompt": "git status を実行して結果を教えて",
+   "expect": "run_shell"
+  },
+  {
+   "prompt": "Check how much disk space is free on this machine.",
+   "expect": "run_shell"
+  },
+  {
+   "prompt": "Send an email to alice@example.com with subject 'Lunch' saying I'll be 10 minutes late.",
+   "expect": "send_email"
+  },
+  {
+   "prompt": "bob@example.com に「資料送りました」という件名でメールを送って。本文は「ご確認ください」で。",
+   "expect": "send_email"
+  },
+  {
+   "prompt": "Email team@example.com that the deploy finished successfully.",
+   "expect": "send_email"
+  },
+  {
+   "prompt": "Add a meeting called 'Design review' tomorrow at 15:00 for 60 minutes to my calendar.",
+   "expect": "create_calendar_event"
+  },
+  {
+   "prompt": "2026年10月20日の9時から「歯医者」の予定を入れて",
+   "expect": "create_calendar_event"
+  },
+  {
+   "prompt": "Schedule 'Gym' for 2026-10-12T07:00 for 45 minutes.",
+   "expect": "create_calendar_event"
+  },
+  {
+   "prompt": "Translate 'Where is the nearest station?' into Japanese using the translate tool.",
+   "expect": "translate"
+  },
+  {
+   "prompt": "「ありがとうございます」をフランス語に翻訳ツールで訳して",
+   "expect": "translate"
+  },
+  {
+   "prompt": "Translate this into German with the tool: 'The meeting is postponed.'",
+   "expect": "translate"
+  },
+  {
+   "prompt": "What's Apple's stock price right now?",
+   "expect": "get_stock_price"
+  },
+  {
+   "prompt": "NVDA の株価を調べて",
+   "expect": "get_stock_price"
+  },
+  {
+   "prompt": "Get the current price of TSLA.",
+   "expect": "get_stock_price"
+  },
+  {
+   "prompt": "What is the capital of Japan?",
+   "expect": null
+  },
+  {
+   "prompt": "Write a haiku about autumn.",
+   "expect": null
+  },
+  {
+   "prompt": "こんにちは！元気？",
+   "expect": null
+  },
+  {
+   "prompt": "Explain what a linked list is in two sentences.",
+   "expect": null
+  },
+  {
+   "prompt": "What does HTTP stand for?",
+   "expect": null
+  },
+  {
+   "prompt": "おすすめの本を一冊教えて",
+   "expect": null
+  },
+  {
+   "prompt": "Thanks, that's all for now.",
+   "expect": null
+  },
+  {
+   "prompt": "What is 2 + 2?",
+   "expect": null
+  },
+  {
+   "prompt": "猫と犬、どっちが好き？",
+   "expect": null
+  },
+  {
+   "prompt": "Give me a one-line definition of photosynthesis.",
+   "expect": null
+  }
+ ],
+ "results": {
+  "get_weather": {
+   "temp_c": 18,
+   "condition": "cloudy"
+  },
+  "web_search": {
+   "results": [
+    {
+     "title": "Result 1",
+     "snippet": "Example snippet."
+    }
+   ]
+  },
+  "calculator": {
+   "result": "42"
+  },
+  "read_file": {
+   "content": "line 1\nline 2\nline 3"
+  },
+  "write_file": {
+   "ok": true
+  },
+  "run_shell": {
+   "stdout": "a.txt\nb.txt\n",
+   "exit_code": 0
+  },
+  "send_email": {
+   "ok": true
+  },
+  "create_calendar_event": {
+   "ok": true,
+   "id": "evt_1"
+  },
+  "translate": {
+   "translation": "(translated text)"
+  },
+  "get_stock_price": {
+   "price": 123.45,
+   "currency": "USD"
+  }
+ }
+}

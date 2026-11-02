@@ -2039,5 +2039,79 @@ def heads_refine(c: Common, holder: dict,
         lines.append("3. 追加の組を作れなかったので、合わせたレシピはありません")
     return d, "\n".join(lines), 0
 
+
+def _fieldtest_text(d: dict) -> str:
+    def fmt(section, key, v):
+        if v is None:
+            return "—"
+        if section == "ppl":
+            return f"{v:.3f}"
+        if key == "tokens":
+            return f"{v:.0f}"
+        if key == "tail_distinct":
+            return f"{v:.2f}"
+        return f"{v * 100:.1f}%"
+    title = {"long": f"長い作業({d['settings']['n_long']} 問、{d['settings']['long_tokens']} トークンまで)",
+             "tools": f"ツール呼び出し({d['settings']['n_tools']} 問)", "ppl": "perplexity"}
+    lines = [f"{d['path']}({d['seconds'] / 60:.0f} 分)", f"対象: {d['target']['file']}" + (f" + LoRA {Path(d['target']['lora']).name}" if d["target"]["lora"] else "")]
+    if d["reference"]:
+        lines.append(f"比較: {d['reference']['file']}")
+    rows = d["compare"]
+    if rows is None:                                  # 比べる相手が無いとき: 対象の数字だけ
+        run = d["runs"][-1]
+        rows = []
+        for sec in ("long", "tools"):
+            rows += [{"section": sec, "metric": k, "label": k, "reference": None, "target": v, "worse": False}
+                     for k, v in (run.get(sec) or {}).items() if not k.startswith("n")]
+        for name, m in (run.get("prompts") or {}).items():
+            rows += [{"section": f"prompts:{name}", "metric": k, "label": k, "reference": None, "target": v, "worse": False}
+                     for k, v in m.items() if k != "n"]
+        rows += [{"section": "ppl", "metric": k, "label": k, "reference": None, "target": v, "worse": False} for k, v in (run.get("ppl") or {}).items()]
+    cur = None
+    for r in rows:
+        if r["section"] != cur:
+            cur = r["section"]
+            head = title.get(cur) or f"質問集 {cur.split(':', 1)[-1]}({d['settings']['prompts'].get(cur.split(':', 1)[-1], '?')} 問、{d['settings']['prompt_tokens']} トークンまで)"
+            lines.append(head)
+            lines.append(f"  {'':<26} {'比較':>9} {'対象':>9}")
+        lines.append(f"  {r['label']:<26} {fmt(r['section'], r['metric'], r['reference']):>9} {fmt(r['section'], r['metric'], r['target']):>9}"
+                     + ("  ← 悪化" if r.get("worse") else ""))
+    if d["same_level"] is not None:
+        lines.append("結論: すべて同程度(割合は 2 問ぶん、perplexity は 1% までの差を同程度とみなす)" if d["same_level"]
+                     else "結論: 悪化した項目があります: " + ", ".join(d["worse"]))
+    lines.append(f"生成した文章: {d['replies_path']}")
+    return "\n".join(lines)
+
+
+@gne_command(app, "fieldtest")
+def fieldtest_cmd(c: Common, holder: dict,
+                  against: Optional[Path] = typer.Option(None, "--against", help="比べるファイル(例 元のモデル)。省くと --model だけ測る(--lora があれば LoRA なしと比べる)"),
+                  lora: Optional[str] = typer.Option(None, "--lora", help="--model に当てる LoRA(パス か パス:倍率)"),
+                  name: Optional[str] = typer.Option(None, "--name", help="保存名(既定はファイル名)"),
+                  prompts: Optional[list[str]] = typer.Option(None, "--prompts", help="自分の質問集 名前=ファイル(JSON か YAML のリスト、何度でも)"),
+                  match: Optional[str] = typer.Option(None, "--match", help="質問集の返事(本文)に当てる正規表現。一致率を出す"),
+                  long_tasks: Optional[Path] = typer.Option(None, "--long-tasks", help="長い作業の課題(既定 configs/fieldtest/long_tasks.json)"),
+                  tool_tasks: Optional[Path] = typer.Option(None, "--tool-tasks", help="ツールの課題(既定 configs/fieldtest/tool_tasks.json)"),
+                  long_tokens: int = typer.Option(3072, "--long-tokens"), tool_tokens: int = typer.Option(1536, "--tool-tokens"),
+                  prompt_tokens: int = typer.Option(1536, "--prompt-tokens"), temperature: float = typer.Option(0.6, "--temperature"),
+                  n_parallel: int = typer.Option(4, "--n-parallel", help="同時に生成する本数"),
+                  reasoning_effort: Optional[str] = typer.Option("medium", "--reasoning-effort", help="チャットテンプレートに渡す値"),
+                  llama_server: Optional[str] = typer.Option(None, "--llama-server", envvar="GNE_LLAMA_SERVER", help="llama-server のパス"),
+                  server_args: Optional[str] = typer.Option(None, "--server-args", help="llama-server に足す引数"),
+                  ppl: bool = typer.Option(True, "--ppl/--no-ppl", help="perplexity も測る"),
+                  skip_long: bool = typer.Option(False, "--skip-long"), skip_tools: bool = typer.Option(False, "--skip-tools"),
+                  yes: bool = _YES):
+    """実地テスト: 本番と同じ動かし方(llama-server、思考あり、サンプリングあり)で、長い作業・ツール呼び出し・質問集・perplexity を測り、
+    ファイルどうしを比べる。eval は同じファイルの倍率違いを短い問題で見るもの。こちらは焼き込んだファイルをそのまま測れる。"""
+    s = holder["session"] = c.session()
+    args = {"against": str(against) if against else None, "lora": lora, "prompts": list(prompts or []), "long_tokens": long_tokens,
+            "prompt_tokens": prompt_tokens, "n_parallel": n_parallel, "skip_long": skip_long, "skip_tools": skip_tools,
+            "long_tasks": str(long_tasks) if long_tasks else None, "tool_tasks": str(tool_tasks) if tool_tasks else None}
+    _gate(s, "fieldtest", args, yes, None)
+    d = s.fieldtest(against=against, lora=lora, name=name, prompts=list(prompts or []), match=match, long_tasks=long_tasks, tool_tasks=tool_tasks,
+                    long_tokens=long_tokens, tool_tokens=tool_tokens, prompt_tokens=prompt_tokens, temperature=temperature, n_parallel=n_parallel,
+                    reasoning_effort=reasoning_effort, llama_server=llama_server, server_args=server_args, ppl=ppl, skip_long=skip_long, skip_tools=skip_tools)
+    return d, _fieldtest_text(d), 0
+
 if __name__ == "__main__":
     app()

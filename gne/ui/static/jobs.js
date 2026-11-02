@@ -8,7 +8,7 @@ export const KIND = { embed: tr("埋め込み"), connections: "connections", lay
                stats_resid: tr("残差の統計"), stats_act: tr("活性の統計"), reverse: tr("逆引き"), eval: "eval",
                heads_contrast: tr("ヘッドの対照分析"), experts_contrast: tr("専門家の対照分析"), experts_sweep: tr("専門家の sweep"),
                heads_causal: tr("因果スクリーニング"), heads_allocate: tr("強さの配分"), head_pipeline: tr("方向とヘッドの一括"), direction: tr("方向"),
-               heads_candidates: tr("強さの候補"), heads_refine: tr("残りから追加"), headproj_export: tr("LoRA・焼き込み") };
+               heads_candidates: tr("強さの候補"), heads_refine: tr("残りから追加"), headproj_export: tr("LoRA・焼き込み"), fieldtest: tr("実地テスト") };
 
 function eta(s) {
   if (s === null || s === undefined || !Number.isFinite(s)) return "";

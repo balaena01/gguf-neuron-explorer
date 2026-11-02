@@ -663,6 +663,19 @@ class UIData:
                         "updated": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(p.stat().st_mtime))})
         return out
 
+    # --- 実地テスト(fieldtest のジョブ): eval ビュー -----------------------------------------------------------
+    def fieldtests_list(self) -> list[dict]:
+        from ..fieldtest import list_fieldtests
+        return list_fieldtests(self.s)
+
+    def fieldtest_one(self, name: str) -> dict:
+        if not re.fullmatch(r"[\w.\-]+", name or "") or name.endswith(".replies"):
+            raise GneError("BAD_ARGS", f"名前 {name!r} が不正です")
+        p = self.s.store.fieldtest_dir() / f"{name}.json"
+        if not p.exists():
+            raise GneError("NOT_FOUND", f"実地テストの結果 {name} がありません")
+        return json.loads(p.read_text(encoding="utf-8"))
+
     @staticmethod
     def pipeline_templates() -> list[dict]:
         """用途別の質問集のテンプレート(configs/pipeline/*.json): ファイル名・説明(about の ja / en)・中身(about を除く)。"""

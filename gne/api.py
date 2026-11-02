@@ -1960,6 +1960,12 @@ class Session:
         except (TypeError, ValueError):
             raise GneError("BAD_ARGS", f"target は数か B(B 側の平均)か mid(A と B の真ん中)です({spec!r})") from None
 
+    def fieldtest(self, model: str | Path | None = None, **kw) -> dict:
+        """実地テスト(gne/fieldtest.py): 本番と同じ動かし方(llama-server、思考あり)で長い作業・ツール呼び出し・質問集・perplexity を
+        測り、against のファイルと比べる。結果は <root>/fieldtest/<name>.json、生成した文章は <name>.replies.json。"""
+        from .fieldtest import fieldtest as run
+        return run(self, model, **kw)
+
     def _pipeline_causal_reuse(self, name: str, cs, positions: str, mx: int | None, pipe: dict) -> dict | None:
         """一括の 3 段目(因果)を使い回せるなら、heads_causal と同じ形の結果。同じ対照集合・測る位置・質問の数・方向の層・
         外す閾値・層の数で、層ごとの行があるものだけ(層の数を記録していない古い結果は、同じとみなす)。"""

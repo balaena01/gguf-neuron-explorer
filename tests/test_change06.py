@@ -1013,3 +1013,108 @@ def test_bake_into_unquantized_copy(session, tmp_path):
     if small.exists():
         with pytest.raises(GneError):
             session.headproj_export(r, tmp_path / "y.gguf", bake=True, into=small)
+
+
+# --- 実地テスト(gne fieldtest)--------------------------------------------------------------------------
+
+def _fake_chat(messages, max_tokens, seed, tools=None):
+    """llama-server の代わり: 質問の中身で振る舞いを変える。"""
+    last = messages[-1]
+    if last["role"] == "tool":
+        return {"content": "done"}, "stop", 3
+    q = last["content"]
+    if tools:
+        if "weather" in q:
+            return {"content": "", "tool_calls": [{"id": "c1", "function": {"name": "get_weather", "arguments": '{"city": "Osaka"}'}}]}, "tool_calls", 9
+        if "broken" in q:
+            return {"content": "", "tool_calls": [{"id": "c2", "function": {"name": "get_weather", "arguments": "{oops"}}]}, "tool_calls", 9
+        return {"content": "hello"}, "stop", 2
+    if "loop" in q:
+        return {"content": "same words again " * 400}, "length", max_tokens
+    if "empty" in q:
+        return {"reasoning_content": "thinking about many different things " + " ".join(str(i) for i in range(400)), "content": ""}, "length", max_tokens
+    if "error" in q:
+        return {}, "error", 0
+    return {"reasoning_content": "ok", "content": "A fine answer: " + " ".join(str(i) for i in range(300))}, "stop", 50
+
+
+def test_fieldtest_sections_and_compare(tmp_path):
+    """長い作業・ツール・質問集の数え方(ループ・本文が空・上限・名前・引数・結果の後)と、ファイルどうしの比較(2 問ぶんまで同程度)。"""
+    from gne import fieldtest as ft
+    assert ft.tail_distinct("same words " * 400) < 0.5 and ft.tail_distinct(" ".join(str(i) for i in range(900))) > 0.7
+    para = " ".join(f"word{i}" for i in range(60)) + " "
+    assert ft.long_repeat(para * 30) > 0.5 and ft.long_repeat(" ".join(str(i) for i in range(2000))) == 0.0
+    ticks = []
+    m, recs = ft.run_long(_fake_chat, ["plain", "a loop please", "empty please", "error please"], 64, 2, ticks.append)
+    assert m["n"] == 4 and m["loop"] == 0.25 and m["empty"] == 0.5 and m["error"] == 0.25 and m["hit_limit"] == 0.5 and sum(ticks) == 4
+    assert recs[1]["loop"] and not recs[0]["loop"] and recs[0]["content"].startswith("A fine")
+    spec = {"tools": [{"type": "function", "function": {"name": "get_weather", "parameters": {"required": ["city"]}}}],
+            "tasks": [{"prompt": "weather in Osaka", "expect": "get_weather"}, {"prompt": "broken call", "expect": "get_weather"},
+                      {"prompt": "no call here", "expect": "get_weather"}, {"prompt": "just chat", "expect": None}], "results": {"get_weather": {"t": 1}}}
+    m, _ = ft.run_tools(_fake_chat, spec, 64, 2, lambda n: None)
+    assert m["n_expect"] == 3 and abs(m["called"] - 2 / 3) < 1e-9 and abs(m["name_ok"] - 2 / 3) < 1e-9 and abs(m["args_ok"] - 1 / 3) < 1e-9
+    assert m["no_tool_ok"] == 1.0 and m["followup_ok"] == 1.0 and m["n_followup"] == 2
+    m, recs = ft.run_prompts(_fake_chat, ["plain", "a loop", "empty one", "plain 2"], 64, 2, lambda n: None, match="fine answer")
+    assert m["match"] == 0.5 and m["loop"] == 0.25 and m["empty"] == 0.25
+    assert ft.run_prompts(_fake_chat, ["plain"], 64, 1, lambda n: None)[0]["match"] is None
+    # 比較: 2 問ぶんまでは同程度、それより悪ければ worse。perplexity は 1% まで
+    base = {"long": {"n": 24, "loop": 0.0, "empty": 0.0, "tail_distinct": 0.98, "tokens": 900}, "tools": {"n": 40, "n_expect": 30, "called": 1.0},
+            "prompts": {"h": {"n": 100, "loop": 0.0, "empty": 0.02}}, "ppl": {"en": 6.0, "mean": 6.0}}
+    same = {"long": {"n": 24, "loop": 2 / 24, "empty": 0.0, "tail_distinct": 0.95, "tokens": 2000}, "tools": {"n": 40, "n_expect": 30, "called": 28 / 30},
+            "prompts": {"h": {"n": 100, "loop": 0.02, "empty": 0.03}}, "ppl": {"en": 6.05, "mean": 6.05}}
+    assert not any(r["worse"] for r in ft.compare(base, same))
+    bad = {**same, "long": {**same["long"], "loop": 3 / 24}, "tools": {"n": 40, "n_expect": 30, "called": 27 / 30}, "ppl": {"en": 6.2, "mean": 6.2}}
+    worse = {(r["section"], r["metric"]) for r in ft.compare(base, bad) if r["worse"]}
+    assert worse == {("long", "loop"), ("tools", "called"), ("ppl", "en"), ("ppl", "mean")}
+
+
+def test_fieldtest_inputs_and_shipped_tasks(tmp_path):
+    """同梱の課題が読める。質問集は 名前=ファイル か表で、履歴も書ける。崩れた入力は断る。llama-server が無ければ分かるように断る。"""
+    from gne import fieldtest as ft
+    assert len(ft.load_long_tasks()) == 24
+    t = ft.load_tool_tasks()
+    assert len(t["tasks"]) == 40 and set(t["results"]) == {x["function"]["name"] for x in t["tools"]}
+    p = tmp_path / "q.yaml"
+    p.write_text(yaml.safe_dump(["Hello", [{"role": "user", "content": "a"}, {"role": "assistant", "content": "b"}, {"role": "user", "content": "c"}]]), encoding="utf-8")
+    assert len(ft.parse_prompt_sets([f"mine={p}"])["mine"]) == 2 and ft.parse_prompt_sets({"x": ["q"]}) == {"x": ["q"]}
+    for bad in (["nofile"], {"a b": ["q"]}, {"x": []}, {"x": [{"role": "user"}]}):
+        with pytest.raises(GneError):
+            ft.parse_prompt_sets(bad)
+    (tmp_path / "bad.json").write_text('{"tools": [{"type":"function","function":{"name":"a","parameters":{}}}], "tasks": [{"prompt":"p","expect":"zzz"}]}')
+    with pytest.raises(GneError):
+        ft.load_tool_tasks(tmp_path / "bad.json")
+    assert ft.find_llama_server(str(tmp_path / "none")) is None
+
+
+@pytest.mark.model
+def test_fieldtest_end_to_end_with_llama_server(session, tmp_path):
+    """本物の llama-server で通す(GNE_LLAMA_SERVER か build か PATH にあるとき): 2 ファイルを比べ、結果と文章を別のファイルに書く。
+    走った後は読み込んでいたモデルに戻れ、llama-server は残らない。"""
+    import subprocess
+
+    from gne import fieldtest as ft
+    from gne.schemas import SCHEMA_VERSION, FieldtestOut
+    if ft.find_llama_server() is None:
+        pytest.skip("llama-server がありません")
+    (tmp_path / "long.json").write_text(json.dumps(["Say hello.", "Name a color."]))
+    tools = json.loads(ft.TOOL_TASKS.read_text(encoding="utf-8"))
+    tools["tasks"] = [{"prompt": "What's the weather like in Osaka right now?", "expect": "get_weather"}, {"prompt": "What is 2 + 2?", "expect": None}]
+    (tmp_path / "tools.json").write_text(json.dumps(tools))
+    (tmp_path / "q.json").write_text(json.dumps(["Hello", "Who are you?"]))
+    d = session.fieldtest(against=MODEL, name="ft_t", long_tasks=tmp_path / "long.json", tool_tasks=tmp_path / "tools.json",
+                          prompts=[f"mine={tmp_path / 'q.json'}"], match="hello", long_tokens=24, tool_tokens=24, prompt_tokens=24, n_parallel=2)
+    assert [r["label"] for r in d["runs"]] == ["reference", "target"] and d["compare"] and d["same_level"] is not None
+    run = d["runs"][1]
+    assert run["long"]["n"] == 2 and run["tools"]["n"] == 2 and run["prompts"]["mine"]["n"] == 2 and run["ppl"]["mean"] > 1
+    # 同じファイル・同じ種なら perplexity は同じ
+    ppl_row = next(r for r in d["compare"] if r["section"] == "ppl" and r["metric"] == "mean")
+    assert abs(ppl_row["delta"]) < 1e-6 and not ppl_row["worse"]
+    saved = json.loads(Path(d["path"]).read_text(encoding="utf-8"))
+    assert saved["name"] == "ft_t" and "reasoning" not in json.dumps(saved["runs"]) and "content" not in json.dumps(saved["runs"][1]["long"])
+    assert "reference" in json.loads(Path(d["replies_path"]).read_text(encoding="utf-8"))
+    FieldtestOut.model_validate({"schema_version": SCHEMA_VERSION, "command": "fieldtest", "model_id": "x", "llama_cpp_version": "x",
+                                 "seed": 0, "generated_at": "x", **d})
+    assert session.no_yield is False and session.engine is not None                    # モデルは読み直せる
+    me = str(os.getpid())
+    kids = subprocess.run(["ps", "--ppid", me, "-o", "comm="], capture_output=True, text=True).stdout
+    assert "llama-server" not in kids

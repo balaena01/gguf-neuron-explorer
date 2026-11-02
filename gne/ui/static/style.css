@@ -555,3 +555,10 @@ table.fi-tab.moe th:nth-child(1) { width: 52px; } table.fi-tab.moe th:nth-child(
 .rc-lx { border: 1px solid #263140; border-radius: 4px; padding: 6px 8px; margin: 6px 0; background: #0f141b; }
 .rc-lx-row { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; margin: 4px 0; }
 .rc-lx-row.off { opacity: 0.5; }
+.evx-ft { margin: 14px 0 8px; border-top: 1px solid #1a212b; padding-top: 8px; }
+.ft-form { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin: 6px 0; }
+.ft-form input[type=number] { width: 6em; }
+.ft-table tr.ft-sec td { font-weight: 500; padding-top: 8px; color: var(--text); }
+.ft-table tr.ft-worse td { background: #2a1616; }
+.ft-past tr[data-ft] { cursor: pointer; }
+.ft-past tr.on td { background: #15202c; }

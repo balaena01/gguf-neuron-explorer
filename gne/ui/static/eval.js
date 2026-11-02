@@ -5,6 +5,7 @@
 // 方式の比較(eval --compare-methods)は方式ごとの表、ヘッド数の曲線(eval --alloc)は x = ヘッド数の小さな折れ線 3 つと表。
 import { getJSON } from "./api.js";
 import { t } from "./i18n.js";
+import { FieldtestPanel } from "./fieldtest.js";
 import { esc } from "./panels.js";
 
 const C = { text: "#aeb9c8", muted: "#6b7686", grid: "#1a212b", amber: "#e8b04a", minus: "#c94fa7", ppl: "#7c8796", judge: "#9fb3cf", ok: "#6fcf8f",
@@ -47,7 +48,7 @@ function series(d) {
 }
 
 export class EvalView {
-  constructor(root, { recipe, onRun, onLoadProj, onLoadRecipe }) {
+  constructor(root, { recipe, onRun, onLoadProj, onLoadRecipe, onRunJob }) {
     this.root = root;
     this.recipe = recipe;              // UI のレシピ(recipe.js の Recipe)
     this.onRun = onRun;                // (params) → ジョブ eval を投げる
@@ -68,8 +69,11 @@ export class EvalView {
           <label class="muted" title="${t("方向の指標で読む質問の数(A・B それぞれ。一致率の返事もこの数まで)。多い対照集合は等間隔に間引く。0 で全部")}">${t("問")} <input id="evx-dm-n" type="number" min="0" max="4096" value="64" style="width:4.5em"></label>
           <button id="evx-go">${t("今のレシピで eval")}</button></span></div>
       <p class="muted note evx-help">${t("倍率はレシピ全体に掛ける係数(0 = 無介入)。能力 = exact と format の正答率、ppl は参照テキスト、混入は日本語の回答に出た簡体字・ハングルなどの割合。4B で数分。")}</p>
-      <div id="evx-body"></div>`;
+      <div id="evx-body"></div>
+      <details class="evx-ft" id="evx-ft-wrap"><summary>${t("実地テスト(本番と同じ動かし方で、ファイルどうしを比べる)")}</summary><div id="evx-ft"></div></details>`;
     this.$ = (s) => root.querySelector(s);
+    this.ft = new FieldtestPanel(this.$("#evx-ft"), { onRun: onRunJob });
+    this.$("#evx-ft-wrap").addEventListener("toggle", () => { if (this.$("#evx-ft-wrap").open) this.ft.refresh(); });
     this.$("#evx-pick").addEventListener("change", (ev) => this.load(ev.target.value));
     this.$("#evx-go").addEventListener("click", () => this.run());
     new ResizeObserver(() => this.draw()).observe(root);

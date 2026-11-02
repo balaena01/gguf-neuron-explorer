@@ -210,6 +210,15 @@ def create_app(session, *, warm: bool = True, openai: bool = False) -> FastAPI:
     def direction_one(name: str):
         return data.direction_one(name)
 
+    @app.get("/api/fieldtests")
+    def fieldtests():
+        """実地テスト(fieldtest のジョブ)の保存済みの結果。生成した文章は返さない。"""
+        return data.fieldtests_list()
+
+    @app.get("/api/fieldtests/{name}")
+    def fieldtest_one(name: str):
+        return data.fieldtest_one(name)
+
     @app.get("/api/pipeline-templates")
     def pipeline_templates():
         """用途別の質問集のテンプレート(configs/pipeline/、「ひな形」で選ぶ)。"""

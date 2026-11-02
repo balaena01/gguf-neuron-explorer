@@ -195,6 +195,7 @@ def standard_kinds() -> dict[str, Callable[..., dict]]:
         "head_pipeline": lambda s, spec, **p: s.heads_pipeline(spec, **p),             # 方向 → 基準層 → 因果 → 配分
         "heads_candidates": lambda s, alloc, **p: s.heads_candidates(alloc, **p),       # 組 × 倍率で生成 → 採点のファイル
         "heads_refine": lambda s, name, **p: s.heads_refine(name, **p),                 # 残りの質問で追加のヘッドを探す
+        "fieldtest": lambda s, **p: s.fieldtest(**p),                                   # 本番と同じ動かし方で、ファイルどうしを比べる
         "headproj_export": _headproj_export,
     }
 
@@ -263,7 +264,7 @@ class JobRunner:
             job.done, job.total, job.stage = done, total, stage
             if job.cancel:
                 raise _Cancelled()
-            if self.arbiter.yield_point():
+            if not getattr(s, "no_yield", False) and self.arbiter.yield_point():   # 実地テストは llama-server に GPU を渡している間は譲らない
                 job.yields += 1
 
         job.status, job.started = "running", time.monotonic()

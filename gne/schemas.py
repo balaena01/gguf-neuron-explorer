@@ -990,6 +990,21 @@ class HeadsPipelineOut(Envelope):               # gne heads pipeline(方向 → 
     reused: list[str] | None = None              # 使い回した段(direction・causal、resume)
 
 
+class FieldtestOut(Envelope):                   # gne fieldtest(本番と同じ動かし方で、ファイルどうしを比べる)
+    name: str
+    path: str
+    replies_path: str
+    target: dict[str, Any]
+    reference: dict[str, Any] | None
+    settings: dict[str, Any]
+    runs: list[dict[str, Any]]                  # ファイルごとの long・tools・prompts・ppl
+    compare: list[dict[str, Any]] | None        # 指標ごとの参照・対象・差・worse
+    same_level: bool | None                     # worse の行が 1 つも無ければ True
+    worse: list[str]
+    updated: str
+    seconds: float
+
+
 class HeadsRefineOut(Envelope):                 # gne heads refine(残りの質問で追加のヘッドを探す)
     name: str
     path: str
@@ -1080,5 +1095,5 @@ COMMAND_SCHEMAS: dict[str, type[Envelope]] = {
     "direction score": DirectionScoreOut, "heads causal": HeadsCausalOut, "heads allocate": HeadsAllocateOut,
     "headproj export": GainOut, "headproj check": HeadprojCheckOut, "heads pipeline": HeadsPipelineOut,
     "heads candidates": HeadsCandidatesOut,
-    "heads refine": HeadsRefineOut,
+    "heads refine": HeadsRefineOut, "fieldtest": FieldtestOut,
 }

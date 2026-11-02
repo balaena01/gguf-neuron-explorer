@@ -57,6 +57,7 @@ dose は既定で rel(その層の残差の大きさに対する比)。0.5 で�
 | 組で消し切れない質問に足す | `heads refine` | `heads_refine` | 残りの質問だけで、組を当てたまま方向を作り直して足すヘッドを探す |
 | 全体の倍率を返事で決める | `heads candidates`(`--tally`) | `heads_candidates`・`heads_candidates_tally` | 組 × 倍率で返事を作り、どの候補か伏せた採点のファイルを書いて集計する |
 | 副作用を測る | `eval` | `eval` | 能力・ppl・言語の混入・性格の変化量 |
+| 実際の使い方で確かめる | `fieldtest` | `fieldtest` | llama-server で長い作業・ツール呼び出し・質問集・perplexity。ファイルどうしを比べる。配る前に |
 | 書き出す | `export-cvec`・`gain`・`headproj export`・`bake` | `export_cvec`・`gain_export`・`headproj_export`・`bake` | llama.cpp の `--control-vector`・`--lora` |
 | 人と一緒に見る | `serve` | `ui_highlight`・`ui_note`・`ui_open` | 127.0.0.1 だけで待ち受ける |
 | 他のアプリから使う | `serve --openai` | — | `extra_body={"gne": {"recipe": ..., "when": ...}}` |

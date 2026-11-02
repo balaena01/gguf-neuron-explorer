@@ -2802,3 +2802,71 @@ def test_eval_tab_direction_metric_options(refine_server, browser):
         if lang == "en":
             assert pg.evaluate("[...window.gneI18n.missing]") == []
         pg.close()
+
+
+def test_fieldtest_panel(refine_server, browser, tmp_path):
+    """eval ビューの「実地テスト」: 入力を fieldtest のジョブにして投げ、終わると比較の表を出す。悪化の行に印。文章は出さない。英語の文言もある。"""
+    import urllib.error
+    import urllib.request
+    url = refine_server
+    from gne.store import Store  # noqa: F401
+    done_row = {"name": "ftx", "target": {"model": "/m/a.gguf", "file": "a.gguf", "lora": None}, "reference": {"model": "/m/b.gguf", "file": "b.gguf", "lora": None},
+                "settings": {"n_long": 24, "n_tools": 40, "long_tokens": 3072, "prompts": {"mine": 100}},
+                "runs": [], "same_level": False, "worse": ["long.loop"], "updated": "2026-11-02T12:00:00", "seconds": 600,
+                "compare": [{"section": "long", "metric": "loop", "label": "短い周期のループ", "reference": 0.0, "target": 0.125, "delta": 0.125, "worse": True},
+                            {"section": "tools", "metric": "called", "label": "呼ぶべきときに呼んだ", "reference": 1.0, "target": 1.0, "delta": 0.0, "worse": False},
+                            {"section": "prompts:mine", "metric": "empty", "label": "本文が空", "reference": 0.02, "target": 0.02, "delta": 0.0, "worse": False},
+                            {"section": "ppl", "metric": "mean", "label": "全体(幾何平均)", "reference": 6.77, "target": 6.78, "delta": 0.01, "worse": False}]}
+    for bad in ("nope", "x.replies"):
+        with pytest.raises(urllib.error.HTTPError) as ei:
+            urllib.request.urlopen(url + f"/api/fieldtests/{bad}")
+        assert ei.value.code == 400
+    for lang in ("ja", "en"):
+        pg = browser.new_page(viewport={"width": 1500, "height": 1000})
+        errors, posts = [], []
+        pg.on("pageerror", lambda e: errors.append(str(e)))
+
+        def on_jobs(route, req):
+            if req.method != "POST":
+                route.continue_()
+                return
+            body = json.loads(req.post_data)
+            posts.append(body)
+            route.fulfill(status=200, content_type="application/json", body=json.dumps({
+                "id": "fake-ft", "kind": body["kind"], "params": body["params"], "status": "queued", "done": 0, "total": 0, "stage": "",
+                "eta_s": None, "yields": 0, "seconds": None, "result": None, "error": None}))
+        pg.route("**/api/jobs", on_jobs)
+        done = {"id": "fake-ft", "kind": "fieldtest", "params": {}, "status": "done", "done": 1, "total": 1, "stage": "", "eta_s": None, "yields": 0,
+                "seconds": 600.0, "result": {"name": "ftx"}, "error": None}
+        pg.route("**/api/jobs/fake-ft/events", lambda route, req: route.fulfill(status=200, content_type="text/event-stream", body=f"data: {json.dumps(done)}\n\n"))
+        pg.route("**/api/fieldtests", lambda route, req: route.fulfill(status=200, content_type="application/json", body=json.dumps(
+            [{"name": "ftx", "target": "a.gguf", "reference": "b.gguf", "same_level": False, "n_worse": 1, "updated": "2026-11-02T12:00:00"}])))
+        pg.route("**/api/fieldtests/ftx", lambda route, req: route.fulfill(status=200, content_type="application/json", body=json.dumps(done_row)))
+        pg.goto(url + f"/?lang={lang}")
+        pg.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
+        pg.click("#views button[data-view=eval]")
+        pg.wait_for_function("window.gne.evalView && window.gne.evalView.ft", timeout=30000)
+        pg.evaluate("document.querySelector('#evx-ft-wrap').open = true")
+        pg.fill("#ft-prompts", "broken line")
+        pg.click("#ft-go")
+        assert not posts and pg.evaluate("document.querySelector('#ft-status').classList.contains('err')")   # 質問集の書き方の誤り
+        pg.fill("#ft-model", "/m/a.gguf")
+        pg.fill("#ft-against", "/m/b.gguf")
+        pg.fill("#ft-prompts", "mine=/q/x.json\n")
+        pg.fill("#ft-match", "abc")
+        pg.fill("#ft-long", "2048")
+        pg.uncheck("#ft-ppl")
+        pg.click("#ft-go")
+        pg.wait_for_selector("#ft-result .ft-table", timeout=15000)
+        p = posts[0]["params"]
+        assert posts[0]["kind"] == "fieldtest" and p == {"long_tokens": 2048, "tool_tokens": 1536, "prompt_tokens": 1536, "ppl": False, "model": "/m/a.gguf",
+                                                         "against": "/m/b.gguf", "match": "abc", "prompts": ["mine=/q/x.json"]}
+        assert pg.evaluate("document.querySelectorAll('#ft-result tr.ft-sec').length") == 4
+        assert pg.evaluate("document.querySelectorAll('#ft-result tr.ft-worse').length") == 1
+        assert "12.5%" in pg.evaluate("document.querySelector('#ft-result tr.ft-worse').textContent")
+        assert "6.780" in pg.evaluate("document.querySelector('#ft-result').textContent")
+        assert pg.evaluate("document.querySelectorAll('#ft-list tr[data-ft=ftx]').length") == 1
+        if lang == "en":
+            assert pg.evaluate("[...window.gneI18n.missing]") == []
+        assert not errors, errors
+        pg.close()

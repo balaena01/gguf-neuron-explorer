@@ -52,6 +52,7 @@ direction で作った方向は "L:dir:NAME:dose"、attention ヘッドの gain 
    一通り回すだけなら heads_pipeline(spec)(方向づくりから配分まで。質問は何百個でもよく、止めて測る段階は 64 個に間引く)。
    強さを決める最後は、heads_candidates(組 × 倍率で生成し、名前を伏せた採点のファイルを作る)→ 採点 → heads_candidates_tally。
    組で消し切れない質問(配分の表の remain)が残るなら、heads_refine で残りの質問だけから追加のヘッドを探して組に足す。
+   配る前の確かめは fieldtest(焼き込んだファイルと元のファイルを、本番と同じ動かし方で比べる。eval では見えない長い作業の崩れとツール呼び出しを見る)。
    - 方向を使う介入は、まず direction_score で基準層と分離度(cohen_d)を確認してから進める。
    - heads_causal の ablate と marginal は順位が違う。最初の候補出しは ablate、配り直しは marginal(heads_allocate が使う)。
    - 強さを決めるのは常に生成なしの物差し(direction_score・heads_causal・heads_allocate)。生成を伴う eval は確定候補だけに使う。
@@ -386,6 +387,22 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
             return _err(e)
 
     @srv.tool()
+    async def fieldtest(model: str | None = None, against: str | None = None, lora: str | None = None, name: str | None = None,
+                        prompts: dict[str, Any] | None = None, match: str | None = None, long_tokens: int = 3072, tool_tokens: int = 1536,
+                        prompt_tokens: int = 1536, n_parallel: int = 4, llama_server: str | None = None, ppl: bool = True) -> dict:
+        """実地テストをジョブで投げる(job_status で結果)。本番と同じ動かし方(llama-server、思考あり、サンプリングあり)で、長い作業
+        (上限で切れた割合・ループ・本文が空)、ツール呼び出し(呼ぶか・名前・引数・不要なときに呼ばない・結果の後に続ける)、質問集
+        (prompts は {名前: ファイルか質問のリスト}、match で一致率)、perplexity を測り、against のファイルと比べる(compare の worse、
+        same_level)。焼き込んだファイルもそのまま測れる。model を省くと読み込んでいるモデル。走っている間はそのモデルを GPU から下ろし、
+        ほかの GPU の処理は待たされる。27B で質問集 200 問を足して 1 ファイル 30〜45 分。生成した文章は結果に入らず、replies_path に書く。"""
+        try:
+            p = {"model": model, "against": against, "lora": lora, "name": name, "prompts": prompts, "match": match, "long_tokens": long_tokens,
+                 "tool_tokens": tool_tokens, "prompt_tokens": prompt_tokens, "n_parallel": n_parallel, "llama_server": llama_server, "ppl": ppl}
+            return jobs.start("fieldtest", {k: v for k, v in p.items() if v is not None}).view()
+        except Exception as e:  # noqa: BLE001
+            return _err(e)
+
+    @srv.tool()
     async def heads_refine(name: str, n_heads: int | None = None, new_heads: list[int] | None = None, resume: bool = True) -> dict:
         """組を当てても目標まで下がらない A 側の質問(残り)だけで、追加のヘッドを探すジョブを投げる(job_status で結果)。
         name は一括(heads_pipeline)か heads_allocate の名前、n_heads は残りを測る組(既定は推す組)。残りの質問と B 側の質問で、
@@ -533,7 +550,7 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
 
     @srv.tool()
     async def job_start(kind: str, params: dict[str, Any] | None = None, workers: str | None = None) -> dict:
-        """長時間の処理を投げる。kind: stats_resid / stats_act / lens_logit / lens_steer / sweep / rank / reverse / eval / direction / ablate / heads_contrast / heads_causal / heads_allocate / head_pipeline / heads_candidates / heads_refine / headproj_export。
+        """長時間の処理を投げる。kind: stats_resid / stats_act / lens_logit / lens_steer / sweep / rank / reverse / eval / direction / ablate / heads_contrast / heads_causal / heads_allocate / head_pipeline / heads_candidates / heads_refine / headproj_export / fieldtest。
         params は gne.api の同名メソッドの引数(例 sweep: {"layer": 22, "neurons": "random:64", "design": "quick"})。
         見積もりが 30 分を超えるジョブは走らせずに NEEDS_CONFIRM と見積もりを返す。params に budget("30m" など)を入れると
         予算に収まるように絞る(lens_steer は方向に近いニューロンの上位、sweep は quick 設計で steer lens の上位、reverse は
