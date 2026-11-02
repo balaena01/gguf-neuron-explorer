@@ -987,6 +987,25 @@ class HeadsPipelineOut(Envelope):               # gne heads pipeline(方向 → 
     recommended: dict[str, Any] | None
     seconds: float
     updated: str | None = None
+    reused: list[str] | None = None              # 使い回した段(direction・causal、resume)
+
+
+class HeadsRefineOut(Envelope):                 # gne heads refine(残りの質問で追加のヘッドを探す)
+    name: str
+    path: str
+    base: str
+    direction: str
+    n_heads: int
+    base_units: list[str]
+    base_recipe: str
+    score_layer: int
+    threshold: float
+    remaining: dict[str, Any]                   # n(残り)・n_a・used(方向に使った数)・padded・questions・scores
+    pipeline: dict[str, Any]                    # 一括の結果のパス・方向・推す組・使い回した段・組の表
+    combined: dict[str, Any] | None             # 代表の合わせたレシピと、元の方向での残り・A の平均・B 側のずれ(前 → 後)
+    combined_rows: list[dict[str, Any]] = []    # 比較表のどの組も、元の組と合わせたもの(同じ項目)
+    updated: str
+    seconds: float
 
 
 class CandidateRow(BaseModel):
@@ -1061,4 +1080,5 @@ COMMAND_SCHEMAS: dict[str, type[Envelope]] = {
     "direction score": DirectionScoreOut, "heads causal": HeadsCausalOut, "heads allocate": HeadsAllocateOut,
     "headproj export": GainOut, "headproj check": HeadprojCheckOut, "heads pipeline": HeadsPipelineOut,
     "heads candidates": HeadsCandidatesOut,
+    "heads refine": HeadsRefineOut,
 }

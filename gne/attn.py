@@ -119,13 +119,13 @@ def head_out_names(session, names: set[str], layers: Sequence[int]) -> dict[int,
     return out
 
 
-def _probe(e) -> tuple[Capture, object]:
-    """flash attention を切った probe ctx と、それに付けた Capture(使い回す)。"""
+def _probe(e, need: int | None = None) -> tuple[Capture, object]:
+    """flash attention を切った probe ctx と、それに付けた Capture(使い回す)。need は読ませる最長の列のトークン数。"""
     cap = getattr(e, "_attn_capture", None)
     if cap is None:
         cap = e._attn_capture = Capture()
     cap.set_wanted(lambda nm: False)
-    return cap, e.attn_probe_ctx(cap)
+    return cap, e.attn_probe_ctx(cap, need=need)
 
 
 def _names(e, cap: Capture, ctx, ids: list[int]) -> set[str]:
@@ -161,7 +161,7 @@ def capture_attention(session, convs: Sequence[list[dict] | str | list[int]], *,
         ids_list.append(ids)
     arch = w.arch
     Ls = [L for L in (range(e.n_layer) if layers is None else layers) if arch.layers[L].head_dim]
-    probe, ctx = _probe(e)
+    probe, ctx = _probe(e, need=max(len(x) for x in ids_list))
     names = _names(e, probe, ctx, ids_list[0][:16])
     want: dict[str, tuple[int, str]] = {}
     if want_head_out:

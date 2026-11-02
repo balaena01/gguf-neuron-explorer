@@ -51,9 +51,11 @@ class Validate:
 
 
 def load_contrast(path: str | Path) -> tuple[ContrastSet, Validate]:
+    from .reverse import check_questions
     cs = ContrastSet.load(path)
     d = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
     v = d.get("validate") or {}
+    check_questions(v.get("prompts"), f"{path}: validate.prompts")
     if v.get("match"):
         try:
             re.compile(v["match"])
@@ -338,22 +340,30 @@ def save_select(path: Path, sel: dict) -> None:
     path.write_text(json.dumps(sel, ensure_ascii=False, indent=1))
 
 
+def thin(v: list, n: int | None) -> list:
+    """多いリストを n 個に等間隔に間引く(n が None か足りていればそのまま)。"""
+    if not n or len(v) <= n:
+        return list(v)
+    return [v[int(i)] for i in sorted({int(x) for x in np.linspace(0, len(v) - 1, int(n)).round()})]
+
+
 def behavior(session, cs: ContrastSet, val: Validate, recipe, *, max_tokens: int = 64,
-             base_lp: np.ndarray | None = None) -> dict:
+             base_lp: np.ndarray | None = None, max_examples: int | None = None, with_kl: bool = True) -> dict:
     """消したい振る舞いがどれだけ出るか: A 側(system_a 付き)の検証プロンプトの出力で判定の一致率、
-    B 側(system_b 付き)の次トークン分布の KL(base‖recipe)。recipe が None なら無介入。"""
+    B 側(system_b 付き)の次トークン分布の KL(base‖recipe)。recipe が None なら無介入。
+    max_examples で質問を等間隔に間引く。with_kl=False なら KL を測らない(B 側を読まない)。"""
     from .evalx import _generate
     rx = re.compile(val.match, re.IGNORECASE) if val.match else None
     from .reverse import combine, side_interventions
     vecs = session.vectors(recipe)[0] if recipe is not None else None
     lora = session.lora_for(recipe) if recipe is not None else None
     ivs = side_interventions(session, cs) if cs.has_recipes else {"A": (None, None), "B": (None, None)}
-    gen = cs.convs("A", val.prompts)
-    kl_convs = cs.convs("B")
+    gen = cs.convs("A", thin(list(val.prompts), max_examples))
+    kl_convs = thin(cs.convs("B"), max_examples)
     outs = _generate(session, [(c, max_tokens) for c in gen], *combine(ivs["A"], vecs, lora), "all", lambda n: None)
-    lp = last_logprobs(session, kl_convs, *combine(ivs["B"], vecs, lora))
+    lp = last_logprobs(session, kl_convs, *combine(ivs["B"], vecs, lora)) if with_kl else None
     return {"rate": float(np.mean([bool(rx.search(o["text"])) for o in outs])) if rx else None,
-            "kl_b": kl(base_lp, lp) if base_lp is not None else 0.0, "lp": lp,
+            "kl_b": kl(base_lp, lp) if base_lp is not None and lp is not None else 0.0, "lp": lp,
             "sample": outs[0]["text"][:200] if outs else ""}
 
 
@@ -433,7 +443,8 @@ def response_directions(session, cs: ContrastSet, *, max_tokens: int = 96, with_
     names = {f"l_out-{L}": L for L in Ls}
     act_names: dict[str, int] = {}
     if with_act:
-        probe = e.tokenize_prompt(e.render_chat([{"role": "user", "content": cs.user_prompts[0]}]))
+        from .reverse import _conv
+        probe = e.tokenize_prompt(e.render_chat(_conv(None, cs.user_prompts[0])))
         seen = e.list_names(probe[:16])
         from .moe import moe_names
         for L in Ls:
@@ -454,12 +465,13 @@ def response_directions(session, cs: ContrastSet, *, max_tokens: int = 96, with_
         outs = _generate(session, [(c, max_tokens) for c in convs], vecs, lora, "all", lambda n: None)
         cap = Capture()
         cap.set_wanted(lambda n: n in names or n in act_names)
+        need = max(len(e.tokenize_prompt(e.render_chat(c))) for c in convs) + max_tokens   # 質問 + 返事の上限
         for c, o in zip(convs, outs, strict=True):
             pids = e.tokenize_prompt(e.render_chat(c))
             resp = [t for t in o["token_ids"] if not e.is_eog(t)]
             if not resp:
                 continue
-            ctx = e.probe_ctx(cap)
+            ctx = e.probe_ctx(cap, need=need)
             e.clear_memory(ctx)
             e.set_cvec(ctx, vecs or None)
             e.set_lora(ctx, lora or None)
@@ -602,6 +614,7 @@ class Scorer:
         self.prompts = self.prompts_side["A"]
         self.items = {side: [(seqs[side][i][0], _score_rows(len(seqs[side][i][0]), seqs[side][i][1], positions))
                              for i in self.index_side[side]] for side in "AB"}
+        self.max_len = max(len(ids) for side in "AB" for ids, _ in self.items[side])   # コンテキストをこの長さに合わせる
         from .reverse import side_interventions
         # レシピで A / B を作る対照集合: 側ごとのレシピをいつも当て、調べる介入(run の lora・vecs)はその上に重ねる
         self.sides = side_interventions(session, cs) if cs.has_recipes else {"A": (None, None), "B": (None, None)}
@@ -622,7 +635,7 @@ class Scorer:
         cap = _score_capture(e)
         names = {f"l_out-{L}": L for L in self.layers}
         cap.set_wanted(lambda nm: nm in names)
-        ctx = e.probe_ctx(cap)
+        ctx = e.probe_ctx(cap, need=self.max_len)
         out: dict[str, dict] = {}
         try:
             for side in sides:

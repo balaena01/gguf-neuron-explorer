@@ -344,6 +344,9 @@ table.dv-ex th:first-child { text-align: left; }
 table.pp-past tbody tr.on td { background: #121923; }
 .pp-res { border-top: 1px solid #1a212b; margin-top: 12px; padding-top: 4px; }
 .pp-res h3 { font-size: 15px; font-weight: 500; margin: 8px 0 4px; }
+.pp-refine { border-left: 3px solid #5b8def; background: #111a26; padding: 4px 10px; margin: 6px 0; }
+.pp-refine p { margin: 4px 0; }
+.q-turn { margin: 1px 0; }
 .pp-stage { border-top: 1px solid #141a22; margin-top: 10px; padding-top: 2px; }
 .pp-stage > h4 { color: #dfe6ee; font-weight: 500; }
 .pp-stage .muted.note { max-width: 980px; }
@@ -547,3 +550,8 @@ table.rc tr.rc-moe td.id a { color: #9fd0e8; }
 .fi-routed-list .muted { display: inline-block; width: 30px; }
 #legend .sw.tile { background: transparent; border-width: 2px; border-radius: 1px; }
 table.fi-tab.moe th:nth-child(1) { width: 52px; } table.fi-tab.moe th:nth-child(2) { width: 80px; }   /* MoE は E37 N511 の形 */
+#stale-banner { position: fixed; top: 0; left: 50%; transform: translateX(-50%); z-index: 50; display: flex; gap: 10px; align-items: center;
+  max-width: 90vw; background: #3a2a0c; color: #f3d9a0; border: 1px solid #8a6a2a; border-top: none; border-radius: 0 0 6px 6px; padding: 6px 12px; font-size: 13px; }
+.rc-lx { border: 1px solid #263140; border-radius: 4px; padding: 6px 8px; margin: 6px 0; background: #0f141b; }
+.rc-lx-row { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; margin: 4px 0; }
+.rc-lx-row.off { opacity: 0.5; }

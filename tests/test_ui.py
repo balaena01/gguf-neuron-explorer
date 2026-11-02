@@ -604,6 +604,8 @@ def test_chat_mic_sends_wav(server, browser):
 def test_chat_single_column_in_browser(server, browser):
     """チャットの 1 列: + の列(レシピあり)だけを生成し、3 列に戻すときは確かめてから会話を消す。選んだ列の数は覚える。"""
     pg = browser.new_page()
+    errors = []
+    pg.on("pageerror", lambda e: errors.append(str(e)))
     pg.goto(server + "/")
     pg.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
     pg.evaluate("window.gne.recipe.clear()")
@@ -621,7 +623,11 @@ def test_chat_single_column_in_browser(server, browser):
     pg.dispatch_event("#ch-max", "change")
     pg.fill("#ch-text", "Hello")
     pg.click("#ch-send")
-    pg.wait_for_function("!document.querySelector('#ch-send').disabled", timeout=120000)
+    try:
+        pg.wait_for_function("!document.querySelector('#ch-send').disabled", timeout=120000)
+    except Exception:
+        raise AssertionError(f"返事が終わらない: {pg.evaluate('document.querySelector(\"#ch-status\").textContent')} {errors}") from None
+    assert not errors, errors
     cells = pg.evaluate("[...document.querySelectorAll('.ch-cell')].map(e => e.className)")
     assert len(cells) == 1 and "plus" in cells[0]
     assert "秒で 1 列を生成" in pg.evaluate("document.querySelector('#ch-status').textContent")
@@ -631,6 +637,48 @@ def test_chat_single_column_in_browser(server, browser):
     pg.click("[data-cols='3']")
     pg.wait_for_function("document.querySelectorAll('.ch-head > div').length === 3", timeout=5000)
     assert asked and pg.evaluate("document.querySelectorAll('.ch-cell').length") == 0
+    pg.close()
+
+
+def test_chat_new_conversation_button(server, browser):
+    """入力欄の横の「新しい会話」: 会話があれば確かめてから消し(断れば残す)、入力欄に戻る。1 列のまま。
+    生成はブラウザの中で差し替える(GPU を使わずに速く確かめるため)。"""
+    pg = browser.new_page()
+    errors = []
+    pg.on("pageerror", lambda e: errors.append(str(e)))
+    sse = "".join(f"data: {json.dumps(ev)}\n\n" for ev in (
+        {"type": "start", "id": "x1", "columns": 1}, {"type": "gpu", "waited_s": 0.0}, {"type": "column", "col": 0, "n_prompt": 9},
+        {"type": "text", "col": 0, "text": "Hi there"}, {"type": "end", "col": 0, "text": "Hi there", "finish": "length", "n_gen": 2},
+        {"type": "done", "seconds": 0.1}))
+    pg.route("**/api/steer", lambda route, req: route.fulfill(status=200, content_type="text/event-stream", body=sse))
+    pg.goto(server + "/")
+    pg.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
+    pg.evaluate("window.gne.recipe.clear()")
+    pg.fill("#jump", "L6 N100")
+    pg.press("#jump", "Enter")
+    pg.wait_for_function("document.querySelector('#neuron-body .n-id')", timeout=30000)
+    pg.click("#neuron-body [data-rc='1']")
+    pg.click("#list-tabs button[data-tab=recipe]")
+    pg.click("#rc-chat")
+    pg.wait_for_selector("#ch-text", timeout=30000)
+    pg.click("[data-cols='1']")
+    assert pg.evaluate("!!document.querySelector('.ch-input #ch-reset')")          # 送る・止めるの横
+    for text in ("Hello", "Again"):
+        pg.fill("#ch-text", text)
+        pg.click("#ch-send")
+        pg.wait_for_function("!document.querySelector('#ch-send').disabled", timeout=30000)
+    assert pg.evaluate("document.querySelectorAll('.ch-cell').length") == 2
+    pg.once("dialog", lambda d: d.dismiss())                                       # 断れば残す
+    pg.click("#ch-reset")
+    assert pg.evaluate("document.querySelectorAll('.ch-cell').length") == 2
+    asked = []
+    pg.once("dialog", lambda d: (asked.append(d.message), d.accept()))
+    pg.click("#ch-reset")
+    pg.wait_for_function("document.querySelectorAll('.ch-cell').length === 0", timeout=5000)
+    assert asked and pg.evaluate("document.activeElement && document.activeElement.id") == "ch-text"
+    assert pg.evaluate("document.querySelectorAll('.ch-head > div').length") == 1   # 1 列のまま
+    pg.click("#ch-reset")                                                          # 会話が無ければ確かめない
+    assert len(asked) == 1 and not errors, errors
     pg.close()
 
 
@@ -2192,6 +2240,13 @@ def test_pipeline_api_and_panel(pipe_server, browser):
         p = pp[0]["params"]
         assert (p["n_heads"], p["max_examples"], p["top_layers"], p["hard"], p["positions"]) == ([3, 2], 8, 1, 4, "last") and "target" not in p
         assert p["spec"]["name"] == "pirate" and len(p["spec"]["user_prompts"]) == 8
+        # 目標の欄: 数のほかに B(B 側の平均)と mid。読めない書き方は投げない
+        for v, want in (("b", "B"), ("mid", "mid"), ("-3.5", -3.5)):
+            pg.fill("#pp-target", v)
+            assert pg.evaluate("window.gne.directionView.pipe.params().target") == want
+        pg.fill("#pp-target", "half")
+        assert pg.evaluate("window.gne.directionView.pipe.params()") is None
+        pg.fill("#pp-target", "")
         if lang == "en":
             assert pg.evaluate("[...window.gneI18n.missing]") == []
         assert not errors, errors
@@ -2380,6 +2435,7 @@ def test_candidates_blind_scoring_in_browser(cand_server, browser):
     pg.wait_for_selector("#pp-past tr[data-pp=ppx]", timeout=30000)
     pg.click("#pp-past tr[data-pp=ppx]")
     pg.wait_for_selector("#pc-go", timeout=30000)
+    assert pg.evaluate("document.querySelector('#pc-scales').value") == "0.5,1,1.5,2,3"     # 既定の倍率(1 より大きい側を厚く)
     pg.fill("#pc-scales", "0.5,0, 1")
     pg.dispatch_event("#pc-scales", "input")
     pg.click("#pc-go")
@@ -2399,3 +2455,350 @@ def test_candidates_blind_scoring_in_browser(cand_server, browser):
     assert pg.evaluate("[...window.gneI18n.missing]") == []
     assert not errors, errors
     pg.close()
+
+
+# --- gne serve を Ctrl+C で止める -------------------------------------------------------------------------------
+
+def test_sse_streams_end_when_closing():
+    """止める合図(app.state.closing)が立つと、開いたままの配信(画面の更新・ジョブの進み具合)が自分から終わる。
+    終わらないと、サーバが接続の終わりを待ち続けて Ctrl+C で止まらない。"""
+    import asyncio
+
+    from gne.ui.agent import AgentBus
+    bus = AgentBus(4, lambda L: 8)
+
+    async def run():
+        gen = bus.events()
+        first = await gen.__anext__()
+        assert first.startswith("data: ")
+        threading.Timer(0.3, bus.closing.set).start()
+        t0 = time.perf_counter()
+
+        async def collect():
+            return [x async for x in gen]
+        rest = await asyncio.wait_for(collect(), timeout=5)               # 終わらなければ TimeoutError(止まらない不具合)
+        return time.perf_counter() - t0, rest
+    res: list = []                       # ブラウザのテスト(playwright)がメインのスレッドでループを回しているので、別のスレッドで回す
+    th = threading.Thread(target=lambda: res.append(asyncio.run(run())), daemon=True)
+    th.start()
+    th.join(timeout=10)
+    assert res, "配信が終わらない"
+    dt, rest = res[0]
+    assert dt < 2.0 and rest == []
+
+    class _Job:
+        def view(self):
+            return {"status": "running", "done": 1, "total": 9, "stage": "x"}
+    from gne.ui.live import Live
+    live = Live.__new__(Live)
+    live.closing = threading.Event()
+    live.jobs = type("J", (), {"get": staticmethod(lambda _id: _Job())})()
+    gen = live.job_events("x")
+    assert next(gen).startswith("data: ")
+    live.closing.set()
+    out: list = []
+    th = threading.Thread(target=lambda: out.extend(gen), daemon=True)
+    th.start()
+    th.join(timeout=5)
+    assert not th.is_alive() and out == []
+
+
+@pytest.mark.model
+def test_serve_stops_on_first_ctrl_c(tmp_path):
+    """ブラウザの配信(/api/ui/events)を開いたまま gne serve に Ctrl+C(SIGINT)を 1 回送ると、数秒で終わる。"""
+    import signal
+    import subprocess
+    import sys
+    import urllib.request
+    if not MODEL.exists():
+        pytest.skip("モデルがありません")
+    with socket.socket() as so:
+        so.bind(("127.0.0.1", 0))
+        port = so.getsockname()[1]
+    gne = str(Path(sys.executable).parent / "gne")
+    p = subprocess.Popen([gne, "--n-gpu-layers", "0", "serve", "-m", str(MODEL), "--root", str(tmp_path / "root"), "--port", str(port)],
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        url = f"http://127.0.0.1:{port}"
+        for _ in range(240):
+            try:
+                urllib.request.urlopen(url + "/", timeout=2)
+                break
+            except OSError:
+                time.sleep(0.5)
+        else:
+            pytest.fail("gne serve が立ち上がりません")
+        got = []
+        sse = urllib.request.urlopen(url + "/api/ui/events", timeout=30)
+
+        def read():
+            try:
+                for line in sse:
+                    got.append(line)
+            except Exception:  # noqa: BLE001
+                pass
+        threading.Thread(target=read, daemon=True).start()
+        time.sleep(1.0)
+        assert got and got[0].startswith(b"data: ")                        # 配信が開いている
+        t0 = time.perf_counter()
+        p.send_signal(signal.SIGINT)
+        p.wait(timeout=15)
+        assert time.perf_counter() - t0 < 10
+        err = p.stderr.read()
+        assert p.returncode == 0 and "止めました" in err and "Traceback" not in err, err[-2000:]
+    finally:
+        if p.poll() is None:
+            p.kill()
+
+
+# --- 「残りから追加」(heads_refine) ---------------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def refine_server(tmp_path_factory):
+    """一括の結果 ppx と、その 2 ヘッドの組の残りから作った ppx_r1(refine の説明と合わせた組つき)。CPU。"""
+    import yaml
+    if not MODEL.exists():
+        pytest.skip("モデルがありません")
+    from gne.api import Session
+    s = Session(MODEL, root=tmp_path_factory.mktemp("ui_refine"), n_ctx=2048, n_seq_max=4, n_gpu_layers=0)
+    base = _seed_pipeline(s)
+    hd = s.store.heads_dir(s.meta.model_id)
+    comb = hd / "ppx_r1.combined.yaml"
+    units = ["12:H5:s10@ppx", "12:H3:s7@ppx", "16:H2:s4@ppx_r1"]
+    comb.write_text(yaml.safe_dump({"name": "ppx_r1-combined", "model_id": s.meta.model_id, "units": [
+        {"layer": int(u.split(":")[0]), "kind": "head", "head": int(u.split(":")[1][1:]), "mode": "proj",
+         "s": float(u.split(":s")[1].split("@")[0]), "direction": u.split("@")[1]} for u in units]}))
+    r1 = {**json.loads(json.dumps(base)), "name": "ppx_r1",
+          "refine": {"base": "ppx", "n_heads": 2, "base_units": units[:2],
+                     "remaining": {"n": 3, "n_a": 6, "used": 4, "padded": True, "questions": ["Q1", "Q2", "Q3", "Q4"], "scores": [40, 33, 30, 20]},
+                     "combined": {"recipe": str(comb), "units": units, "n_heads": 3, "remain_before": 3, "remain_after": 1,
+                                  "a_mean_before": 20.0, "a_mean_after": 8.0, "b_drift_orth_base": 0.1, "b_drift_orth": 0.12,
+                                  "chosen_by": "recommended"},
+                     "combined_rows": [{"n_new": n, "recipe": str(hd / f"ppx_r1.combined-n{n}.yaml"), "units": units[:2] + us,
+                                        "n_heads": 2 + len(us), "recommended": n == 2, "remain_before": 3, "remain_after": 4 - n,
+                                        "a_mean_before": 20.0, "a_mean_after": 8.0, "b_drift_orth_base": 0.1, "b_drift_orth": 0.1 + 0.01 * n}
+                                       for n, us in ((3, ["16:H2:s4@ppx_r1", "16:H5:s2@ppx_r1", "17:H1:s1@ppx_r1"]),
+                                                     (2, ["16:H2:s4@ppx_r1", "16:H5:s2@ppx_r1"]))]}}
+    (hd / "ppx_r1.pipeline.json").write_text(json.dumps(r1, ensure_ascii=False))
+    yield from _serve(s)
+
+
+def test_pipeline_refine_button_and_note(refine_server, browser):
+    """比較表の「残りから追加」は残りのある組だけ押せ、heads_refine のジョブを投げ、終わると新しい結果(_r1)を開く。
+    その結果には、どの組の残りから作ったかと、元の組と合わせた組(残りの前後・レシピに読み込む・eval する)が出る。"""
+    url = refine_server
+    pg = browser.new_page(viewport={"width": 1600, "height": 1000})
+    errors, posts = [], []
+    pg.on("pageerror", lambda e: errors.append(str(e)))
+    pg.on("dialog", lambda d: d.accept())
+    pg.goto(url + "/?lang=ja")
+    pg.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
+    pg.evaluate("window.gne.recipe.clear(); try { localStorage.removeItem('gne.pipeline.draft') } catch {}")
+    pg.click("#views button[data-view=direction]")
+    pg.wait_for_function("window.gne.directionView && window.gne.directionView.mode === 'pipe'", timeout=60000)
+    pg.wait_for_selector("#pp-past tr[data-pp=ppx]", timeout=30000)
+    pg.click("#pp-past tr[data-pp=ppx]")
+    pg.wait_for_selector("#pp-result table.pp-cmp [data-refine='2']", timeout=30000)
+    assert not pg.evaluate("document.querySelector(\"#pp-result [data-refine='2']\").disabled")
+    assert pg.evaluate("document.querySelectorAll('#pp-result .pp-refine').length") == 0
+
+    def on_jobs(route, req):
+        if req.method != "POST":
+            route.continue_()
+            return
+        body = json.loads(req.post_data)
+        posts.append(body)
+        route.fulfill(status=200, content_type="application/json", body=json.dumps({
+            "id": "fake-ref", "kind": body["kind"], "params": body["params"], "status": "queued", "done": 0, "total": 0, "stage": "",
+            "eta_s": None, "yields": 0, "seconds": None, "result": None, "error": None}))
+    pg.route("**/api/jobs", on_jobs)
+    done = {"id": "fake-ref", "kind": "heads_refine", "params": {}, "status": "done", "done": 1, "total": 1, "stage": "", "eta_s": None,
+            "yields": 0, "seconds": 5.0, "result": {"name": "ppx_r1"}, "error": None}
+    pg.route("**/api/jobs/fake-ref/events", lambda route, req: route.fulfill(status=200, content_type="text/event-stream",
+                                                                          body=f"data: {json.dumps(done)}\n\n"))
+    pg.click("#pp-result [data-refine='2']")
+    pg.wait_for_function("window.gne.directionView.pipe.data && window.gne.directionView.pipe.data.name === 'ppx_r1'", timeout=30000)
+    assert posts and posts[0]["kind"] == "heads_refine" and posts[0]["params"] == {"name": "ppx", "n_heads": 2}
+    pg.wait_for_selector("#pp-result .pp-refine", timeout=10000)
+    note = pg.evaluate("document.querySelector('#pp-result .pp-refine').textContent")
+    assert "ppx" in note and "3 問" in note and "残り 3 → 1 問" in note and "4 問で作りました" in note
+    pg.click("#pp-rf-load")
+    assert pg.evaluate("window.gne.recipe.specs()") == ["12:H5:s10@ppx", "12:H3:s7@ppx", "16:H2:s4@ppx_r1"]
+    # 比較表の行は「元の組 + この組」: 読み込むと元の組の 2 個と、その行の追加のヘッド
+    assert "元の組と合わせると" in pg.evaluate("document.querySelector(\"#pp-result table.pp-cmp [data-load='3']\").closest('td').textContent")
+    pg.click("#pp-result table.pp-cmp [data-load='3']")
+    assert pg.evaluate("window.gne.recipe.specs()") == ["12:H5:s10@ppx", "12:H3:s7@ppx", "16:H2:s4@ppx_r1", "16:H5:s2@ppx_r1", "17:H1:s1@ppx_r1"]
+    pg.click("#pp-result table.pp-cmp [data-eval='2']")
+    assert [b for b in posts if b["kind"] == "eval"][-1]["params"]["recipe"].endswith("ppx_r1.combined-n2.yaml")
+    pg.click("#pp-rf-eval")
+    ev = [b for b in posts if b["kind"] == "eval"]
+    assert ev and ev[-1]["params"]["recipe"].endswith("ppx_r1.combined.yaml")
+    assert not errors, errors
+    pg.close()
+    pe = browser.new_page()
+    pe.goto(url + "/?lang=en")
+    pe.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
+    pe.click("#views button[data-view=direction]")
+    pe.wait_for_function("window.gne.directionView && window.gne.directionView.mode === 'pipe'", timeout=60000)
+    pe.wait_for_selector("#pp-past tr[data-pp=ppx_r1]", timeout=30000)
+    pe.click("#pp-past tr[data-pp=ppx_r1]")
+    pe.wait_for_selector("#pp-result .pp-refine", timeout=30000)
+    assert pe.evaluate("[...window.gneI18n.missing]") == []
+    pe.close()
+
+
+def test_stale_server_notice(refine_server, browser, monkeypatch):
+    """サーバを立ち上げた後で gne のコードが更新されていれば、/api/stale が知らせ、画面の上に立ち上げ直しを勧める帯が出る。"""
+    import urllib.request
+
+    import gne.ui.server as srv
+    url = refine_server
+    assert json.loads(urllib.request.urlopen(url + "/api/stale").read())["stale"] is False
+    monkeypatch.setattr(srv, "_code_stamp", lambda: time.time() + 100)
+    assert json.loads(urllib.request.urlopen(url + "/api/stale").read())["stale"] is True
+    pg = browser.new_page()
+    pg.goto(url + "/?lang=ja")
+    pg.wait_for_selector("#stale-banner", timeout=60000)
+    assert "立ち上げ直して" in pg.evaluate("document.querySelector('#stale-banner').textContent")
+    pg.click("#stale-banner button")
+    assert pg.evaluate("document.querySelector('#stale-banner')") is None
+    pg.close()
+
+
+def test_recipe_lora_bake_panel(refine_server, browser):
+    """レシピのタブの「LoRA・焼き込み」: ヘッドのユニットがあれば押せ、形式と焼き込みのオプションを選んで headproj_export の
+    ジョブを投げ、終わると場所(LoRA は落とせるリンク)と使い方を出す。英語の文言もある。"""
+    url = refine_server
+    for lang in ("ja", "en"):
+        pg = browser.new_page(viewport={"width": 1600, "height": 1000})
+        errors, posts = [], []
+        pg.on("pageerror", lambda e: errors.append(str(e)))
+        pg.goto(url + f"/?lang={lang}")
+        pg.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
+        pg.evaluate("window.gne.recipe.clear(); document.querySelector('#list').classList.remove('collapsed')")
+        pg.click("#list-tabs button[data-tab=recipe]")
+        assert pg.evaluate("document.querySelector('#rc-lora').disabled")                    # ヘッドが無ければ押せない
+        pg.evaluate("window.gne.recipe.loadProj('ppx-n2', ['12:H5:s10@ppx', '12:H3:s7@ppx'], 'ppx')")
+        pg.click("#list-tabs button[data-tab=recipe]")
+        pg.wait_for_function("!document.querySelector('#rc-lora').disabled", timeout=10000)
+
+        def on_jobs(route, req):
+            if req.method != "POST":
+                route.continue_()
+                return
+            body = json.loads(req.post_data)
+            posts.append(body)
+            route.fulfill(status=200, content_type="application/json", body=json.dumps({
+                "id": f"fake-x{len(posts)}", "kind": body["kind"], "params": body["params"], "status": "queued", "done": 0, "total": 0,
+                "stage": "", "eta_s": None, "yields": 0, "seconds": None, "result": None, "error": None}))
+        pg.route("**/api/jobs", on_jobs)
+        res_exists = None
+        res_lora = {"path": "/x/export/ppx-n2.lora.gguf", "file": "ppx-n2.lora.gguf", "url": "/api/export/file/ppx-n2.lora.gguf",
+                    "bytes": 123456, "proj_layers": {"12": {"heads": [[5, 10, "ppx"], [3, 7, "ppx"]], "rank": 1, "folded": True}}}
+        res_bake = {"path": "/x/export/ppx-n2-headproj.gguf", "file": "ppx-n2-headproj.gguf", "bytes": 9.1e9, "strip_meta": True,
+                    "local_path_keys": ["quantize.imatrix.dataset"],
+                    "modified": [{"tensor": "blk.12.attn_output.weight", "from": "Q4_K", "to": "Q4_K"}],
+                    "verify": {"pass": True, "kl_first_token": 1e-5, "top1_match": 1.0, "ppl_diff_pct": 0.01}}
+        for i, res in ((1, res_lora), (2, res_bake)):
+            done = {"id": f"fake-x{i}", "kind": "headproj_export", "params": {}, "status": "done", "done": 1, "total": 1, "stage": "",
+                    "eta_s": None, "yields": 0, "seconds": 2.0, "result": res, "error": None}
+            pg.route(f"**/api/jobs/fake-x{i}/events", lambda route, req, done=done: route.fulfill(
+                status=200, content_type="text/event-stream", body=f"data: {json.dumps(done)}\n\n"))
+        pg.click("#rc-lora")
+        pg.wait_for_selector(".rc-lx", timeout=5000)
+        assert pg.evaluate("document.querySelector('#lx-requant').disabled")                 # LoRA では焼き込みの欄は使わない
+        assert pg.evaluate("document.querySelector('#lx-file').placeholder") == "ppx-n2"       # ファイル名の既定はレシピの名前
+        pg.click("#lx-go")
+        pg.wait_for_function("document.querySelector('#lx-result a[download]')", timeout=10000)
+        assert posts[0]["kind"] == "headproj_export" and posts[0]["params"] == {
+            "units": ["12:H5:s10@ppx", "12:H3:s7@ppx"], "name": "ppx-n2", "bake": False, "file_stem": "ppx-n2", "overwrite": False}
+        assert "--lora" in pg.evaluate("document.querySelector('#lx-result').textContent")
+        pg.check("input[name=lx-kind][value=bake]")
+        assert pg.evaluate("document.querySelector('#lx-file').placeholder") == "ppx-n2-headproj"
+        pg.fill("#lx-file", "My-Model_v1")
+        pg.dispatch_event("#lx-file", "input")
+        pg.check("#lx-viaf16")
+        pg.fill("#lx-lq", "/opt/llama-quantize")
+        pg.dispatch_event("#lx-lq", "input")
+        pg.fill("#lx-contrast", "/c/x.yaml")
+        pg.dispatch_event("#lx-contrast", "input")
+        pg.check("#lx-strip")
+        pg.click("#lx-go")
+        pg.wait_for_function("document.querySelector('#lx-result') && document.querySelector('#lx-result').textContent.includes('headproj.gguf')", timeout=10000)
+        p = posts[1]["params"]
+        assert p["file_stem"] == "My-Model_v1" and p["overwrite"] is False
+        assert p["bake"] is True and p["via_f16"] is True and p["llama_quantize"] == "/opt/llama-quantize" and p["verify"] is True \
+            and p["contrast"] == "/c/x.yaml" and "requant" not in p and p["strip_meta"] is True
+        assert "strip_meta" not in posts[0]["params"]                                   # 既定は記録を入れる
+        txt = pg.evaluate("document.querySelector('#lx-result').textContent")
+        assert "✓" in txt and ("9100 MB" in txt) and "quantize.imatrix.dataset" in txt                # 残った手元のパスを知らせる
+        # 同じ名前のファイルがある(ジョブが FILE_EXISTS で失敗)→「上書きする」で overwrite: true を付けて投げ直す
+        err = {"id": "fake-x3", "kind": "headproj_export", "params": {}, "status": "error", "done": 0, "total": 0, "stage": "",
+               "eta_s": None, "yields": 0, "seconds": 0.1, "result": None,
+               "error": {"code": "FILE_EXISTS", "message": "My-Model_v1.gguf はもうあります", "hint": None}}
+        pg.route("**/api/jobs/fake-x3/events", lambda route, req: route.fulfill(status=200, content_type="text/event-stream",
+                                                                             body=f"data: {json.dumps(err)}\n\n"))
+        pg.route("**/api/jobs/fake-x4/events", lambda route, req: route.fulfill(status=200, content_type="text/event-stream", body=""))
+        pg.click("#lx-go")
+        pg.wait_for_selector("#lx-over", timeout=10000)
+        pg.click("#lx-over")
+        pg.wait_for_function(f"true", timeout=1000)
+        assert posts[-1]["params"]["overwrite"] is True and posts[-1]["params"]["file_stem"] == "My-Model_v1"
+        # 焼き込む先に量子化していないモデル: 型は元のまま(keep)、LoRA 版との比較は出さない
+        pg.route("**/api/jobs/fake-x5/events", lambda route, req: route.fulfill(status=200, content_type="text/event-stream", body=""))
+        pg.uncheck("#lx-viaf16")
+        pg.fill("#lx-into", "/m/Model-BF16.gguf")
+        pg.dispatch_event("#lx-into", "change")
+        assert pg.evaluate("document.querySelector('#lx-requant').value") == "keep" and pg.evaluate("document.querySelector('#lx-verify').disabled")
+        pg.click("#lx-go")
+        pg.wait_for_function(f"true", timeout=1000)
+        q = posts[-1]["params"]
+        assert q["into"] == "/m/Model-BF16.gguf" and q["requant"] == "keep" and "verify" not in q and "via_f16" not in q
+        if lang == "en":
+            assert pg.evaluate("[...window.gneI18n.missing]") == []
+        assert not errors, errors
+        pg.close()
+
+
+def test_eval_tab_direction_metric_options(refine_server, browser):
+    """eval タブの「方向の指標」と「問」: 既定(印あり・64)は何も足さず、外すと direction_metrics: false、0 は全部(null)、
+    ほかの数はそのまま送る。英語の文言もある。"""
+    url = refine_server
+    for lang in ("ja", "en"):
+        pg = browser.new_page(viewport={"width": 1500, "height": 900})
+        posts = []
+
+        def on_jobs(route, req):
+            if req.method != "POST":
+                route.continue_()
+                return
+            body = json.loads(req.post_data)
+            posts.append(body)
+            route.fulfill(status=200, content_type="application/json", body=json.dumps({
+                "id": f"fake-e{len(posts)}", "kind": body["kind"], "params": body["params"], "status": "queued", "done": 0,
+                "total": 0, "stage": "", "eta_s": None, "yields": 0, "seconds": None, "result": None, "error": None}))
+        pg.route("**/api/jobs", on_jobs)
+        pg.route("**/api/jobs/fake-e*/events", lambda route, req: route.fulfill(status=200, content_type="text/event-stream", body=""))
+        pg.goto(url + f"/?lang={lang}")
+        pg.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
+        pg.evaluate("window.gne.recipe.clear(); window.gne.recipe.loadProj('ppx-n2', ['12:H5:s10@ppx', '12:H3:s7@ppx'], 'ppx')")
+        pg.click("#views button[data-view=eval]")
+        pg.wait_for_function("window.gne.evalView && !document.querySelector('#evx-go').disabled", timeout=30000)
+        pg.fill("#evx-doses", "0,1")
+        pg.click("#evx-go")
+        pg.uncheck("#evx-dm")
+        pg.click("#evx-go")
+        pg.check("#evx-dm")
+        pg.fill("#evx-dm-n", "0")
+        pg.click("#evx-go")
+        pg.fill("#evx-dm-n", "16")
+        pg.click("#evx-go")
+        pg.wait_for_function(f"true", timeout=1000)
+        ps = [b["params"] for b in posts if b["kind"] == "eval"]
+        assert len(ps) == 4
+        assert "direction_metrics" not in ps[0] and "dir_max_examples" not in ps[0]
+        assert ps[1]["direction_metrics"] is False
+        assert "dir_max_examples" in ps[2] and ps[2]["dir_max_examples"] is None and ps[3]["dir_max_examples"] == 16
+        if lang == "en":
+            assert pg.evaluate("[...window.gneI18n.missing]") == []
+        pg.close()

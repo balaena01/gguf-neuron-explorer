@@ -1,4 +1,6 @@
-# 方向成分だけを変えるヘッド介入 — 汎用手法
+# CHiPS(Causal Head-isolated Projection Steering)— 方向成分だけを変えるヘッド介入
+
+この手法を CHiPS と呼ぶ。Causal = 止めて測って効くヘッドを選ぶ、Head-isolated = 選んだヘッドの書き込みだけに限定する、Projection = 方向に沿った成分だけを動かす、Steering = それで振る舞いを変える。一番の特徴は、選んだヘッドだけに限定して射影すること(小文字の i の isolated)。
 
 任意の「振る舞いの方向」について、**因果で効くヘッドを少数選び、そのヘッドが書くベクトルのうち方向成分だけを変える**手法。ペルソナ、口調、言語混入、冗長さ、迎合などに使える。
 
@@ -290,6 +292,7 @@ A 側と B 側のそれぞれで点数を出す。生成しないので 1 条件
 | 3.4 因果で絞る | `gne heads causal --name <方向>`(層単位 → ヘッド単位、`heads_causal`) | なし |
 | 3.5〜3.6 組を作り、効率で配り直す・ヘッド数を減らす | `gne heads allocate --name <方向> --target <点数>`(`heads_allocate`) | なし |
 | 3.2〜3.6 をまとめて回す | `gne heads pipeline --spec <JSON>`(`heads_pipeline`、UI の direction ビューで JSON を読み込んでも回せる。用途別のひな形は `configs/pipeline/`) | なし |
+| 組で消し切れない質問から、足すヘッドを探す | `gne heads refine --name <配分> --n-heads N`(`heads_refine`、UI の比較表の「残りから追加」)。残りの質問を A、元の B を B にし、両側に組を当てたまま方向を作り直して一括に流し、元の組と合わせたレシピを作って測り直す | なし |
 | 全体の倍率を返事で決める | `gne heads candidates --alloc <配分>`(組 × 倍率で返事を作り、どの候補か伏せた採点のファイルを書く)→ 採点 → `gne heads candidates --tally <名前>`(`heads_candidates`・`heads_candidates_tally`、UI のパイプラインのタブからも) | あり |
 | 3.7 書き出す | `gne headproj export --recipe <レシピ>`(`--bake` で焼き込み、`--verify` で LoRA 版との一致) | なし |
 | 3.8 評価する(ランダム対照・全層射影との比較) | `gne eval --recipe <レシピ> --random-controls 16`、`gne eval --recipe <レシピ> --compare-methods`、`gne eval --alloc <方向> --n-heads 6,5,4,3`(`eval`) | あり |

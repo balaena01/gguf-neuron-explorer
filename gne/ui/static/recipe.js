@@ -202,7 +202,7 @@ export class Recipe {
 export const samplingLabel = (sp) => (sp ? `${t("温度")} ${+sp.temperature} · top-k ${sp.top_k} · top-p ${+sp.top_p} · min-p ${+sp.min_p} · presence ${+sp.presence_penalty}` : "");
 
 export class RecipePanel {
-  constructor(root, recipe, { onOpen, onOpenHead, onOpenExpert, onChat, unitWords, directions, projDirections, headKind, nFF }) {
+  constructor(root, recipe, { onOpen, onOpenHead, onOpenExpert, onChat, unitWords, directions, projDirections, headKind, nFF, onRunJob }) {
     this.root = root;
     this.r = recipe;
     this.directions = directions || (() => []);   // 方向の名前(gne direction / reverse)
@@ -215,6 +215,13 @@ export class RecipePanel {
     this.onChat = onChat;
     this.unitWords = unitWords;        // (L, n) → 短い説明(sweep の語など)。無ければ ""
     this.saved = [];
+    this.onRunJob = onRunJob || (async () => null);   // (kind, params) → ジョブ(jobs.js の start。見積もりの確認つき)
+    // LoRA・焼き込みの書き出し(headproj_export のジョブ)。欄の値は描き直しても残す
+    this.lxOpen = false;
+    this.lx = { bake: false, requant: "q8_0", via_f16: false, llama_quantize: "", imatrix: "", verify: true, contrast: "", strip: false,
+                file: "", into: "" };              // file: ファイル名(拡張子なし、空ならレシピの名前から)、into: 焼き込む先の別の GGUF
+    this.lxJobId = null;
+    this.lxMsg = null;                 // { html } 書き出しの結果か進み具合
   }
 
   async refreshSaved() {
@@ -257,7 +264,9 @@ export class RecipePanel {
         <button id="rc-chat"${r.empty() ? " disabled" : ""}>${t("3 列チャットで試す")}</button>
         <button id="rc-export"${r.addSpecs().length ? "" : " disabled"}>${t("cvec を書き出す")}</button>
         <label class="muted"><input type="checkbox" id="rc-verify"> ${t("llama.cpp で確かめる")}</label>
+        <button id="rc-lora"${r.heads().length || r.projs().length ? "" : " disabled"} title="${t("ヘッドの方向成分(proj)と倍率(gain)を、llama.cpp の --lora で使う LoRA アダプタか、重みに焼き込んだ GGUF に書き出す")}">${t("LoRA・焼き込み")}${this.lxOpen ? " ▴" : " ▾"}</button>
       </div>
+      ${this.lxOpen ? this.lxHTML() : ""}
       ${r.units.length ? `<div class="rc-actions"><button class="small" id="rc-clear" title="${t("すべてのユニットを外す")}">${t("レシピを空にする")}</button></div>` : ""}
       <div id="rc-result"></div>`;
     const $ = (s) => this.root.querySelector(s);
@@ -311,6 +320,8 @@ export class RecipePanel {
     if (sprm) sprm.addEventListener("click", () => { r.setSampling(null); this.render(); });
     this.wireAblate();
     $("#rc-export").addEventListener("click", () => this.export());
+    $("#rc-lora").addEventListener("click", () => { this.lxOpen = !this.lxOpen; this.render(); });
+    if (this.lxOpen) this.wireLx();
   }
 
   // MoE の単位の名前(CHANGE-05 G)。add には「方向押し」の印、専門家全体は EXPERT パネルへ
@@ -426,6 +437,118 @@ export class RecipePanel {
         <details open><summary class="muted note">${t("出力を比べる")}</summary><p class="muted note">gne: ${esc(v.ours)}</p><p class="muted note">llama.cpp: ${esc(v.theirs)}</p></details>` : ""}
         ${x.warnings && x.warnings.length ? `<p class="muted note">${x.warnings.map(esc).join("<br>")}</p>` : ""}`;
     } catch (e) { res.innerHTML = `<p class="err">${esc(e.message)}</p>`; }
+  }
+
+  // --- LoRA・焼き込み(headproj_export のジョブ) -----------------------------------------------------------
+  // ファイル名の既定(拡張子なし): レシピの名前(焼き込みは -headproj を付ける)
+  lxDefaultStem() {
+    const nm = (((this.root.querySelector("#rc-name") || {}).value || this.r.name || "headproj").trim().replace(/[^\w.-]/g, "_")) || "headproj";
+    return this.lx.bake ? `${nm}-headproj` : nm;
+  }
+
+  lxHTML() {
+    const f = this.lx, r = this.r, bake = f.bake;
+    const n = r.heads().length + r.projs().length, nAdd = r.addSpecs().length;
+    const dis = bake ? "" : " disabled";
+    return `<div class="rc-lx">
+      <div class="rc-lx-row"><span class="muted">${t("形式")}</span>
+        <label title="${t("小さいファイル(同じ層・同じ方向のヘッドは階数 1 にまとまる)。llama.cpp では --lora で当てる。元のモデルはそのまま")}"><input type="radio" name="lx-kind" value="lora"${bake ? "" : " checked"}> ${t("LoRA アダプタ")}</label>
+        <label title="${t("関係するテンソルだけ書き換えた GGUF を丸ごと作る。--lora なしでそのまま使える。モデルと同じくらいのディスクが要る")}"><input type="radio" name="lx-kind" value="bake"${bake ? " checked" : ""}> ${t("重みに焼き込む(GGUF)")}</label></div>
+      <div class="rc-lx-row${bake ? "" : " off"}"><span class="muted" title="${t("空なら、いま読んでいるモデルに焼き込む。同じモデルの量子化していない GGUF(F16 / BF16)のパスを入れると、方向はこのモデルで作ったものを使い、そちらに焼き込む(GPU は使わない。少し誤差がある。LoRA 版との比較はできない)")}">${t("焼き込む先")}</span>
+        <input id="lx-into" size="30" value="${esc(f.into)}" placeholder="${t("空ならいま読んでいるモデル")}" spellcheck="false"${dis}></div>
+      <div class="rc-lx-row${bake ? "" : " off"}"><span class="muted" title="${t("書き換えたテンソルを何の型で書くか。Q8_0 は元より少し大きくなることがある、F16 はもっと大きい。下の「元の型に戻す」を使うとほぼ元の大きさ")}">${t("書き換えたテンソルの型")}</span>
+        <select id="lx-requant"${dis || (f.via_f16 ? " disabled" : "")}><option value="q8_0"${f.requant === "q8_0" ? " selected" : ""}>Q8_0</option><option value="f16"${f.requant === "f16" ? " selected" : ""}>F16</option><option value="keep"${f.requant === "keep" ? " selected" : ""}>${t("元と同じ(F16・BF16 のモデル)")}</option></select>
+        <label title="${t("書き換えたテンソルを F16 で書いてから、llama-quantize で元の量子化の型に戻す(ファイルの大きさを元に近く保つ。低ビットの型は imatrix があると誤差が小さい)")}"><input type="checkbox" id="lx-viaf16"${f.via_f16 ? " checked" : ""}${dis}> ${t("元の量子化の型に戻す")}</label></div>
+      ${bake && f.via_f16 ? `<div class="rc-lx-row"><span class="muted">llama-quantize</span><input id="lx-lq" size="28" value="${esc(f.llama_quantize)}" placeholder="${t("空なら GNE_LLAMA_QUANTIZE か PATH から探す")}" spellcheck="false">
+        <span class="muted" title="${t("低ビットの型(IQ1・IQ2・IQ3_XXS)に戻すときは必須。空なら、モデルの隣の <モデル名>.imatrix.gguf / .imatrix.dat / imatrix.gguf を探して使う")}">imatrix</span><input id="lx-imatrix" size="22" value="${esc(f.imatrix)}" placeholder="${t("空ならモデルの隣を探す")}" spellcheck="false"></div>` : ""}
+      <div class="rc-lx-row${bake && !f.into.trim() ? "" : " off"}"><label title="${t("焼き込み版と LoRA 版で、方向の点数・最初のトークンの分布・最尤トークン・ppl が一致するかを確かめる(モデルを 2 回読むので時間がかかる)")}"><input type="checkbox" id="lx-verify"${f.verify ? " checked" : ""}${bake && !f.into.trim() ? "" : " disabled"}> ${t("LoRA 版と一致するか確かめる")}</label>
+        ${bake && f.verify && !f.into.trim() ? `<span class="muted">${t("対照集合")}</span><input id="lx-contrast" size="24" value="${esc(f.contrast)}" placeholder="${t("空なら方向を作った対照集合")}" spellcheck="false">` : ""}</div>
+      <div class="rc-lx-row"><span class="muted" title="${t("書き出すファイルの名前(拡張子なし)。空ならレシピの名前から作る。保存先は <root>/export/")}">${t("ファイル名")}</span>
+        <input id="lx-file" size="26" value="${esc(f.file)}" placeholder="${esc(this.lxDefaultStem())}" spellcheck="false"><span class="muted mono">${bake ? ".gguf" : ".lora.gguf"}</span></div>
+      <div class="rc-lx-row"><label title="${t("gne が書く記録(gne.* のメタデータ: レシピ・ヘッド・強さ・方向の鍵、名前の印、横の .headproj.json)を入れない。人に渡すファイル用。書いたあと、メタデータに手元のパスが残っていないかも確かめる")}"><input type="checkbox" id="lx-strip"${f.strip ? " checked" : ""}> ${t("gne の記録(メタデータ)を入れない(人に渡す用)")}</label></div>
+      <div class="rc-lx-row"><button id="lx-go">${t(bake ? "焼き込む" : "LoRA を書き出す")}</button>
+        <span class="muted note">${t("名前は上のレシピの名前(空なら headproj)。ヘッドのユニット {n} 個が入る", { n })}${nAdd ? ` · ${t("add のユニット {k} 個は入らない(cvec で書き出す)", { k: nAdd })}` : ""}${bake ? ` · ${t("焼き込みはモデルを丸ごともう 1 つ書く(同じくらいのディスク・時間)")}` : ""}</span></div>
+      <div id="lx-result">${this.lxMsg ? this.lxMsg.html : ""}</div></div>`;
+  }
+
+  wireLx() {
+    const $ = (s) => this.root.querySelector(s), f = this.lx;
+    for (const el of this.root.querySelectorAll("input[name=lx-kind]")) el.addEventListener("change", () => { f.bake = el.value === "bake" && el.checked; this.render(); });
+    const on = (sel, ev, fn) => { const el = $(sel); if (el) el.addEventListener(ev, fn); };
+    on("#lx-requant", "change", (ev) => { f.requant = ev.target.value; });
+    on("#lx-viaf16", "change", (ev) => { f.via_f16 = ev.target.checked; this.render(); });
+    on("#lx-lq", "input", (ev) => { f.llama_quantize = ev.target.value; });
+    on("#lx-imatrix", "input", (ev) => { f.imatrix = ev.target.value; });
+    on("#lx-verify", "change", (ev) => { f.verify = ev.target.checked; this.render(); });
+    on("#lx-contrast", "input", (ev) => { f.contrast = ev.target.value; });
+    on("#lx-strip", "change", (ev) => { f.strip = ev.target.checked; });
+    on("#lx-file", "input", (ev) => { f.file = ev.target.value; });
+    on("#lx-into", "change", (ev) => {                   // 量子化していないモデルへ: 型は元のまま(keep)にし、比較はしない
+      f.into = ev.target.value;
+      if (f.into.trim() && f.requant !== "f16") f.requant = "keep";
+      this.render();
+    });
+    on("#lx-go", "click", () => this.runLx());
+  }
+
+  lxSet(html) { this.lxMsg = { html }; const el = this.root.querySelector("#lx-result"); if (el) el.innerHTML = html; }
+
+  async runLx(overwrite = false) {
+    const f = this.lx, r = this.r;
+    const name = ((this.root.querySelector("#rc-name") || {}).value || r.name || "headproj").trim().replace(/[^\w.-]/g, "_") || "headproj";
+    const stem = (f.file.trim() || this.lxDefaultStem()).replace(/\.lora\.gguf$|\.gguf$/, "");
+    if (!/^[\w.-]+$/.test(stem)) { this.lxSet(`<p class="err">${t("ファイル名は英数字・_・-・. だけにしてください")}</p>`); return; }
+    const units = [...r.heads(), ...r.projs()].map((u) => r.specs()[r.units.indexOf(u)]);
+    const p = { units, name, bake: f.bake, file_stem: stem, overwrite };
+    if (f.strip) p.strip_meta = true;
+    if (r.projs().length && r.directionLayer && r.directionLayer !== "own") p.direction_layer = r.directionLayer;
+    if (f.bake) {
+      if (f.via_f16) {
+        p.via_f16 = true;
+        if (f.llama_quantize.trim()) p.llama_quantize = f.llama_quantize.trim();
+        if (f.imatrix.trim()) p.imatrix = f.imatrix.trim();
+      } else p.requant = f.requant;
+      if (f.into.trim()) p.into = f.into.trim();
+      else if (f.verify) { p.verify = true; if (f.contrast.trim()) p.contrast = f.contrast.trim(); }
+    }
+    this.lxSet(`<p class="muted note">${t("ジョブを投げています…")}</p>`);
+    try {
+      const j = await this.onRunJob("headproj_export", p);
+      if (!j) { this.lxSet(`<p class="muted note">${t("やめました")}</p>`); return; }
+      this.lxJobId = j.id;
+      this.lxSet(`<p class="muted note">${t(f.bake ? "焼き込んでいます(下のジョブのバーに進み具合)。終わるとここに場所が出ます" : "書き出しています。終わるとここに場所が出ます")}</p>`);
+    } catch (e) { this.lxSet(`<p class="err">${esc(e.message)}</p>`); }
+  }
+
+  // app.js の onJobFinished から(headproj_export)
+  lxDone(j) {
+    if (j.id !== this.lxJobId) return;
+    if (j.status !== "done" && j.error && j.error.code === "FILE_EXISTS") {          // 同じ名前のファイルがある: 確かめてから上書き
+      this.lxSet(`<p class="err">${esc(j.error.message)}</p><button class="small" id="lx-over">${t("上書きする")}</button>
+        <span class="muted note">${t("別の名前にするなら、ファイル名を変えてもう一度押す")}</span>`);
+      const b = this.root.querySelector("#lx-over");
+      if (b) b.addEventListener("click", () => this.runLx(true));
+      return;
+    }
+    if (j.status !== "done") { this.lxSet(`<p class="err">${t("失敗")}: ${esc((j.error && j.error.message) || j.status)}</p>${j.error && j.error.hint ? `<p class="muted note">${esc(j.error.hint)}</p>` : ""}`); return; }
+    const x = j.result || {}, mb = (x.bytes || 0) / 1e6;
+    const layers = Object.entries(x.proj_layers || {}).map(([L, v]) => `L${L}: ${t("階数 {r}", { r: v.rank })}`).join(" · ");
+    const v = x.verify;
+    const how = x.url ? t("llama.cpp で使う: {cmd}", { cmd: `<code>llama-server -m &lt;model&gt; --lora ${esc(x.path)}</code>` })
+      : t("llama.cpp で使う: {cmd}", { cmd: `<code>llama-server -m ${esc(x.path)}</code>` });
+    this.lxSet(`<p class="note">${x.url ? t("{file} を書き出しました", { file: `<a href="${esc(x.url)}" download="${esc(x.file)}">${esc(x.file)}</a>` })
+        : t("{file} を書き出しました", { file: `<span class="mono">${esc(x.path)}</span>` })}(${fmt(mb, mb < 10 ? 2 : 0)} MB)</p>
+      ${x.url ? `<p class="muted note mono">${esc(x.path)}</p>` : ""}
+      ${x.into ? `<p class="muted note">${t("焼き込む先: {f}", { f: esc(x.into) })}</p>` : ""}
+      ${x.imatrix ? `<p class="muted note">${t(x.imatrix_auto ? "imatrix: {f}(モデルの隣で見つけたもの)" : "imatrix: {f}", { f: esc(x.imatrix) })}</p>` : ""}
+      ${x.strip_meta ? `<p class="note">${(x.local_path_keys || []).length
+        ? `⚠ ${t("gne の記録は入れていませんが、メタデータに手元のパスらしい文字列が残っています: {k}", { k: esc(x.local_path_keys.join(", ")) })}`
+        : `✓ ${t("gne の記録は入れていません(手元のパスらしい文字列もメタデータに無し)")}`}</p>` : ""}
+      ${layers ? `<p class="muted note mono">${esc(layers)}</p>` : ""}
+      ${(x.modified || []).length ? `<p class="muted note">${t("書き換えたテンソル {n} 個", { n: x.modified.length })}: <span class="mono">${esc(x.modified.slice(0, 6).map((m) => `${m.tensor} ${m.from}→${m.to}`).join(", "))}${x.modified.length > 6 ? " …" : ""}</span></p>` : ""}
+      ${v ? `<p class="note">${v.pass ? "✓" : "✗"} ${t("LoRA 版との比較: 最初のトークンの KL {kl}、最尤トークンの一致 {top}%、ppl の差 {ppl}%", { kl: Number(v.kl_first_token).toExponential(1), top: Math.round(100 * v.top1_match), ppl: fmt(v.ppl_diff_pct, 3) })}</p>` : ""}
+      <p class="muted note">${how}</p>
+      ${(x.warnings || []).length ? `<p class="muted note">${x.warnings.map(esc).join("<br>")}</p>` : ""}`);
   }
 }
 

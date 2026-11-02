@@ -486,6 +486,53 @@ def test_pipeline_spec_checks(tmp_path):
     assert est["seconds"] and est["detail"]["prompts"] == 300 and est["detail"]["screened"] == 32
 
 
+@pytest.mark.model
+def test_contexts_fit_the_questions_and_steer_is_freed(session):
+    """短い会話しか読まない処理(方向の点数・因果・配分)は、内部を測るコンテキストを最長の会話に合わせて小さく作り、
+    生成用のコンテキストは先に解放する(大きいモデルで VRAM からあふれて遅くなるのを避ける)。"""
+    e = session.engine
+    assert e.fit_ctx(None) == e.n_ctx and e.fit_ctx(1) == 256 and e.fit_ctx(257) == 512 and e.fit_ctx(e.n_ctx) == e.n_ctx
+    with pytest.raises(ValueError):
+        e.fit_ctx(e.n_ctx + 1)
+    from gne.capture import Capture
+    cap = Capture()
+    c1 = e.probe_ctx(cap, need=100)
+    assert c1.n_ctx == 256 and c1.n_ubatch == 256
+    assert e.probe_ctx(cap, need=200) is c1                              # 足りていれば作り直さない
+    c2 = e.probe_ctx(cap, need=600)
+    assert c2 is not c1 and c2.n_ctx == 768
+    assert e.probe_ctx(cap, need=100).n_ctx == 256                       # 2 倍より大きければ小さく作り直す
+    assert e.probe_ctx(cap).n_ctx == e.n_ctx                             # 長さを言わない呼び出しは今までどおり
+    e.steer_ctx()
+    d = session.direction_score("evil", layers=[10])
+    assert e._steer is None and e._probe.n_ctx < e.n_ctx and d["layers"]
+    from gne.attn import capture_attention
+    capture_attention(session, ["Hello there, how are you?"], layers=[10], want_pattern=False)
+    assert e._attn_probe.n_ctx == 256
+    e.free_attn_probe()
+
+
+@pytest.mark.model
+def test_pipeline_resumes_direction_and_causal(session, tmp_path):
+    """同じ JSON・同じ設定で流し直すと、作り済みの方向と因果の結果を使い回して配分からやり直す。resume=False は作り直す。
+    設定(top_layers)が違えば因果は作り直す。"""
+    d = yaml.safe_load(EVIL.read_text(encoding="utf-8"))
+    spec = {"name": "pipe_r", "system_a": d["system_a"], "system_b": d["system_b"], "user_prompts": d["user_prompts"],
+            "pipeline": {"n_heads": [2], "max_examples": 8, "top_layers": 1, "hard": 4}}
+    first = session.heads_pipeline(dict(spec))
+    assert not first["reused"] and not first["direction"]["reused"]
+    again = session.heads_pipeline(dict(spec))
+    assert again["reused"] == ["direction", "causal"] and again["causal"]["reused"]
+    assert again["causal"]["top"] == first["causal"]["top"] and again["causal"]["score_layers"] == first["causal"]["score_layers"]
+    assert again["causal"]["seconds"] < first["causal"]["seconds"]
+    assert [r["units"] for r in again["allocate"]["table"] if not r.get("skipped")] == \
+        [r["units"] for r in first["allocate"]["table"] if not r.get("skipped")]
+    other = session.heads_pipeline({**spec, "pipeline": {**spec["pipeline"], "top_layers": 2}})
+    assert other["reused"] == ["direction"]
+    fresh = session.heads_pipeline(dict(spec), resume=False)
+    assert fresh["reused"] == []
+
+
 def test_pipeline_templates_are_valid(tmp_path):
     """configs/pipeline/ の用途別のテンプレートは、そのまま heads pipeline の spec として通る(about は説明だけ)。"""
     import re
@@ -666,3 +713,303 @@ def test_candidates_generate_blind_files_and_tally(session, tmp_path):
         session.heads_candidates("cand_t", n_heads=[7])
     with pytest.raises(GneError):
         session.heads_candidates("cand_t", sampling="nope")
+
+
+# --- 会話の履歴を書いた質問(多ターン)-----------------------------------------------------------------
+
+HIST = [{"role": "user", "content": "I adopted a puppy yesterday."}, {"role": "assistant", "content": "Congratulations! What is its name?"},
+        {"role": "user", "content": "Max. What should I feed him?"}]
+
+
+def test_multi_turn_questions_parse(tmp_path):
+    """1 問は文字列か会話の履歴(user と assistant が交互、user で始まり user で終わる)。崩れた履歴は読む前に断る。
+    同じ返事を 2 つの system で読ませる道具は、履歴の質問を断る。"""
+    from gne.reverse import ContrastSet, _conv, check_question, question_text
+    check_question("hi")
+    check_question(HIST)
+    for bad in ([], [{"role": "assistant", "content": "x"}], HIST[:2], [{"role": "user", "content": 3}],
+                [{"role": "user", "content": "a"}, {"role": "user", "content": "b"}], [{"role": "user", "content": "a", "x": 1}], 5):
+        with pytest.raises(GneError):
+            check_question(bad)
+    assert _conv("SYS", HIST)[0] == {"role": "system", "content": "SYS"} and _conv(None, HIST)[-1]["content"].startswith("Max.")
+    assert question_text(HIST).startswith("user: I adopted") and question_text("q") == "q"
+    p = tmp_path / "c.yaml"
+    p.write_text(yaml.safe_dump({"name": "c", "system_a": "Be evil.", "system_b": "Be nice.",
+                                 "user_prompts": ["Who are you?", HIST, "Hello", "Hi"]}), encoding="utf-8")
+    cs = ContrastSet.load(p)
+    assert cs.multi_turn and cs.convs("A")[1][-1]["content"].startswith("Max.") and cs.convs("A")[1][0]["role"] == "system"
+    with pytest.raises(GneError):
+        cs.require_systems("gne heads contrast")
+    p.write_text(yaml.safe_dump({"name": "c", "system_a": "x", "user_prompts": ["a", [{"role": "user"}]]}), encoding="utf-8")
+    with pytest.raises(GneError):
+        ContrastSet.load(p)
+
+
+@pytest.mark.model
+def test_multi_turn_questions_measured_before_last_reply(session, tmp_path):
+    """履歴の質問は、最後の user の発話への返事の直前で測る(assistant の位置は最後の返事の見出し)。方向・点数・候補づくりが通る。"""
+    from gne.reverse import ContrastSet, contrast_sequences
+    d = yaml.safe_load(EVIL.read_text(encoding="utf-8"))
+    qs = d["user_prompts"][:5] + [HIST]
+    p = tmp_path / "mt.yaml"
+    p.write_text(yaml.safe_dump({"name": "mt", "system_a": d["system_a"], "system_b": d["system_b"], "user_prompts": qs,
+                                 "validate": d["validate"]}, allow_unicode=True), encoding="utf-8")
+    cs = ContrastSet.load(p)
+    e = session.engine
+    seqs = contrast_sequences(e, cs)
+    ids, start = seqs["A"][-1]
+    full = e.detokenize(ids)
+    assert "Congratulations" in full and "Max." in full                      # 履歴が全部入っている
+    assert "Max." not in e.detokenize(ids[start:]) and "Max." in e.detokenize(ids[:start])   # 測る位置は最後の返事の見出し
+    session.direction(contrast=p, name="mt", positions="last")
+    sc = session.direction_score("mt", layers=[12])
+    assert sc["layers"][0]["A"]["n"] == len(qs)
+
+
+@pytest.mark.model
+def test_refine_adds_heads_from_remaining_questions(session, tmp_path):
+    """残りから追加: 組を当てても閾値を超える A 側の質問だけで(両側に組を当てたまま)方向を作り直し、一括で足すヘッドを決め、
+    元の組と合わせたレシピを作って測り直す。残りが無ければ断る。同じ組で流し直すと同じ名前で、方向と因果を使い回す。"""
+    d = yaml.safe_load(EVIL.read_text(encoding="utf-8"))
+    spec = {"name": "rf", "system_a": d["system_a"], "system_b": d["system_b"], "user_prompts": d["user_prompts"],
+            "validate": d["validate"], "pipeline": {"n_heads": [2], "max_examples": 8, "top_layers": 1, "hard": 4}}
+    session.heads_pipeline(spec)
+    hd = session.store.heads_dir(session.meta.model_id)
+    ap = hd / "rf.alloc.json"
+    al = json.loads(ap.read_text(encoding="utf-8"))
+    al["remain_threshold"] = 1e9                                             # 何も残らない
+    ap.write_text(json.dumps(al), encoding="utf-8")
+    with pytest.raises(GneError):
+        session.heads_refine("rf", n_heads=2)
+    al["remain_threshold"] = -1e9                                            # 全部残る(仕組みを確かめるため)
+    ap.write_text(json.dumps(al), encoding="utf-8")
+    out = session.heads_refine("rf", n_heads=2, new_heads=[1])
+    rm = out["remaining"]
+    assert out["name"] == "rf_r1" and rm["n"] == rm["n_a"] == len(d["user_prompts"]) and not rm["padded"]
+    assert out["base_units"] == next(r["units"] for r in al["table"] if r["n_heads"] == 2)
+    cs_path = Path(json.loads(Path(out["pipeline"]["path"]).read_text(encoding="utf-8"))["contrast"])
+    c = yaml.safe_load(cs_path.read_text(encoding="utf-8"))
+    base_specs = {f"{u['layer']}:H{u['head']}" for u in c["recipe_a"]["units"]}
+    assert base_specs == {f"{u['layer']}:H{u['head']}" for u in c["recipe_b"]["units"]}          # 両側に元の組
+    assert len(c["prompts_a"]) == rm["used"] and c["prompts_b"] == d["user_prompts"] and c.get("validate")
+    pd = json.loads(Path(out["pipeline"]["path"]).read_text(encoding="utf-8"))
+    assert pd["refine"]["base"] == "rf" and pd["refine"]["n_heads"] == 2
+    rows = [r for r in out["pipeline"]["table"] if not r.get("skipped")]
+    assert len(out["combined_rows"]) == len(rows)                           # 比較表のどの組も、元の組と合わせる
+    base_u = out["base_units"]
+    for c, r in zip(out["combined_rows"], rows, strict=True):
+        assert c["units"] == base_u + r["units"] and c["n_heads"] == len(base_u) + len(r["units"]) and Path(c["recipe"]).exists()
+        rr = Recipe.load(c["recipe"])
+        assert {u.direction for u in rr.units} == {"rf", "rf_r1"}                        # 元の方向と、作り直した方向
+        assert c["remain_before"] == rm["n"] and c["b_drift_orth_base"] >= 0
+    if rows:
+        cb = out["combined"]
+        assert cb["chosen_by"] in ("recommended", "fewest_remaining") and (hd / "rf_r1.combined.yaml").exists()
+        assert pd["refine"]["combined_rows"] == out["combined_rows"]
+    again = session.heads_refine("rf", n_heads=2, new_heads=[1])
+    assert again["name"] == "rf_r1" and again["pipeline"]["reused"] == ["direction", "causal"]
+    from gne.schemas import SCHEMA_VERSION, HeadsRefineOut
+    HeadsRefineOut.model_validate({"schema_version": SCHEMA_VERSION, "command": "heads refine", "model_id": "x",
+                                   "llama_cpp_version": "x", "seed": 0, "generated_at": "x", **out})
+
+
+def test_pipeline_target_keywords():
+    """目標は数、B(B 側の平均)、mid か省略(A と B の真ん中)。ほかは流す前に断る。"""
+    from gne.api import Session
+    bs = {"A": 10.0, "B": -6.0}
+    assert Session._pipeline_target(None, bs) == (2.0, "A と B の平均の真ん中")
+    assert Session._pipeline_target("mid", bs)[0] == 2.0 and Session._pipeline_target("b", bs) == (-6.0, "B 側の平均")
+    assert Session._pipeline_target("3.5", bs) == (3.5, "settings") and Session._pipeline_target(-1, bs) == (-1.0, "settings")
+    with pytest.raises(GneError):
+        Session._pipeline_target("half", bs)
+
+
+@pytest.mark.model
+def test_pipeline_target_b_uses_b_mean(session):
+    """target="B" は物差しの最後の層での B 側の平均を目標にし、残りもそれを超える例で数える。方向と因果は使い回す。"""
+    d = yaml.safe_load(EVIL.read_text(encoding="utf-8"))
+    spec = {"name": "pipe_b", "system_a": d["system_a"], "system_b": d["system_b"], "user_prompts": d["user_prompts"],
+            "pipeline": {"n_heads": [2], "max_examples": 8, "top_layers": 1, "hard": 4}}
+    mid = session.heads_pipeline(dict(spec))
+    out = session.heads_pipeline(dict(spec), target="B")
+    S = str(out["causal"]["score_layers"][-1])
+    assert out["target"] == pytest.approx(out["causal"]["base_scores"][S]["B"]) and out["target_from"] == "B 側の平均"
+    assert out["allocate"]["remain_threshold"] == pytest.approx(out["target"]) and out["reused"] == ["direction", "causal"]
+    assert out["target"] < mid["target"]
+    with pytest.raises(GneError):
+        session.heads_pipeline(dict(spec), target="half")
+
+
+@pytest.mark.model
+def test_export_job_takes_units_and_names_files(session):
+    """UI の書き出し(headproj_export のジョブ): レシピのユニットの書き方から LoRA を <root>/export/<名前>.lora.gguf に書き、
+    落とせる URL を返す。名前の誤りは断る。"""
+    from gne.jobs import _headproj_export
+    b = session.direction_set("evil").meta.get("base_layer") or 12
+    d = _headproj_export(session, units=[f"{b - 1}:H1:s3@evil", f"{b - 1}:H2:s2@evil"], name="ui_t")
+    assert d["file"] == "ui_t.lora.gguf" and d["url"] == "/api/export/file/ui_t.lora.gguf" and Path(d["path"]).exists()
+    assert d["proj_layers"][str(b - 1)]["rank"] == 1 and d["bytes"] > 0
+    with pytest.raises(GneError):
+        _headproj_export(session, units=[f"{b - 1}:H1:s3@evil"], name="a b")
+    with pytest.raises(GneError):
+        _headproj_export(session, name="x")
+
+
+@pytest.mark.model
+def test_eval_direction_metrics_thinned_counted_and_optional(session):
+    """eval の方向の指標: 質問を dir_max_examples に等間隔に間引き(一致率の返事も)、進み具合に数える(終わりで done = total)。
+    direction_metrics=False なら測らない。"""
+    b = session.direction_set("evil").meta.get("base_layer") or 12
+    r = session.recipe(units=[f"{b - 1}:H1:s3@evil", f"{b - 1}:H2:s2@evil"])
+    seen = []
+    old = session.progress
+    session.progress = lambda done, total, stage: seen.append((done, total, stage))
+    try:
+        d = session.eval(r, doses=(0, 1), dir_max_examples=4, name="dm_t")
+    finally:
+        session.progress = old
+    dm = d["direction_metrics"]
+    assert dm["n_a"] == 4 and dm["n_b"] == 4 and 0 < dm["n_behavior"] <= 4 and dm["max_examples"] == 4
+    assert d["rows"][1].get("dir_drop_a") is not None and d["rows"][1].get("rate") is not None
+    assert seen and seen[-1][0] == seen[-1][1] and any("方向の指標" in s for _, _, s in seen)
+    assert all(x[0] <= x[1] for x in seen)
+    e = session.eval(r, doses=(0, 1), direction_metrics=False, name="dm_f")
+    assert "direction_metrics" not in e and e["rows"][1].get("dir_drop_a") is None
+
+
+def test_local_path_keys_finds_home_paths(tmp_path):
+    """人に渡すファイルの確かめ: メタデータの文字列に手元のパス(ホーム・/home/・/tmp/)があれば、そのキーを返す。語彙は見ない。"""
+    import os
+
+    from gguf import GGUFWriter
+
+    from gne.ablate import local_path_keys
+    p = tmp_path / "m.gguf"
+    w = GGUFWriter(str(p), arch="llama")
+    w.add_string("general.name", "model")
+    w.add_string("quantize.imatrix.dataset", os.path.expanduser("~") + "/calib.txt")
+    w.add_string("general.note", "fine")
+    w.add_array("tokenizer.ggml.tokens", ["/home/x", "b"])
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_ti_data_to_file()
+    w.close()
+    assert local_path_keys(p) == ["quantize.imatrix.dataset"]
+
+
+@pytest.mark.model
+def test_strip_meta_leaves_no_gne_records(session, tmp_path):
+    """strip_meta: LoRA にも焼き込みにも gne.* のメタデータを入れず、名前に印を付けず、横の .headproj.json も作らない。
+    付けないときは今までどおり記録が入る。"""
+    from gguf import GGUFReader
+    b = session.direction_set("evil").meta.get("base_layer") or 12
+    r = session.recipe(units=[f"{b - 1}:H1:s3@evil"], name="secret_name")
+
+    def keys(p):
+        return {f.name: f.contents() for f in GGUFReader(str(p)).fields.values() if not f.name.startswith("tokenizer.")}
+    plain = session.headproj_export(r, tmp_path / "a.lora.gguf")
+    assert any(k.startswith("gne.") for k in keys(plain["path"]))
+    lo = session.headproj_export(r, tmp_path / "b.lora.gguf", strip_meta=True)
+    k = keys(lo["path"])
+    assert lo["strip_meta"] and not any(x.startswith("gne.") for x in k) and "secret_name" not in str(k.get("general.name"))
+    assert lo["local_path_keys"] == []
+    bk = session.headproj_export(r, tmp_path / "c.gguf", bake=True, strip_meta=True)
+    kb = keys(bk["path"])
+    orig = {f.name: f.contents() for f in session.weights.reader.fields.values() if f.name == "general.name"}
+    assert not any(x.startswith("gne.") for x in kb) and kb.get("general.name") == orig.get("general.name")
+    assert not Path(str(bk["path"]) + ".headproj.json").exists() and bk["local_path_keys"] == []
+    bk2 = session.headproj_export(r, tmp_path / "d.gguf", bake=True)
+    assert "gne.headproj" in keys(bk2["path"]) and Path(str(bk2["path"]) + ".headproj.json").exists()
+
+
+def test_find_imatrix_next_to_model(tmp_path):
+    """モデルの隣の imatrix を探す: <モデル名>.imatrix.gguf → .dat → -imatrix.* → imatrix.gguf / .dat の順。"""
+    from gne.ablate import find_imatrix
+    m = tmp_path / "Model-IQ2_XS.gguf"
+    m.write_bytes(b"x")
+    assert find_imatrix(m) is None
+    (tmp_path / "imatrix.dat").write_bytes(b"x")
+    assert find_imatrix(m).name == "imatrix.dat"
+    (tmp_path / "Model-IQ2_XS.imatrix.dat").write_bytes(b"x")
+    assert find_imatrix(m).name == "Model-IQ2_XS.imatrix.dat"
+    (tmp_path / "Model-IQ2_XS.imatrix.gguf").write_bytes(b"x")
+    assert find_imatrix(m).name == "Model-IQ2_XS.imatrix.gguf"
+
+
+@pytest.mark.model
+def test_bake_uses_imatrix_found_next_to_model(session, tmp_path, monkeypatch):
+    """「元の型に戻す」で imatrix を渡さなければ、モデルの隣で見つけたものを llama-quantize に渡す(記録を残さないときは
+    結果に名前だけ)。渡せばそちらを使う。"""
+    import gne.ablate as ab
+    got = {}
+
+    def fake(weights, write_mid, dst, *, llama_quantize=None, imatrix=None, keep_f16=False, neutral_imatrix=False):
+        got.update(imatrix=imatrix, neutral=neutral_imatrix)
+        Path(dst).write_bytes(b"GGUF")
+        return {"path": str(dst), "bytes": 4, "modified": []}
+    found = tmp_path / "near.imatrix.gguf"
+    found.write_bytes(b"x")
+    monkeypatch.setattr(ab, "requant_via_f16", fake)
+    monkeypatch.setattr(ab, "find_imatrix", lambda p: found)
+    monkeypatch.setattr(ab, "local_path_keys", lambda p: [])
+    b = session.direction_set("evil").meta.get("base_layer") or 12
+    r = session.recipe(units=[f"{b - 1}:H1:s3@evil"])
+    d = session.gain(r, tmp_path / "o.gguf", bake=True, via_f16=True, strip_meta=True)
+    assert got == {"imatrix": str(found), "neutral": True} and d["imatrix_auto"] and d["imatrix"] == "near.imatrix.gguf"
+    d = session.gain(r, tmp_path / "o2.gguf", bake=True, via_f16=True, imatrix="/given/im.dat")
+    assert got["imatrix"] == "/given/im.dat" and not d["imatrix_auto"] and d["imatrix"] == "/given/im.dat"
+
+
+@pytest.mark.model
+def test_export_job_file_name_and_overwrite(session):
+    """書き出しのファイル名(拡張子なし)を変えられ、overwrite=False なら同じ名前があるときに書かずに断る。"""
+    from gne.jobs import _headproj_export
+    b = session.direction_set("evil").meta.get("base_layer") or 12
+    u = [f"{b - 1}:H1:s3@evil"]
+    d = _headproj_export(session, units=u, name="rcp", file_stem="My-model_v2.lora.gguf", overwrite=False)
+    assert d["file"] == "My-model_v2.lora.gguf"
+    with pytest.raises(GneError) as ei:
+        _headproj_export(session, units=u, name="rcp", file_stem="My-model_v2", overwrite=False)
+    assert ei.value.code == "FILE_EXISTS"
+    assert _headproj_export(session, units=u, name="rcp", file_stem="My-model_v2", overwrite=True)["file"] == "My-model_v2.lora.gguf"
+    with pytest.raises(GneError):
+        _headproj_export(session, units=u, name="rcp", file_stem="bad name")
+
+
+@pytest.mark.model
+def test_bake_into_unquantized_copy(session, tmp_path):
+    """分析は量子化したモデルで、焼き込みは同じ構造の量子化していない GGUF(BF16)に: 方向はこのモデルのものを使い、書き換える
+    行列は焼き込む先のもの。keep なら元の型(BF16)のまま書き、ほかのテンソルはそのまま。構造が違えば断り、LoRA 版との比較もしない。"""
+    import subprocess
+
+    from gne.ablate import find_llama_quantize
+    from gne.weights import Weights
+    lq = find_llama_quantize()
+    if lq is None:
+        pytest.skip("llama-quantize がありません")
+    bf = tmp_path / "m-bf16.gguf"
+    p = subprocess.run([lq, "--allow-requantize", str(MODEL), str(bf), "BF16"], capture_output=True, text=True)
+    assert p.returncode == 0, p.stderr[-500:]
+    b = session.direction_set("evil").meta.get("base_layer") or 12
+    L = b - 1
+    r = session.recipe(units=[f"{L}:H1:s3@evil"])
+    out = tmp_path / "baked.gguf"
+    d = session.headproj_export(r, out, bake=True, requant="keep", into=bf)
+    assert d["into"] == str(bf) and all(m["from"] == "BF16" and m["to"] == "BF16" for m in d["modified"])
+    src, dst = Weights(bf), Weights(out)
+    name = d["modified"][0]["tensor"]
+    W0 = src.head_writer_matrix(L).astype(np.float64)
+    W1 = dst.head_writer_matrix(L).astype(np.float64)
+    from gne.headproj import ProjBuilder, proj_heads
+    tens = ProjBuilder(src, session.direction_set).tensors(proj_heads(r))
+    A, B = tens[name]
+    want = W0 + B.astype(np.float64) @ A.astype(np.float64)
+    assert np.abs(W1 - want).max() <= 0.02 * np.abs(want).max()                  # BF16 の丸めの範囲
+    other = next(t for t in src.reader.tensors if t.name != name and t.name.endswith("attn_output.weight"))
+    assert np.array_equal(np.asarray(other.data), np.asarray(next(t for t in dst.reader.tensors if t.name == other.name).data))
+    with pytest.raises(GneError):
+        session.headproj_export(r, tmp_path / "x.gguf", bake=True, requant="keep", into=bf, verify=True)
+    small = ROOT / "models" / "SmolLM2-135M-Instruct-f16.gguf"
+    if small.exists():
+        with pytest.raises(GneError):
+            session.headproj_export(r, tmp_path / "y.gguf", bake=True, into=small)

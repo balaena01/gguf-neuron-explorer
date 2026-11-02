@@ -14,7 +14,7 @@ const fmt = (x, d = 2) => (x === null || x === undefined || !Number.isFinite(+x)
 const sgn = (x, d = 2) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : `${x >= 0 ? "+" : "−"}${Math.abs(x).toFixed(d)}`);
 const short = (s, n = 80) => { const x = String(s ?? ""); return x.length > n ? `${x.slice(0, n - 1)}…` : x; };
 const NAME_RE = /^[\w.-]+$/;
-const PIPE_KEYS = ["positions", "score_positions", "target", "n_heads", "hard", "top_layers", "max_examples", "s_max", "direction_layer", "name"];
+const PIPE_KEYS = ["positions", "score_positions", "target", "n_heads", "hard", "top_layers", "max_examples", "s_max", "direction_layer", "resume", "name"];
 const DRAFT = "gne.pipeline.draft";               // 入力欄の下書き(このブラウザだけ)
 // 設定の欄 → ジョブの引数(spec の pipeline に値があれば、読み込んだときに欄に入れる)
 const FIELDS = [["target", "#pp-target"], ["n_heads", "#pp-nheads"], ["max_examples", "#pp-mx"], ["positions", "#pp-pos"],
@@ -55,10 +55,16 @@ export function checkSpec(text) {
   out.spec = d;
   if (!NAME_RE.test(String(d.name ?? ""))) out.errors.push(t("name は英数字・_・-・. だけの名前にしてください(方向と結果のファイル名になります)"));
   // 質問: 両側で同じなら user_prompts、側ごとに違うなら prompts_a / prompts_b(片側だけ書けばもう片側は user_prompts)
-  const isList = (v) => Array.isArray(v) && v.every((u) => typeof u === "string");
+  // 1 問は文字列か、会話の履歴(user と assistant が交互で、user で始まり user で終わるメッセージのリスト)
+  const isTurns = (q) => Array.isArray(q) && q.length > 0 && q.length % 2 === 1
+    && q.every((m, i) => m && typeof m === "object" && m.role === (i % 2 ? "assistant" : "user") && typeof m.content === "string");
+  const isList = (v) => Array.isArray(v) && v.every((u) => typeof u === "string" || isTurns(u));
   let listOk = true;
   for (const k of ["user_prompts", "prompts_a", "prompts_b"]) {
-    if (d[k] !== undefined && d[k] !== null && !isList(d[k])) { out.errors.push(t("{k} は質問の文字列のリストです", { k })); listOk = false; }
+    if (d[k] !== undefined && d[k] !== null && !isList(d[k])) {
+      out.errors.push(t("{k} は質問のリストです。1 問は文字列か、会話の履歴([{\"role\": \"user\", \"content\": …}, {\"role\": \"assistant\", …}, …] を user で始めて user で終える)", { k }));
+      listOk = false;
+    }
   }
   const pa = isList(d.prompts_a) ? d.prompts_a : isList(d.user_prompts) ? d.user_prompts : null;
   const pb = isList(d.prompts_b) ? d.prompts_b : isList(d.user_prompts) ? d.user_prompts : null;
@@ -68,7 +74,7 @@ export function checkSpec(text) {
     if (n < 4) out.errors.push(t("質問は 4 個以上にしてください(いま {n} 個)", { n }));
     else if (n < 16) out.warns.push(t("質問が {n} 個と少ないので、測った値のぶれが大きくなります(数十〜数百個を勧めます)", { n }));
   }
-  const samePrompts = !!(pa && pb) && pa.length === pb.length && pa.every((u, i) => u === pb[i]);
+  const samePrompts = !!(pa && pb) && pa.length === pb.length && pa.every((u, i) => JSON.stringify(u) === JSON.stringify(pb[i]));
   if (pa && pb && !samePrompts) out.warns.push(t("A と B で質問が違います。方向には狙った違いのほかに、話題・長さ・言語の差も混ざるので、それ以外はできるだけそろえてください"));
   const hasRecipe = (d.recipe_a !== undefined && d.recipe_a !== null) || (d.recipe_b !== undefined && d.recipe_b !== null);
   const sysA = d.system_a !== undefined && d.system_a !== null, sysB = d.system_b !== undefined && d.system_b !== null;
@@ -81,6 +87,8 @@ export function checkSpec(text) {
       if (bad.length) out.errors.push(t("pipeline に {k} は使えません", { k: bad.join(", ") }));
     }
   }
+  const nMulti = [...(pa || []), ...(samePrompts ? [] : pb || [])].filter((q) => Array.isArray(q)).length;
+  if (nMulti) out.warns.push(t("会話の履歴を書いた質問が {n} 個あります(最後の user の発話への返事の直前で測ります)", { n: nMulti }));
   if (pa && pb) out.summary = { n: samePrompts ? pa.length : `${pa.length} / ${pb.length}`, A: sideText(d, "a"), B: sideText(d, "b"), validate: d.validate && d.validate.match };
   return out;
 }
@@ -119,7 +127,7 @@ export class PipelinePanel {
     this.causal = null;                          // その因果スクリーニングの全部の行(/api/causal/<name>)
     this.jobId = null;
     this.candJobId = null;                       // 「候補を作る」で投げた heads_candidates のジョブ
-    this.cf = { scales: "0.5,0.75,1,1.25", n_heads: "", max_prompts: 24, max_tokens: 120, sampling: "llama_server", seed: 0,
+    this.cf = { scales: "0.5,1,1.5,2,3", n_heads: "", max_prompts: 24, max_tokens: 120, sampling: "llama_server", seed: 0,
                 judge_b: false, qa: "", qb: "", with_recipe: "" };   // 「候補を作る」の欄(結果を開き直しても残す)
     this.lastPipe = null;                        // 最後に欄に入れた spec の pipeline(変わったときだけ設定の欄を書き換える)
     root.innerHTML = `
@@ -134,12 +142,13 @@ export class PipelinePanel {
       <textarea id="pp-text" class="mono" rows="9" spellcheck="false" placeholder='{"name": "…", "system_a": "…", "system_b": "…", "user_prompts": ["…", "…", "…", "…"]}'></textarea>
       <div id="pp-check" class="note"></div>
       <div class="pp-set">
-        <label class="muted" title="${t("配分で A 側の点数をここまで下げる(物差しの最後の層)。空なら A と B の平均の真ん中")}">${t("目標")} <input id="pp-target" size="7" placeholder="${t("真ん中")}" spellcheck="false"></label>
+        <label class="muted" title="${t("配分で A 側の点数をここまで下げる(物差しの最後の層)。数か、B(B 側の平均まで = 消し切る)。空なら A と B の平均の真ん中(半分ほど消す)")}">${t("目標")} <input id="pp-target" size="7" placeholder="${t("真ん中")}" spellcheck="false"></label>
         <label class="muted" title="${t("比べる組のヘッドの数(カンマ区切り)。少ない組ほど 1 ヘッドの強さが大きくなる")}">${t("ヘッド数")} <input id="pp-nheads" size="8" value="${DEFAULTS.n_heads}" spellcheck="false"></label>
         <label class="muted" title="${t("止めて測る段(物差し・因果・配分)で使う質問の数(等間隔に間引く)。方向づくりには全部使う")}">max_examples <input id="pp-mx" type="number" min="4" max="4096" value="${DEFAULTS.max_examples}"></label>
         <label class="muted" title="${t("方向を作る位置。last = 質問の最後のトークン、response = 返事を書かせてその位置(遅い)")}">positions <select id="pp-pos"><option>last</option><option>response</option></select></label>
         <label class="muted" title="${t("層ごとのスクリーニングのあと、ヘッドを 1 個ずつ止めて測る層の数")}">top_layers <input id="pp-tl" type="number" min="1" max="64" value="${DEFAULTS.top_layers}"></label>
-        <label class="muted" title="${t("効率を測るときの、点数が残りやすい質問の数")}">hard <input id="pp-hard" type="number" min="1" max="1024" value="${DEFAULTS.hard}"></label></div>
+        <label class="muted" title="${t("効率を測るときの、点数が残りやすい質問の数")}">hard <input id="pp-hard" type="number" min="1" max="1024" value="${DEFAULTS.hard}"></label>
+        <label class="muted" title="${t("同じ JSON・同じ設定で作り済みの方向と因果の結果があっても使い回さず、最初から作り直す(止めて流し直すときは外したままにすると配分からやり直せる)")}"><input type="checkbox" id="pp-fresh"> ${t("最初から作り直す")}</label></div>
       <div class="pp-go"><button id="pp-go" disabled>${t("方向とヘッドを作る")}</button> <span class="muted note" id="pp-status"></span></div>
       <h4>${t("これまでの実行")}</h4><div id="pp-past"><p class="muted note">${t("読み込み中…")}</p></div>
       <div id="pp-result"></div>`;
@@ -225,10 +234,13 @@ export class PipelinePanel {
     const mx = num("#pp-mx", 4), tl = num("#pp-tl", 1), hard = num("#pp-hard", 1);
     if (mx === null || tl === null || hard === null) { this.status(t("max_examples・top_layers・hard は整数で(max_examples は 4 以上)"), true); return null; }
     const p = { spec: c.spec, n_heads: nh, max_examples: mx, positions: this.$("#pp-pos").value, top_layers: tl, hard };
+    if (this.$("#pp-fresh").checked) p.resume = false;
     const tg = this.$("#pp-target").value.trim();
     if (tg) {
-      if (!Number.isFinite(Number(tg))) { this.status(t("目標は数で(空なら A と B の平均の真ん中)"), true); return null; }
-      p.target = Number(tg);
+      if (/^b$/i.test(tg)) p.target = "B";
+      else if (/^mid$/i.test(tg)) p.target = "mid";
+      else if (!Number.isFinite(Number(tg))) { this.status(t("目標は数か B(B 側の平均)で(空なら A と B の平均の真ん中)"), true); return null; }
+      else p.target = Number(tg);
     }
     return p;
   }
@@ -249,9 +261,35 @@ export class PipelinePanel {
     finally { this.$("#pp-go").disabled = !this.checked || !this.checked.spec || this.checked.errors.length > 0; }
   }
 
+  // 「残りから追加」: その組で残った質問だけで、追加のヘッドを探す(heads_refine のジョブ)
+  async runRefine(name, nHeads, btn) {
+    try {
+      const j = await this.onRun("heads_refine", { name, n_heads: nHeads });
+      if (!j) return;
+      this.refineJobId = j.id;
+      if (btn) { btn.textContent = t("探しています…"); btn.disabled = true; }
+      this.status(t("{n} ヘッドの組で残った質問から、追加のヘッドを探すジョブを投げました(終わると新しい結果を開きます)", { n: nHeads }));
+    } catch (e) { this.status(`${t("エラー")}: ${e.message}`, true); }
+  }
+
+  // 「残りから追加」で作った結果の説明と、元の組と合わせた組(レシピに読み込む・eval する)
+  refineNote(d) {
+    const r = d.refine;
+    if (!r) return "";
+    const rm = r.remaining || {}, c = r.combined;
+    return `<div class="pp-refine note"><p>${t("{base} の {n} ヘッドの組で目標まで下がらなかった {k} 問(A 側 {nA} 問のうち)から作った、追加のヘッドの結果です。A と B の両側に元の組を当てたまま、方向を作り直しています。",
+      { base: esc(r.base), n: r.n_heads, k: rm.n ?? "—", nA: rm.n_a ?? "—" })}${rm.padded ? ` ${t("(残りが少ないので、点数の高い順に {u} 問で作りました)", { u: rm.used })}` : ""}</p>
+      ${c ? `<p><b>${t("元の組と合わせた組({m} ヘッド)", { m: c.n_heads })}</b>${c.chosen_by === "fewest_remaining" ? ` <span class="muted">${t("(目標に届いた組が無いので、合わせた残りが最も少ない組)")}</span>` : ""}: ${t("残り {a} → {b} 問", { a: c.remain_before, b: c.remain_after })} ·
+        ${t("A 平均 {a} → {b}", { a: fmt(c.a_mean_before, 2), b: fmt(c.a_mean_after, 2) })} · ${t("B ⊥ {a} → {b}", { a: fmt(c.b_drift_orth_base, 3), b: fmt(c.b_drift_orth, 3) })}
+        <button class="small" id="pp-rf-load" title="${t("元の組と追加の組を合わせたユニットで今のレシピを置き換える")}">${t("合わせた組をレシピに読み込む")}</button>
+        <button class="small" id="pp-rf-eval" title="${t("合わせた組のレシピで eval を投げる(倍率 0 と 1、ランダムな対照 8 本)")}">${t("合わせた組で eval する")}</button></p>`
+        : `<p class="muted">${t("追加の組を作れなかったので、合わせた組はありません。")}</p>`}
+      <p class="muted">${t("下の比較表の「元の組と合わせて読み込む」「合わせて eval する」は、どの行も元の組とその行の組を合わせて使います(追加の組は元の組を当てた状態で探したので、単独では使いません)。")}</p></div>`;
+  }
+
   // app.js の onJobFinished から(このパネルで投げたものでなくても一覧は取り直す)
   async jobEnded(j) {
-    const mine = j.id === this.jobId;
+    const mine = j.id === this.jobId || (j.kind === "heads_refine" && j.id === this.refineJobId);
     if (j.status === "done") {
       const name = j.result && j.result.name;
       if (mine) this.status(t("できました({s} 秒)", { s: fmt(j.seconds, 0) }));
@@ -300,6 +338,9 @@ export class PipelinePanel {
       <div class="pp-res">
       <h3>${t("{name} の結果", { name: esc(d.name) })} <span class="muted note mono">${esc((d.updated || "").replace("T", " ").slice(0, 16))} · ${t("{n} 秒", { n: Math.round(d.seconds || 0) })}</span></h3>
       <p class="note">${t("質問 {n} 個", { n: d.n_prompts ?? "—" })} · A: ${esc(side(sides.A))} · B: ${esc(side(sides.B))}</p>
+      ${this.refineNote(d)}
+      ${(d.reused || []).length ? `<p class="note muted">${t("同じ JSON・同じ設定で作り済みの{w}を使い回しました(作り直すときは「最初から作り直す」に印を付けて流し直す)",
+        { w: d.reused.map((x) => (x === "direction" ? t("方向") : x === "causal" ? t("因果の結果") : x)).join(t("と")) })}</p>` : ""}
       <p class="note">${t("目標: L{L} の A 側の点数を {v} まで({src})", { L: (d.causal && (d.causal.score_layers || []).slice(-1)[0]) ?? "—", v: fmt(d.target, 2),
         src: esc(d.target_from === "settings" ? t("設定") : d.target_from ? t(d.target_from) : "—") })}${d.recommended ? ` · <b>${t("推す組: {n} ヘッド", { n: d.recommended.n_heads })}</b>` : ` · ${t("推す組なし(どの組も目標に届かない)")}`}</p>
       <div class="pp-actions"><button class="small" id="pp-showdir" title="${t("上の「方向を見る」で、この方向の層ごとの点数と分布を見る")}">${t("方向を見る")}</button>
@@ -326,14 +367,35 @@ export class PipelinePanel {
     const more = $("#pp-eta-more");
     if (more) more.addEventListener("click", () => { for (const tr of out.querySelectorAll("table.pp-eta tr.pp-more")) tr.classList.remove("hidden"); more.remove(); });
     const table = (d.allocate && d.allocate.table) || [];
+    const crows = (d.refine && d.refine.combined_rows) || [];
+    const crow = (n) => crows.find((c) => String(c.n_new) === String(n));
     for (const b of out.querySelectorAll("[data-load]")) {
-      b.addEventListener("click", () => { const r = table.find((x) => String(x.n_heads) === b.dataset.load); if (r) this.onLoadProj(`${d.name}-n${r.n_heads}`, r.units, d.name); });
+      b.addEventListener("click", () => {
+        const c = crow(b.dataset.load);
+        if (c) { this.onLoadProj(`${d.name}-n${c.n_new}-combined`, c.units, d.name); return; }   // 残りから追加: 元の組と合わせて
+        const r = table.find((x) => String(x.n_heads) === b.dataset.load);
+        if (r) this.onLoadProj(`${d.name}-n${r.n_heads}`, r.units, d.name);
+      });
+    }
+    for (const b of out.querySelectorAll("[data-refine]")) {
+      b.addEventListener("click", () => this.runRefine(d.name, +b.dataset.refine, b));
+    }
+    const rf = d.refine && d.refine.combined;
+    const rl = $("#pp-rf-load"), re = $("#pp-rf-eval");
+    if (rf && rl) rl.addEventListener("click", () => this.onLoadProj(`${d.name}-combined`, rf.units, d.name));
+    if (rf && re) {
+      re.addEventListener("click", () => {
+        this.onEval({ recipe: rf.recipe, doses: [0, 1], random_controls: 8 });
+        re.textContent = t("eval を投げました");
+        re.disabled = true;
+      });
     }
     for (const b of out.querySelectorAll("[data-eval]")) {
       b.addEventListener("click", () => {
         const r = table.find((x) => String(x.n_heads) === b.dataset.eval);
         if (!r || !r.recipe) return;
-        this.onEval({ recipe: r.recipe, doses: [0, 1], random_controls: 8 });
+        const c = crow(b.dataset.eval);
+        this.onEval({ recipe: c ? c.recipe : r.recipe, doses: [0, 1], random_controls: 8 });
         b.textContent = t("eval を投げました");
         b.disabled = true;
       });
@@ -491,14 +553,18 @@ export class PipelinePanel {
         <td>${r.in_base ? "✓" : ""}</td><td class="l">${r.excluded ? `<span class="pp-ex">${t("外した: 中立の残差が大きく動く")}</span>` : ""}</td></tr>`;
     }).join("");
     const nA = a.n_a;
+    const crows = (d.refine && d.refine.combined_rows) || [];             // 残りから追加の結果: 行は「元の組 + この組」で使う
+    const crow = (n) => crows.find((c) => String(c.n_new) === String(n));
     const cmp = (a.table || []).slice().sort((x, y) => y.n_heads - x.n_heads).map((r) => {
       if (r.skipped) return `<tr><td>${r.n_heads}</td><td class="excl" colspan="9">${esc(r.skipped)}</td></tr>`;
       const chips = (r.heads || []).map((h) => headChip(h.layer, h.head, ` <span class="muted">s${fmt(h.s, 1)}</span>`)).join(" ");
       return `<tr class="${r.recommended ? "rec" : ""}" data-n="${r.n_heads}"><td>${r.n_heads}${r.recommended ? ` <span class="badge">${t("推奨")}</span>` : ""}</td><td class="units">${chips}</td>
         <td>${fmt(r.s_max, 2)}</td><td>${r.remain ?? "—"}${nA ? ` / ${nA}` : ""}</td><td>${fmt(r.a_max, 2)}</td><td>${fmt(r.a_mean, 2)}</td><td>${sgn(r.b_side_delta, 2)}</td><td>${fmt(r.b_drift_orth, 3)}</td>
         <td class="${r.reached ? "ok" : "ng"}">${r.reached ? "✓" : "×"}</td>
-        <td class="l"><button class="small" data-load="${r.n_heads}" title="${t("この組(proj のユニット)で今のレシピを置き換える")}">${t("レシピに読み込む")}</button>
-          <button class="small" data-eval="${r.n_heads}" title="${t("この組のレシピで eval を投げる(倍率 0 と 1、ランダムな対照 8 本)")}"${r.recipe ? "" : " disabled"}>${t("eval する")}</button></td></tr>`;
+        <td class="l">${crow(r.n_heads) ? `<div class="muted note">${t("元の組と合わせると: 残り {a} → {b} 問 · B ⊥ {c}", { a: crow(r.n_heads).remain_before, b: crow(r.n_heads).remain_after, c: fmt(crow(r.n_heads).b_drift_orth, 3) })}</div>` : ""}
+          <button class="small" data-load="${r.n_heads}" title="${crow(r.n_heads) ? t("元の組とこの組を合わせたユニットで今のレシピを置き換える(この組は元の組を当てた状態で探したので、単独では使わない)") : t("この組(proj のユニット)で今のレシピを置き換える")}">${crow(r.n_heads) ? t("元の組と合わせて読み込む") : t("レシピに読み込む")}</button>
+          <button class="small" data-eval="${r.n_heads}" title="${crow(r.n_heads) ? t("元の組とこの組を合わせたレシピで eval を投げる(倍率 0 と 1、ランダムな対照 8 本)") : t("この組のレシピで eval を投げる(倍率 0 と 1、ランダムな対照 8 本)")}"${r.recipe ? "" : " disabled"}>${crow(r.n_heads) ? t("合わせて eval する") : t("eval する")}</button>
+          <button class="small" data-refine="${r.n_heads}" title="${t("この組を当てても目標まで下がらない質問(残り)だけで、組を当てたまま方向を作り直し、因果 → 配分で足すヘッドを探す。結果は新しい一括の結果(名前 _r1 …)として出る")}"${r.remain > 0 ? "" : " disabled"}>${t("残りから追加")}</button></td></tr>`;
     }).join("");
     const hp = hard.prompts || [], hs = hard.scores || [];
     return `<section class="pp-stage"><h4>${t("4. 効率での配り直し")}</h4>

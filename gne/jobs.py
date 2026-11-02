@@ -132,6 +132,43 @@ def _eval(s, recipe: str | None = None, units: list[str] | None = None, dose_uni
     return {k: v for k, v in d.items() if k != "samples"}
 
 
+def _headproj_export(s, recipe: str | None = None, out: str | None = None, *, units: list[str] | None = None,
+                     name: str | None = None, direction_layer: str | None = None, file_stem: str | None = None,
+                     overwrite: bool = True, **p) -> dict:
+    """ヘッドの proj と gain(LoRA に入るユニット)を LoRA アダプタか焼き込み GGUF に書き出す。recipe(保存したレシピの名前か
+    パス)か units(UI のレシピのユニットの書き方)。out を省くと <root>/export/<名前>.lora.gguf(焼き込みは <名前>-headproj.gguf)。
+    file_stem を渡すとファイル名はそれ(LoRA は <file_stem>.lora.gguf、焼き込みは <file_stem>.gguf)。overwrite=False なら、
+    同じ名前のファイルがあれば書かずに FILE_EXISTS を返す(UI は確かめてから上書きする)。LoRA は小さいので、UI から落とせる
+    URL も返す。"""
+    import re
+    from pathlib import Path
+    from .steer import GneError
+    if units:
+        r = s.recipe(units=list(units), name=name or None, direction_layer=direction_layer)
+    elif recipe:
+        r = s.recipe(path=s.recipe_path(recipe), direction_layer=direction_layer)
+    else:
+        raise GneError("BAD_ARGS", "recipe か units が要ります")
+    nm = name or r.name or "headproj"
+    if not re.fullmatch(r"[\w.\-]+", nm):
+        raise GneError("BAD_ARGS", f"名前 {nm!r} は英数字・_・-・. だけにしてください")
+    bake = bool(p.get("bake"))
+    if file_stem is not None:
+        file_stem = file_stem.strip().removesuffix(".gguf").removesuffix(".lora")
+        if not re.fullmatch(r"[\w.\-]+", file_stem):
+            raise GneError("BAD_ARGS", f"ファイル名 {file_stem!r} は英数字・_・-・. だけにしてください")
+    stem = file_stem or (f"{nm}-headproj" if bake else nm)
+    path = Path(out) if out else s.store.export_dir() / (f"{stem}.gguf" if bake else f"{stem}.lora.gguf")
+    if not overwrite and path.exists():
+        raise GneError("FILE_EXISTS", f"{path.name} はもうあります", "上書きするか、別の名前にしてください")
+    d = s.headproj_export(r, path, **p)
+    d["file"] = Path(d["path"]).name
+    if not bake and Path(d["path"]).parent.resolve() == s.store.export_dir().resolve():
+        d["url"] = f"/api/export/file/{d['file']}"
+    d["name"] = nm
+    return d
+
+
 def standard_kinds() -> dict[str, Callable[..., dict]]:
     """MCP(job_start)と Web UI が共通で使うジョブの種類。"""
     return {
@@ -157,7 +194,8 @@ def standard_kinds() -> dict[str, Callable[..., dict]]:
         "heads_allocate": lambda s, direction, **p: s.heads_allocate(direction, **p),    # CHANGE-06 D
         "head_pipeline": lambda s, spec, **p: s.heads_pipeline(spec, **p),             # 方向 → 基準層 → 因果 → 配分
         "heads_candidates": lambda s, alloc, **p: s.heads_candidates(alloc, **p),       # 組 × 倍率で生成 → 採点のファイル
-        "headproj_export": lambda s, recipe, out, **p: s.headproj_export(s.recipe(path=s.recipe_path(recipe)), out, **p),
+        "heads_refine": lambda s, name, **p: s.heads_refine(name, **p),                 # 残りの質問で追加のヘッドを探す
+        "headproj_export": _headproj_export,
     }
 
 

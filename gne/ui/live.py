@@ -38,6 +38,7 @@ class Live:
         self._fires: OrderedDict[str, dict] = OrderedDict()
         self._streams: dict[str, threading.Event] = {}
         self._lock = threading.Lock()
+        self.closing = threading.Event()          # サーバを止めるとき(serve の Ctrl+C)に立つ。配信と生成はこれで止める
 
     # --- 共通 -------------------------------------------------------------------------------------------
     def _gpu(self, fn):
@@ -138,7 +139,12 @@ class Live:
             th.start()
             try:
                 while True:
-                    ev = q.get()
+                    if self.closing.is_set():         # サーバを止める: 生成を止めて配信を閉じる(トークンが流れていても)
+                        break
+                    try:
+                        ev = q.get(timeout=0.5)
+                    except queue.Empty:
+                        continue
                     yield _sse(ev)
                     if ev["type"] == "done":
                         break
@@ -377,7 +383,7 @@ class Live:
 
     def export_path(self, file: str) -> Path:
         p = (self.s.store.root / "export" / file).resolve()
-        if p.parent != (self.s.store.root / "export").resolve() or not p.name.endswith(".cvec.gguf") or not p.exists():
+        if p.parent != (self.s.store.root / "export").resolve() or not p.name.endswith((".cvec.gguf", ".lora.gguf")) or not p.exists():
             raise GneError("NOT_FOUND", f"{file} はありません")
         return p
 
@@ -393,7 +399,7 @@ class Live:
                 if key != last:
                     yield _sse(v)
                     last = key
-                if v["status"] in ("done", "error", "cancelled"):
+                if v["status"] in ("done", "error", "cancelled") or self.closing.is_set():
                     break
                 time.sleep(0.5)
         return events()

@@ -383,6 +383,42 @@ def _bake_embed(weights, t, r: np.ndarray, s: float, requant: str, chunk: int = 
 
 # --- --via-f16(F16 で書いて llama-quantize で元の型に戻す)------------------------------------------------
 
+def local_path_keys(path: str | Path) -> list[str]:
+    """GGUF のメタデータのうち、手元のパスらしい文字列(ホームのフォルダ・/home/・/tmp/・C:\\Users\\)を含むキー。
+    人に渡すファイルを作ったあとに確かめる(llama-quantize が imatrix を作った文章のパスを書くことがある)。"""
+    import os
+
+    from gguf import GGUFReader, GGUFValueType
+    home = os.path.expanduser("~")
+    marks = [m for m in (home, "/home/", "/Users/", "/tmp/", "\\Users\\") if m and m != "/"]
+    out = []
+    for f in GGUFReader(str(path)).fields.values():
+        if f.name.startswith("tokenizer."):        # 語彙(何万もの文字列)は見ない
+            continue
+        if f.types and f.types[0] in (GGUFValueType.STRING, GGUFValueType.ARRAY):
+            try:
+                v = f.contents()
+            except Exception:  # noqa: BLE001
+                continue
+            text = json.dumps(v, ensure_ascii=False) if not isinstance(v, str) else v
+            if any(m in text for m in marks):
+                out.append(f.name)
+    return out
+
+
+def find_imatrix(model_path: str | Path) -> Path | None:
+    """モデルの隣の imatrix: <モデル名>.imatrix.gguf / .imatrix.dat / -imatrix.gguf / -imatrix.dat、無ければ imatrix.gguf /
+    imatrix.dat(同じフォルダ)。「元の量子化の型に戻す」で imatrix を渡さなかったときに使う。"""
+    p = Path(model_path)
+    stem = p.name[:-len(".gguf")] if p.name.endswith(".gguf") else p.stem
+    for name in (f"{stem}.imatrix.gguf", f"{stem}.imatrix.dat", f"{stem}-imatrix.gguf", f"{stem}-imatrix.dat",
+                 "imatrix.gguf", "imatrix.dat"):
+        c = p.with_name(name)
+        if c.is_file():
+            return c
+    return None
+
+
 def find_llama_quantize(path: str | None = None) -> str | None:
     if path:
         return path if Path(path).exists() else None
@@ -416,9 +452,10 @@ def bake_via_f16(weights, r, dst: str | Path, *, layers=None, scale: float = 1.0
 
 
 def requant_via_f16(weights, write_mid: Callable[[Path], dict], dst: str | Path, *, llama_quantize: str | None = None,
-                    imatrix: str | None = None, keep_f16: bool = False) -> dict:
+                    imatrix: str | None = None, keep_f16: bool = False, neutral_imatrix: bool = False) -> dict:
     """write_mid(中間のパス) で書き換えたテンソルだけ F16 の GGUF を書かせ、llama-quantize で全テンソルを元の型に戻す
-    (ablate と、ヘッドの方向成分の焼き込み CHANGE-06 で共用)。"""
+    (ablate と、ヘッドの方向成分の焼き込み CHANGE-06 で共用)。neutral_imatrix なら、llama-quantize がメタデータに書く
+    imatrix のパス(quantize.imatrix.file)が手元のパスにならないよう、作業用のフォルダに「imatrix」の名前で置いて渡す。"""
     lq = find_llama_quantize(llama_quantize)
     if lq is None:
         raise GneError("TOOL_NOT_FOUND", "llama-quantize が見つかりません",
@@ -430,26 +467,42 @@ def requant_via_f16(weights, write_mid: Callable[[Path], dict], dst: str | Path,
     if need and not imatrix:
         raise GneError("NEEDS_IMATRIX", f"このモデルには {', '.join(need)} のテンソルがあり、llama-quantize は imatrix が無いと"
                        "書き出しません(写すだけのテンソルでも)",
-                       "元のモデルを作ったときの imatrix を --imatrix で渡すか、--requant q8_0 を使ってください")
-    dst = Path(dst)
+                       "元のモデルを作ったときの imatrix を --imatrix で渡すか、モデルの隣に <モデル名>.imatrix.gguf(か .dat)を"
+                       "置くか、--requant q8_0 を使ってください")
+    dst = Path(dst).resolve()
     mid = dst.with_name(dst.name + ".f16.part")
     rep = write_mid(mid)
     tt = dst.with_name(dst.name + ".tensor-types.txt")
     tensor_types_file(weights, tt)
     cmd = [lq, "--tensor-type-file", str(tt)]
-    if imatrix:
+    cwd, work = None, None
+    if imatrix and neutral_imatrix:
+        import shutil
+        work = dst.with_name(f".{dst.name}.imatrix-work")
+        work.mkdir(parents=True, exist_ok=True)
+        name = "imatrix" + Path(imatrix).suffix
+        try:
+            (work / name).symlink_to(Path(imatrix).resolve())
+        except OSError:
+            shutil.copyfile(imatrix, work / name)
+        cmd += ["--imatrix", name]
+        cwd = str(work)
+    elif imatrix:
         cmd += ["--imatrix", str(imatrix)]
     ft = weights.field("general.file_type")
     if ft is not None:
         cmd += ["--override-kv", f"general.file_type=int:{int(ft)}"]
     cmd += [str(mid), str(dst), "Q8_0"]
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        p = subprocess.run(cmd, capture_output=True, text=True, check=False, cwd=cwd)
         if p.returncode != 0:
             raise GneError("TOOL_FAILED", f"llama-quantize が失敗しました(rc={p.returncode})", (p.stderr or p.stdout)[-800:])
     finally:
         tt.unlink(missing_ok=True)
         if not keep_f16:
             mid.unlink(missing_ok=True)
+        if work is not None:
+            import shutil
+            shutil.rmtree(work, ignore_errors=True)
     return {**rep, "path": str(dst), "requant": "via-f16", "bytes": dst.stat().st_size, "llama_quantize": lq,
             "intermediate_bytes": rep["bytes"]}

@@ -236,6 +236,20 @@ def estimate(session, kind: str, params: dict) -> dict:
         if pipe.get("positions") == "response":
             sec += 2 * sp.gen(n, 96)
         detail = {"prompts": n, "screened": mx, "trials": trials_causal + trials_alloc}
+    elif kind == "heads_refine":                               # 残りを測る + 残りの質問で一括(方向 → 因果 → 配分)+ 合わせた組を測る
+        import yaml
+        name = str(p.get("name") or "")
+        hd = session.store.heads_dir(session.meta.model_id)
+        pj = hd / f"{name}.pipeline.json"
+        n_a, n_b = 32, 32
+        if pj.exists():
+            pd = json.loads(pj.read_text(encoding="utf-8"))
+            n_a, n_b = int(pd.get("n_prompts") or 32), int(pd.get("n_prompts_b") or pd.get("n_prompts") or 32)
+        spec = {"user_prompts": ["q"] * max(4, n_a // 3), "prompts_b": ["q"] * n_b,
+                "pipeline": {"n_heads": list(p.get("new_heads") or (3, 2, 1))}}
+        sub = estimate(session, "head_pipeline", {"spec": spec})
+        sec = (sub.get("seconds") or 0.0) + (2 * n_a + 3 * min(64, n_b)) * sp.setprefill / 1000 * 1.2
+        detail = {"prompts_a": n_a, "remaining_guess": max(4, n_a // 3), "pipeline": sub.get("detail")}
     elif kind == "heads_candidates":                           # 候補(組 × 倍率 + 無介入)× 両側の質問を生成する
         n_rows = len(p.get("n_heads") or []) or 3
         ap = p.get("alloc")
@@ -245,7 +259,7 @@ def estimate(session, kind: str, params: dict) -> dict:
                 pth = session.store.heads_dir(session.meta.model_id) / f"{ap}.alloc.json"
             if pth.exists():
                 n_rows = sum(1 for r in json.loads(pth.read_text(encoding="utf-8")).get("table", []) if not r.get("skipped"))
-        n_c = 1 + n_rows * len(p.get("scales") or (0.5, 0.75, 1.0, 1.25))
+        n_c = 1 + n_rows * len(p.get("scales") or (0.5, 1.0, 1.5, 2.0, 3.0))
         n_q = int(p.get("max_prompts", 24))
         sec = n_c * 2 * sp.gen(n_q, int(p.get("max_tokens", 120)))
         detail = {"candidates": n_c, "prompts_per_side": n_q, "replies": n_c * 2 * n_q}

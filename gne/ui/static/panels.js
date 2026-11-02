@@ -5,6 +5,11 @@ import { getJSON, postJSON } from "./api.js";
 import { t } from "./i18n.js";
 
 export const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+// 質問(文字列か、会話の履歴 [{role, content}, …])→ 1 行の文字列 / 役割つきの HTML
+export const qText = (q) => (Array.isArray(q) ? q.map((m) => `${m.role}: ${m.content}`).join(" / ") : String(q ?? ""));
+export const qHTML = (q, last = "USER") => (Array.isArray(q)
+  ? q.map((m, i) => `<div class="q-turn"><span class="muted mono">${i === q.length - 1 ? last : esc(String(m.role).toUpperCase())}</span> ${esc(m.content)}</div>`).join("")
+  : `<span class="muted mono">${last}</span> ${esc(q)}`);
 const fmt = (x, d = 2) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : (+x).toFixed(d));
 const pct = (x) => (x === null || x === undefined ? "—" : `${Math.round(x * 100)}%`);
 

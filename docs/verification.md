@@ -1384,7 +1384,7 @@ F114 のレシピ `yandere_omni_attn14` は、L14 の attention の出力につ�
 
 `gne heads listen`(UI ではヘッドのパネルの Listen タブ)は、この分解を 1 つの会話について出す。トークン s の寄与は contrib_h[s] = mean_t a_h(t, s) · ⟨W_O,h (g_h(t) ⊙ v(s)), γ ⊙ d̂⟩ / rms_t で、層の全ヘッドで足し直した出力と捕捉した attention の出力の差は、Qwen3-0.6B(ゲートなし)で 0.69%、Qwen3.5-4B(要素ごとのゲート)で 0.72%、LFM3-Omni(ヘッドごとのゲートと post_operator_norm)で 0.69% だった。Qwen3.5 の `post_attention_norm` と `attn_post_norm` は FFN の前の norm なので、attention の出力の後の norm として扱うのは LFM3 の `post_operator_norm` と Gemma 系の `attn_post_norm` だけにしている。
 
-## 20. CHANGE-06: ヘッドの方向成分だけを変える介入
+## 20. CHANGE-06: CHiPS(ヘッドの方向成分だけを変える介入)
 
 手法は [head-component-steering.md](head-component-steering.md)、判断の仕方は [agent_playbook.md](agent_playbook.md) §4.4。実装は `gne/headproj.py`(介入の形式・LoRA・焼き込み・ランダム対照・V24/V25)、`gne/direction.py`(速い物差し `Scorer` / `score`、基準層)、`gne/causal.py`(因果スクリーニング・効率の配分)、`gne/evalx.py`(方向の指標・proj の対照)、`gne/api.py`(方式の比較・ヘッド数の曲線・V26)。テストは `tests/test_change06.py`。
 

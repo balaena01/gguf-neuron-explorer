@@ -6,7 +6,7 @@
 // いちばん良い候補から、その倍率のレシピを recipe タブに読み込む・1 列チャットで試す。
 import { getJSON, postJSON } from "./api.js";
 import { t } from "./i18n.js";
-import { esc } from "./panels.js";
+import { esc, qHTML } from "./panels.js";
 import { parseProj } from "./recipe.js";
 
 const fmt = (x, d = 2) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : (+x).toFixed(d));
@@ -160,7 +160,7 @@ export class CandidatesPanel {
       const order = this.named ? cands : shuffled(cands, i * 2 + (side === "B" ? 1 : 0) + 7);
       const cells = order.map((c, k) => `<div class="cd-cell"><div class="cd-lab mono">${this.named ? `${esc(c.name)} <span class="muted">${goalLabel(c.goal)}</span>` : `#${k + 1}`}</div>
         <div class="cd-txt">${esc(stripThink(d.replies[`${c.name}|${side}`][i]))}</div></div>`).join("");
-      return `<div class="cd-q"><div class="cd-prompt"><span class="muted mono">${side}${i + 1}</span> ${esc(q)}</div><div class="cd-grid">${cells}</div></div>`;
+      return `<div class="cd-q"><div class="cd-prompt">${qHTML(q, `${side}${i + 1}`)}</div><div class="cd-grid">${cells}</div></div>`;
     }).join("");
     el.innerHTML = `<div class="pp-actions"><span class="seg" id="cd-side">${["A", "B"].map((s) => `<button data-sd="${s}" class="${side === s ? "on" : ""}" title="${
       s === "A" ? t("A 側(振る舞いが出ている状態)の質問と返事") : t("B 側(ふつうの状態)の質問と返事")}">${s}</button>`).join("")}</span>
@@ -204,7 +204,7 @@ export class CandidatesPanel {
         <button class="small" id="cd-skip" title="${t("点を付けずに次へ(→)")}">${t("とばす")} →</button>
         <span class="mono">#${it.id}</span> <span class="muted note">${t("{i} 本目 / {n} 本", { i: this.pos + 1, n })}${have ? ` · ${t("付けた点 P {p} C {c}", { p: have[0], c: have[1] })}` : ""}</span>
         <span class="cd-bar"><span style="width:${(100 * k / Math.max(n, 1)).toFixed(1)}%"></span></span> <span class="muted note" id="cd-saved"></span></div>
-      <div class="cd-prompt"><span class="muted mono">USER</span> ${esc(it.prompt)}</div>
+      <div class="cd-prompt">${qHTML(it.prompt)}</div>
       <div class="cd-reply">${esc(stripThink(it.text)) || `<span class="muted">${t("(空の返事)")}</span>`}</div>
       <div class="cd-pc"><span class="cd-pc-l" title="${t("目標の振る舞いがどれだけ出ているか(1 = まったく出ていない、5 = 典型的に全体に出ている)")}">P</span>${btns("p", P)}
         <span class="cd-pc-l" title="${t("自然さ(1 = 崩れている、5 = 完全に自然)")}">C</span>${btns("c", C)}</div>

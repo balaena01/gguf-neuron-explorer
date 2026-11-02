@@ -187,7 +187,12 @@ def register(app: FastAPI, session, live) -> None:
             yield chunk({"role": "assistant", "content": ""})
             try:
                 while True:
-                    kind, x = q.get()
+                    if live.closing.is_set():         # サーバを止める: 生成を止めて配信を閉じる(トークンが流れていても)
+                        break
+                    try:
+                        kind, x = q.get(timeout=0.5)
+                    except queue.Empty:
+                        continue
                     if kind == "delta":
                         yield chunk({"content": x})
                     elif kind == "error":

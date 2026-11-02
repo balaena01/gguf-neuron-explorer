@@ -773,9 +773,10 @@ async function onJobFinished(j) {
   const what = `${KIND[j.kind] || j.kind}${L !== undefined ? ` L${L}` : ""}`;
   state.flash = { text: `${t({ done: "完了", error: "失敗", cancelled: "中止" }[j.status])}: ${what}`, until: Date.now() + 10000 };   // 結果を先に(状態表示は狭いので)
   updateStatus();
-  if (j.kind === "head_pipeline" || j.kind === "heads_candidates") {    // 一括と強さの候補: direction ビューに結果を出す
+  if (j.kind === "headproj_export" && recipePanel) recipePanel.lxDone(j);   // レシピのタブの LoRA・焼き込み
+  if (j.kind === "head_pipeline" || j.kind === "heads_candidates" || j.kind === "heads_refine") {    // 一括・強さの候補・残りから追加: direction ビューに結果を出す
     if (j.status === "done") {
-      if (j.kind === "head_pipeline") causalCache.clear();
+      if (j.kind !== "heads_candidates") causalCache.clear();
       state.lastResult = j.result && j.result.name ? { kind: j.kind, name: j.result.name } : state.lastResult;
     }
     if (directionView) directionView.jobEnded(j);
@@ -871,7 +872,7 @@ async function setView(v) {
       state.directionView = directionView;                               // 自動テスト用
       await directionView.refresh();
       const lr = state.lastResult;                                       // ビューを開く前に終わった一括・候補
-      if (lr && lr.kind === "head_pipeline") { directionView.setMode("pipe"); directionView.pipe.open(lr.name); }
+      if (lr && (lr.kind === "head_pipeline" || lr.kind === "heads_refine")) { directionView.setMode("pipe"); directionView.pipe.open(lr.name); }
       else if (lr) directionView.openCandidates(lr.name);
       return;
     }
@@ -1018,6 +1019,20 @@ function wireHeader() {
   if (!state.model) { $("#search").classList.add("hidden"); $("#color-select").disabled = true; }
 }
 
+// サーバを立ち上げた後で gne のコードが更新されていれば、画面の上に立ち上げ直しを勧める帯を出す(画面のファイルは新しく、
+// サーバの Python は古いので、新しいボタンが動かないことがある)
+async function checkStale() {
+  let s;
+  try { s = await getJSON("/api/stale"); } catch { return; }      // 古いサーバにはこの API が無い(404)
+  if (!s || !s.stale || document.querySelector("#stale-banner")) return;
+  const el = document.createElement("div");
+  el.id = "stale-banner";
+  el.innerHTML = `<span>${t("サーバを立ち上げた後で gne のコードが更新されています。新しい機能(ボタン)を使うには、サーバを立ち上げ直してください(ターミナルで Ctrl+C → gne serve …)。")}</span>
+    <button class="small" title="${t("この帯を閉じる")}">×</button>`;
+  el.querySelector("button").addEventListener("click", () => el.remove());
+  document.body.prepend(el);
+}
+
 async function main() {
   translateDOM();                                                        // index.html の文言を今の言語に
   for (const b of document.querySelectorAll("#lang button")) {         // 右上の JP / EN
@@ -1031,6 +1046,7 @@ async function main() {
     state.model = await getJSON("/api/model");
     state.arch = state.model.arch;
     await refreshExperts();
+    checkStale();
   }
   document.title = `gne · ${state.model ? state.model.meta.name : state.arch.arch}`;
   const t0 = performance.now();
@@ -1072,6 +1088,7 @@ async function main() {
       projDirections: () => (state.model ? (state.model.direction_sets || []).map((x) => x.name) : []),
       onOpenHead: (u) => openHead(u),
       headKind: (L) => mixerLabel(state.arch.layers[L]),
+      onRunJob: (kind, params) => jobsBar.start(kind, params),          // LoRA・焼き込み(headproj_export)
     });
     headPanel = new HeadPanel($("#head-body"), {
       onRecipe: (L, h, k) => {

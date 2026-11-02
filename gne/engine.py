@@ -153,8 +153,9 @@ class Rollout:
 class _Ctx:
     """llama_context と付随物(バッチ、捕捉)をまとめたもの。"""
 
-    def __init__(self, ptr, *, n_batch: int, n_ubatch: int, n_seq_max: int, capture: Capture | None):
+    def __init__(self, ptr, *, n_batch: int, n_ubatch: int, n_seq_max: int, capture: Capture | None, n_ctx: int = 0):
         self.ptr = ptr
+        self.n_ctx = n_ctx
         self.n_batch = n_batch
         self.n_ubatch = n_ubatch
         self.n_seq_max = n_seq_max
@@ -262,7 +263,7 @@ class Engine:
         ptr = C.llama_init_from_model(self.model, p)
         if not ptr:
             raise RuntimeError("llama_context を作れません(VRAM 不足の可能性)")
-        return _Ctx(ptr, n_batch=n_batch, n_ubatch=n_ubatch, n_seq_max=n_seq_max, capture=capture)
+        return _Ctx(ptr, n_batch=n_batch, n_ubatch=n_ubatch, n_seq_max=n_seq_max, capture=capture, n_ctx=n_ctx)
 
     def steer_ctx(self) -> _Ctx:
         if self._steer is None:
@@ -270,30 +271,46 @@ class Engine:
                                         n_seq_max=self.n_seq_max, capture=None, logits_all=False)
         return self._steer
 
-    def probe_ctx(self, capture: Capture, *, logits_all: bool = False) -> _Ctx:
-        """cb_eval つきコンテキスト(1 個だけ保持)。別の Capture を渡すと作り直す。"""
+    def fit_ctx(self, need: int | None) -> int:
+        """読ませる最長の列(トークン数)に合わせたコンテキストの長さ: 256 の倍数に切り上げ、n_ctx を上限にする。
+        None なら n_ctx。KV キャッシュと計算用のバッファはこの長さに比例するので、短い会話しか読まない処理
+        (方向の点数・因果・配分)では VRAM が大きく空く(大きいモデルで VRAM からあふれて遅くなるのを避ける)。"""
+        if need is None:
+            return self.n_ctx
+        if need > self.n_ctx:
+            raise ValueError(f"{need} トークンの列が n_ctx={self.n_ctx} に入りません")
+        return min(self.n_ctx, max(256, -(-int(need) // 256) * 256))
+
+    def probe_ctx(self, capture: Capture, *, logits_all: bool = False, need: int | None = None) -> _Ctx:
+        """cb_eval つきコンテキスト(1 個だけ保持)。別の Capture を渡すと作り直す。need(読ませる最長の列のトークン数)を
+        渡すと、その長さに合わせた小さいコンテキストにする(足りなければ大きく作り直し、2 倍より大きければ小さく作り直す)。"""
+        want = self.fit_ctx(need)
         c = self._probe
-        if c is not None and (c.capture is not capture or self._probe_logits_all != logits_all):
+        if c is not None and (c.capture is not capture or self._probe_logits_all != logits_all or c.n_ctx < want
+                              or (need is not None and c.n_ctx > 2 * want)):
             c.free()
             c = self._probe = None
         if c is None:
-            ub = self.probe_ubatch
-            self._probe = self._new_ctx(n_ctx=self.n_ctx, n_batch=ub, n_ubatch=ub, n_seq_max=1,
+            ub = min(self.probe_ubatch, want)
+            self._probe = self._new_ctx(n_ctx=want, n_batch=ub, n_ubatch=ub, n_seq_max=1,
                                         capture=capture, logits_all=logits_all)
             self._probe_logits_all = logits_all
         return self._probe
 
-    def attn_probe_ctx(self, capture: Capture) -> _Ctx:
+    def attn_probe_ctx(self, capture: Capture, *, need: int | None = None) -> _Ctx:
         """flash attention を切った cb_eval つきコンテキスト(CHANGE-04 B)。attention パターン kq_soft_max-L は
         flash attention が無効のときだけグラフに現れる(llama-graph.cpp build_attn_mha)。1 個だけ保持し、
         別の Capture を渡すと作り直す。通常の probe ctx とは別に持つ(VRAM を食うので使い終わったら free_attn_probe)。"""
+        # attention の捕捉は 1 本 probe_ubatch トークンまでなので、長さはそれ(か need)で足りる。flash attention を切ると
+        # attention の行列(ubatch × 長さ × ヘッド数)をそのまま持つので、n_ctx のまま作ると大きいモデルでは VRAM を大きく食う
+        want = self.fit_ctx(min(self.n_ctx, self.probe_ubatch) if need is None else need)
         c = self._attn_probe
-        if c is not None and c.capture is not capture:
+        if c is not None and (c.capture is not capture or c.n_ctx < want):
             c.free()
             c = self._attn_probe = None
         if c is None:
-            ub = self.probe_ubatch
-            self._attn_probe = self._new_ctx(n_ctx=self.n_ctx, n_batch=ub, n_ubatch=ub, n_seq_max=1,
+            ub = min(self.probe_ubatch, want)
+            self._attn_probe = self._new_ctx(n_ctx=want, n_batch=ub, n_ubatch=ub, n_seq_max=1,
                                              capture=capture, logits_all=False, flash_attn=False)
         return self._attn_probe
 
@@ -301,6 +318,13 @@ class Engine:
         if self._attn_probe is not None:
             self._attn_probe.free()
             self._attn_probe = None
+
+    def free_steer(self) -> None:
+        """生成用のコンテキスト(チャット・eval が作り、残しておくもの)を解放する。生成しない長い処理(方向の点数・
+        因果・配分)の前に呼んで VRAM を空ける。次に生成するときに作り直す。"""
+        if self._steer is not None:
+            self._steer.free()
+            self._steer = None
 
     # --- chat template / tokenize ---------------------------------------------------------------
 
@@ -692,7 +716,8 @@ class Engine:
 
     def list_names(self, ids: list[int], layer: int | None = None) -> set[str]:
         """cb_eval で観測できるテンソル名(probe ctx で 1 回 prefill)。layer を渡すとその層の名前だけ。"""
-        ctx = self._probe or self.probe_ctx(Capture())     # 既存の probe ctx があれば作り直さずに使う
+        ctx = self._probe if self._probe is not None and self._probe.n_ctx >= len(ids) else \
+            self.probe_ctx(Capture(), need=len(ids))       # 既存の probe ctx があれば(長さが足りれば)作り直さずに使う
         cap = ctx.capture
         prev = cap._wanted
         cap.set_wanted(lambda n: False)

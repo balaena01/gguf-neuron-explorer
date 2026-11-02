@@ -64,6 +64,8 @@ export class EvalView {
           <label class="muted" title="${t("各倍率で同じ大きさのランダムな向きのレシピも測る(時間はおよそ本数倍)")}">${t("対照")} <input id="evx-rc-n" type="number" min="0" max="64" value="0" style="width:4em"></label>
           <label class="muted" title="${t("反応性(CHANGE-04 F): reactivity の対(トリガーあり/なし)と validate.match を持つ対照集合の YAML。空なら測らない")}">${t("反応性")} <input id="evx-react" placeholder="configs/contrast/….yaml" size="22" spellcheck="false"></label>
           <label class="muted" title="${t("レシピのヘッドを同じ k のランダムなヘッドに替えた対照で反応性も測る本数(反応性があるときだけ)")}">${t("ヘッドの対照")} <input id="evx-hc-n" type="number" min="0" max="64" value="0" style="width:4em"></label>
+          <label class="muted" title="${t("方向を使うレシピ(ヘッドの proj など)で、方向の指標(点数の下がり方・ずれ・判定の一致率)も測る。外すと能力・ppl・混入・性格の変化量だけで早く終わる")}"><input type="checkbox" id="evx-dm" checked> ${t("方向の指標")}</label>
+          <label class="muted" title="${t("方向の指標で読む質問の数(A・B それぞれ。一致率の返事もこの数まで)。多い対照集合は等間隔に間引く。0 で全部")}">${t("問")} <input id="evx-dm-n" type="number" min="0" max="4096" value="64" style="width:4.5em"></label>
           <button id="evx-go">${t("今のレシピで eval")}</button></span></div>
       <p class="muted note evx-help">${t("倍率はレシピ全体に掛ける係数(0 = 無介入)。能力 = exact と format の正答率、ppl は参照テキスト、混入は日本語の回答に出た簡体字・ハングルなどの割合。4B で数分。")}</p>
       <div id="evx-body"></div>`;
@@ -108,6 +110,11 @@ export class EvalView {
     if (nc) p.random_controls = nc;
     const react = this.$("#evx-react").value.trim(), hc = Math.max(0, Math.floor(+this.$("#evx-hc-n").value || 0));
     if (react) { p.reactivity = react; if (hc) p.head_controls = hc; }
+    if (!this.$("#evx-dm").checked) p.direction_metrics = false;
+    else {
+      const dmn = Math.max(0, Math.floor(+this.$("#evx-dm-n").value || 0));
+      if (dmn !== 64) p.dir_max_examples = dmn || null;                 // 0 = 全部の質問
+    }
     if (this.recipe.name) p.name = this.recipe.name;
     this.onRun(p);
   }

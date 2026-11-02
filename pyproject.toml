@@ -34,3 +34,6 @@ packages = ["gne"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = ["model: needs a GGUF model (GNE_TEST_MODEL)"]
+# 焼き込みのテストはモデルの大きさのファイルを書くので、通ったテストの一時ファイルは残さない
+tmp_path_retention_count = 1
+tmp_path_retention_policy = "failed"

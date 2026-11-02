@@ -674,7 +674,8 @@ def gain(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Option
          out: Optional[Path] = typer.Option(None, "--out", "-o", help="出力(既定 <root>/export/<レシピ名>.lora.gguf、--bake なら -gain.gguf)"),
          bake: bool = typer.Option(False, "--bake", help="LoRA ではなく、W_up を書き換えた GGUF を作る"),
          in_path: Optional[Path] = typer.Option(None, "--in", help="--bake の元の GGUF(既定 --model)"),
-         requant: str = typer.Option("auto", "--requant", help="--bake の書き方: auto(パッチで書ければスケールパッチ、書けなければ q8_0)/ patch / q8_0 / f16")):
+         requant: str = typer.Option("auto", "--requant", help="--bake の書き方: auto(パッチで書ければスケールパッチ、書けなければ q8_0)/ patch / q8_0 / f16"),
+         strip_meta: bool = typer.Option(False, "--strip-meta", help="gne の記録(gne.* のメタデータ・レシピ・名前の印)を残さない(人に渡す版)")):
     """gain ユニット(L:N:x2 など、出力を k 倍。ヘッドは L:Hh:xk)を LoRA アダプタ GGUF か書き換え GGUF に書き出す(§6.16)。"""
     if in_path and c.model and in_path.resolve() != c.model.resolve():
         raise GneError("BAD_ARGS", "--in と --model が違うファイルです")
@@ -682,7 +683,7 @@ def gain(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Option
     r = s.recipe(units=unit, path=recipe, scale=scale)
     name = r.name or "gain"
     out = out or s.store.export_dir() / (f"{name}-gain.gguf" if bake else f"{name}.lora.gguf")
-    d = s.gain(r, out, bake=bake, requant=requant)
+    d = s.gain(r, out, bake=bake, requant=requant, strip_meta=strip_meta)
     if bake:
         text = f"{d['path']}({d['bytes'] / 1e6:.1f} MB)、書き換え: " + ", ".join(
             f"{m['tensor']}({m['from']} → {m['to']})" for m in d["modified"])
@@ -730,6 +731,9 @@ def eval_cmd(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Op
              score_layer: Optional[int] = typer.Option(None, "--score-layer", help="--compare-methods: 物差しの層"),
              alloc: Optional[str] = typer.Option(None, "--alloc", help="gne heads allocate の結果(名前かパス)の組を、ヘッド数ごとに評価する(CHANGE-06 F.4)"),
              n_heads: Optional[str] = typer.Option(None, "--n-heads", help="--alloc: 評価するヘッド数(例 6,5,4,3)"),
+             direction_metrics: bool = typer.Option(True, "--direction-metrics/--no-direction-metrics",
+                                                    help="方向を使うレシピで、方向の指標(点数の下がり方・ずれ・判定の一致率)も測る"),
+             dir_max_examples: int = typer.Option(64, "--dir-max-examples", help="方向の指標で読む質問の数(A・B それぞれ。0 = 全部)"),
              yes: bool = _YES):
     """副作用チェック: 倍率ごとに能力(exact / format)・ppl・言語の混入・性格の変化量を測り、配布可の倍率を示す(§6.14)。"""
     s = holder["session"] = c.session()
@@ -780,7 +784,7 @@ def eval_cmd(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Op
     _gate(s, "eval", {"doses": _doses(doses), "suite": suite, "when": when, "random_controls": random_controls}, yes, None)
     d = s.eval(r, doses=_doses(doses), suite=suite, when=when, judge_model=judge_model, judge_target=judge_target,
                name=name, random_controls=random_controls, reactivity=reactivity, head_controls=head_controls,
-               control_pool=control_pool)
+               control_pool=control_pool, direction_metrics=direction_metrics, dir_max_examples=dir_max_examples or None)
     th = d["suite"]["thresholds"]
     nc = d.get("random_controls") or 0
     head = f"{'倍率':>5} {'能力':>6} {'低下pt':>6} {'ppl':>8} {'悪化%':>7} {'混入':>6} {'新語':>5} {'d4':>5} {'打切':>4}"
@@ -1810,13 +1814,15 @@ def headproj_export(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, u
                     out: Optional[Path] = typer.Option(None, "--out", "-o", help="出力(既定 <root>/export/<レシピ名>.lora.gguf、--bake なら -headproj.gguf)"),
                     bake: bool = typer.Option(False, "--bake", help="LoRA ではなく、書き込み行列だけ量子化し直した GGUF を作る"),
                     in_path: Optional[Path] = typer.Option(None, "--in", help="--bake の元の GGUF(既定 --model)"),
-                    requant: str = typer.Option("q8_0", "--requant", help="--bake で書き換えたテンソルの型: q8_0 / f16"),
+                    requant: str = typer.Option("q8_0", "--requant", help="--bake で書き換えたテンソルの型: q8_0 / f16 / keep(元が F32・F16・BF16 ならその型)"),
+                    into: Optional[Path] = typer.Option(None, "--into", help="--bake: 焼き込む先の別の GGUF(同じ構造の量子化していない F16 / BF16 など)。方向はこのモデル(--model)のものを使う。GPU は使わない"),
                     via_f16: bool = typer.Option(False, "--via-f16", help="--bake: F16 で書いて llama-quantize で元の型に戻す"),
                     imatrix: Optional[Path] = typer.Option(None, "--imatrix"), llama_quantize: Optional[str] = typer.Option(None, "--llama-quantize"),
                     verify: bool = typer.Option(False, "--verify", help="--bake: 焼き込み版と LoRA 版を比べる(V26: 点数・KL・最尤トークン・ppl)"),
                     contrast: Optional[Path] = typer.Option(None, "--contrast", help="--verify の点数に使う対照集合(既定は方向を作った対照集合)"),
                     direction: Optional[str] = typer.Option(None, "--direction", help="@NAME を省いた proj のユニットの方向"),
-                    direction_layer: Optional[str] = typer.Option(None, "--direction-layer", help="own(ヘッドの層の方向)/ base(基準層の方向)")):
+                    direction_layer: Optional[str] = typer.Option(None, "--direction-layer", help="own(ヘッドの層の方向)/ base(基準層の方向)"),
+                    strip_meta: bool = typer.Option(False, "--strip-meta", help="gne の記録(gne.* のメタデータ・レシピ・名前の印・横の .headproj.json)を残さない(人に渡す版)")):
     """proj のユニット(L:Hh:sS@NAME、レシピの mode: proj)を LoRA アダプタ GGUF か焼き込み GGUF に書き出す(CHANGE-06 E、gne gain の別名)。
     同じ層・同じ方向のヘッドは階数 1 の LoRA に畳む。スケールパッチ(CHANGE-05 D)では表せないので、焼き込みは書き換える
     テンソルだけ量子化し直す。"""
@@ -1827,8 +1833,11 @@ def headproj_export(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, u
     nm = r.name or "headproj"
     out = out or s.store.export_dir() / (f"{nm}-headproj.gguf" if bake else f"{nm}.lora.gguf")
     d = s.headproj_export(r, out, bake=bake, requant=requant, via_f16=via_f16, imatrix=str(imatrix) if imatrix else None,
-                          llama_quantize=llama_quantize, verify=verify, contrast=contrast)
-    lines = [f"{d['path']}({d['bytes'] / 1e6:.2f} MB、{'焼き込み' if bake else 'LoRA'})"]
+                          llama_quantize=llama_quantize, verify=verify, contrast=contrast, strip_meta=strip_meta, into=into)
+    lines = [f"{d['path']}({d['bytes'] / 1e6:.2f} MB、{'焼き込み' if bake else 'LoRA'}"
+             + ("、gne の記録なし" if d.get("strip_meta") else "") + ")"]
+    if d.get("local_path_keys"):
+        lines.append("注意: メタデータに手元のパスらしい文字列が残っています: " + ", ".join(d["local_path_keys"]))
     for L, x in (d.get("proj_layers") or {}).items():
         lines.append(f"  L{L}: " + ", ".join(f"H{int(h)} s{sv:g}@{dn}" for h, sv, dn in x["heads"])
                      + f"(階数 {x['rank']}" + ("" if x["folded"] else "、方向が混ざっていて 1 に畳めない") + ")")
@@ -1867,21 +1876,24 @@ def headproj_check(c: Common, holder: dict, layer: int = typer.Option(..., "--la
 @gne_command(heads_app, "pipeline", "heads pipeline")
 def heads_pipeline(c: Common, holder: dict,
                    spec: Path = typer.Option(..., "--spec", help="対照集合の JSON か YAML(name・user_prompts か側ごとの prompts_a / prompts_b・system_a / system_b か recipe_a / recipe_b、任意で pipeline の設定)"),
-                   target: Optional[float] = typer.Option(None, "--target", help="効きにくい例の点数の目標(既定は B 側の平均)"),
+                   target: Optional[str] = typer.Option(None, "--target", help="効きにくい例の点数の目標: 数、B(B 側の平均まで消す)、mid(既定、A と B の真ん中)"),
                    n_heads: Optional[str] = typer.Option(None, "--n-heads", help="比べる組のヘッド数(既定 6,5,4)"),
                    max_examples: Optional[int] = typer.Option(None, "--max-examples", help="止めて測る段階で使う質問の数(既定 64、等間隔に間引く)"),
                    positions: Optional[str] = typer.Option(None, "--positions", help="方向を作る位置: last(既定)/ response など"),
                    top_layers: Optional[int] = typer.Option(None, "--top-layers"), hard: Optional[int] = typer.Option(None, "--hard"),
+                   fresh: bool = typer.Option(False, "--fresh", help="作り済みの方向と因果の結果を使い回さず、最初から作り直す"),
                    yes: bool = _YES):
     """対照集合から、方向づくり → 基準層 → 因果スクリーニング(層ごと → ヘッド 1 個ずつ止める)→ 強さの配分(効き目に比例した
     最初の組を二分探索 → 点数が残りやすい質問で効率を測って 0 から配り直す → ヘッド数を変えた組の比較)を 1 回で回す。"""
     s = holder["session"] = c.session()
     over = {"target": target, "n_heads": _ints(n_heads), "max_examples": max_examples, "positions": positions,
-            "top_layers": top_layers, "hard": hard}
+            "top_layers": top_layers, "hard": hard, "resume": False if fresh else None}
     _gate(s, "head_pipeline", {"spec": str(spec), **{k: v for k, v in over.items() if v is not None}}, yes, None)
     d = s.heads_pipeline(spec, **over)
     sc, ca, al = d["score"], d["causal"], d["allocate"]
-    lines = [f"{d['path']}({d['n_prompts']} 問、{d['seconds']:.0f} 秒)",
+    lines = [f"{d['path']}({d['n_prompts']} 問、{d['seconds']:.0f} 秒"
+             + (f"、作り済みの{'・'.join({'direction': '方向', 'causal': '因果'}[x] for x in d['reused'])}を使い回した" if d.get("reused") else "")
+             + ")",
              f"1. 方向 {d['name']}({d['direction']['positions']}、{d['direction']['seconds']:.0f} 秒)",
              f"2. 基準層 L{sc['base_layer']}(cohen_d 最大、止めて測る段階は {sc['n'].get('A')} 問)",
              f"3. 因果: 物差し L{','.join(map(str, ca['score_layers']))}、{ca['n_rows']} ヘッド、上位 " +
@@ -1952,7 +1964,7 @@ def heads_candidates(c: Common, holder: dict,
                      alloc: Optional[str] = typer.Option(None, "--alloc", help="heads allocate / pipeline の配分の結果(名前か .alloc.json)"),
                      tally: Optional[str] = typer.Option(None, "--tally", help="採点を書いた候補(名前か .candidates.json)を集計する"),
                      prompts: Optional[Path] = typer.Option(None, "--prompts", help="調整に使っていない質問(YAML / JSON のリストか {A: [...], B: [...]})"),
-                     scales: str = typer.Option("0.5,0.75,1,1.25", "--scales", help="組の s 全体にかける倍率"),
+                     scales: str = typer.Option("0.5,1,1.5,2,3", "--scales", help="組の s 全体にかける倍率(負は B 側で強める向き)"),
                      n_heads: Optional[str] = typer.Option(None, "--n-heads", help="使う組のヘッド数(既定は比較表の全部)"),
                      max_prompts: int = typer.Option(24, "--max-prompts", help="側ごとの質問の上限(多ければ等間隔に間引く)"),
                      max_tokens: int = typer.Option(120, "--max-tokens"),
@@ -1985,6 +1997,47 @@ def heads_candidates(c: Common, holder: dict,
                            sampling=sm_v, seed=sample_seed, judge_b=judge_b, contrast=contrast, name=out_name,
                            with_recipe=with_recipe, rubric=rubric)
     return d, _candidates_text(d), 0
+
+
+@gne_command(heads_app, "refine", "heads refine")
+def heads_refine(c: Common, holder: dict,
+                 name: str = typer.Option(..., "--name", help="配分の結果(一括の名前か heads allocate の保存名)"),
+                 n_heads: Optional[int] = typer.Option(None, "--n-heads", help="残りを測る組のヘッド数(既定は推す組)"),
+                 new_heads: str = typer.Option("3,2,1", "--new-heads", help="追加する組のヘッド数(カンマ区切り)"),
+                 out_name: Optional[str] = typer.Option(None, "--out-name", help="保存名(既定 <name>_r1、別の組なら _r2 …)"),
+                 fresh: bool = typer.Option(False, "--fresh", help="作り済みの方向と因果の結果を使い回さない"),
+                 yes: bool = _YES):
+    """組を当てても目標まで下がらない A 側の質問(残り)だけで、追加のヘッドを探す。残りの質問と B 側の質問で、組を当てたまま
+    方向を作り直し、一括(基準層 → 因果 → 配分)で足すヘッドと強さを決め、元の組と合わせたレシピを作って残りを測り直す。"""
+    s = holder["session"] = c.session()
+    nh = _ints(new_heads) or [3, 2, 1]
+    _gate(s, "heads_refine", {"name": name, "new_heads": nh}, yes, None)
+    d = s.heads_refine(name, n_heads=n_heads, new_heads=nh, out_name=out_name, resume=not fresh)
+    rm, cb, pp = d["remaining"], d["combined"], d["pipeline"]
+    lines = [f"{d['path']}({d['seconds']:.0f} 秒)",
+             f"1. {d['n_heads']} ヘッドの組 " + " ".join(d["base_units"]) + f" で、L{d['score_layer']} の点数が {d['threshold']:.2f} を超える"
+             f" A 側の質問: {rm['n']}/{rm['n_a']} 問" + (f"(少ないので点数の高い順に {rm['used']} 問で方向を作った)" if rm["padded"] else ""),
+             f"2. 残りの質問で一括 → 方向 {pp['direction']}" + (f"(作り済みの{'・'.join({'direction': '方向', 'causal': '因果'}[x] for x in pp['reused'])}を使い回した)" if pp["reused"] else "")]
+    for r in pp["table"]:
+        if r.get("skipped"):
+            lines.append(f"   {r['n_heads']} 個: {r['skipped']}")
+            continue
+        lines.append(f"   {r['n_heads']} 個: 最大 s {r['s_max']:.2f}、残る {r['remain']}  " + " ".join(r["units"])
+                     + ("  ← 推す" if r["recommended"] else "") + ("" if r["reached"] else "(目標に届かない)"))
+    rows = d.get("combined_rows") or []
+    if rows:
+        lines.append(f"3. 元の組と合わせた組(元の方向 L{d['score_layer']} で測り直す。合わせる前: 残り {rm['n']}/{rm['n_a']} 問、"
+                     f"B 側の直交成分のずれ {rows[0]['b_drift_orth_base']:.4f})")
+        for c in rows:
+            lines.append(f"   + {c['n_new']} 個(計 {c['n_heads']} ヘッド): 残り {c['remain_after']} 問、A の平均 {c['a_mean_before']:.2f} → "
+                         f"{c['a_mean_after']:.2f}、B のずれ {c['b_drift_orth']:.4f}  {c['recipe']}"
+                         + ("  ← 代表" if cb and c["recipe"] == cb["recipe"] else ""))
+        lines.append(f"代表は {Path(cb['recipe']).with_name(d['name'] + '.combined.yaml')} にも置いた"
+                     + ("(推す組)" if cb["chosen_by"] == "recommended" else "(目標に届いた組が無いので、合わせた残りが最も少ない組)"))
+        lines.append(f"確かめる: gne eval --recipe {cb['recipe']} --random-controls 16")
+    else:
+        lines.append("3. 追加の組を作れなかったので、合わせたレシピはありません")
+    return d, "\n".join(lines), 0
 
 if __name__ == "__main__":
     app()

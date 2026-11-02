@@ -51,6 +51,7 @@ direction で作った方向は "L:dir:NAME:dose"、attention ヘッドの gain 
    heads_allocate(効率 η で強さを配り、ヘッド数を減らした組を比べる)→ eval(random_controls=N, compare_methods=True)→ headproj_export。
    一通り回すだけなら heads_pipeline(spec)(方向づくりから配分まで。質問は何百個でもよく、止めて測る段階は 64 個に間引く)。
    強さを決める最後は、heads_candidates(組 × 倍率で生成し、名前を伏せた採点のファイルを作る)→ 採点 → heads_candidates_tally。
+   組で消し切れない質問(配分の表の remain)が残るなら、heads_refine で残りの質問だけから追加のヘッドを探して組に足す。
    - 方向を使う介入は、まず direction_score で基準層と分離度(cohen_d)を確認してから進める。
    - heads_causal の ablate と marginal は順位が違う。最初の候補出しは ablate、配り直しは marginal(heads_allocate が使う)。
    - 強さを決めるのは常に生成なしの物差し(direction_score・heads_causal・heads_allocate)。生成を伴う eval は確定候補だけに使う。
@@ -222,7 +223,7 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
                    when: str | None = None, random_controls: int = 0, reactivity: str | None = None,
                    head_controls: int = 0, compare_methods: bool = False, match_effect: float | None = None,
                    score_layer: int | None = None, alloc: str | None = None, n_heads: list[int] | None = None,
-                   control_pool: str = "before") -> dict:
+                   control_pool: str = "before", direction_metrics: bool = True, dir_max_examples: int = 64) -> dict:
         """副作用チェック(§6.14)をジョブとして投げる。recipe は保存したレシピの名前、units は単発指定(どちらか)。
         doses はレシピ全体の倍率(既定 [0, 0.25, 0.5, 0.75, 1]、0 が無介入)。倍率ごとに exact / format の正答率、ppl、
         言語の混入(簡体字・ハングルなど)、性格の変化量(無介入にない語の割合など)を測り、配布可(能力 −5pt 以内、
@@ -236,7 +237,8 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
         (control_pool: before / same-layers)で、dir_null_pct・rate_null_pct・drift_orth_b_null_pct を出す。
         compare_methods=True は、proj のレシピと同じ方向で全層射影・ヘッドの方向成分・ヘッドの丸ごと倍率・ニューロンの消去を
         A 側の点数の水準(match_effect、省けばこのレシピ)をそろえて比べる(F.3)。alloc(heads_allocate の名前)と n_heads で、
-        ヘッド数ごとの組を評価する(F.4、recipe・units は要らない)。"""
+        ヘッド数ごとの組を評価する(F.4、recipe・units は要らない)。方向の指標は direction_metrics=False で測らない。
+        dir_max_examples はその測定で読む質問の数(既定 64、A・B それぞれ等間隔に間引く。0 で全部)。"""
         try:
             if alloc:
                 return jobs.start("eval", {"alloc": alloc, "n_heads": n_heads, "when": when,
@@ -252,6 +254,9 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
                 p["head_controls"] = head_controls
             if doses is not None:
                 p["doses"] = doses
+            if not compare_methods:
+                p["direction_metrics"] = bool(direction_metrics)
+                p["dir_max_examples"] = int(dir_max_examples) or None
             return jobs.start("eval", p).view()
         except Exception as e:  # noqa: BLE001
             return _err(e)
@@ -364,16 +369,31 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
             return _err(e)
 
     @srv.tool()
-    async def heads_pipeline(spec: dict[str, Any] | str, target: float | None = None, n_heads: list[int] | None = None,
-                             max_examples: int | None = None) -> dict:
+    async def heads_pipeline(spec: dict[str, Any] | str, target: float | str | None = None, n_heads: list[int] | None = None,
+                             max_examples: int | None = None, resume: bool = True) -> dict:
         """対照集合(name・user_prompts か側ごとの質問 prompts_a / prompts_b・system_a / system_b か recipe_a / recipe_b、
         任意で pipeline の設定。表か JSON / YAML の
         パス)から、方向づくり → 基準層 → 因果スクリーニング → 強さの配分(効き目に比例した最初の組 → 効率で配り直す →
         ヘッド数の比較)をジョブで 1 回で回す(job_status で結果)。質問は何百個でもよく、止めて測る段階は max_examples 個
-        (既定 64)に間引く。target を省くと B 側の平均。結果の recommended が推す組のレシピ。"""
+        (既定 64)に間引く。target は数か "B"(B 側の平均まで消す)か "mid"(省いたときの既定、A と B の真ん中)。
+        真ん中では振る舞いが半分ほどしか消えないことが多いので、消し切りたいときは "B"。結果の recommended が推す組のレシピ。resume(既定 True)なら、
+        同じ対照集合・同じ設定で作り済みの方向と因果の結果を使い回す(止めて流し直したとき、配分からやり直せる)。"""
         try:
-            p = {"spec": spec, "target": target, "n_heads": n_heads, "max_examples": max_examples}
+            p = {"spec": spec, "target": target, "n_heads": n_heads, "max_examples": max_examples,
+                 "resume": None if resume else False}
             return jobs.start("head_pipeline", {k: v for k, v in p.items() if v is not None}).view()
+        except Exception as e:  # noqa: BLE001
+            return _err(e)
+
+    @srv.tool()
+    async def heads_refine(name: str, n_heads: int | None = None, new_heads: list[int] | None = None, resume: bool = True) -> dict:
+        """組を当てても目標まで下がらない A 側の質問(残り)だけで、追加のヘッドを探すジョブを投げる(job_status で結果)。
+        name は一括(heads_pipeline)か heads_allocate の名前、n_heads は残りを測る組(既定は推す組)。残りの質問と B 側の質問で、
+        組を当てたまま方向を作り直し(方向 <name>_rK)、基準層 → 因果 → 配分で足すヘッドと強さ(new_heads、既定 [3, 2, 1])を決め、
+        元の組と合わせたレシピ(combined.recipe)を作って、元の方向で残りの数(remain_before → remain_after)と B 側のずれを測り直す。"""
+        try:
+            p = {"name": name, "n_heads": n_heads, "new_heads": new_heads, "resume": None if resume else False}
+            return jobs.start("heads_refine", {k: v for k, v in p.items() if v is not None}).view()
         except Exception as e:  # noqa: BLE001
             return _err(e)
 
@@ -383,7 +403,7 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
                                max_tokens: int = 120, sampling: str | dict[str, Any] = "llama_server", seed: int = 0,
                                judge_b: bool = False, with_recipe: str | None = None) -> dict:
         """強さの候補づくりをジョブで投げる(job_status で結果)。配分の結果(alloc、heads_allocate / heads_pipeline の名前)の
-        比較表の組 × 全体の倍率 scales(既定 [0.5, 0.75, 1, 1.25])と無介入で、A 側と B 側の質問に返事を作る(同じ種のサンプリング)。
+        比較表の組 × 全体の倍率 scales(既定 [0.5, 1, 1.5, 2, 3])と無介入で、A 側と B 側の質問に返事を作る(同じ種のサンプリング)。
         正の倍率は A 側の振る舞いを消す向き(A 側を採点)、負の倍率は符号を返して B 側で強める向き(B 側を採点)。
         候補ごとの判定の一致率(rate_a / rate_b)・繰り返しの少なさ(d4)・無介入と同じ返事の割合と、採点する側の返事を
         どの候補か伏せて並べた採点のファイル(judge.round、基準は judge.rubric)を返す。prompts は調整に使っていない質問
@@ -411,18 +431,26 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
             return _err(e)
 
     @srv.tool()
-    async def headproj_export(recipe: str, bake: bool = False, requant: str = "q8_0", verify: bool = True) -> dict:
+    async def headproj_export(recipe: str, bake: bool = False, requant: str = "q8_0", verify: bool = True,
+                              strip_meta: bool = False, into: str | None = None) -> dict:
         """保存したレシピの proj のユニット(ヘッドの方向成分の射影、と gain)を書き出す(CHANGE-06 E)。既定は LoRA アダプタ
         GGUF(同じ層・同じ方向は階数 1 に畳む。数百 KB)。bake=True なら書き込み行列だけ量子化し直した GGUF をジョブで作り、
-        verify なら焼き込み版と LoRA 版を点数・最初のトークンの KL・最尤トークンの一致率・ppl で比べる(V26)。"""
+        verify なら焼き込み版と LoRA 版を点数・最初のトークンの KL・最尤トークンの一致率・ppl で比べる(V26)。
+        strip_meta=True なら gne の記録(gne.* のメタデータ・レシピ・名前の印・横の .headproj.json)を残さない(人に渡す版)。
+        結果の local_path_keys は、メタデータに手元のパスらしい文字列が残っているキー。into は焼き込む先の別の GGUF
+        (同じ構造の量子化していない F16 / BF16 など。方向はこのモデルのものを使う。requant="keep" で元の型のまま、verify はできない)。"""
         try:
             out = str(session.store.export_dir() / (f"{recipe}-headproj.gguf" if bake else f"{recipe}.lora.gguf"))
             if bake:
-                return jobs.start("headproj_export", {"recipe": recipe, "out": out, "bake": True, "requant": requant,
-                                                      "verify": verify}).view()
+                p = {"recipe": recipe, "out": out, "bake": True, "requant": requant, "verify": verify and not into,
+                     "strip_meta": strip_meta}
+                if into:
+                    p["into"] = into
+                return jobs.start("headproj_export", p).view()
         except Exception as e:  # noqa: BLE001
             return _err(e)
-        return await call(lambda: session.headproj_export(session.recipe(path=session.recipe_path(recipe)), out))
+        return await call(lambda: session.headproj_export(session.recipe(path=session.recipe_path(recipe)), out,
+                                                          strip_meta=strip_meta))
 
     @srv.tool()
     async def expert(layer: int, expert: int) -> dict:
@@ -505,7 +533,7 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
 
     @srv.tool()
     async def job_start(kind: str, params: dict[str, Any] | None = None, workers: str | None = None) -> dict:
-        """長時間の処理を投げる。kind: stats_resid / stats_act / lens_logit / lens_steer / sweep / rank / reverse / eval / direction / ablate / heads_contrast / heads_causal / heads_allocate / head_pipeline / heads_candidates / headproj_export。
+        """長時間の処理を投げる。kind: stats_resid / stats_act / lens_logit / lens_steer / sweep / rank / reverse / eval / direction / ablate / heads_contrast / heads_causal / heads_allocate / head_pipeline / heads_candidates / heads_refine / headproj_export。
         params は gne.api の同名メソッドの引数(例 sweep: {"layer": 22, "neurons": "random:64", "design": "quick"})。
         見積もりが 30 分を超えるジョブは走らせずに NEEDS_CONFIRM と見積もりを返す。params に budget("30m" など)を入れると
         予算に収まるように絞る(lens_steer は方向に近いニューロンの上位、sweep は quick 設計で steer lens の上位、reverse は

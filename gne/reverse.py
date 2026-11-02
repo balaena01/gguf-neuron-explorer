@@ -36,7 +36,7 @@ class ContrastSet:
     name: str
     system_a: str | None
     system_b: str | None
-    user_prompts: list[str]                 # 両側で同じ質問(側ごとの質問だけのときは A の質問)
+    user_prompts: list                      # 両側で同じ質問(側ごとの質問だけのときは A の質問)。1 問は文字列か会話の履歴
     sha: str
     recipe_a: object = None
     recipe_b: object = None
@@ -63,8 +63,15 @@ class ContrastSet:
         """その側の会話(system があれば system + ユーザーの発話)。"""
         return [_conv(self.system(side), u) for u in (self.prompts(side) if prompts is None else prompts)]
 
+    @property
+    def multi_turn(self) -> bool:
+        return any(is_multi(q) for side in "AB" for q in self.prompts(side))
+
     def require_systems(self, what: str) -> None:
         """system の違いでしか測れない道具(同じ返事を 2 つの system で読ませるもの)は、レシピの対照集合を断る。"""
+        if self.multi_turn:
+            raise GneError("BAD_CONTRAST", f"{what} は 1 ターンの質問だけを読みます(会話の履歴を書いた質問には使えません)",
+                           "会話の履歴の質問は gne direction・direction score・heads causal・heads allocate・heads pipeline・eval で使えます")
         if self.has_recipes or self.system_a is None or self.system_b is None or self.separate_prompts:
             raise GneError("BAD_CONTRAST", f"{what} は同じ質問を system_a と system_b で読ませて比べる道具なので、レシピで A / B を"
                            f"作る対照集合(recipe_a / recipe_b)、system を省いた対照集合、側ごとに質問が違う対照集合"
@@ -81,8 +88,7 @@ class ContrastSet:
         ra, rb = d.get("recipe_a"), d.get("recipe_b")
         up, ua, ub = d.get("user_prompts"), d.get("prompts_a"), d.get("prompts_b")
         for key, v in (("user_prompts", up), ("prompts_a", ua), ("prompts_b", ub)):
-            if v is not None and (not isinstance(v, list) or not all(isinstance(x, str) for x in v)):
-                raise GneError("BAD_CONTRAST", f"{p}: {key} は質問の文字列のリストです")
+            check_questions(v, f"{p}: {key}")
         pa, pb = (ua if ua is not None else up), (ub if ub is not None else up)
         if not pa or not pb:
             raise GneError("BAD_CONTRAST", f"{p}: 質問が要ります(両側で同じなら user_prompts、側ごとに違うなら prompts_a と prompts_b)")
@@ -154,9 +160,53 @@ def combine(iv: Intervention | None, vecs=None, lora=None) -> Intervention:
     return (v or None), (lo or None)
 
 
-def _conv(system: str | None, user: str) -> list[dict]:
-    """system が None なら system なしの会話(空の文字列は空の system として残す)。"""
-    return ([] if system is None else [{"role": "system", "content": system}]) + [{"role": "user", "content": user}]
+# --- 質問: 文字列(1 ターン)か、会話の履歴(user と assistant が交互で、user で始まり user で終わるメッセージの列) -----------
+
+def is_multi(q) -> bool:
+    return not isinstance(q, str)
+
+
+def check_question(q, where: str = "質問") -> None:
+    """1 問を確かめる。文字列か、[{"role": "user", "content": …}, {"role": "assistant", …}, …, {"role": "user", …}]。"""
+    if isinstance(q, str):
+        return
+    if not isinstance(q, list) or not q:
+        raise GneError("BAD_CONTRAST", f"{where}: 1 問は文字列か、会話の履歴(メッセージのリスト)です")
+    for i, m in enumerate(q):
+        if not isinstance(m, dict) or set(m) - {"role", "content"} or not isinstance(m.get("content"), str):
+            raise GneError("BAD_CONTRAST", f"{where}: 会話の {i + 1} 番目は {{\"role\": …, \"content\": 文字列}} の形にしてください")
+        want = "user" if i % 2 == 0 else "assistant"
+        if m.get("role") != want:
+            raise GneError("BAD_CONTRAST", f"{where}: 会話は user と assistant が交互で、user で始めてください({i + 1} 番目が "
+                                           f"{m.get('role')!r}、{want!r} のはず)")
+    if q[-1]["role"] != "user":
+        raise GneError("BAD_CONTRAST", f"{where}: 会話の履歴は user の発話で終えてください(その返事を測る・作る)")
+
+
+def check_questions(v, where: str) -> None:
+    if v is None:
+        return
+    if not isinstance(v, list):
+        raise GneError("BAD_CONTRAST", f"{where} は質問のリストです(1 問は文字列か会話の履歴)")
+    for i, q in enumerate(v):
+        check_question(q, f"{where} の {i + 1} 問目")
+
+
+def turns(q) -> list[dict]:
+    """質問 → メッセージの列(system は含まない)。"""
+    return [{"role": "user", "content": q}] if isinstance(q, str) else [{"role": m["role"], "content": m["content"]} for m in q]
+
+
+def question_text(q, *, sep: str = " / ") -> str:
+    """表示・採点のファイル用の 1 行。会話の履歴は「user: … / assistant: … / user: …」。"""
+    if isinstance(q, str):
+        return q
+    return sep.join(f"{m['role']}: {m['content']}" for m in q)
+
+
+def _conv(system: str | None, user) -> list[dict]:
+    """system が None なら system なしの会話(空の文字列は空の system として残す)。user は質問(文字列か会話の履歴)。"""
+    return ([] if system is None else [{"role": "system", "content": system}]) + turns(user)
 
 
 def contrast_sequences(engine: Engine, cs: ContrastSet) -> dict[str, list[tuple[list[int], int]]]:
@@ -200,6 +250,7 @@ def contrastive_directions(engine: Engine, cs: ContrastSet, *, layers: Sequence[
     interventions は側ごとに当てる (control vector, LoRA)(レシピで A / B を作る対照集合、side_interventions)。"""
     Ls = [L for L in (range(engine.n_layer - 1) if layers is None else layers) if 0 <= L < engine.n_layer - 1]
     seqs = contrast_sequences(engine, cs)
+    need = max(len(ids) for side in "AB" for ids, _ in seqs[side])     # コンテキストを最長の会話に合わせる(VRAM を空ける)
     names = engine.list_names(seqs["A"][0][0][:16])
     act_names = {}
     if with_act:
@@ -210,7 +261,7 @@ def contrastive_directions(engine: Engine, cs: ContrastSet, *, layers: Sequence[
                 act_names[nm] = L
     resid_names = {f"l_out-{L}": L for L in Ls}
     cap = Capture(lambda n: n in resid_names or n in act_names)
-    ctx = engine.probe_ctx(cap)
+    ctx = engine.probe_ctx(cap, need=need)
     engine.set_cvec(ctx, None)
     sums = {side: {L: 0.0 for L in Ls} for side in "AB"}
     sq = {L: 0.0 for L in Ls}                                  # A∪B の行の二乗和(次元ごとのばらつき用)
@@ -220,11 +271,11 @@ def contrastive_directions(engine: Engine, cs: ContrastSet, *, layers: Sequence[
     total, step = len(seqs["A"]) + len(seqs["B"]), 0
     for side in "AB":
         vecs, lora = (interventions or {}).get(side) or (None, None)
-        ctx = engine.probe_ctx(cap)
+        ctx = engine.probe_ctx(cap, need=need)
         engine.set_cvec(ctx, vecs or None)
         engine.set_lora(ctx, lora or None)
         for ids, start in seqs[side]:
-            ctx = engine.probe_ctx(cap)
+            ctx = engine.probe_ctx(cap, need=need)
             engine.clear_memory(ctx)
             engine.prefill(ctx, [ids])
             out = cap.take()

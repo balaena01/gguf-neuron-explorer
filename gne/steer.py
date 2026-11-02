@@ -633,17 +633,20 @@ class BakeReport:
     n_tensors: int = 0
 
 
-def copy_gguf_header(weights, dst: str | Path, *, tag: str, recipe: Recipe | None) -> GGUFWriter:
+def copy_gguf_header(weights, dst: str | Path, *, tag: str, recipe: Recipe | None, strip: bool = False) -> GGUFWriter:
     """元の GGUF のメタデータを写した GGUFWriter を作る(general.name に tag を付け、gne.recipe にレシピを残す)。
-    テンソルは呼び出し側が add_tensor_info → write_* で書く。bake(§6.5.1)と gain の書き換え(§6.16)で共用。"""
+    テンソルは呼び出し側が add_tensor_info → write_* で書く。bake(§6.5.1)と gain の書き換え(§6.16)で共用。
+    strip なら gne の記録を残さない(元の gne.* も写さず、名前に印も付けない。人に渡すファイル用)。"""
     m = weights.meta
     r: GGUFReader = weights.reader
     w = GGUFWriter(str(dst), arch=m.arch, endianess=r.endianess)
     align = r.fields.get("general.alignment")
     if align is not None:
         w.data_alignment = int(align.contents())
+    if strip:
+        tag = ""
     for f in r.fields.values():
-        if f.name == "general.architecture" or f.name.startswith("GGUF."):
+        if f.name == "general.architecture" or f.name.startswith("GGUF.") or (strip and f.name.startswith("gne.")):
             continue
         vtype = f.types[0]
         sub = f.types[-1] if vtype == GGUFValueType.ARRAY else None
@@ -653,8 +656,9 @@ def copy_gguf_header(weights, dst: str | Path, *, tag: str, recipe: Recipe | Non
         w.add_key_value(f.name, val, vtype, sub_type=sub)
     if "general.name" not in r.fields:
         w.add_key_value("general.name", f"{m.name}{tag}", GGUFValueType.STRING)
-    w.add_key_value("gne.recipe", json.dumps(recipe.to_dict() if recipe else {}, ensure_ascii=False), GGUFValueType.STRING)
-    w.add_key_value("gne.source_model_id", m.model_id, GGUFValueType.STRING)
+    if not strip:
+        w.add_key_value("gne.recipe", json.dumps(recipe.to_dict() if recipe else {}, ensure_ascii=False), GGUFValueType.STRING)
+        w.add_key_value("gne.source_model_id", m.model_id, GGUFValueType.STRING)
     return w
 
 

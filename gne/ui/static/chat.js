@@ -184,8 +184,7 @@ export class ChatPanel {
       <div class="ch-tools">${colSeg}${amount}<span class="muted">max</span><input id="ch-max" type="number" min="1" max="2048" value="${this.maxTokens}">
         <span class="muted" title="${tr("足す位置: all = 全位置 / gen = 生成中だけ(プロンプトの理解を壊さない)/ assistant = assistant の発話だけ / skip-replies = 過去の返事以外(過去の返事は素のまま読む)/ after = 出力にその文字列が出てから / ramp = 倍率を a から b へ変える")}">when</span><select id="ch-when">${
           ["all", "gen", "assistant", "skip-replies", "after", "ramp"].map((w) => `<option value="${w}"${this.when === w ? " selected" : ""}>${w}</option>`).join("")}</select>${
-          this.when === "after" || this.when === "ramp" ? `<input id="ch-when-x" size="8" value="${esc(this.whenArg)}" placeholder="${this.when === "after" ? tr("結論:") : "1.5-0.5"}">` : ""}
-        <button class="small" id="ch-reset"${this.busy ? " disabled" : ""}>${tr("会話を消す")}</button></div>
+          this.when === "after" || this.when === "ramp" ? `<input id="ch-when-x" size="8" value="${esc(this.whenArg)}" placeholder="${this.when === "after" ? tr("結論:") : "1.5-0.5"}">` : ""}</div>
       <div class="ch-tools">${this.samplingHTML()}</div>
       <div class="ch-tools"><span class="muted">system</span><input id="ch-system" class="ch-system" value="${esc(this.system)}" placeholder="${tr("空なら無し(音声で話すなら Respond in text.)")}">
         <label class="muted" title="${tr("右の列の返事を、ブラウザの音声で読み上げる")}"><input type="checkbox" id="ch-speak"${this.speak ? " checked" : ""}> 🔊 ${tr("読み上げ")}</label></div>
@@ -196,7 +195,7 @@ export class ChatPanel {
           : tr("同じ発話を 3 列で生成します(左から −、無介入、+)。返答は列ごとに別の履歴になります。")}</p>`}
       </div>
       <div class="ch-input"><textarea id="ch-text" rows="2" placeholder="${tr("メッセージ(Ctrl+Enter で送る)")}"${this.busy ? " disabled" : ""}>${esc(this.draft)}</textarea>
-        <button id="ch-send"${this.busy ? " disabled" : ""}>${tr("送る")}</button><button id="ch-mic" class="${this.mic.recording ? "rec" : ""}" title="${tr("音声で話しかける(押して話し、もう一度押すと送る。入力欄の文も一緒に送る)")}"${this.busy ? " disabled" : ""}>${this.mic.recording ? `■ ${tr("止めて送る")}` : `🎤 ${tr("話す")}`}</button><button id="ch-stop"${this.busy ? "" : " disabled"}>${tr("止める")}</button></div>
+        <button id="ch-send"${this.busy ? " disabled" : ""}>${tr("送る")}</button><button id="ch-mic" class="${this.mic.recording ? "rec" : ""}" title="${tr("音声で話しかける(押して話し、もう一度押すと送る。入力欄の文も一緒に送る)")}"${this.busy ? " disabled" : ""}>${this.mic.recording ? `■ ${tr("止めて送る")}` : `🎤 ${tr("話す")}`}</button><button id="ch-stop"${this.busy ? "" : " disabled"}>${tr("止める")}</button><button id="ch-reset" title="${tr("会話を消して、最初から話す(どの列も)")}"${this.busy ? " disabled" : ""}>${tr("新しい会話")}</button></div>
       <div class="ch-status muted note" id="ch-status">${esc(this.status || "")}</div>`;
   }
 
@@ -252,7 +251,12 @@ export class ChatPanel {
     $("#ch-when").addEventListener("change", (ev) => { this.when = ev.target.value; this.render(); });
     const wx = $("#ch-when-x");
     if (wx) wx.addEventListener("change", (ev) => { this.whenArg = ev.target.value.trim(); });
-    $("#ch-reset").addEventListener("click", () => { this.turns = []; this.status = ""; this.render(); });
+    $("#ch-reset").addEventListener("click", () => {
+      if (this.turns.length && !window.confirm(tr("いまの会話を消して、最初から話しますか?"))) return;
+      this.turns = []; this.status = ""; this.render();
+      const ta = this.el.querySelector("#ch-text");
+      if (ta) ta.focus();
+    });
     for (const b of this.el.querySelectorAll("[data-cols]")) b.addEventListener("click", () => this.setSingle(b.dataset.cols === "1"));
     const text = $("#ch-text");
     text.addEventListener("input", () => { this.draft = text.value; });

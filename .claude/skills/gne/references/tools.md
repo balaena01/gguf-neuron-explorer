@@ -117,7 +117,7 @@ gne eval --recipe R --reactivity configs/contrast/yandere_react.yaml --head-cont
 - 時間: 4B の 880 ヘッド × 10 プロンプトで 9 秒。
 - (実験的)`gne heads query --layer 15 --head 2 --direction yandere_react --seek configs/contrast/yandere_react.yaml`: attn_q に rank-1 の LoRA を足し、ペルソナの方向が入ったときだけトリガーを見に行かせる(V17)。レシピは `{layer, kind: head, head, mode: query, direction, seek, scale}`。4B の L15 H2 で、ペルソナありの注目 0.0015 → 0.29(scale 4)、なしは 0.022 のまま。返事の性格への効きは未確認。
 
-### ヘッドの、方向に沿った分だけを変える
+### CHiPS: ヘッドの、方向に沿った分だけを変える
 
 ```bash
 gne direction score --name evil                       # 層ごとの A/B の分かれ方(cohen_d)。基準層を記録する。生成なし
@@ -130,17 +130,21 @@ gne eval --recipe R --compare-methods                 # 全層の射影消去・
 gne eval --alloc evil --n-heads 4,3,2                 # 配分で作った組をヘッドの数ごとに評価
 gne headproj export --recipe R                        # 層ごとに階数 1 の LoRA(--bake で関係するテンソルだけ書き換え)
 gne heads pipeline --spec spec.json                   # 上の direction → score → causal → allocate を 1 回で(UI の direction ビューからも)
-gne heads candidates --alloc evil --prompts held_out.yaml   # 比較表の組 × 倍率(既定 0.5,0.75,1,1.25)で返事を作り、伏せた採点のファイルを書く
+gne heads candidates --alloc evil --prompts held_out.yaml   # 比較表の組 × 倍率(既定 0.5,1,1.5,2,3)で返事を作り、伏せた採点のファイルを書く
 gne heads candidates --tally evil                     # round_01.scores.txt(「番号 P C」)を候補ごとに集計する
+gne heads refine --name evil --n-heads 2              # その組で残った質問だけで、組を当てたまま方向を作り直し、足すヘッドを探す
+gne headproj export --recipe R --bake --strip-meta     # 人に渡す版: gne.* のメタデータ・名前の印・横の json を残さない
 ```
 
 ヘッドが残差に書くベクトルのうち、方向に沿った分だけを `1 − s` 倍にする。`s = 1` で消え、`s = 2` で反転、負の `s` で強まる。それ以外の分には触らないので、同じ効き目なら出力を丸ごと倍にする gain より副作用が小さい。4B の evil(system で頼んだ性格)では、2 個のヘッドで判定が 83% から 0 になり、能力も ppl も変わらなかった。同じ点数にそろえると、全層の射影消去は ppl が 15% 悪化し、同じヘッドの丸ごと倍率は能力が 14pt 落ちた。
 
 変化の量は、そのヘッドがいまの入力で方向に沿って書いている量に比例する。だから、もともと書いていない振る舞いは作れない。性格を運ぶヘッドを負の s で強めても、指示のない会話では何も起きない。ニューロンや方向の小さな押しで先に性格が出ていれば増幅でき、弱い増幅なら同じくらいの性格を ppl の悪化を抑えて出せた。ただし能力の落ち方はニューロンだけのときと同じで、強く増幅すると崩れる(verification.md §20.10)。
 
-`heads pipeline` の spec は対照集合の中身(name・user_prompts・system か recipe)に、任意で `pipeline: {target, n_heads, hard, top_layers, max_examples}`。用途別のひな形は `configs/pipeline/`(system の性格・2 つの性格の差・レシピの性格・質問の種類の差。`about` は説明だけで、読むときに捨てる。UI の「ひな形」でも選べる)。質問は何百個でもよく、止めて測る段階は 64 個に間引く。止めると中立の側が大きく崩れる層(最初の層など)とヘッドは自動で外れる。目標を省くと A と B の平均の真ん中。
+`heads pipeline` の spec は対照集合の中身(name・user_prompts・system か recipe)に、任意で `pipeline: {target, n_heads, hard, top_layers, max_examples}`。用途別のひな形は `configs/pipeline/`(system の性格・2 つの性格の差・レシピの性格・質問の種類の差。`about` は説明だけで、読むときに捨てる。UI の「ひな形」でも選べる)。質問は何百個でもよく、止めて測る段階は 64 個に間引く。止めると中立の側が大きく崩れる層(最初の層など)とヘッドは自動で外れる。目標を省くと A と B の平均の真ん中(半分ほど消す)、`B` で B 側の平均(消し切る)。止めて同じ spec・同じ設定で流し直すと、作り済みの方向と因果を使い回して配分からやり直す(`--fresh` で作り直す)。返事を作らない段は、測るコンテキストを最長の会話に合わせて小さく作り、生成用のコンテキストを先に解放する(27B のような大きいモデルで VRAM があふれてメインメモリに逃げ、極端に遅くなるのを避ける)。
 
 `heads candidates` は、生成なしで決めた組の全体の倍率を、返事を読んで決めるためのもの。正の倍率は A 側の振る舞いを消す向きで A 側の返事を、負の倍率(`--scales -0.5,-1`)は B 側で強める向きで B 側の返事を、どの候補か伏せて `<root>/heads/<model_id>/<名前>.cand/round_01.txt` に並べ、基準 `RUBRIC.md` を添える。種は全部の候補で同じ。P(振る舞いの強さ)と C(自然さ)を 1〜5 で付け、`--tally` で消す向きは min(6 − P, C)、強める向きは min(P, C) の平均で並べる。調整に使っていない質問を `--prompts` で渡す(渡さないと注意が出る)。`--with-recipe` のレシピ(ニューロンの種火など)は無介入の base も含めた全候補に重なる。採点は `references/judging.md` と同じく、1 回の比較を同じ採点役で、鍵を見る前に付ける。
+
+質問は文字列のほかに、会話の履歴(`[{"role": "user", …}, {"role": "assistant", …}, {"role": "user", …}]`、user で終える)でも書ける。1 問ずつまっさらな状態から読ませ、最後の返事の直前で測る。`heads refine` は、配分の比較表の「残り」(組を当てても目標まで下がらない A 側の質問)だけを A にし、両側に組を当てたまま一括を流して、足すヘッドと、元の組と合わせたレシピ(`combined`)を作る。
 
 対照集合は、system を片方だけ書いてもよく(省いた側は system なし)、側ごとに別の質問 `prompts_a` / `prompts_b` を読ませることもできる(例 `configs/contrast/ja_vs_en.yaml`、何もしないモデルに 2 種類の質問を読ませる)。
 

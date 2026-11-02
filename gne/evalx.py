@@ -339,7 +339,7 @@ class DirMetrics:
     点数は基準層と最も後ろの層で測り、行に平らに出す値(drift_*・dir_drop_a)は最も後ろの層のもの。"""
 
     def __init__(self, session, name: str, *, contrast: str | Path | None = None, layers: list[int] | None = None,
-                 behavior: bool = True, max_tokens: int = 64):
+                 behavior: bool = True, max_tokens: int = 64, max_examples: int | None = 64):
         from .direction import Scorer, base_layer_of, load_contrast, score_layers_default
         from .direction import score as score_fn
         self.session = session
@@ -355,16 +355,30 @@ class DirMetrics:
         self.layers = sorted(set(layers)) if layers else sorted({b, max(score_layers_default(session, ds, b))})
         self.top = max(self.layers)
         self.name, self.ds = name, ds
-        self.sc = Scorer(session, ds, self.cs, layers=self.layers)
-        self.base = self.sc.run(keep=True)
+        # 質問が多い対照集合(何百問)では、1 回の測定で全部を読むと大きいモデルで何十分もかかるので、等間隔に間引く
+        from .direction import thin
+        self.max_examples = max_examples
+        self.sc = Scorer(session, ds, self.cs, layers=self.layers, max_examples=max_examples)
         self.behavior = behavior and bool(self.val.match)
         self.max_tokens = max_tokens
+        self.n_score = self.sc.n("A") + self.sc.n("B")
+        self.n_beh = len(thin(list(self.val.prompts), max_examples)) if self.behavior else 0
+        self.cost = self.n_score + self.n_beh             # 1 回の測定で読む・作る会話の数(進み具合に数える)
+        self.tick: Callable[[int, str], None] = lambda n, label="": None
+        self.base = None
         self.base_rate = None
+
+    def prepare(self) -> None:
+        """無介入の点数と一致率(測る前に 1 回)。"""
+        self.base = self.sc.run(keep=True)
+        self.tick(self.n_score, "方向の指標(無介入)")
         if self.behavior:
             from .direction import behavior as beh
-            self.base_rate = beh(session, self.cs, self.val, None, max_tokens=max_tokens)["rate"]
+            self.base_rate = beh(self.session, self.cs, self.val, None, max_tokens=self.max_tokens,
+                                 max_examples=self.max_examples, with_kl=False)["rate"]
+            self.tick(self.n_beh, "方向の指標(無介入)")
 
-    def measure(self, r: Recipe | None) -> dict:
+    def measure(self, r: Recipe | None, label: str = "方向の指標") -> dict:
         from .direction import drift
         if r is None:
             got = self.base
@@ -372,6 +386,7 @@ class DirMetrics:
             lora = self.session.lora_for(r)
             vecs = self.session.vectors(r)[0] if r.add_units else None
             got = self.sc.run(lora, vecs, keep=True)
+            self.tick(self.n_score, label)
         layers = {}
         for L in self.layers:
             x = {"score_a": float(got["A"]["values"][L].mean()), "score_b": float(got["B"]["values"][L].mean()),
@@ -386,7 +401,11 @@ class DirMetrics:
                **{k: top[k] for k in ("drift_par_a", "drift_orth_a", "drift_par_b", "drift_orth_b")}}
         if self.behavior:
             from .direction import behavior as beh
-            rate = self.base_rate if r is None else beh(self.session, self.cs, self.val, r, max_tokens=self.max_tokens)["rate"]
+            rate = self.base_rate
+            if r is not None:
+                rate = beh(self.session, self.cs, self.val, r, max_tokens=self.max_tokens, max_examples=self.max_examples,
+                           with_kl=False)["rate"]
+                self.tick(self.n_beh, label)
             out["rate"], out["rate_drop"] = rate, None if rate is None or self.base_rate is None else self.base_rate - rate
         return out
 
@@ -414,7 +433,7 @@ def evaluate(session, recipe: Recipe, *, doses=(0, 0.25, 0.5, 0.75, 1.0), suite:
              when: str | None = None, judge: Judge | None = None, random_controls: int = 0,
              reactivity: str | Path | None = None, head_controls: int = 0, reactivity_tokens: int = 64,
              control_pool: str = "before", direction_metrics: bool = True, baseline: dict | None = None,
-             progress: Callable[[int, int, str], None] | None = None) -> dict:
+             dir_max_examples: int | None = 64, progress: Callable[[int, int, str], None] | None = None) -> dict:
     """dose(レシピ全体の倍率)ごとに全タスクを流し、指標の表を返す。0 が無ければ足す(ベースライン、最初に測る)。
     倍率 0 も同じ when の経路で生成する(バッチの組み方で数値が変わるので、比べる行どうしで経路をそろえる)。
     負の倍率(反対向き)も測れる。表は倍率の小さい順。
@@ -444,7 +463,7 @@ def evaluate(session, recipe: Recipe, *, doses=(0, 0.25, 0.5, 0.75, 1.0), suite:
     dname = direction_of(recipe) if direction_metrics else None
     if dname is not None:
         try:
-            dm = DirMetrics(session, dname)
+            dm = DirMetrics(session, dname, max_examples=dir_max_examples)
         except GneError as e:
             session.warn(f"方向 {dname} の点数と直交成分のずれは測りません: {e.message}")
     if n_ctrl and not control_set(session, recipe, 1, pool=control_pool, score_layers=dm.layers if dm else None):
@@ -456,12 +475,24 @@ def evaluate(session, recipe: Recipe, *, doses=(0, 0.25, 0.5, 0.75, 1.0), suite:
         n_hctrl = 0                                 # ヘッドの無いレシピにはヘッドの対照を作れない
     if rc is not None:
         total += (len(doses) + n_hctrl * (len(doses) - 1)) * 2 * len(rc.pairs)
+    n_nonzero = len({float(x) for x in doses} - {0.0})
+    if dm is not None:                              # 方向の指標: 無介入 1 回 + 倍率ごと + 対照ごと
+        total += dm.cost * (1 + n_nonzero + n_ctrl * n_nonzero)
 
     def tick(n: int, d: float = 0.0):
         nonlocal done
         done += n
         if progress:
             progress(done, total, f"eval dose {d:g}")
+
+    def dtick(n: int, label: str):
+        nonlocal done
+        done += n
+        if progress:
+            progress(min(done, total), total, label)
+    if dm is not None:
+        dm.tick = dtick
+        dm.prepare()
 
     def measure(r: Recipe | None, d: float):
         vecs = session.vectors(r)[0] if r is not None else None
@@ -495,7 +526,7 @@ def evaluate(session, recipe: Recipe, *, doses=(0, 0.25, 0.5, 0.75, 1.0), suite:
             if d == 0:
                 base_meas = {"row": json.loads(json.dumps(row)), "by": by, "ex": ex, "fm": fm}
             if dm is not None:
-                row["direction"] = dm.measure(r)
+                row["direction"] = dm.measure(r, f"方向の指標 倍率 {d:g}")
                 for k in ("dir_drop_a", "drift_par_a", "drift_orth_a", "drift_par_b", "drift_orth_b", "rate", "rate_drop"):
                     if k in row["direction"]:
                         row[k] = row["direction"][k]
@@ -518,11 +549,11 @@ def evaluate(session, recipe: Recipe, *, doses=(0, 0.25, 0.5, 0.75, 1.0), suite:
                 row["reactivity"] = rx
         if n_ctrl and d != 0:
             crow = []
-            for c in control_set(session, r, n_ctrl, pool=control_pool, score_layers=dm.layers if dm else None):
+            for j, c in enumerate(control_set(session, r, n_ctrl, pool=control_pool, score_layers=dm.layers if dm else None)):
                 pc = session.patches_for(c)                    # 対照も同じ専門家の gain・route を残すので、同じパッチで測る
                 with session.patched(pc) if pc is not None else contextlib.nullcontext():
                     cr, cby, _, _ = measure(c, d)
-                    cdm = dm.measure(c) if dm is not None else None
+                    cdm = dm.measure(c, f"方向の指標 倍率 {d:g} 対照 {j + 1}/{n_ctrl}") if dm is not None else None
                 pm = persona_metrics(base_persona, [o for _, o in cby["persona"]], tok)
                 crow.append({"name": c.name, "capability": cr["capability"], "ppl_mean": cr["ppl_mean"],
                              "mix": cr["mix_zh"] + cr["mix_other"], "novelty": pm["novelty"], "mass": pm["mass"],
@@ -586,7 +617,9 @@ def evaluate(session, recipe: Recipe, *, doses=(0, 0.25, 0.5, 0.75, 1.0), suite:
     return {"recipe": recipe.to_dict(), "when": w, "random_controls": n_ctrl,
             **({"control_pool": control_pool} if recipe.proj_units and n_ctrl else {}),
             **({"direction_metrics": {"direction": dm.name, "layers": dm.layers, "contrast": dm.cs.name,
-                                      "behavior": dm.behavior, "base_rate": dm.base_rate}} if dm is not None else {}),
+                                      "behavior": dm.behavior, "base_rate": dm.base_rate, "n_a": dm.sc.n("A"),
+                                      "n_b": dm.sc.n("B"), "n_behavior": dm.n_beh, "max_examples": dm.max_examples}}
+               if dm is not None else {}),
             **({"notes": notes} if notes else {}), "_baseline": base_meas,
             "reactivity": None if rc is None else {"contrast": str(rc.path), "name": rc.name, "n_pairs": len(rc.pairs),
                                                    "head_controls": n_hctrl, "max_tokens": reactivity_tokens}, "suite": {"name": st.name, "path": str(st.path), "n_tasks": st.n_tasks,

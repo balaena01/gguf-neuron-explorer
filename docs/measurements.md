@@ -304,7 +304,7 @@ Qwen3.5-4B Q8_0、`gne direction --select auto --mode add`(12 プロンプト、
 | 専門家 1 つの W_down の dequantize(LFM2 の Q6_K、2048 × 1792) | 0.03 秒 | 層全体(32 個)は 1.1 秒 |
 
 
-## CHANGE-06(2026-11-01、同じ環境)
+## CHANGE-06: CHiPS(2026-11-01、同じ環境)
 
 対照集合は `configs/contrast/evil.yaml`(A・B 各 12 会話、生成プロンプトの最後のトークンで測る)。B 側への影響は全 12 例で測った。
 

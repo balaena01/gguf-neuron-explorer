@@ -16,6 +16,7 @@ CHANGE-06 G: 因果スクリーニングと強さの配分(/api/causal)、方向
 from __future__ import annotations
 
 import json
+import sys
 import threading
 from pathlib import Path
 
@@ -32,6 +33,12 @@ STATIC = Path(__file__).resolve().parent / "static"
 def _binary(body: bytes, shape: str, meta: dict) -> Response:
     return Response(body, media_type="application/octet-stream",
                     headers={"X-Shape": shape, "X-Meta": json.dumps(meta, ensure_ascii=True), "Cache-Control": "no-store"})
+
+
+def _code_stamp() -> float:
+    """gne のコード(Python と UI のファイル)の最終更新時刻。サーバを立ち上げた後でコードが更新されたかを見る。"""
+    root = Path(__file__).resolve().parent.parent
+    return max((p.stat().st_mtime for p in root.rglob("*") if p.suffix in (".py", ".js", ".html", ".css")), default=0.0)
 
 
 def create_app(session, *, warm: bool = True, openai: bool = False) -> FastAPI:
@@ -51,6 +58,16 @@ def create_app(session, *, warm: bool = True, openai: bool = False) -> FastAPI:
     app.state.live = live
     agent = AgentBus(session.meta.n_layer, session.meta.n_ff_at)
     app.state.agent = agent
+    agent.closing = live.closing                   # 止める合図は 1 つ(serve の Ctrl+C で立てる)
+    app.state.closing = live.closing
+    started_stamp = _code_stamp()
+
+    @app.get("/api/stale")
+    def stale():
+        """サーバを立ち上げた後で gne のコードが更新されたか。画面のファイルは毎回読み直すので、更新されていると新しい画面と
+        古いサーバが食い違う(新しいボタンのジョブを知らない、など)。UI はこれを見て立ち上げ直しを勧める。"""
+        now = _code_stamp()
+        return {"stale": now > started_stamp + 1.0, "started": started_stamp, "now": now}
 
     @app.middleware("http")
     async def local_only(request, call_next):
@@ -411,4 +428,61 @@ def serve(model: str | Path, *, host: str = "127.0.0.1", port: int = 8791, root:
     if host not in ("127.0.0.1", "localhost", "::1"):
         raise GneError("BAD_ARGS", "UI はローカル専用です(--host は 127.0.0.1)", "別冊 UI 設計 §1 の非ゴール: マルチユーザー・認証")
     session = Session(model, root=root, n_gpu_layers=n_gpu_layers, n_ctx=n_ctx, seed=seed, mmproj=mmproj)
-    uvicorn.run(create_app(session, openai=openai), host=host, port=port, log_level="warning")
+    app = create_app(session, openai=openai)
+    server = _Server(uvicorn.Config(app, host=host, port=port, log_level="warning"), app.state.closing)
+    try:
+        server.run()
+    except KeyboardInterrupt:                      # uvicorn.run と同じく、止めた後に送り直される Ctrl+C は黙って終わる
+        pass
+    if server.started:
+        sys.stderr.write("gne serve: 止めました\n")
+
+
+def _server_class():
+    import uvicorn
+
+    class Server(uvicorn.Server):
+        """Ctrl+C で止まる uvicorn。ブラウザが開いたままにする配信(SSE)は終わらないので、そのままだとサーバが接続の
+        終わりを待ち続ける(Python 3.12 の asyncio は、強制終了でも残った接続が閉じるまで待つ)。1 回目で止める合図を立てて
+        配信を閉じさせ、2 回目(か 5 秒たっても残っていれば)残った接続を切る。3 回目はすぐ終わる。"""
+
+        def __init__(self, config, closing):
+            super().__init__(config)
+            self.closing = closing
+            self.loop = None
+            self.n_signals = 0
+
+        async def startup(self, sockets=None):
+            import asyncio
+            self.loop = asyncio.get_running_loop()
+            await super().startup(sockets)
+
+        def handle_exit(self, sig, frame):
+            import os
+            import sys
+            self.n_signals += 1
+            self.closing.set()
+            if self.n_signals == 1:
+                sys.stderr.write("gne serve: 止めています(開いている配信を閉じています。もう一度 Ctrl+C で接続を切ります)\n")
+                if self.loop is not None:
+                    self.loop.call_soon_threadsafe(self.loop.call_later, 5.0, self.drop_connections)
+            elif self.n_signals == 2:
+                sys.stderr.write("gne serve: 残った接続を切って止めます\n")
+                if self.loop is not None:
+                    self.loop.call_soon_threadsafe(self.drop_connections)
+            else:
+                os._exit(130)
+            super().handle_exit(sig, frame)
+
+        def drop_connections(self):
+            self.force_exit = True
+            for c in list(self.server_state.connections):
+                t = getattr(c, "transport", None)
+                if t is not None and not t.is_closing():
+                    t.close()
+
+    return Server
+
+
+def _Server(config, closing):
+    return _server_class()(config, closing)

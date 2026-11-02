@@ -134,7 +134,8 @@ def lora_tensors(weights, by_layer: dict[int, list[tuple[int, float]]]) -> dict[
 
 
 def export_gain_lora(weights, recipe: Recipe, path: str | Path, *,
-                     extra: dict[str, tuple[np.ndarray, np.ndarray]] | None = None, extra_meta: dict | None = None) -> dict:
+                     extra: dict[str, tuple[np.ndarray, np.ndarray]] | None = None, extra_meta: dict | None = None,
+                     strip_meta: bool = False) -> dict:
     """gain ユニット(ニューロンの ffn_up とヘッドの W_O)を LoRA アダプタ GGUF に書く。extra は同じファイルに入れる
     書き込み行列の LoRA(ヘッドの方向成分の射影 CHANGE-06。同じテンソルのヘッドの gain とは A・B を連結して 1 つにする)。"""
     from .headproj import merge_tensors
@@ -160,11 +161,14 @@ def export_gain_lora(weights, recipe: Recipe, path: str | Path, *,
     w = GGUFWriter(str(path), arch=m.arch)
     w.add_type("adapter")
     w.add_string("adapter.type", "lora")
-    w.add_name(f"{m.name} gain" + (f" {recipe.name}" if recipe.name else ""))
-    w.add_key_value("gne.recipe", json.dumps(recipe.to_dict(), ensure_ascii=False), GGUFValueType.STRING)
-    w.add_key_value("gne.source_model_id", m.model_id, GGUFValueType.STRING)
-    if extra_meta is not None:
-        w.add_key_value("gne.headproj", json.dumps(extra_meta, ensure_ascii=False), GGUFValueType.STRING)
+    if strip_meta:                                               # 人に渡す版: gne の記録(レシピ・ヘッド・強さ)を残さない
+        w.add_name(f"{m.name} adapter")
+    else:
+        w.add_name(f"{m.name} gain" + (f" {recipe.name}" if recipe.name else ""))
+        w.add_key_value("gne.recipe", json.dumps(recipe.to_dict(), ensure_ascii=False), GGUFValueType.STRING)
+        w.add_key_value("gne.source_model_id", m.model_id, GGUFValueType.STRING)
+        if extra_meta is not None:
+            w.add_key_value("gne.headproj", json.dumps(extra_meta, ensure_ascii=False), GGUFValueType.STRING)
     for L, (A, B) in tens.items():
         w.add_tensor(f"blk.{L}.ffn_up.weight.lora_a", A)
         w.add_tensor(f"blk.{L}.ffn_up.weight.lora_b", B)
@@ -259,7 +263,7 @@ def bake_gain_patch(weights, recipe: Recipe, dst: str | Path) -> dict:
 
 def bake_gain_gguf(weights, recipe: Recipe, dst: str | Path, *, requant: str = "q8_0",
                    extra: dict[str, tuple[np.ndarray, np.ndarray]] | None = None, extra_meta: dict | None = None,
-                   via_f16: bool = False) -> dict:
+                   via_f16: bool = False, strip_meta: bool = False) -> dict:
     """W_up[L] の行(ニューロン)と W_O の列ブロック(ヘッド)を k 倍した GGUF を作る。書き換えたテンソルだけ
     Q8_0(requant="q8_0")か F16 にし、他は生バイトのまま写す。requant="patch" はスケールパッチ(量子化を保ったまま
     ちょうど k 倍、bake_gain_patch)、"auto" はパッチで書ければパッチ、書けなければ Q8_0。専門家全体の gain と route は
@@ -280,14 +284,14 @@ def bake_gain_gguf(weights, recipe: Recipe, dst: str | Path, *, requant: str = "
         _check(weights, by_layer)
     head_tensors = {weights.head_block(L, hk[0][0])[0]: L for L, hk in heads.items()}
     head_tensors.update({name: int(name.split(".")[1]) for name in extra})
-    if requant not in ("q8_0", "f16"):
-        raise GneError("BAD_ARGS", "--requant は q8_0 か f16 です")
+    if requant not in ("q8_0", "f16", "keep"):
+        raise GneError("BAD_ARGS", "--requant は q8_0・f16・keep(元が F32 / F16 / BF16 ならその型、量子化された型なら Q8_0)です")
     if Path(weights.path).resolve() == Path(dst).resolve():
         raise GneError("BAD_ARGS", "--in と --out が同じファイルです")
     Path(dst).parent.mkdir(parents=True, exist_ok=True)
     tag = f" +gain:{recipe.name}" if recipe.name else " +gain"
-    w = copy_gguf_header(weights, dst, tag=tag, recipe=recipe)
-    if extra_meta is not None:
+    w = copy_gguf_header(weights, dst, tag=tag, recipe=recipe, strip=strip_meta)
+    if extra_meta is not None and not strip_meta:
         w.add_key_value("gne.headproj", json.dumps(extra_meta, ensure_ascii=False), GGUFValueType.STRING)
     plan, modified = [], []
     for t in weights.reader.tensors:
@@ -309,7 +313,13 @@ def bake_gain_gguf(weights, recipe: Recipe, dst: str | Path, *, requant: str = "
                 A, B = extra[t.name]
                 W += (B.astype(np.float64) @ A.astype(np.float64)).astype(np.float32)
         if W is not None:
-            if requant == "f16":
+            if requant == "keep" and t.tensor_type == GGMLQuantizationType.F32:      # 量子化していないモデル: 元の型のまま
+                data, qt = W.astype(np.float32), GGMLQuantizationType.F32
+            elif requant == "keep" and t.tensor_type == GGMLQuantizationType.F16:
+                data, qt = W.astype(np.float16), GGMLQuantizationType.F16
+            elif requant == "keep" and t.tensor_type == GGMLQuantizationType.BF16:
+                data, qt = gquants.quantize(W, GGMLQuantizationType.BF16), GGMLQuantizationType.BF16
+            elif requant == "f16":
                 data, qt = W.astype(np.float16), GGMLQuantizationType.F16
             else:
                 data, qt = gquants.quantize(W, GGMLQuantizationType.Q8_0), GGMLQuantizationType.Q8_0
@@ -317,7 +327,7 @@ def bake_gain_gguf(weights, recipe: Recipe, dst: str | Path, *, requant: str = "
             modified.append({"tensor": t.name, "from": t.tensor_type.name, "to": qt.name})
         else:
             plan.append((t.name, t.data, t.tensor_type))
-    if extra:                                                     # CHANGE-06 E.2: 書き換えたテンソルと元の型
+    if extra and not strip_meta:                                  # CHANGE-06 E.2: 書き換えたテンソルと元の型
         rec = [{**m, "op": "rewrite"} if not via_f16 else {**m, "to": m["from"], "via": "f16+llama-quantize", "op": "rewrite"}
                for m in modified]                         # via_f16: 中間は F16、llama-quantize で元の型に戻る
         w.add_key_value("gne.patches", json.dumps(rec, ensure_ascii=False), GGUFValueType.STRING)

@@ -7,7 +7,7 @@
 // heads_candidates のジョブの結果と名前を伏せた採点)に替わる。方向が 1 つも無ければ「JSON から作る」を開く。
 import { getJSON, postJSON } from "./api.js";
 import { t } from "./i18n.js";
-import { esc } from "./panels.js";
+import { esc, qText } from "./panels.js";
 import { CandidatesPanel } from "./candidates.js";
 import { PipelinePanel } from "./pipeline.js";
 
@@ -88,7 +88,7 @@ export class DirectionView {
 
   // app.js の onJobFinished から: 一括(head_pipeline)と候補(heads_candidates)
   async jobEnded(j) {
-    if (j.kind === "head_pipeline") return this.pipe.jobEnded(j);
+    if (j.kind === "head_pipeline" || j.kind === "heads_refine") return this.pipe.jobEnded(j);
     if (j.kind !== "heads_candidates") return;
     const mine = j.id === this.pipe.candJobId;
     this.pipe.candJobEnded(j);
@@ -319,7 +319,7 @@ export class DirectionView {
     const ps = r.prompts || [], n = Math.max((A || []).length, (B || []).length);
     const rows = Array.from({ length: n }, (_, i) => {
       const a = A ? A[i] : null, b = B ? B[i] : null;
-      return `<tr><td class="w">${esc(ps.length === n ? ps[i] : `#${i}`)}</td><td>${fmt(a, 2)}</td><td>${fmt(b, 2)}</td><td>${a !== null && b !== null ? fmt(a - b, 2) : "—"}</td></tr>`;
+      return `<tr><td class="w">${esc(ps.length === n ? qText(ps[i]) : `#${i}`)}</td><td>${fmt(a, 2)}</td><td>${fmt(b, 2)}</td><td>${a !== null && b !== null ? fmt(a - b, 2) : "—"}</td></tr>`;
     }).join("");
     this.$("#dv-ex").innerHTML = `<details><summary class="muted note">${t("例ごとの点数(L{L}、{n} 件)", { L, n })}</summary>
       <table class="evx mono dv-ex"><thead><tr><th>${t("プロンプト")}</th><th>A</th><th>B</th><th>A − B</th></tr></thead><tbody>${rows}</tbody></table></details>`;

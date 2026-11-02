@@ -31,6 +31,7 @@ class AgentBus:
         self.last: dict | None = None             # 最後の操作(画面の状態表示用)
         self._subs: list[tuple[asyncio.AbstractEventLoop, asyncio.Queue]] = []
         self._lock = threading.Lock()
+        self.closing = threading.Event()          # サーバを止めるとき(serve の Ctrl+C)に立つ。配信はこれで閉じる
 
     # --- 状態 --------------------------------------------------------------------------------------------
     def _check(self, L, n) -> tuple[int, int]:
@@ -105,12 +106,17 @@ class AgentBus:
             self._subs.append((loop, q))
         try:
             yield _sse(self.snapshot())                                         # あとから開いたブラウザにも今の状態を
-            while True:
+            idle = 0.0
+            while not self.closing.is_set():      # 開いたままの配信があるとサーバが止まれないので、止めるときは閉じる
                 try:
-                    ev = await asyncio.wait_for(q.get(), timeout=15)
+                    ev = await asyncio.wait_for(q.get(), timeout=0.5)
                     yield _sse(ev)
+                    idle = 0.0
                 except asyncio.TimeoutError:
-                    yield ": keep-alive\n\n"
+                    idle += 0.5
+                    if idle >= 15:
+                        yield ": keep-alive\n\n"
+                        idle = 0.0
         finally:
             with self._lock:
                 self._subs = [s for s in self._subs if s[1] is not q]
