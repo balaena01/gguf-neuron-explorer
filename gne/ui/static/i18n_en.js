@@ -850,6 +850,7 @@ export const EN = {
   "最初から作り直す": "rebuild from scratch",
   "能力を測るベンチマーク。データは初回に取得する。合わせて数時間かかる": "Benchmarks that measure capability. The data is fetched on first use. Together they take a few hours",
   "ベンチマーク {k}({n} 問)": "benchmark {k} ({n})",
+  "採点に bench extra が要る": "Grading needs the bench extra.",
   "片方だけ正解: 比較 {a} / 対象 {b}(p = {p})": "right on one side only: reference {a} / target {b} (p = {p})",
   "正答率": "accuracy",
   "答えを取り出せなかった": "no answer found",

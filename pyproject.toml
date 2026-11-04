@@ -19,6 +19,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8", "playwright>=1.40"]
 mcp = ["mcp>=2.3"]
+bench = ["math-verify>=0.9", "langdetect>=1.0.9", "nltk>=3.9", "immutabledict>=4"]   # gne fieldtest --bench math500,ifeval の採点
 ui = ["fastapi>=0.115", "uvicorn>=0.30", "umap-learn>=0.5"]   # Web UI(gne serve)。umap-learn は配置の計算(別冊 §4.4)
 
 [project.scripts]

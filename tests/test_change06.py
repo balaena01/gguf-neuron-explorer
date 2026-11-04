@@ -539,7 +539,7 @@ def test_pipeline_templates_are_valid(tmp_path):
     from gne.api import Session
     from gne.direction import load_contrast
     files = sorted((ROOT / "configs" / "pipeline").glob("*.json"))
-    assert len(files) == 4
+    assert len(files) == 5
     for f in files:
         d = json.loads(f.read_text(encoding="utf-8"))
         about = d.pop("about")
@@ -553,8 +553,9 @@ def test_pipeline_templates_are_valid(tmp_path):
         cs, val = load_contrast(p)
         assert min(len(cs.prompts("A")), len(cs.prompts("B"))) >= 16
         assert val.match and val.target and re.compile(val.match)
-        held = set(val.prompts) if val.explicit else set()
-        assert not held & (set(cs.prompts("A")) | set(cs.prompts("B")))      # 確かめ用の質問は調整に使う質問と重ならない
+        key = lambda q: json.dumps(q, ensure_ascii=False)                    # 質問は文字列か会話の履歴(リスト)
+        held = {key(q) for q in val.prompts} if val.explicit else set()
+        assert not held & {key(q) for side in "AB" for q in cs.prompts(side)}   # 確かめ用の質問は調整に使う質問と重ならない
 
 
 @pytest.mark.model
@@ -722,12 +723,16 @@ HIST = [{"role": "user", "content": "I adopted a puppy yesterday."}, {"role": "a
 
 
 def test_multi_turn_questions_parse(tmp_path):
-    """1 問は文字列か会話の履歴(user と assistant が交互、user で始まり user で終わる)。崩れた履歴は読む前に断る。
+    """1 問は文字列か会話の履歴(user と assistant が交互で user で始まる。assistant で終われば書きかけの返事)。崩れた履歴は読む前に断る。
     同じ返事を 2 つの system で読ませる道具は、履歴の質問を断る。"""
     from gne.reverse import ContrastSet, _conv, check_question, question_text
     check_question("hi")
     check_question(HIST)
-    for bad in ([], [{"role": "assistant", "content": "x"}], HIST[:2], [{"role": "user", "content": 3}],
+    check_question(HIST[:2])                                                 # assistant で終われば書きかけの返事
+    with pytest.raises(GneError):
+        check_question(HIST[:2], in_progress=False)                          # 読めない道具(fieldtest)は断る
+    for bad in ([], [{"role": "assistant", "content": "x"}], [{"role": "user", "content": "a"}, {"role": "assistant", "content": ""}],
+                [{"role": "user", "content": 3}],
                 [{"role": "user", "content": "a"}, {"role": "user", "content": "b"}], [{"role": "user", "content": "a", "x": 1}], 5):
         with pytest.raises(GneError):
             check_question(bad)
@@ -764,6 +769,77 @@ def test_multi_turn_questions_measured_before_last_reply(session, tmp_path):
     session.direction(contrast=p, name="mt", positions="last")
     sc = session.direction_score("mt", layers=[12])
     assert sc["layers"][0]["A"]["n"] == len(qs)
+
+
+THINK_TPL = ("{% for m in messages %}<{{ m.role }}>{{ m.content }}</{{ m.role }}>{% endfor %}"
+             "{% if add_generation_prompt %}<assistant>{% if enable_thinking %}<think>\n{% else %}<think>\n\n</think>\n\n{% endif %}{% endif %}")
+
+
+def test_reply_in_progress_renders_open():
+    """assistant で終わる質問は書きかけの返事: 閉じずに生成プロンプトの続きに置く。<think> で始まれば thinking の途中で、
+    テンプレートが開いた <think> と重ねない。生成プロンプトなしは、その前の会話だけ。印のない assistant は今までどおり。"""
+    from gne.engine import render_template
+    from gne.fieldtest import load_long_tasks, parse_prompt_sets
+    from gne.reverse import _conv
+    q = [{"role": "user", "content": "Q"}, {"role": "assistant", "content": "<think>\nabc"}]
+    assert render_template(THINK_TPL, _conv(None, q)) == "<user>Q</user><assistant><think>\nabc"
+    assert render_template(THINK_TPL, _conv("S", q)) == "<system>S</system><user>Q</user><assistant><think>\nabc"
+    body = [q[0], {"role": "assistant", "content": "The answer"}]
+    assert render_template(THINK_TPL, _conv(None, body)) == "<user>Q</user><assistant><think>\n\n</think>\n\nThe answer"
+    assert render_template(THINK_TPL, _conv(None, q), add_generation_prompt=False) == "<user>Q</user>"
+    settled = render_template(THINK_TPL, q)                                  # 印がない = 閉じた発話 + 新しい返事
+    assert settled.startswith("<user>Q</user><assistant><think>\nabc</assistant><assistant>")
+    no_tag = "{% for m in messages %}[{{ m.content }}]{% endfor %}{% if add_generation_prompt %}A:{% endif %}"
+    assert render_template(no_tag, _conv(None, q)) == "[Q]A:<think>\nabc"     # <think> を開かないテンプレート
+    old = [{"role": "user", "content": "<think>x"}, {"role": "assistant", "content": "<think>\ny"}]
+    assert render_template(no_tag, _conv(None, old)) == "[<think>x]A:<think>\ny"   # 履歴の中の <think> は削らない
+    with pytest.raises(GneError):
+        parse_prompt_sets({"s": [q]})                                        # fieldtest は書きかけを読まない
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        (Path(td) / "t.json").write_text(json.dumps([q]), encoding="utf-8")
+        with pytest.raises(GneError):
+            load_long_tasks(Path(td) / "t.json")
+
+
+@pytest.mark.model
+def test_causal_skips_questions_longer_than_the_capture_limit(session, tmp_path):
+    """止めて測る段階に長さの制限はない。直接の書き込みは捕捉の上限より長い質問を除いて測り、途中で止まらない。"""
+    d = yaml.safe_load(EVIL.read_text(encoding="utf-8"))
+    long_q = "Tell me about this. " + "word " * (session.engine.probe_ubatch + 40)
+    qs = d["user_prompts"][:5] + [long_q]
+    p = tmp_path / "ln.yaml"
+    p.write_text(yaml.safe_dump({"name": "ln", "system_a": d["system_a"], "system_b": d["system_b"], "user_prompts": qs,
+                                 "validate": d["validate"]}, allow_unicode=True), encoding="utf-8")
+    session.direction(contrast=p, name="ln", positions="last")
+    r = session.heads_causal("ln", contrast=p, top_layers=1, hard=2)
+    assert r["name"] == "ln" and Path(r["path"]).is_file()
+
+
+@pytest.mark.model
+def test_reply_in_progress_is_measured_at_its_end(session, tmp_path):
+    """書きかけの返事は最後のトークンで測る。区間は返事の側に入り、生成はその続きから書く。ひな形がそのまま流れる。"""
+    from gne.reverse import ContrastSet, _conv, contrast_sequences
+    from gne.when import chat_segments
+    d = json.loads((ROOT / "configs" / "pipeline" / "reply_in_progress.json").read_text(encoding="utf-8"))
+    p = tmp_path / "rp.yaml"
+    p.write_text(yaml.safe_dump({"name": "rp", "prompts_a": d["prompts_a"], "prompts_b": d["prompts_b"], "validate": d["validate"]},
+                                allow_unicode=True), encoding="utf-8")
+    cs = ContrastSet.load(p)
+    assert cs.multi_turn and cs.separate_prompts
+    e = session.engine
+    ids, start = contrast_sequences(e, cs)["A"][0]
+    text = cs.prompts("A")[0][-1]["content"]
+    assert e.detokenize(ids).rstrip().endswith(text.rstrip()) and "<think>\n\n</think>" not in e.detokenize(ids)   # 閉じず、空の think 欄もない
+    assert text[-20:] in e.detokenize(ids[start:]) and cs.prompts("A")[0][0]["content"] in e.detokenize(ids[:start])
+    conv = _conv(None, cs.prompts("A")[0])
+    all_ids, segs = chat_segments(e, conv)                                   # when の区間でも書きかけは返事の側
+    assert all_ids == ids and segs[-1][2] and segs[-1][1] == len(ids) and segs[-1][0] <= start + 1
+    session.direction(contrast=p, name="rp", positions="last")
+    sc = session.direction_score("rp", layers=[6])
+    assert sc["layers"][0]["A"]["n"] == len(cs.prompts("A"))
+    r = e.generate_greedy(e.steer_ctx(), [ids], max_tokens=4)[0]              # 続きから書く
+    assert r.prompt_ids == ids and r.token_ids
 
 
 @pytest.mark.model
@@ -1123,6 +1199,92 @@ def test_fieldtest_end_to_end_with_llama_server(session, tmp_path, monkeypatch):
     me = str(os.getpid())
     kids = subprocess.run(["ps", "--ppid", me, "-o", "comm="], capture_output=True, text=True).stdout
     assert "llama-server" not in kids
+
+
+def test_llama_server_restarts_after_a_crash(tmp_path):
+    """測定の途中で llama-server が落ちても立て直して同じ問いをやり直す。落ち続けたら無限に立て直さず、エラーとして数えて結果の頭に書く。"""
+    import stat
+    import sys
+    from concurrent.futures import ThreadPoolExecutor
+
+    from gne import fieldtest as ft
+    fake = tmp_path / "fake-server"
+    state = tmp_path / "crash-left"
+    fake.write_text(f"""#!{sys.executable}
+import json, os, sys
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+port = int(sys.argv[sys.argv.index("--port") + 1])
+class H(BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def _send(self, o):
+        b = json.dumps(o).encode(); self.send_response(200); self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
+    def do_GET(self): self._send({{"status": "ok"}})
+    def do_POST(self):
+        self.rfile.read(int(self.headers["Content-Length"]))
+        left = int(open({str(state)!r}).read())
+        if left != 0:
+            open({str(state)!r}, "w").write(str(left - 1))
+            os._exit(1)
+        self._send({{"choices": [{{"message": {{"content": "ok"}}, "finish_reason": "stop"}}], "usage": {{"completion_tokens": 3}}}})
+ThreadingHTTPServer(("127.0.0.1", port), H).serve_forever()
+""", encoding="utf-8")
+    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+    srv = ft.LlamaServer(str(fake), "m.gguf", lora=None, n_parallel=2, n_ctx_slot=128, ngl=0, template_kwargs=None, log=tmp_path / "s.log")
+    state.write_text("2")
+    with srv:
+        chat = srv.chat_fn({})
+        with ThreadPoolExecutor(4) as ex:                                              # 同時に落ちても立て直しは必要な分だけ
+            res = list(ex.map(lambda i: chat([{"role": "user", "content": "q"}], 8, i), range(8)))
+        assert [r[1] for r in res] == ["stop"] * 8 and srv.restarts == 2
+        state.write_text("-1")                                                         # 落ち続ける
+        assert chat([{"role": "user", "content": "q"}], 8, 0) == ({}, "error", 0)
+        assert srv.restarts == ft.LlamaServer.MAX_RESTARTS
+        assert srv.p.poll() is not None
+    w = ft._run_warnings([{"label": "target", "server_restarts": 3, "prompts": {"a": {"error": 0.25}}, "bench": {}, "long": {}}])
+    assert len(w) == 2 and "3 回" in w[0] and "25%" in w[1]
+    assert ft._run_warnings([{"label": "t", "prompts": {"a": {"error": 0.0}}, "long": {"error": 0}}]) == []
+
+
+def test_fieldtest_bench_math500_and_ifeval(tmp_path, monkeypatch):
+    """MATH-500 は最後の boxed を math-verify で(スレッドからでも別プロセスで)、IFEval は公式の採点器で指示を全部守ったときだけ正解。"""
+    from gne import fieldtest as ft
+    assert ft.last_boxed(r"a \\boxed{1} b \\boxed{\\frac{1}{2}} c") == r"\\frac{1}{2}" and ft.last_boxed(r"\\boxed{open") is None and ft.last_boxed("x") is None
+    it = ft.bench_item("math500", 3, {"problem": "P", "answer": " 7 "})
+    assert it["gold"] == "7" and it["prompt"].endswith("within \\boxed{}.")
+    row = {"prompt": "Q", "instruction_id_list": ["punctuation:no_comma"], "kwargs": [{"a": None, "b": 1}]}
+    assert ft.bench_item("ifeval", 4, row)["kwargs"] == [{"b": 1}]                     # 表の形の None は落とす
+    assert set(ft.BENCHES) == {"gsm8k", "mmlu_pro", "math500", "ifeval"}
+    pytest.importorskip("math_verify")
+    pytest.importorskip("langdetect")
+    pytest.importorskip("nltk")
+    pytest.importorskip("immutabledict")
+    ft.bench_ready(["math500", "ifeval"])
+    assert ft.grade_math(["\\left( 3, \\frac{\\pi}{2} \\right)", "12", "5"], ["(3,\\pi/2)", "13", None]) == ([True, False, False], 0)
+    # 別プロセスが落ちても、長い生成の結果は失わない(採点できなかった数を数える)
+    real = ft._grade_math_rows
+    monkeypatch.setattr(ft, "_grade_math_rows", lambda rows, t: (_ for _ in ()).throw(GneError("GRADE_FAILED", "x")))
+    assert ft.grade_math(["1", "2"], ["1", "2"]) == ([False, False], 2)
+    monkeypatch.setattr(ft, "_grade_math_rows", real)
+    item = {"prompt": "About cats.", "instructions": ["punctuation:no_comma", "length_constraints:number_words"],
+            "kwargs": [{}, {"relation": "at least", "num_words": 5}]}
+    assert ft.grade_ifeval(item, "Cats sleep a lot during the day.") == ([True, True], 0)
+    assert ft.grade_ifeval(item, "Cats, dogs.") == ([False, False], 0)
+    assert ft.grade_ifeval(item, "") == ([False, False], 0)
+    def chat(msgs, mt, seed):
+        return {"reasoning_content": "t", "content": "So \\boxed{7}."}, "stop", 5
+    items = [{"id": "1", "prompt": "P", "gold": "7"}, {"id": "2", "prompt": "P", "gold": "8"}]
+    m, its, recs = ft.run_bench(chat, "math500", items, 32, 2, lambda n: None)
+    assert m["accuracy"] == 0.5 and its["correct"] == [True, False] and recs[0]["answer"] == "7"
+    def chat2(msgs, mt, seed):
+        return {"reasoning_content": "t", "content": "Cats sleep a lot during the day."}, "stop", 5
+    m, its, recs = ft.run_bench(chat2, "ifeval", [{**item, "id": "1", "gold": ""}], 32, 1, lambda n: None)
+    assert m["accuracy"] == 1.0 and recs[0]["answer"] == "2/2"
+    def chat3(msgs, mt, seed):                                                         # 思考で切れて本文が無い
+        return {"reasoning_content": "loop", "content": ""}, "length", 32
+    m, its, recs = ft.run_bench(chat3, "ifeval", [{**item, "id": "1", "gold": ""}], 32, 1, lambda n: None)
+    assert m["accuracy"] == 0.0 and m["hit_limit"] == 1.0 and m["no_answer"] == 1.0
+    m, its, recs = ft.run_bench(chat3, "math500", items[:1], 32, 1, lambda n: None)
+    assert m["accuracy"] == 0.0 and m["no_answer"] == 1.0
 
 
 def test_fieldtest_bench_extract_score_and_compare(tmp_path):

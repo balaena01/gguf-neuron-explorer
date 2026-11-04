@@ -764,10 +764,30 @@ class _GenerationTag(jinja2.ext.Extension):
         return jinja2.nodes.Scope(body, lineno=lineno)
 
 
+IN_PROGRESS = "in_progress"     # reverse.turns が付ける印: この assistant の発話は書きかけの返事
+THINK_OPEN = "<think>"
+
+
 def render_template(template: str, messages: list[dict], *, enable_thinking: bool = False,
                     add_generation_prompt: bool = True, bos_token: str = "", eos_token: str = "",
                     **extra) -> str:
-    """GGUF の tokenizer.chat_template(HF 形式の jinja2)を描画する。"""
+    """GGUF の tokenizer.chat_template(HF 形式の jinja2)を描画する。
+
+    最後の発話に IN_PROGRESS の印があれば書きかけの返事として、それまでの会話の生成プロンプトの続きに、
+    閉じずにそのまま置く。<think> で始まる文は thinking の途中として読む(テンプレートが開いた <think> と
+    重ねない)。それ以外は返事の本文の途中(thinking なしなら空の think 欄の後ろ)。
+    生成プロンプトなしの描画は、書きかけより前の会話だけを返す(書きかけは返事の区間に入る)。"""
+    if messages and messages[-1].get(IN_PROGRESS):
+        text = messages[-1]["content"]
+        thinking = text.startswith(THINK_OPEN)
+        head = render_template(template, messages[:-1], enable_thinking=enable_thinking or thinking,
+                               add_generation_prompt=add_generation_prompt, bos_token=bos_token,
+                               eos_token=eos_token, **extra)
+        if not add_generation_prompt:
+            return head
+        if thinking and head.rstrip().endswith(THINK_OPEN):
+            head = head.rstrip()[:-len(THINK_OPEN)]
+        return head + text
     env = jinja2.sandbox.ImmutableSandboxedEnvironment(trim_blocks=True, lstrip_blocks=True,
                                                       extensions=["jinja2.ext.loopcontrols", _GenerationTag])
     env.filters["tojson"] = _tojson

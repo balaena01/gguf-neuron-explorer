@@ -14,6 +14,7 @@ gne eval は同じファイルにレシピの倍率を掛けて、短い問題�
 from __future__ import annotations
 
 import atexit
+import importlib.util
 import json
 import math
 import os
@@ -22,6 +23,8 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -178,7 +181,10 @@ def run_prompts(chat: ChatFn, prompts: Sequence, max_tokens: int, n_parallel: in
 # --- ベンチマーク(能力を配布ファイルで測る) -----------------------------------------------------------------
 
 BENCHES = {"gsm8k": {"dataset": "openai/gsm8k", "config": "main", "split": "test", "n": 250},
-           "mmlu_pro": {"dataset": "TIGER-Lab/MMLU-Pro", "config": "default", "split": "test", "n": 300}}
+           "mmlu_pro": {"dataset": "TIGER-Lab/MMLU-Pro", "config": "default", "split": "test", "n": 300},
+           "math500": {"dataset": "HuggingFaceH4/MATH-500", "config": "default", "split": "test", "n": 250},
+           "ifeval": {"dataset": "google/IFEval", "config": "default", "split": "train", "n": 250}}
+_BENCH_NEEDS = {"math500": ("math_verify",), "ifeval": ("langdetect", "nltk", "immutabledict")}   # bench extra
 _ROWS_URL = "https://datasets-server.huggingface.co/rows"
 _NUM = r"-?\d[\d,]*(?:\.\d+)?|-?\.\d+"
 _GSM_ANSWER = re.compile(rf"[Aa]nswer\s*[:：]\s*[*_\s]*\$?\s*({_NUM})")
@@ -213,7 +219,96 @@ def is_correct(bench: str, answer: str | None, gold: str) -> bool:
     return answer == gold
 
 
+def last_boxed(text: str | None) -> str | None:
+    """本文の最後の \\\\boxed{…}(か \\\\fbox{…})の中身。括弧の対応を見る。無い・閉じていない・空なら None。"""
+    text = text or ""
+    i = max(text.rfind("\\boxed{"), text.rfind("\\fbox{"))
+    if i < 0:
+        return None
+    start = text.index("{", i)
+    depth = 0
+    for k in range(start, len(text)):
+        depth += {"{": 1, "}": -1}.get(text[k], 0)
+        if depth == 0:
+            return text[start + 1:k].strip() or None
+    return None
+
+
+def bench_ready(names: Sequence[str]) -> None:
+    """採点に要るものを、GPU を動かす前に確かめる(無ければ断る。IFEval の文の区切りのデータは最初に取得する)。"""
+    missing = sorted({m for b in names for m in _BENCH_NEEDS.get(b, ()) if importlib.util.find_spec(m) is None})
+    if missing:
+        raise GneError("TOOL_MISSING", f"ベンチマークの採点に {', '.join(missing)} が要ります", "pip install 'gguf-neuron-explorer[bench]'(pyproject の bench extra)")
+    if "ifeval" in names:
+        import nltk
+        try:
+            nltk.data.find("tokenizers/punkt_tab/english/")
+        except LookupError:
+            if not nltk.download("punkt_tab", quiet=True):
+                raise GneError("DOWNLOAD_FAILED", "IFEval の採点に要る nltk の punkt_tab を取得できません", "ネットワークを確かめてください") from None
+    if "math500" in names and _grade_math_rows([["1/2", "0.5"], ["3", "4"]], 120.0) != [True, False]:
+        raise GneError("TOOL_MISSING", "math-verify の採点が想定どおりに動きません", "pip install 'gguf-neuron-explorer[bench]' を確かめてください")
+
+
+def _grade_math_rows(rows: list[list[str]], timeout: float) -> list[bool]:
+    r = subprocess.run([sys.executable, "-m", "gne.bench_grade"], input=json.dumps(rows), capture_output=True, text=True, timeout=timeout, check=False)
+    if r.returncode != 0:
+        raise GneError("GRADE_FAILED", f"MATH-500 の採点に失敗しました: {r.stderr[-300:]}")
+    return json.loads(r.stdout.strip().splitlines()[-1])
+
+
+def grade_math(golds: Sequence[str], answers: Sequence[str | None], chunk: int = 32) -> tuple[list[bool], int]:
+    """math-verify で採点する(別プロセス)。答えが無いものは不正解。長い生成のあとで全部を失わないよう、塊が失敗したら
+    1 問ずつやり直し、それでも採点できない問題だけを不正解にする。戻り値は (正解か, 採点できなかった数)。"""
+    out = [False] * len(golds)
+    todo = [i for i, a in enumerate(answers) if a is not None]
+    errors = 0
+    for s in range(0, len(todo), chunk):
+        part = todo[s:s + chunk]
+        rows = [[golds[i], answers[i]] for i in part]
+        try:
+            res = _grade_math_rows(rows, 60.0 + 16.0 * len(rows))
+        except (GneError, subprocess.TimeoutExpired, ValueError, IndexError):
+            res = []
+            for row in rows:
+                try:
+                    res += _grade_math_rows([row], 45.0)
+                except (GneError, subprocess.TimeoutExpired, ValueError, IndexError):
+                    res.append(False)
+                    errors += 1
+        for i, ok in zip(part, res, strict=True):
+            out[i] = bool(ok)
+    return out, errors
+
+
+def grade_ifeval(item: dict, body: str) -> tuple[list[bool], int]:
+    """IFEval の公式の採点器(gne/third_party/ifeval)で、指示ごとに従ったかを返す。戻り値は (指示ごと, 採点できなかった数)。"""
+    import langdetect
+
+    from .third_party.ifeval import instructions_registry as reg
+    langdetect.DetectorFactory.seed = 0                 # 言語の判定を毎回同じにする
+    out, errors = [], 0
+    for iid, kw in zip(item["instructions"], item["kwargs"], strict=True):
+        try:
+            ins = reg.INSTRUCTION_DICT[iid](iid)
+            ins.build_description(**kw)
+            args = ins.get_instruction_args()
+            if args and "prompt" in args:
+                ins.build_description(prompt=item["prompt"])
+            out.append(bool(body.strip() and ins.check_following(body)))
+        except Exception:  # noqa: BLE001  第三者の採点器の失敗で、長い生成の結果を失わない
+            out.append(False)
+            errors += 1
+    return out, errors
+
+
 def bench_item(bench: str, idx: int, row: dict) -> dict:
+    if bench == "math500":
+        prompt = f"{row['problem']}\nPlease reason step by step, and put your final answer within \\boxed{{}}."
+        return {"id": str(idx), "prompt": prompt, "gold": str(row["answer"]).strip()}
+    if bench == "ifeval":
+        kwargs = [{k: v for k, v in kw.items() if v is not None} for kw in row["kwargs"]]   # 表の形で全部の鍵が並ぶので、None は落とす
+        return {"id": str(idx), "prompt": row["prompt"], "gold": "", "instructions": list(row["instruction_id_list"]), "kwargs": kwargs}
     if bench == "gsm8k":
         gold = str(row["answer"]).split("####")[-1].strip().replace(",", "")
         prompt = f"{row['question']}\n\nSolve the problem. End your reply with a final line of the form: Answer: <number>"
@@ -274,13 +369,29 @@ def run_bench(chat: ChatFn, bench: str, items: Sequence[dict], max_tokens: int, 
     def one(i, it):
         msg, fin, ntok = chat(turns(it["prompt"]), max_tokens, seed + i)
         think, body = msg.get("reasoning_content") or "", msg.get("content") or ""
-        ans = extract_answer(bench, body)
-        return {"id": it["id"], "finish": fin, "tokens": ntok, "body_chars": len(body), "answer": ans, "gold": it["gold"],
-                "correct": is_correct(bench, ans, it["gold"]), "reasoning": think, "content": body}
+        return {"id": it["id"], "finish": fin, "tokens": ntok, "body_chars": len(body), "gold": it["gold"], "reasoning": think, "content": body}
     recs = _map(one, list(items), n_parallel, tick)
+    grade_errors = 0
+    if bench == "math500":                              # 採点は生成のあと(math-verify はスレッドで動かない)
+        answers = [last_boxed(r["content"]) for r in recs]
+        correct, grade_errors = grade_math([r["gold"] for r in recs], answers)
+        for r, a, c in zip(recs, answers, correct, strict=True):
+            r["answer"], r["correct"] = a, c
+    elif bench == "ifeval":                             # 指示を全部守って正解(公式の strict)。answer は「守った数/指示の数」
+        for r, it in zip(recs, items, strict=True):
+            done, e = grade_ifeval(it, r["content"])
+            grade_errors += e
+            r["answer"] = f"{sum(done)}/{len(done)}" if r["content"].strip() else None
+            r["correct"] = all(done)
+    else:
+        for r in recs:
+            r["answer"] = extract_answer(bench, r["content"])
+            r["correct"] = is_correct(bench, r["answer"], r["gold"])
     m = {"n": len(recs), "accuracy": _mean([r["correct"] for r in recs]), "no_answer": _mean([r["answer"] is None for r in recs]),
          "empty": _mean([r["body_chars"] == 0 for r in recs]), "hit_limit": _mean([r["finish"] == "length" for r in recs]),
          "tokens": _mean([r["tokens"] for r in recs]), "error": _mean([r["finish"] == "error" for r in recs])}
+    if grade_errors:
+        m["grade_errors"] = grade_errors
     return m, {"ids": [r["id"] for r in recs], "correct": [bool(r["correct"]) for r in recs]}, recs
 
 
@@ -363,8 +474,23 @@ def _die_with_parent() -> None:                     # 親が落ちてもサー�
         pass
 
 
+def _run_warnings(runs: Sequence[dict]) -> list[str]:
+    """測れなかった問いと、サーバの立て直しを結果の頭に書く(エラーは正答率などでは不正解や空に見えてしまう)。"""
+    out = []
+    for run in runs:
+        if run.get("server_restarts"):
+            out.append(f"{run['label']}: llama-server が測定の途中で落ち、{run['server_restarts']} 回立て直しました(理由はログ)")
+        for sec in ("long", "prompts", "bench"):
+            for k, m in ((run.get(sec) or {}).items() if sec != "long" else [("", run.get("long") or {})]):
+                if isinstance(m, dict) and m.get("error"):
+                    out.append(f"{run['label']}: {sec} {k} の {m['error']:.0%} はエラーで測れていません")
+    return out
+
+
 class LlamaServer:
-    """llama-server を立てて止める。127.0.0.1 だけで待ち受ける。"""
+    """llama-server を立てて止める。127.0.0.1 だけで待ち受ける。測定の途中で落ちたら(GPU のメモリ違反など)立て直して
+    同じ問いをやり直す。残りを全部エラーで数えて、測れたように見せない。"""
+    MAX_RESTARTS = 3
 
     def __init__(self, binary: str, model: str | Path, *, lora: str | None, n_parallel: int, n_ctx_slot: int, ngl: int,
                  template_kwargs: dict | None, log: Path, extra: Sequence[str] = (), start_timeout: float = 900.0):
@@ -381,12 +507,20 @@ class LlamaServer:
         cmd += list(extra)
         self.log, self.cmd, self.timeout = log, cmd, start_timeout
         self.p: subprocess.Popen | None = None
+        self.restarts = 0
+        self.gen = 0                                    # 立ち上げた回数。問いを送った後に変われば、その問いは落ちた時のもの
+        self._lock = threading.Lock()
 
     def __enter__(self):
         self.log.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.log, "w", encoding="utf-8") as f:
-            self.p = subprocess.Popen(self.cmd, stdout=subprocess.DEVNULL, stderr=f, preexec_fn=_die_with_parent)
+        self.log.write_text("", encoding="utf-8")
+        self._launch()
         atexit.register(self.stop)
+        return self
+
+    def _launch(self) -> None:
+        with open(self.log, "a", encoding="utf-8") as f:          # 立て直しても前のログ(落ちた理由)を残す
+            self.p = subprocess.Popen(self.cmd, stdout=subprocess.DEVNULL, stderr=f, preexec_fn=_die_with_parent)
         t0 = time.monotonic()
         while time.monotonic() - t0 < self.timeout:
             if self.p.poll() is not None:
@@ -395,7 +529,8 @@ class LlamaServer:
             try:
                 with urllib.request.urlopen(f"{self.url}/health", timeout=2) as r:
                     if json.load(r).get("status") == "ok":
-                        return self
+                        self.gen += 1
+                        return
             except (OSError, ValueError):
                 pass
             time.sleep(1)
@@ -418,16 +553,39 @@ class LlamaServer:
     def __exit__(self, *exc):
         self.stop()
 
+    def _revive(self, seen_gen: int) -> bool:
+        """サーバが落ちていれば立て直す(同時に来ても 1 回だけ)。もう一度問うてよければ True。"""
+        with self._lock:
+            if self.gen != seen_gen:                    # 別の問いが立て直した
+                return True
+            if self.p is None or self.p.poll() is None:  # 動いている = この問い自身の失敗
+                return False
+            if self.restarts >= self.MAX_RESTARTS:
+                return False
+            self.restarts += 1
+            try:
+                self._launch()
+            except GneError:
+                return False
+            return True
+
     def chat_fn(self, sampling: dict, timeout: float = 3600.0) -> ChatFn:
         def chat(messages, max_tokens, seed, tools=None):
             body = {"messages": messages, "max_tokens": max_tokens, "seed": seed, **sampling}
             if tools:
                 body["tools"] = tools
             req = urllib.request.Request(f"{self.url}/v1/chat/completions", json.dumps(body).encode(), {"Content-Type": "application/json"})
-            try:
-                with urllib.request.urlopen(req, timeout=timeout) as resp:
-                    r = json.load(resp)
-            except (urllib.error.URLError, OSError, ValueError):   # 出力を解釈できない(崩れたツール呼び出しなど)か、サーバを止めた
+            for _ in range(self.MAX_RESTARTS + 2):
+                with self._lock:                        # 立て直している間は待つ
+                    seen = self.gen
+                try:
+                    with urllib.request.urlopen(req, timeout=timeout) as resp:
+                        r = json.load(resp)
+                    break
+                except (urllib.error.URLError, OSError, ValueError):   # 出力を解釈できない(崩れたツール呼び出しなど)か、サーバが落ちた
+                    if not self._revive(seen):
+                        return {}, "error", 0
+            else:
                 return {}, "error", 0
             c = r["choices"][0]
             return c["message"], c.get("finish_reason") or "stop", int((r.get("usage") or {}).get("completion_tokens") or 0)
@@ -446,7 +604,7 @@ def _load_any(p: str | Path):
 
 def load_long_tasks(p: str | Path | None = None) -> list:
     d = _load_any(p or LONG_TASKS)
-    check_questions(d, "長い作業の課題")
+    check_questions(d, "長い作業の課題", in_progress=False)
     if not d:
         raise GneError("BAD_ARGS", "長い作業の課題がありません")
     return d
@@ -480,7 +638,7 @@ def parse_prompt_sets(sets: dict | Sequence[str] | None) -> dict[str, list]:
         if not re.fullmatch(r"[\w.\-]+", str(k)):
             raise GneError("BAD_ARGS", f"質問集の名前 {k!r} は英数字・_・-・. だけにしてください")
         q = v if isinstance(v, list) else _load_any(v)
-        check_questions(q, f"質問集 {k}")
+        check_questions(q, f"質問集 {k}", in_progress=False)
         if not q:
             raise GneError("BAD_ARGS", f"質問集 {k} が空です")
         out[str(k)] = list(q)
@@ -545,6 +703,7 @@ def fieldtest(session, model: str | Path | None = None, *, against: str | Path |
     tool_spec = None if skip_tools else load_tool_tasks(tool_tasks)
     sets = parse_prompt_sets(prompts)
     names = [x.strip() for x in bench.split(",") if x.strip()] if isinstance(bench, str) else list(bench or [])
+    bench_ready(names)
     benches = {b: load_bench(b, session.store.fieldtest_dir() / "data", bench_n) for b in names}   # 取得の失敗は GPU を動かす前に返す
     if not long_q and not tool_spec and not sets and not benches and not ppl:
         raise GneError("BAD_ARGS", "測るものがありません")
@@ -599,6 +758,7 @@ def fieldtest(session, model: str | Path | None = None, *, against: str | Path |
                     for k, q in benches.items():
                         run["bench"][k], run["bench_items"][k], rec[f"bench:{k}"] = run_bench(chat, k, q, bench_tokens, n_parallel,
                                                                                               step(f"{label}: {k}"))
+                    run["server_restarts"] = srv.restarts
             if ppl:
                 run["ppl"] = measure_ppl(session, path, lora_pair if lo else None, step(f"{label}: perplexity"))
             run["seconds"] = time.perf_counter() - tr
@@ -610,6 +770,7 @@ def fieldtest(session, model: str | Path | None = None, *, against: str | Path |
     ref_run = runs[0] if len(runs) > 1 else None
     empty = {"long": {}, "tools": {}, "prompts": {}, "ppl": {}, "bench": {}, "bench_items": {}}
     rows = compare({**empty, **ref_run}, {**empty, **tgt_run}) if ref_run else None
+    warnings = _run_warnings(runs)
     d = {"name": nm, "target": {k: tgt_run[k] for k in ("model", "file", "lora")},
          "reference": None if ref_run is None else {k: ref_run[k] for k in ("model", "file", "lora")},
          "settings": {"long_tokens": long_tokens, "tool_tokens": tool_tokens, "prompt_tokens": prompt_tokens, **sampling,
@@ -617,7 +778,7 @@ def fieldtest(session, model: str | Path | None = None, *, against: str | Path |
                       "n_long": len(long_q or []), "n_tools": len((tool_spec or {}).get("tasks") or []),
                       "prompts": {k: len(v) for k, v in sets.items()}, "bench": {k: len(v) for k, v in benches.items()},
                       "bench_tokens": bench_tokens},
-         "runs": runs, "compare": rows, "same_level": None if rows is None else not any(r["worse"] for r in rows),
+         "warnings": warnings, "runs": runs, "compare": rows, "same_level": None if rows is None else not any(r["worse"] for r in rows),
          "worse": [] if rows is None else [f"{r['section']}.{r['metric']}" for r in rows if r["worse"]],
          "updated": time.strftime("%Y-%m-%dT%H:%M:%S"), "seconds": time.perf_counter() - t0}
     path = out_dir / f"{nm}.json"

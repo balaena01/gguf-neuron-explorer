@@ -35,6 +35,8 @@ export class FieldtestPanel {
         <label class="muted" title="${t("参照テキストの perplexity も測る(gne でファイルを読み直す)")}"><input id="ft-ppl" type="checkbox" checked> perplexity</label>
         <label class="muted" title="${t("能力を測るベンチマーク。データは初回に取得する。合わせて数時間かかる")}"><input id="ft-gsm8k" type="checkbox"> GSM8K</label>
         <label class="muted" title="${t("能力を測るベンチマーク。データは初回に取得する。合わせて数時間かかる")}"><input id="ft-mmlu" type="checkbox"> MMLU-Pro</label>
+        <label class="muted" title="${t("能力を測るベンチマーク。データは初回に取得する。合わせて数時間かかる")} ${t("採点に bench extra が要る")}"><input id="ft-math500" type="checkbox"> MATH-500</label>
+        <label class="muted" title="${t("能力を測るベンチマーク。データは初回に取得する。合わせて数時間かかる")} ${t("採点に bench extra が要る")}"><input id="ft-ifeval" type="checkbox"> IFEval</label>
         <button id="ft-go">${t("実地テストを走らせる")}</button> <span class="muted note" id="ft-status"></span></div>
       <div id="ft-list"></div><div id="ft-result"></div>`;
     this.$ = (s) => root.querySelector(s);
@@ -53,7 +55,7 @@ export class FieldtestPanel {
     const lines = this.$("#ft-prompts").value.split("\n").map((x) => x.trim()).filter(Boolean);
     if (lines.some((x) => !x.includes("="))) { this.status(t("質問集は 1 行に 名前=ファイル で書いてください"), true); return null; }
     if (lines.length) p.prompts = lines;
-    const bench = [["gsm8k", "#ft-gsm8k"], ["mmlu_pro", "#ft-mmlu"]].filter(([, s]) => this.$(s).checked).map(([k]) => k);
+    const bench = [["gsm8k", "#ft-gsm8k"], ["mmlu_pro", "#ft-mmlu"], ["math500", "#ft-math500"], ["ifeval", "#ft-ifeval"]].filter(([, s]) => this.$(s).checked).map(([k]) => k);
     if (bench.length) p.bench = bench;
     return p;
   }
@@ -130,6 +132,7 @@ export class FieldtestPanel {
     }).join("");
     this.$("#ft-result").innerHTML = `<h4>${t("{name} の結果", { name: esc(d.name) })} <span class="muted note mono">${esc((d.updated || "").replace("T", " ").slice(0, 16))} · ${t("{n} 分", { n: Math.round((d.seconds || 0) / 60) })}</span></h4>
       <p class="note">${t("対象")}: <span class="mono">${esc(d.target.file)}</span>${d.target.lora ? ` + LoRA` : ""}${hasRef ? ` · ${t("比較")}: <span class="mono">${esc(d.reference.file)}</span>` : ""}</p>
+      ${(d.warnings || []).map((w) => `<p class="note ng">${esc(w)}</p>`).join("")}
       ${d.same_level === null || d.same_level === undefined ? "" : `<p class="note ${d.same_level ? "ok" : "ng"}">${d.same_level ? t("すべて同程度です") : t("悪化した項目があります")}</p>`}
       <table class="evx mono ft-table"><thead><tr><th class="l"></th>${hasRef ? `<th>${t("比較")}</th>` : ""}<th>${t("対象")}</th></tr></thead><tbody>${body}</tbody></table>
       <p class="muted note">${t("同程度の目安: 割合は 2 問ぶん、perplexity は 1% までの差。種は同じですが、1 問の違いはサンプリングの揺れで起きます。生成した文章は結果と同じ場所の .replies.json にあります(画面には出しません)。")}</p>`;

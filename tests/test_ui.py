@@ -2144,7 +2144,7 @@ def test_pipeline_api_and_panel(pipe_server, browser):
             urllib.request.urlopen(url + f"/api/pipelines/{bad}")
         assert ei.value.code == 400
     tpl = get("/api/pipeline-templates")                                   # 用途別のテンプレート(configs/pipeline/)
-    assert [x["spec"]["name"] for x in tpl] == ["evil_sys", "cold_vs_warm", "evil_neurons_4b", "ja_vs_en"]
+    assert [x["spec"]["name"] for x in tpl] == ["evil_sys", "cold_vs_warm", "evil_neurons_4b", "ja_vs_en", "repeat_vs_progress"]
     assert all("about" not in x["spec"] and x["ja"]["title"] and x["en"]["text"] for x in tpl)
     for lang in ("ja", "en"):
         pg = browser.new_page(viewport={"width": 1600, "height": 1000})
@@ -2213,7 +2213,7 @@ def test_pipeline_api_and_panel(pipe_server, browser):
         assert not pg.evaluate("document.querySelector('#pp-go').disabled") and pg.evaluate("document.querySelectorAll('#pp-check .err').length") == 0
         assert "pirate" in pg.evaluate("document.querySelector('#pp-check').textContent")
         # 用途別のひな形: 選ぶと入る(説明つき)。書き換えた入力欄は、確かめて断れば残る。小さな例に戻せる
-        pg.wait_for_function("document.querySelectorAll('#pp-tpl-sel option').length === 5", timeout=10000)
+        pg.wait_for_function("document.querySelectorAll('#pp-tpl-sel option').length === 6", timeout=10000)
         pg.select_option("#pp-tpl-sel", "question_kinds.json")
         assert pg.evaluate("JSON.parse(document.querySelector('#pp-text').value).name") == "ja_vs_en"
         assert pg.evaluate("document.querySelector('#pp-tpl-about').textContent").strip()

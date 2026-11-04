@@ -1,0 +1,350 @@
+{
+  "about": {
+    "order": 5,
+    "ja": {
+      "title": "返事の途中で起きる振る舞い(考えがループするなど。書きかけの返事の対)",
+      "text": "返事の直前では測れない、書いている途中の状態の差を方向にする。例は thinking の途中で、同じ問題と同じ途中の計算のあと、A は同じ確認を繰り返し、B は先へ進む。assistant で終わる履歴は書きかけの返事で、その最後のトークンで測り、候補づくりはその続きから書く。<think> で始めると thinking の途中として読む(thinking のないモデルでは本文の途中を書く)。例は形を示すために人が書いた文なので、実際に使うときはそのモデル自身の返事から切り出したものに置き換える。 候補づくりは正の倍率で、A 側の繰り返しが減るかを読む。"
+    },
+    "en": {
+      "title": "Behavior that appears partway through a reply (thinking in circles, for example; pairs of unfinished replies)",
+      "text": "For differences that cannot be measured just before the reply, because they arise while it is being written. The example is partway through thinking: after the same question and the same work so far, side A repeats the same check and side B moves on. A history that ends with an assistant turn is an unfinished reply: it is measured at its last token, and candidates continue from there. Text that starts with <think> is read as thinking in progress (for a model without thinking, write the middle of the reply instead). The example text was written by hand to show the shape, so for real use replace it with passages cut from that model's own replies. For candidates, use positive factors and read whether side A's repetition goes down."
+    }
+  },
+  "name": "repeat_vs_progress",
+  "prompts_a": [
+    [
+      {
+        "role": "user",
+        "content": "A shop sells pens at 3 dollars each. Tom buys 12 pens and pays with a 50 dollar bill. How much change does he get?"
+      },
+      {
+        "role": "assistant",
+        "content": "<think>\n12 pens at 3 dollars each cost 12 * 3 = 36 dollars. Wait, let me check that again. 12 * 3 = 36. Wait, let me check that again. 12 * 3 = 36. Wait, let me check that again. 12 * 3 = 36."
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "A train travels 60 km per hour for 2.5 hours. How far does it go?"
+      },
+      {
+        "role": "assistant",
+        "content": "<think>\nDistance is speed times time, so 60 * 2.5. Hmm, let me recompute this. 60 * 2.5 = 150. Hmm, let me recompute this. 60 * 2.5 = 150. Hmm, let me recompute this. 60 * 2.5 = 150."
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "Mia has 45 stickers and gives a third of them to her brother. She then buys 8 more. How many does she have?"
+      },
+      {
+        "role": "assistant",
+        "content": "<think>\nA third of 45 is 45 / 3 = 15, so 30 are left. Actually, let me verify once more. 45 / 3 = 15. Actually, let me verify once more. 45 / 3 = 15. Actually, let me verify once more. 45 / 3 = 15."
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "A rectangle is 7 cm wide and 12 cm long. What is its perimeter?"
+      },
+      {
+        "role": "assistant",
+        "content": "<think>\nThe perimeter is 2 * (7 + 12). Wait, let me check that again. 7 + 12 = 19. Wait, let me check that again. 7 + 12 = 19. Wait, let me check that again. 7 + 12 = 19."
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "Sam reads 25 pages a day. The book has 400 pages. How many days does he need?"
+      },
+      {
+        "role": "assistant",
+        "content": "<think>\nThe number of days is 400 / 25. Hmm, let me recompute this. 400 / 25 = 16. Hmm, let me recompute this. 400 / 25 = 16. Hmm, let me recompute this. 400 / 25 = 16."
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "A baker makes 8 trays of 24 rolls and sells 150 of them. How many rolls are left?"
+      },
+      {
+        "role": "assistant",
+        "content": "<think>\n8 trays of 24 rolls make 8 * 24 = 192 rolls. Actually, let me verify once more. 8 * 24 = 192. Actually, let me verify once more. 8 * 24 = 192. Actually, let me verify once more. 8 * 24 = 192."
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "Solve for x: 3x + 7 = 28."
+      },
+      {
+        "role": "assistant",
+        "content": "<think>\nSubtract 7 from both sides: 3x = 21. Wait, let me check that again. 28 - 7 = 21. Wait, let me check that again. 28 - 7 = 21. Wait, let me check that again. 28 - 7 = 21."
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "What is 15% of 240?"
+      },
+      {
+        "role": "assistant",
+        "content": "<think>\n15% is 0.15, so this is 0.15 * 240. Hmm, let me recompute this. 0.15 * 240 = 36. Hmm, let me recompute this. 0.15 * 240 = 36. Hmm, let me recompute this. 0.15 * 240 = 36."
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "A car uses 6 liters of fuel per 100 km. How much fuel does it need for 350 km?"
+      },
+      {
+        "role": "assistant",
+        "content": "<think>\n350 km is 3.5 times 100 km. Actually, let me verify once more. 6 * 3.5 = 21. Actually, let me verify once more. 6 * 3.5 = 21. Actually, let me verify once more. 6 * 3.5 = 21."
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "Anna is twice as old as Ben. In 5 years their ages will add up to 40. How old is Ben now?"
+      },
+      {
+        "role": "assistant",
+        "content": "<think>\nLet Ben be b, so Anna is 2b, and (b + 5) + (2b + 5) = 40. Wait, let me check that again. 3b + 10 = 40. Wait, let me check that again. 3b + 10 = 40. Wait, let me check that again. 3b + 10 = 40."
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "A box holds 18 apples. How many boxes are needed for 200 apples?"
+      },
+      {
+        "role": "assistant",
+        "content": "<think>\n200 / 18 is about 11.1, so 11 boxes are not enough. Hmm, let me recompute this. 18 * 11 = 198. Hmm, let me recompute this. 18 * 11 = 198. Hmm, let me recompute this. 18 * 11 = 198."
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "The average of 4 numbers is 15. Three of them are 10, 12 and 20. What is the fourth?"
+      },
+      {
+        "role": "assistant",
+        "content": "<think>\nThe sum of all four is 4 * 15 = 60. Actually, let me verify once more. 10 + 12 + 20 = 42. Actually, let me verify once more. 10 + 12 + 20 = 42. Actually, let me verify once more. 10 + 12 + 20 = 42."
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "A tank holds 500 liters and drains at 20 liters per minute. How long until it is one fifth full?"
+      },
+      {
+        "role": "assistant",
+        "content": "<think>\nOne fifth of 500 is 100, so 400 liters must drain. Wait, let me check that again. 500 / 5 = 100. Wait, let me check that again. 500 / 5 = 100. Wait, let me check that again. 500 / 5 = 100."
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "A coat costs 80 dollars and is 25% off. What is the sale price?"
+      },
+      {
+        "role": "assistant",
+        "content": "<think>\n25% of 80 is 0.25 * 80 = 20. Hmm, let me recompute this. 0.25 * 80 = 20. Hmm, let me recompute this. 0.25 * 80 = 20. Hmm, let me recompute this. 0.25 * 80 = 20."
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "What is the sum of the integers from 1 to 20?"
+      },
+      {
+        "role": "assistant",
+        "content": "<think>\nUse n(n + 1) / 2 with n = 20. Actually, let me verify once more. 20 * 21 = 420. Actually, let me verify once more. 20 * 21 = 420. Actually, let me verify once more. 20 * 21 = 420."
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "Three friends split a 96 dollar bill equally and each adds a 4 dollar tip. How much does each pay?"
+      },
+      {
+        "role": "assistant",
+        "content": "<think>\nEach share of the bill is 96 / 3 = 32 dollars. Wait, let me check that again. 96 / 3 = 32. Wait, let me check that again. 96 / 3 = 32. Wait, let me check that again. 96 / 3 = 32."
+      }
+    ]
+  ],
+  "prompts_b": [
+    [
+      {
+        "role": "user",
+        "content": "A shop sells pens at 3 dollars each. Tom buys 12 pens and pays with a 50 dollar bill. How much change does he get?"
+      },
+      {
+        "role": "assistant",
+        "content": "<think>\n12 pens at 3 dollars each cost 12 * 3 = 36 dollars. Let me check that: 12 * 3 = 36. The change is 50 - 36 = 14 dollars. That uses every number in the question."
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "A train travels 60 km per hour for 2.5 hours. How far does it go?"
+      },
+      {
+        "role": "assistant",
+        "content": "<think>\nDistance is speed times time, so 60 * 2.5. Let me check that: 60 * 2.5 = 150. 60 * 2 = 120 and 60 * 0.5 = 30, so the distance is 150 km. The units are km, as the question asks."
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "Mia has 45 stickers and gives a third of them to her brother. She then buys 8 more. How many does she have?"
+      },
+      {
+        "role": "assistant",
+        "content": "<think>\nA third of 45 is 45 / 3 = 15, so 30 are left. Let me check that: 45 / 3 = 15. After buying 8 more she has 30 + 8 = 38 stickers. Both steps of the question are now used."
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "A rectangle is 7 cm wide and 12 cm long. What is its perimeter?"
+      },
+      {
+        "role": "assistant",
+        "content": "<think>\nThe perimeter is 2 * (7 + 12). Let me check that: 7 + 12 = 19. Then 2 * 19 = 38, so the perimeter is 38 cm. Width and length have both been used."
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "Sam reads 25 pages a day. The book has 400 pages. How many days does he need?"
+      },
+      {
+        "role": "assistant",
+        "content": "<think>\nThe number of days is 400 / 25. Let me check that: 400 / 25 = 16. 25 * 16 = 400 confirms it, so he needs 16 days. There is no remainder to deal with."
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "A baker makes 8 trays of 24 rolls and sells 150 of them. How many rolls are left?"
+      },
+      {
+        "role": "assistant",
+        "content": "<think>\n8 trays of 24 rolls make 8 * 24 = 192 rolls. Let me check that: 8 * 24 = 192. Selling 150 leaves 192 - 150 = 42 rolls. That accounts for the sale in the question."
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "Solve for x: 3x + 7 = 28."
+      },
+      {
+        "role": "assistant",
+        "content": "<think>\nSubtract 7 from both sides: 3x = 21. Let me check that: 28 - 7 = 21. Dividing by 3 gives x = 7, and 3 * 7 + 7 = 28. The equation holds with this value."
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "What is 15% of 240?"
+      },
+      {
+        "role": "assistant",
+        "content": "<think>\n15% is 0.15, so this is 0.15 * 240. Let me check that: 0.15 * 240 = 36. 10% of 240 is 24 and 5% is 12, which also adds up to 36. So the two ways of computing it agree."
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "A car uses 6 liters of fuel per 100 km. How much fuel does it need for 350 km?"
+      },
+      {
+        "role": "assistant",
+        "content": "<think>\n350 km is 3.5 times 100 km. Let me check that: 6 * 3.5 = 21. So the car needs 21 liters for the whole trip. The answer is in liters, as expected."
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "Anna is twice as old as Ben. In 5 years their ages will add up to 40. How old is Ben now?"
+      },
+      {
+        "role": "assistant",
+        "content": "<think>\nLet Ben be b, so Anna is 2b, and (b + 5) + (2b + 5) = 40. Let me check that: 3b + 10 = 40. Then 3b = 30 and b = 10, so Ben is 10 now. In 5 years they are 15 and 25, which add up to 40."
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "A box holds 18 apples. How many boxes are needed for 200 apples?"
+      },
+      {
+        "role": "assistant",
+        "content": "<think>\n200 / 18 is about 11.1, so 11 boxes are not enough. Let me check that: 18 * 11 = 198. That leaves 2 apples over, so 12 boxes are needed. The extra box is needed for the last apples."
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "The average of 4 numbers is 15. Three of them are 10, 12 and 20. What is the fourth?"
+      },
+      {
+        "role": "assistant",
+        "content": "<think>\nThe sum of all four is 4 * 15 = 60. Let me check that: 10 + 12 + 20 = 42. The fourth number is 60 - 42 = 18. All the given numbers have been used."
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "A tank holds 500 liters and drains at 20 liters per minute. How long until it is one fifth full?"
+      },
+      {
+        "role": "assistant",
+        "content": "<think>\nOne fifth of 500 is 100, so 400 liters must drain. Let me check that: 500 / 5 = 100. Draining 400 liters takes 400 / 20 = 20 minutes. The question asks for minutes, so that fits."
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "A coat costs 80 dollars and is 25% off. What is the sale price?"
+      },
+      {
+        "role": "assistant",
+        "content": "<think>\n25% of 80 is 0.25 * 80 = 20. Let me check that: 0.25 * 80 = 20. The sale price is 80 - 20 = 60 dollars. That is the price after the discount."
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "What is the sum of the integers from 1 to 20?"
+      },
+      {
+        "role": "assistant",
+        "content": "<think>\nUse n(n + 1) / 2 with n = 20. Let me check that: 20 * 21 = 420. Half of 420 is 210, so the sum is 210. This matches pairing 1 with 20, and so on."
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "Three friends split a 96 dollar bill equally and each adds a 4 dollar tip. How much does each pay?"
+      },
+      {
+        "role": "assistant",
+        "content": "<think>\nEach share of the bill is 96 / 3 = 32 dollars. Let me check that: 96 / 3 = 32. With the tip each pays 32 + 4 = 36 dollars. The tip was per person, so this is right."
+      }
+    ]
+  ],
+  "validate": {
+    "match": "(?i)(let me (check|verify|recompute|recheck)|wait,)",
+    "target": "keeps rechecking the same step instead of moving on"
+  },
+  "pipeline": {
+    "target": "B",
+    "n_heads": [
+      6,
+      5,
+      4
+    ]
+  }
+}

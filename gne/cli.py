@@ -2056,6 +2056,7 @@ def _fieldtest_text(d: dict) -> str:
     lines = [f"{d['path']}({d['seconds'] / 60:.0f} 分)", f"対象: {d['target']['file']}" + (f" + LoRA {Path(d['target']['lora']).name}" if d["target"]["lora"] else "")]
     if d["reference"]:
         lines.append(f"比較: {d['reference']['file']}")
+    lines += [f"注意: {w}" for w in d.get("warnings") or []]
     rows = d["compare"]
     if rows is None:                                  # 比べる相手が無いとき: 対象の数字だけ
         run = d["runs"][-1]
@@ -2099,13 +2100,15 @@ def fieldtest_cmd(c: Common, holder: dict,
                   tool_tasks: Optional[Path] = typer.Option(None, "--tool-tasks", help="ツールの課題(既定 configs/fieldtest/tool_tasks.json)"),
                   long_tokens: int = typer.Option(3072, "--long-tokens"), tool_tokens: int = typer.Option(1536, "--tool-tokens"),
                   prompt_tokens: int = typer.Option(1536, "--prompt-tokens"), temperature: float = typer.Option(0.6, "--temperature"),
+                  presence_penalty: float = typer.Option(0.0, "--presence-penalty", help="サンプリングの presence penalty(モデルカードの設定に合わせる)"),
                   n_parallel: int = typer.Option(4, "--n-parallel", help="同時に生成する本数"),
                   reasoning_effort: Optional[str] = typer.Option("medium", "--reasoning-effort", help="チャットテンプレートに渡す値"),
+                  template_kwargs: Optional[str] = typer.Option(None, "--template-kwargs", help='チャットテンプレートに渡す JSON(例 {"enable_thinking": false} で思考なし)'),
                   llama_server: Optional[str] = typer.Option(None, "--llama-server", envvar="GNE_LLAMA_SERVER", help="llama-server のパス"),
                   server_args: Optional[str] = typer.Option(None, "--server-args", help="llama-server に足す引数"),
                   ppl: bool = typer.Option(True, "--ppl/--no-ppl", help="perplexity も測る"),
                   skip_long: bool = typer.Option(False, "--skip-long"), skip_tools: bool = typer.Option(False, "--skip-tools"),
-                  bench: Optional[str] = typer.Option(None, "--bench", help="ベンチマーク(カンマ区切り): gsm8k(既定 250 問)・mmlu_pro(既定 300 問)。データは取得して <root>/fieldtest/data に置く"),
+                  bench: Optional[str] = typer.Option(None, "--bench", help="ベンチマーク(カンマ区切り): gsm8k(既定 250 問)・mmlu_pro(既定 300 問)・math500(既定 250 問)・ifeval(既定 250 問。math500 と ifeval は bench extra が要る)。データは取得して <root>/fieldtest/data に置く"),
                   bench_n: Optional[int] = typer.Option(None, "--bench-n", help="ベンチマークの問題数(種を固定して選ぶ)"),
                   bench_tokens: int = typer.Option(4096, "--bench-tokens", help="ベンチマークの返事の上限"),
                   yes: bool = _YES):
@@ -2115,10 +2118,14 @@ def fieldtest_cmd(c: Common, holder: dict,
     args = {"against": str(against) if against else None, "lora": lora, "prompts": list(prompts or []), "long_tokens": long_tokens,
             "prompt_tokens": prompt_tokens, "n_parallel": n_parallel, "skip_long": skip_long, "skip_tools": skip_tools,
             "long_tasks": str(long_tasks) if long_tasks else None, "tool_tasks": str(tool_tasks) if tool_tasks else None,
-            "bench": bench, "bench_n": bench_n}
+            "bench": bench, "bench_n": bench_n, "bench_tokens": bench_tokens}
     _gate(s, "fieldtest", args, yes, None)
-    d = s.fieldtest(against=against, lora=lora, name=name, prompts=list(prompts or []), match=match, long_tasks=long_tasks, tool_tasks=tool_tasks,
-                    long_tokens=long_tokens, tool_tokens=tool_tokens, prompt_tokens=prompt_tokens, temperature=temperature, n_parallel=n_parallel,
+    try:
+        tkw = json.loads(template_kwargs) if template_kwargs else None
+    except ValueError as e:
+        raise GneError("BAD_ARGS", f"--template-kwargs は JSON で書いてください: {e}") from e
+    d = s.fieldtest(against=against, lora=lora, name=name, template_kwargs=tkw, prompts=list(prompts or []), match=match, long_tasks=long_tasks, tool_tasks=tool_tasks,
+                    long_tokens=long_tokens, tool_tokens=tool_tokens, prompt_tokens=prompt_tokens, temperature=temperature, presence_penalty=presence_penalty, n_parallel=n_parallel,
                     reasoning_effort=reasoning_effort, llama_server=llama_server, server_args=server_args, ppl=ppl, skip_long=skip_long, skip_tools=skip_tools,
                     bench=bench, bench_n=bench_n, bench_tokens=bench_tokens)
     return d, _fieldtest_text(d), 0

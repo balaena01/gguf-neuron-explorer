@@ -8,7 +8,11 @@ export const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&a
 // 質問(文字列か、会話の履歴 [{role, content}, …])→ 1 行の文字列 / 役割つきの HTML
 export const qText = (q) => (Array.isArray(q) ? q.map((m) => `${m.role}: ${m.content}`).join(" / ") : String(q ?? ""));
 export const qHTML = (q, last = "USER") => (Array.isArray(q)
-  ? q.map((m, i) => `<div class="q-turn"><span class="muted mono">${i === q.length - 1 ? last : esc(String(m.role).toUpperCase())}</span> ${esc(m.content)}</div>`).join("")
+  ? q.map((m, i) => {
+      const end = i === q.length - 1, inProgress = end && m.role === "assistant";    // assistant で終われば書きかけの返事
+      const label = end && !(inProgress && last === "USER") ? last : esc(String(m.role).toUpperCase());
+      return `<div class="q-turn"><span class="muted mono">${label}</span> ${esc(m.content)}${inProgress ? " …" : ""}</div>`;
+    }).join("")
   : `<span class="muted mono">${last}</span> ${esc(q)}`);
 const fmt = (x, d = 2) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : (+x).toFixed(d));
 const pct = (x) => (x === null || x === undefined ? "—" : `${Math.round(x * 100)}%`);

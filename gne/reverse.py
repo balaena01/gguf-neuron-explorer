@@ -16,7 +16,7 @@ import numpy as np
 import yaml
 
 from .capture import Capture, pick_act_name
-from .engine import Engine
+from .engine import IN_PROGRESS, Engine
 from .steer import GneError
 
 Progress = Callable[[int, int, str], None]
@@ -160,14 +160,15 @@ def combine(iv: Intervention | None, vecs=None, lora=None) -> Intervention:
     return (v or None), (lo or None)
 
 
-# --- 質問: 文字列(1 ターン)か、会話の履歴(user と assistant が交互で、user で始まり user で終わるメッセージの列) -----------
+# --- 質問: 文字列(1 ターン)か、会話の履歴(user と assistant が交互で user で始まるメッセージの列。assistant で終われば書きかけの返事) -----------
 
 def is_multi(q) -> bool:
     return not isinstance(q, str)
 
 
-def check_question(q, where: str = "質問") -> None:
-    """1 問を確かめる。文字列か、[{"role": "user", "content": …}, {"role": "assistant", …}, …, {"role": "user", …}]。"""
+def check_question(q, where: str = "質問", *, in_progress: bool = True) -> None:
+    """1 問を確かめる。文字列か、[{"role": "user", "content": …}, {"role": "assistant", …}, …, {"role": "user", …}]。
+    assistant で終われば書きかけの返事(その最後のトークンで測り、生成はその続きから)。in_progress=False の道具は断る。"""
     if isinstance(q, str):
         return
     if not isinstance(q, list) or not q:
@@ -180,21 +181,29 @@ def check_question(q, where: str = "質問") -> None:
             raise GneError("BAD_CONTRAST", f"{where}: 会話は user と assistant が交互で、user で始めてください({i + 1} 番目が "
                                            f"{m.get('role')!r}、{want!r} のはず)")
     if q[-1]["role"] != "user":
-        raise GneError("BAD_CONTRAST", f"{where}: 会話の履歴は user の発話で終えてください(その返事を測る・作る)")
+        if not in_progress:
+            raise GneError("BAD_CONTRAST", f"{where}: ここでは会話の履歴を user の発話で終えてください(書きかけの返事は読めません)")
+        if not q[-1]["content"]:
+            raise GneError("BAD_CONTRAST", f"{where}: 最後の assistant の発話(書きかけの返事)が空です。返事の直前を測るなら user で終えてください")
 
 
-def check_questions(v, where: str) -> None:
+def check_questions(v, where: str, *, in_progress: bool = True) -> None:
     if v is None:
         return
     if not isinstance(v, list):
         raise GneError("BAD_CONTRAST", f"{where} は質問のリストです(1 問は文字列か会話の履歴)")
     for i, q in enumerate(v):
-        check_question(q, f"{where} の {i + 1} 問目")
+        check_question(q, f"{where} の {i + 1} 問目", in_progress=in_progress)
 
 
 def turns(q) -> list[dict]:
-    """質問 → メッセージの列(system は含まない)。"""
-    return [{"role": "user", "content": q}] if isinstance(q, str) else [{"role": m["role"], "content": m["content"]} for m in q]
+    """質問 → メッセージの列(system は含まない)。assistant で終わる履歴の最後には書きかけの印を付ける。"""
+    if isinstance(q, str):
+        return [{"role": "user", "content": q}]
+    out = [{"role": m["role"], "content": m["content"]} for m in q]
+    if out[-1]["role"] == "assistant":
+        out[-1][IN_PROGRESS] = True
+    return out
 
 
 def question_text(q, *, sep: str = " / ") -> str:

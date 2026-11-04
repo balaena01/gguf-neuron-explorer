@@ -177,7 +177,11 @@ def head_contrib(st: Setup, heads: list[tuple[int, int]], *, chunk: int = 4) -> 
             if L <= S:
                 U[(S, L)] = (st.scorer.r[S] @ W).reshape(li.n_head, li.head_dim)
     acc = {hk: {str(S): 0.0 for S in st.score_layers} for hk in heads}
-    items = st.scorer.items["A"]
+    # 直接の書き込みはヘッドの出力を捕まえて測るので、捕捉の上限より長い質問は除く(止めて測る段階は長さの制限がない)
+    items = [x for x in st.scorer.items["A"] if len(x[0]) <= s.engine.probe_ubatch]
+    if not items:
+        raise GneError("BAD_ARGS", f"A 側の質問がどれも attention の捕捉の上限 {s.engine.probe_ubatch} トークンより長く、直接の書き込みを測れません",
+                       "短い質問を混ぜてください")
     n = 0
     for c0 in range(0, len(items), chunk):
         part = items[c0:c0 + chunk]
