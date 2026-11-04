@@ -230,6 +230,8 @@ The result is an ordinary recipe with units such as `16:H8:s6@evil`. Heads of on
 
 On Qwen3.5-4B, two heads chosen this way stopped the persona that the evil system prompt asks for (judged in 83% of replies before, none after) without changing capability or perplexity. Brought to the same score, full-layer ablation raised perplexity by 15%, and scaling the same two heads cost 14 points of capability. [docs/head-component-steering.md](docs/head-component-steering.md) explains the method in more detail.
 
+The weight edit itself is not new: for a single head it has the same rank-1 form as [Steer2Edit](https://arxiv.org/abs/2602.09870) (Sun et al., 2026), which we found after building this. CHiPS differs in how it chooses heads (by causal effect, where Steer2Edit uses alignment with the steering vector) and in how it sets and checks strengths (by measured behavior). The two have not been compared on the same task.
+
 ### Field test: using a file the way it is really used
 
 `gne eval` is a fast check: it scales a recipe on one file and asks short questions. `gne fieldtest` asks whether a model file holds up in real use, and compares files with each other. It starts `llama-server` with thinking and sampling on, gives the model long tasks and tool-calling tasks, and reports how often answers hit the token limit, how often they fall into short or long loops, how often the answer stays empty because the reasoning never finished, whether the right tool is called with complete arguments, whether no tool is called when none is needed, and whether the model carries on after a tool result. Perplexity comes from reading the same reference texts in gne, so a baked file can be measured directly, which `gne eval` cannot do.
