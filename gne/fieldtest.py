@@ -14,6 +14,7 @@ gne eval は同じファイルにレシピの倍率を掛けて、短い問題�
 from __future__ import annotations
 
 import atexit
+import http.client
 import importlib.util
 import json
 import math
@@ -466,12 +467,25 @@ def compare(ref: dict, tgt: dict) -> list[dict]:
 
 # --- llama-server ---------------------------------------------------------------------------------------
 
+try:                                                # 子プロセスの中で import しない(スレッドから起動すると失敗する)
+    import resource
+except ImportError:                                 # Windows
+    resource = None
+
+
 def _die_with_parent() -> None:                     # 親が落ちてもサーバが GPU に残らないように(Linux)
     try:
         import ctypes
         ctypes.CDLL("libc.so.6", use_errno=True).prctl(1, signal.SIGTERM)
     except OSError:
         pass
+    # クラッシュダンプを書かせない。WSL はダンプを Windows の Temp に書き、大きいモデルだと 1 回で数 GB になる。
+    # 0 ではなく 1 にする: ダンプを外部のプログラムへ渡す設定(core_pattern のパイプ)では、1 だけが「書かない」の意味になる
+    if resource is not None:
+        try:
+            resource.setrlimit(resource.RLIMIT_CORE, (1, 1))
+        except (OSError, ValueError):
+            pass
 
 
 def _run_warnings(runs: Sequence[dict]) -> list[str]:
@@ -558,6 +572,9 @@ class LlamaServer:
         with self._lock:
             if self.gen != seen_gen:                    # 別の問いが立て直した
                 return True
+            deadline = time.monotonic() + 5.0            # 接続が切れた直後は、プロセスの終了がまだ見えないことがある
+            while self.p is not None and self.p.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.05)
             if self.p is None or self.p.poll() is None:  # 動いている = この問い自身の失敗
                 return False
             if self.restarts >= self.MAX_RESTARTS:
@@ -582,7 +599,9 @@ class LlamaServer:
                     with urllib.request.urlopen(req, timeout=timeout) as resp:
                         r = json.load(resp)
                     break
-                except (urllib.error.URLError, OSError, ValueError):   # 出力を解釈できない(崩れたツール呼び出しなど)か、サーバが落ちた
+                except (urllib.error.HTTPError, ValueError):           # サーバは答えた。出力を解釈できない(崩れたツール呼び出しなど)
+                    return {}, "error", 0
+                except (urllib.error.URLError, OSError, http.client.HTTPException):   # つながらない、応答の途中で切れた。落ちたなら立て直す
                     if not self._revive(seen):
                         return {}, "error", 0
             else:

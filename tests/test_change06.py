@@ -1201,6 +1201,51 @@ def test_fieldtest_end_to_end_with_llama_server(session, tmp_path, monkeypatch):
     assert "llama-server" not in kids
 
 
+def test_llama_server_writes_no_crash_dump():
+    """llama-server を起動するときは、クラッシュダンプを書かせない(WSL は Windows 側に数 GB 書く)。"""
+    import subprocess
+    import sys
+
+    from gne import fieldtest as ft
+    code = "import resource; print(resource.getrlimit(resource.RLIMIT_CORE))"
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, preexec_fn=ft._die_with_parent, check=True).stdout
+    assert out.strip() == "(1, 1)"
+
+
+def test_llama_server_restarts_after_a_crash_mid_reply(tmp_path):
+    """応答を返している途中で落ちても(http.client.IncompleteRead)、測定ごと止まらず、立て直して同じ問いをやり直す。"""
+    import stat
+    import sys
+
+    from gne import fieldtest as ft
+    fake = tmp_path / "fake-server"
+    state = tmp_path / "crash-left"
+    fake.write_text(f"""#!{sys.executable}
+import json, os, sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+port = int(sys.argv[sys.argv.index("--port") + 1])
+class H(BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def do_GET(self):
+        b = json.dumps({{"status": "ok"}}).encode(); self.send_response(200); self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
+    def do_POST(self):
+        self.rfile.read(int(self.headers["Content-Length"]))
+        left = int(open({str(state)!r}).read())
+        b = json.dumps({{"choices": [{{"message": {{"content": "ok"}}, "finish_reason": "stop"}}], "usage": {{"completion_tokens": 3}}}}).encode()
+        self.send_response(200); self.send_header("Content-Length", str(len(b))); self.end_headers()
+        if left:
+            open({str(state)!r}, "w").write(str(left - 1)); self.wfile.write(b[:5]); self.wfile.flush(); os._exit(1)
+        self.wfile.write(b)
+HTTPServer(("127.0.0.1", port), H).serve_forever()
+""", encoding="utf-8")
+    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+    state.write_text("2")
+    srv = ft.LlamaServer(str(fake), "m.gguf", lora=None, n_parallel=1, n_ctx_slot=64, ngl=0, template_kwargs=None, log=tmp_path / "s.log")
+    with srv:
+        assert srv.chat_fn({})([{"role": "user", "content": "q"}], 8, 0) == ({"content": "ok"}, "stop", 3)
+        assert srv.restarts == 2
+
+
 def test_llama_server_restarts_after_a_crash(tmp_path):
     """測定の途中で llama-server が落ちても立て直して同じ問いをやり直す。落ち続けたら無限に立て直さず、エラーとして数えて結果の頭に書く。"""
     import stat
@@ -1211,8 +1256,9 @@ def test_llama_server_restarts_after_a_crash(tmp_path):
     fake = tmp_path / "fake-server"
     state = tmp_path / "crash-left"
     fake.write_text(f"""#!{sys.executable}
-import json, os, sys
+import json, os, sys, threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+LOCK = threading.Lock()
 port = int(sys.argv[sys.argv.index("--port") + 1])
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
@@ -1221,10 +1267,11 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self): self._send({{"status": "ok"}})
     def do_POST(self):
         self.rfile.read(int(self.headers["Content-Length"]))
-        left = int(open({str(state)!r}).read())
-        if left != 0:
-            open({str(state)!r}, "w").write(str(left - 1))
-            os._exit(1)
+        with LOCK:                                                                     # 同時の問いで読み書きが混ざらないように
+            left = int(open({str(state)!r}).read())
+            if left != 0:
+                open({str(state)!r}, "w").write(str(left - 1))
+                os._exit(1)
         self._send({{"choices": [{{"message": {{"content": "ok"}}, "finish_reason": "stop"}}], "usage": {{"completion_tokens": 3}}}})
 ThreadingHTTPServer(("127.0.0.1", port), H).serve_forever()
 """, encoding="utf-8")
