@@ -210,8 +210,8 @@ def estimate(session, kind: str, params: dict) -> dict:
                 trials = (n_hl + int(p.get("top_layers", 4)) * n_head) if auto else n_hl * n_head
                 per_a = n_a
         else:
-            nh = len(p.get("n_heads") or (6, 5, 4))
-            trials = 20 + int(p.get("pool", 30)) + nh * 16
+            ns = [int(x) for x in (p.get("n_heads") or (6, 5, 4))]
+            trials = 20 + int(p.get("pool", 30)) + (sum(ns) * 20 if p.get("method") == "greedy" else len(ns) * 16)
             per_a = int(p.get("hard", 16))
         sec = trials * (per_a + b) * sp.setprefill / 1000 * 1.2
         detail = {"trials": trials, "prefills_per_trial": per_a + b}

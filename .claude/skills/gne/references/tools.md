@@ -125,6 +125,7 @@ gne direction score --name evil                       # 層ごとの A/B の分�
 gne heads causal --name evil                          # 層ごと → 効く層のヘッド 1 個ずつ止めて、点数の下がり方
 gne heads causal --name evil --mode marginal --base-unit 15:H8:s2   # いまの組から s を上げたときの効率
 gne heads allocate --name evil --target 0 --n-heads 4,3,2   # 効率で強さを配り、ヘッドの数を減らした組を比べる
+gne heads allocate --name evil --target 0 --method greedy   # 比を固定せず、いちばん効くヘッドを 1 本ずつ上げる(止める強さは生成で確かめる)
 gne steer --unit 15:H8:s4.2@evil --unit 15:H2:s2.8@evil --system "..." -p "..." --compare
 gne eval --recipe R --random-controls 16              # 同じ強さをランダムなヘッドに当てた対照
 gne eval --recipe R --compare-methods                 # 全層の射影消去・ヘッドの丸ごと倍率・ニューロンの消去と、点数をそろえて比べる

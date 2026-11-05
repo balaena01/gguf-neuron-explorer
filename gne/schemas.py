@@ -955,10 +955,11 @@ class HeadsAllocateOut(Envelope):               # CHANGE-06 D(gne heads allocate
     positions: str
     subset: str
     direction_layer: str
+    method: str = "proportional"
     proportional_to: str
     from_zero: bool
     delta_s: float
-    s_max: float
+    s_max: float | None
     remain_threshold: float
     n_a: int
     n_b: int

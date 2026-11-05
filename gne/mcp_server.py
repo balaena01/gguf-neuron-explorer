@@ -55,7 +55,7 @@ direction で作った方向は "L:dir:NAME:dose"、attention ヘッドの gain 
    配る前の確かめは fieldtest(焼き込んだファイルと元のファイルを、本番と同じ動かし方で比べる。eval では見えない長い作業の崩れとツール呼び出しを見る)。
    - 方向を使う介入は、まず direction_score で基準層と分離度(cohen_d)を確認してから進める。
    - heads_causal の ablate と marginal は順位が違う。最初の候補出しは ablate、配り直しは marginal(heads_allocate が使う)。
-   - 強さを決めるのは常に生成なしの物差し(direction_score・heads_causal・heads_allocate)。生成を伴う eval は確定候補だけに使う。
+   - 候補と強さの案は生成なしの物差し(direction_score・heads_causal・heads_allocate)で作る。点数は押した量で、振る舞いそのものではないので、止める強さは少数の問題を生成して確かめる。
    - 報告には外から見える指標(eval の rate = 対照集合の validate.match の一致率、能力・ppl)を主にする。方向の射影値だけでは
      「方向で押したものを方向で測った」ことにしかならない。
    - ランダム対照(eval の random_controls、同数・同じ s のランダムなヘッド)と方式の比較(compare_methods)を通していないレシピは報告しない。
@@ -353,15 +353,16 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
     @srv.tool()
     async def heads_allocate(name: str, target: float, contrast: str | None = None, candidates: str | None = None,
                              n_heads: list[int] | None = None, score_layer: int | None = None, hard: int = 16,
-                             b_side_max: float | None = None) -> dict:
+                             b_side_max: float | None = None, method: str = "proportional", s_max: float | None = None) -> dict:
         """効率ベースの強さ配分をジョブで投げる(CHANGE-06 D、job_status で結果。生成なし)。heads_causal の結果(candidates、
         既定は方向の名前)から、効きにくい例(A 側で点数が高く残る hard 件)を選び、効率 eta を測り、n_heads(既定 [6, 5, 4])の
         各ヘッド数で s ∝ eta に配って、効きにくい例の点数の平均が target になるよう二分探索する。比較表(ヘッド数・各ヘッドの s・
         最大の s・残る件数・A 側の最大点数・B 側の直交成分のずれ)と recommended(残る件数と B 側のずれが同程度なら最少の
-        ヘッド数)、各組のレシピのパスを返す。"""
+        ヘッド数)、各組のレシピのパスを返す。method="greedy" は比を固定せず、いちばん効くヘッドを 1 本ずつ上げる(s_max の既定はなし、
+        止まるのは目標か B 側のずれ)。行の stop が止まった理由、capped が上限に当たったヘッド。目標はスコアの目標なので、組は振る舞いで確かめる。"""
         try:
             params = {"direction": name, "target": target, "candidates": candidates, "score_layer": score_layer,
-                      "hard": hard, "b_side_max": b_side_max,
+                      "hard": hard, "b_side_max": b_side_max, "method": method, "s_max": s_max,
                       "contrast": None if contrast is None else str(_contrast_path(session, contrast, None, None, None, None))}
             if n_heads:
                 params["n_heads"] = list(n_heads)

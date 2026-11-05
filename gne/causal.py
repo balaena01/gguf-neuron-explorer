@@ -392,6 +392,9 @@ def load_hard(session, st: Setup, name_or_path: str | Path) -> list[int]:
 
 # --- 配分 ------------------------------------------------------------------------------------------------
 
+GREEDY_MAX_STEPS = 300
+
+
 def _bisect(f: Callable[[float], float], target: float, hi: float, *, iters: int = 14, tol: float = 0.02,
             grid: int = 1):
     """f(α) が target 以下になる最小の α を [0, hi] で探す。戻り値 (α, f(α), 届いたか, 回数)。
@@ -428,9 +431,10 @@ def _bisect(f: Callable[[float], float], target: float, hi: float, *, iters: int
 def allocate(session, ds, cs, *, candidates, target: float, score_layer: int, hard_subset=None,
              n_heads=(6, 5, 4), proportional_to: str = "eta", from_zero: bool = True, b_side_max: float | None = None,
              base_units: list[ProjHead] | None = None, delta_s: float = 3.0, hard: int = 16, pool: int = 30,
-             s_max: float = 30.0, remain_threshold: float = 0.0, name: str | None = None, positions: str = "last",
+             s_max: float | None = 30.0, remain_threshold: float = 0.0, name: str | None = None, positions: str = "last",
              subset: str = "all", direction_layer: str = "own", score_layers=None, b_examples: int = 16,
-             max_examples: int | None = None, drift_max: float | None = 0.5, progress: Progress | None = None) -> dict:
+             max_examples: int | None = None, drift_max: float | None = 0.5, method: str = "proportional",
+             progress: Progress | None = None) -> dict:
     """効率ベースの強さ配分(CHANGE-06 D)。
     1. いまの組(base_units。無ければ candidates の ablate の行の上位 max(n_heads) 個に causal 比例で、A 側の平均が target に
        なるよう二分探索した組)を当てた状態で、A 側の点数が高く残る hard 件を効きにくい例にする(hard/<model_id>/<name>.json)。
@@ -438,11 +442,19 @@ def allocate(session, ds, cs, *, candidates, target: float, score_layer: int, ha
     3. n_heads の各値について、η の上位 n 個に s ∝ η(from_zero=False ならいまの s に足す)で配り、効きにくい例の点数の
        平均が target になるまで全体の大きさを二分探索する(s の最大は s_max)。
     4. 比較表(ヘッド数・各ヘッドの s・最大の s・A 側で remain_threshold を超えて残る件数・A 側の最大点数・B 側の直交成分の
-       ずれ・所要時間)と、残る件数と B 側のずれが同程度なら最少のヘッド数の組に recommended を付ける。"""
+       ずれ・所要時間)と、残る件数と B 側のずれが同程度なら最少のヘッド数の組に recommended を付ける。
+    method="greedy" は 3 を置き換える。η の上位 n 個を候補に、毎回いちばん点数が下がるヘッドの s だけを delta_s 上げる。比を固定
+    しないので、ヘッドの効き方が直線でなくても追える。止まるのは、目標に届いたとき(stop=target)、B 側の直交成分のずれが drift_max を
+    超えるとき(drift。超える手前の組を使う)、どのヘッドも下がらないとき(no_gain)、s_max を渡して全部が当たったとき(s_max)。
+    目標はスコアの目標で、振る舞いの目標ではない。止まった組は振る舞いで確かめる。"""
     from .direction import load_contrast
     t_all = time.perf_counter()
     if proportional_to not in ("eta", "causal"):
         raise GneError("BAD_ARGS", "proportional_to は eta か causal です")
+    if method not in ("proportional", "greedy"):
+        raise GneError("BAD_ARGS", "method は proportional か greedy です")
+    if method == "proportional" and s_max is None:
+        s_max = 30.0
     ds = session.direction_set(ds) if isinstance(ds, str) else ds
     cs = cs if isinstance(cs, ContrastSet) else load_contrast(cs)[0]
     sl = sorted({int(x) for x in (score_layers or [])} | {int(score_layer)})
@@ -467,7 +479,7 @@ def allocate(session, ds, cs, *, candidates, target: float, score_layer: int, ha
     abl.sort(key=lambda r: -causal_at(r))
     if not abl and not base_units:
         raise GneError("BAD_ARGS", "候補(heads causal の ablate の行)か base_units が要ります")
-    est = 1 + len(n_heads) * 16 + pool
+    est = 1 + pool + (sum(int(x) for x in n_heads) * 20 if method == "greedy" else len(n_heads) * 16)
     a_all = list(range(st.scorer.n("A")))
 
     def mean_score(heads: list[ProjHead], idx: list[int]) -> float:
@@ -486,8 +498,9 @@ def allocate(session, ds, cs, *, candidates, target: float, score_layer: int, ha
             raise GneError("BAD_ARGS", f"L{S} の点数を下げるヘッドが候補にありません(causal ≤ 0)")
         wmax = max(causal_at(r) for r in top)
         wts = [(r["layer"], r["head"], causal_at(r) / wmax) for r in top]
+        # 仮の組は効きにくい例を選ぶためのもの。greedy で s_max が無くても、壊れる強さの状態で η を測らないように上限を置く
         alpha, val, reached, _ = _bisect(lambda a: mean_score([ProjHead(L, h, a * w, ds.name) for L, h, w in wts], a_all),
-                                         target, s_max)
+                                         target, 30.0 if s_max is None else s_max)
         cur = [ProjHead(L, h, alpha * w, ds.name) for L, h, w in wts]
         init = {"heads": [p.spec() for p in cur], "alpha": alpha, "mean_a": val, "reached": reached}
     # 効きにくい例
@@ -514,6 +527,41 @@ def allocate(session, ds, cs, *, candidates, target: float, score_layer: int, ha
         return r["eta"] if proportional_to == "eta" else cz.get((r["layer"], r["head"]), 0.0)
     elig = [r for r in mrows if weight(r) > 0 and not r.get("excluded")]
     elig.sort(key=lambda r: -weight(r))
+    def greedy(keys: list[tuple[int, int]]) -> tuple[list[ProjHead], float, bool, int, str]:
+        """毎回いちばん点数が下がるヘッドだけを delta_s 上げる。戻り値 (組, 効きにくい例の平均, 届いたか, 回数, 止まった理由)。"""
+        cur_s: dict[tuple[int, int], float] = {}
+        val = float(st.base["A"][S][h_idx].mean())
+        make_ = lambda d: [ProjHead(L, h, x, ds.name) for (L, h), x in d.items()]   # noqa: E731
+        stop, n_eval = "steps", 0
+        for _ in range(GREEDY_MAX_STEPS):
+            best = None
+            for k in keys:
+                x = cur_s.get(k, 0.0) + delta_s
+                if s_max is not None and x > s_max:
+                    continue
+                trial = {**cur_s, k: x}
+                v = mean_score(make_(trial), h_idx)
+                n_eval += 1
+                if best is None or v < best[1]:
+                    best = (trial, v)
+            if best is None:
+                stop = "s_max"
+                break
+            if best[1] >= val:
+                stop = "no_gain"
+                break
+            if drift_max is not None:
+                with st.tmp.use(st.builder.tensors(make_(best[0]))) as lora:
+                    gb_ = st.scorer.run(lora, sides="B", which={"B": st.b_idx}, keep=True)
+                if drift(st.base["B_resid"][S], gb_["B"]["resid"][S], st.scorer.r[S])[1] > drift_max:
+                    stop = "drift"
+                    break
+            cur_s, val = best
+            if val <= target:
+                stop = "target"
+                break
+        return make_(cur_s), val, stop == "target", n_eval, stop
+
     # 3. 配る
     table = []
     b_all0 = st.scorer.run(None, sides="B")["B"]["values"][S]
@@ -529,9 +577,20 @@ def allocate(session, ds, cs, *, candidates, target: float, score_layer: int, ha
 
         def make(a, w=w, s0=s0):
             return [ProjHead(L, h, s0.get((L, h), 0.0) + a * wt, ds.name) for (L, h), wt in w.items()]
-        hi = s_max - max(s0.values(), default=0.0)
-        alpha, val, reached, n_iter = _bisect(lambda a: mean_score(make(a), h_idx), target, max(hi, 0.0))
-        heads = make(alpha)
+        capped = None
+        if method == "greedy":
+            heads, val, reached, n_iter, stop = greedy([(r["layer"], r["head"]) for r in pick])
+            alpha = None
+            if not heads:
+                table.append({"n_heads": n, "skipped": "どのヘッドも点数を下げませんでした", "stop": stop})
+                continue
+        else:
+            hi = s_max - max(s0.values(), default=0.0)
+            alpha, val, reached, n_iter = _bisect(lambda a: mean_score(make(a), h_idx), target, max(hi, 0.0))
+            heads = make(alpha)
+            stop = "target" if reached else "s_max"
+            if not reached:                        # 比を固定しているので、上限に当たったヘッドが全体を止める
+                capped = next(({"layer": p.layer, "head": p.head, "s": p.s} for p in heads if w[(p.layer, p.head)] == 1.0), None)
         with st.tmp.use(st.builder.tensors(heads)) as lora:
             got = st.scorer.run(lora, sides="AB", which={"A": a_all})
             gb = st.scorer.run(lora, sides="B", which={"B": st.b_idx}, keep=True)
@@ -545,7 +604,7 @@ def allocate(session, ds, cs, *, candidates, target: float, score_layer: int, ha
         table.append({"n_heads": n, "heads": [{"layer": p.layer, "head": p.head, "s": p.s,
                                                "eta": by[(p.layer, p.head)]["eta"]} for p in heads],
                       "units": [p.spec() for p in heads], "s_max": max(p.s for p in heads), "alpha": alpha,
-                      "hard_mean": val, "reached": reached, "iterations": n_iter,
+                      "hard_mean": val, "reached": reached, "iterations": n_iter, "stop": stop, "capped": capped, "n_used": len(heads),
                       "remain": int((va > remain_threshold).sum()), "a_max": float(va.max()), "a_mean": float(va.mean()),
                       "b_mean": float(got["B"]["values"][S].mean()),
                       "b_side_delta": float(got["B"]["values"][S].mean() - b_all0.mean()),
@@ -565,7 +624,7 @@ def allocate(session, ds, cs, *, candidates, target: float, score_layer: int, ha
     out = {"name": name, "direction": ds.name, "contrast_sha": cs.sha, "score_layer": S, "score_layers": st.score_layers,
            "max_examples": max_examples, "drift_max": drift_max,
            "target": target, "positions": positions, "subset": subset, "direction_layer": direction_layer,
-           "proportional_to": proportional_to, "from_zero": from_zero, "delta_s": delta_s, "s_max": s_max,
+           "method": method, "proportional_to": proportional_to, "from_zero": from_zero, "delta_s": delta_s, "s_max": s_max,
            "remain_threshold": remain_threshold, "n_a": len(a_all), "n_b": len(st.b_idx),
            "base_a_mean": float(st.base["A"][S].mean()), "base_b_mean": float(st.base["B"][S].mean()),
            "initial": init, "current": [p.spec() for p in cur], "hard": {"n": len(h_idx), **({k: v for k, v in hard_rep.items() if k != "idx"} if hard_rep else {})},

@@ -119,6 +119,7 @@ gne eval --recipe R --reactivity configs/contrast/yandere_react.yaml --head-cont
 gne direction score --name evil                               # A/B separation per layer, records the base layer (no generation)
 gne heads causal --name evil                                  # which heads move the direction score when stopped (no generation)
 gne heads allocate --name evil --target -3 --n-heads 6,5,4    # strengths by efficiency, sets with fewer heads compared
+gne heads allocate --name evil --target -3 --method greedy     # or raise the most effective head one step at a time
 gne heads candidates --alloc evil --prompts held_out.yaml     # replies for each set × scale, written out for blind scoring
 gne heads candidates --tally evil                             # tally the scores per candidate
 gne steer --recipe ~/.gne/heads/<model_id>/evil.alloc-n4.yaml --system "You are a cruel AI." -p "Who are you?" --compare   # only the chosen heads' component along the direction

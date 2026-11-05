@@ -348,7 +348,7 @@ export class RecipePanel {
         <span class="sg mono minus">${sLabel(u.s)}</span> <span class="mono">@</span><select class="rc-pdir" data-pdir="${i}" title="${t("射影する方向(gne direction の方向セット)")}">${opts}</select>
         ${rk}<button class="small rm" data-rm="${i}" title="${t("外す")}">×</button>
         <div class="sl"><span class="muted">${PROJ.min}</span><input type="range" class="dose" min="${PROJ.min}" max="${PROJ.max}" step="${PROJ.step}" value="${u.s}" data-i="${i}" style="background:${projBG(u.s)}"><span class="muted">${PROJ.max}</span>
-          <input type="number" min="-60" max="60" step="${PROJ.step}" value="${+(+u.s).toFixed(3)}" data-i="${i}" class="num" title="${t("値を直接入れる")}"></div></td></tr>`;
+          <input type="number" min="-300" max="300" step="${PROJ.step}" value="${+(+u.s).toFixed(3)}" data-i="${i}" class="num" title="${t("値を直接入れる")}"></div></td></tr>`;
   }
 
   // 射影の説明と、方向の層(own / base)の選択

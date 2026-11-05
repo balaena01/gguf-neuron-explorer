@@ -1777,6 +1777,20 @@ def heads_causal(c: Common, holder: dict,
     return d, "\n".join(lines), 0
 
 
+def _allocate_note(r: dict, d: dict) -> list[str]:
+    """止まった理由の説明。目標に届いた組は黙っている(s_max に当たった組の比の話は、見落とすと結果を読み違える)。"""
+    stop, c = r.get("stop"), r.get("capped")
+    if stop == "target" or stop is None:
+        return []
+    if stop == "s_max" and c:
+        return [f"      L{c['layer']} H{c['head']} が上限 s={c['s']:g} に当たりました。比を保つ配分なので、他のヘッドも一緒に止まっています。"
+                "--method greedy か --s-max を試せます(上限を上げるだけだと、目標が遠いときに壊れる強さまで上がります)"]
+    why = {"drift": f"B 側の直交成分のずれが {d.get('drift_max')} を超えるので、その手前で止めました",
+           "no_gain": "どのヘッドを上げても点数が下がらないので止めました", "s_max": "全部のヘッドが s の上限に当たりました",
+           "steps": "上げる回数の上限に達しました"}
+    return [f"      {why[stop]}"] if stop in why else []
+
+
 @gne_command(heads_app, "allocate", "heads allocate")
 def heads_allocate(c: Common, holder: dict,
                    name: str = typer.Option(..., "--name", help="方向の名前"),
@@ -1792,7 +1806,8 @@ def heads_allocate(c: Common, holder: dict,
                    b_side_max: Optional[float] = typer.Option(None, "--b-side-max", help="B 側の点数を動かすヘッドを除く閾値"),
                    base_recipe: Optional[Path] = typer.Option(None, "--base-recipe", help="いまの組(無ければ ablate の上位から作る)"),
                    delta_s: float = typer.Option(3.0, "--delta-s"), pool: int = typer.Option(30, "--pool", help="効率を測る候補(いまの組 + 効き目の上位 N)"),
-                   s_max: float = typer.Option(30.0, "--s-max", help="s の上限"),
+                   s_max: Optional[float] = typer.Option(None, "--s-max", help="s の上限(既定 proportional は 30、greedy はなし)"),
+                   method: str = typer.Option("proportional", "--method", help="proportional(s ∝ η で全体を上げる)/ greedy(いちばん効くヘッドを 1 本ずつ上げる)"),
                    remain_threshold: float = typer.Option(0.0, "--remain-threshold", help="「残る」とみなす点数"),
                    direction_layer: str = typer.Option("own", "--direction-layer"),
                    out_name: Optional[str] = typer.Option(None, "--out-name", help="保存名(既定は方向の名前)")):
@@ -1802,7 +1817,7 @@ def heads_allocate(c: Common, holder: dict,
     d = s.heads_allocate(name, contrast=contrast, candidates=candidates, target=target, score_layer=score_layer,
                          n_heads=_ints(n_heads) or [6, 5, 4], hard=hard, hard_subset=hard_subset,
                          proportional_to=proportional_to, from_zero=from_zero, b_side_max=b_side_max,
-                         base_recipe=base_recipe, delta_s=delta_s, pool=pool, s_max=s_max,
+                         base_recipe=base_recipe, delta_s=delta_s, pool=pool, s_max=s_max, method=method,
                          remain_threshold=remain_threshold, direction_layer=direction_layer, name=out_name)
     lines = [f"{d['path']}(L{d['score_layer']}、目標 {d['target']:g}、A {d['n_a']} 例・効きにくい例 {d['hard']['n']}、"
              f"無介入 A {d['base_a_mean']:.2f} / B {d['base_b_mean']:.2f}、{d['seconds']:.0f} 秒)",
@@ -1814,6 +1829,7 @@ def heads_allocate(c: Common, holder: dict,
         lines.append(f"  {r['n_heads']:>3} {r['s_max']:>6.2f} {r['remain']:>5} {r['a_max']:>7.2f} {r['b_drift_orth']:>7.4f} "
                      f"{r['b_side_delta']:>+7.2f} {r['seconds']:>5.0f}  " + " ".join(r["units"])
                      + ("" if r["reached"] else "  (目標に届かない)") + ("  ← 推す" if r["recommended"] else ""))
+        lines += _allocate_note(r, d)
     if d["recommended"] is not None:
         rp = next(r["recipe"] for r in d["table"] if r.get("recommended"))
         lines.append(f"レシピ: {rp}。確かめる: gne eval --recipe {rp} --random-controls 16")

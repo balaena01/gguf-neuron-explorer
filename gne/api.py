@@ -1685,10 +1685,11 @@ class Session:
                        target: float, score_layer: int | None = None, n_heads=(6, 5, 4), hard: int = 16,
                        hard_subset: str | Path | None = None, proportional_to: str = "eta", from_zero: bool = True,
                        b_side_max: float | None = None, base_recipe: str | Path | None = None, delta_s: float = 3.0,
-                       pool: int = 30, s_max: float = 30.0, remain_threshold: float = 0.0, positions: str | None = None,
+                       pool: int = 30, s_max: float | None = None, remain_threshold: float = 0.0, positions: str | None = None,
                        subset: str | None = None, direction_layer: str = "own", name: str | None = None,
-                       max_examples: int | None = None) -> dict:
-        """CHANGE-06 D: 効率ベースの強さ配分。candidates は heads causal の結果(名前か .causal.jsonl のパス、既定は方向の名前)。"""
+                       max_examples: int | None = None, method: str = "proportional") -> dict:
+        """CHANGE-06 D: 効率ベースの強さ配分。candidates は heads causal の結果(名前か .causal.jsonl のパス、既定は方向の名前)。
+        method は proportional(s ∝ η で全体を二分探索、s_max の既定 30)か greedy(1 本ずつ上げる、s_max の既定はなし)。"""
         from .causal import allocate, causal_paths, load_causal
         from .headproj import proj_heads
         ds, cs, _ = self._direction_contrast(direction, contrast)
@@ -1704,7 +1705,7 @@ class Session:
         return allocate(self, ds, cs, candidates=rows, target=float(target), score_layer=int(score_layer),
                         hard_subset=hard_subset, n_heads=tuple(n_heads), proportional_to=proportional_to,
                         from_zero=from_zero, b_side_max=b_side_max, base_units=base, delta_s=delta_s, hard=hard,
-                        pool=pool, s_max=s_max, remain_threshold=remain_threshold, name=name or ds.name,
+                        pool=pool, s_max=s_max, method=method, remain_threshold=remain_threshold, name=name or ds.name,
                         positions=positions or summ.get("positions") or "last", subset=subset or summ.get("subset") or "all",
                         direction_layer=direction_layer, score_layers=summ.get("score_layers"),
                         max_examples=max_examples if max_examples is not None else summ.get("max_examples"),

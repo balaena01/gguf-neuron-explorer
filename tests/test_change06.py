@@ -316,6 +316,44 @@ def test_screen_heads_both_modes_and_allocate(session):
 
 
 @pytest.mark.model
+def test_allocate_greedy_and_stop_reasons(session):
+    """比例の配分は上限に当たったヘッドと止まった理由を返す。greedy は上限なしで 1 本ずつ上げ、ずれか目標で止まる。"""
+    best = session.direction_score("evil", layers=None, record_base=False)["base_layer"]
+    sl = [best, best + 4]
+    d = session.heads_causal("evil", layers=[best - 2, best - 1], candidates="contrib:4", score_layers=sl, b_examples=4)
+    a0 = float(d["base_scores"][str(sl[-1])]["A"])
+    kw = {"score_layer": sl[-1], "n_heads": (2,), "hard": 4, "pool": 3}
+    one = {**kw, "n_heads": (1,)}                                       # η が正のヘッドが 2 本ないと行が飛ばされるので 1 本で
+    cap = session.heads_allocate("evil", target=a0 - 1e6, s_max=1.0, name="evil_cap", **one)
+    assert cap["method"] == "proportional" and cap["s_max"] == 1.0
+    row = cap["table"][0]
+    assert not row["reached"] and row["stop"] == "s_max" and row["capped"]["s"] == pytest.approx(1.0)
+    assert session.heads_allocate("evil", target=a0 - 1e6, name="evil_cap", **kw)["s_max"] == 30.0     # 比例の既定は今までどおり
+    g = session.heads_allocate("evil", target=a0 - abs(a0) * 0.02 - 0.01, method="greedy", name="evil_greedy", **kw)
+    assert g["method"] == "greedy" and g["s_max"] is None
+    r = g["table"][0]
+    assert r["stop"] in ("target", "drift", "no_gain", "steps") and r.get("capped") is None
+    if not r.get("skipped"):
+        assert Path(r["recipe"]).exists() and r["reached"] == (r["stop"] == "target") and 1 <= r["n_used"] <= 2
+        assert all(float(h["s"]) % 3.0 == 0 for h in r["heads"])                    # delta_s ずつ上がる
+        if r["reached"]:
+            assert r["hard_mean"] <= g["target"]
+    low = session.heads_allocate("evil", target=a0 - 1e6, method="greedy", s_max=3.0, name="evil_greedy", **kw)
+    r = low["table"][0]
+    assert r.get("skipped") or (r["stop"] in ("s_max", "drift", "no_gain") and all(float(h["s"]) <= 3.0 for h in r["heads"]))
+    with pytest.raises(GneError):
+        session.heads_allocate("evil", target=0.0, method="nope", name="evil_greedy", **kw)
+
+
+def test_allocate_note_explains_why_it_stopped():
+    from gne.cli import _allocate_note
+    assert _allocate_note({"stop": "target"}, {}) == []
+    assert "上限" in _allocate_note({"stop": "s_max", "capped": {"layer": 3, "head": 7, "s": 30.0}}, {})[0]
+    assert "0.5" in _allocate_note({"stop": "drift"}, {"drift_max": 0.5})[0]
+    assert _allocate_note({}, {}) == []
+
+
+@pytest.mark.model
 def test_v26_bake_matches_lora(session, tmp_path):
     r = session.recipe(units=["12:H3:s4@evil", "12:H7:s2@evil"], name="v26")
     d = session.headproj_export(r, tmp_path / "v26.gguf", bake=True, verify=True)
