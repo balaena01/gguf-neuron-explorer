@@ -1343,6 +1343,7 @@ def test_head_panel_in_browser(server, browser):
     assert pg.evaluate("document.querySelectorAll('#overlay span.mk-h.minus').length") == 1
     pg.click("#list-tabs button[data-tab=recipe]")
     assert "L12 H3" in pg.evaluate("document.querySelector('#recipe-list table.rc').innerText")
+    pg.wait_for_load_state("networkidle")                             # タブを開いた直後の描き直しが入力を消さないように
     pg.fill("#recipe-list tr.rc-head input.num", "0.5")
     pg.dispatch_event("#recipe-list tr.rc-head input.num", "input")
     assert pg.evaluate("window.gne.recipe.specs()") == ["12:H3:x0.5"] and pg.evaluate("window.gne.recipe.specs(-1)") == ["12:H3:x1.5"]

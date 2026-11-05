@@ -25,6 +25,10 @@ HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE / "tools"))
 import make_tiny_qwen4exp as tiny  # noqa: E402
 
+# 小さなモデルのヘッド数は、CUDA の gated delta net が対応する 16・32・64・128 のどれでもない。n_gpu_layers=0 でも GPU が見えると
+# その演算が GPU に渡って ggml_abort でプロセスごと落ちる。GPU が見えるときは test_qwen4exp_cpu.py が CPU だけの子プロセスで流す。
+pytestmark = pytest.mark.skipif(os.environ.get("CUDA_VISIBLE_DEVICES", None) != "", reason="GPU が見えると小さなモデルは落ちる(CPU の子プロセスで流す)")
+
 CHROME = Path(os.environ.get("GNE_CHROME", Path.home() / ".cache/ms-playwright/chromium-1223/chrome-linux64/chrome"))
 HEADER = json.load(gzip.open(HERE / "data/qwen4exp_iq1s_header.json.gz"))
 SPEC = {"name": "tiny", "system_a": "You are cold and dismissive.", "system_b": "You are warm and kind.",
