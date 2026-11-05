@@ -20,7 +20,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .engine import Engine
+from .engine import NO_CVEC, Engine
 from .schemas import SCHEMA_VERSION
 from .stats import (ActStats, ResidStats, StatsView, load_corpus, neuron_activation_stats,
                     residual_norms)
@@ -104,7 +104,8 @@ class Session:
                 "n_expert": m.n_expert, "has_post_ffn_norm": m.has_post_ffn_norm,
                 "ffn_down_scale": {str(k): v for k, v in m.ffn_down_scale.items()} if m.ffn_down_scale else None,
                 "tied_output": m.tied_output, "has_chat_template": bool(m.chat_template),
-                "ffn_down_qtype": m.ffn_down_qtype, "file_size": m.file_size}
+                "ffn_down_qtype": m.ffn_down_qtype, "file_size": m.file_size,
+                "cvec_supported": m.arch not in NO_CVEC, "is_split": self.weights.gguf.is_split, "hc_streams": int(self.weights.field(f"{m.arch}.hyper_connection.count", 0) or 0)}
         llama = None
         if load:
             try:
@@ -622,6 +623,9 @@ class Session:
                     verify_prompt: str = "Who are you?", n_tokens: int = 32,
                     llama_completion: str | None = None) -> dict:
         recipe = self._as_recipe(recipe)
+        if fmt == "cvec" and self.meta.arch in NO_CVEC:
+            raise GneError("ARCH_UNSUPPORTED", f"{self.meta.arch} のグラフは control vector を読みません(--control-vector を付けても何も起きません)",
+                           "gne gain / gne headproj export で LoRA アダプタにしてください")
         self._warn_when(recipe, "control vector")
         if not recipe.add_units:
             raise GneError("BAD_RECIPE", "add のユニットがありません(gain・proj だけのレシピは control vector になりません)",

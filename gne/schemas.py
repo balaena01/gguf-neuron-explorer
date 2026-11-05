@@ -68,6 +68,9 @@ class MetaModel(_Strict):
     has_chat_template: bool
     ffn_down_qtype: str
     file_size: int
+    cvec_supported: bool = True
+    is_split: bool = False
+    hc_streams: int = 0
 
 
 class LoadInfo(_Strict):

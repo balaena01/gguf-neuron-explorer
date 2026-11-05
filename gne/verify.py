@@ -88,6 +88,18 @@ class Verifier:
     def v1_shapes(self) -> VResult:
         m = self.w.meta
         bad = []
+        if m.n_expert:                                  # 全層 MoE: ne = [n_ff, n_embd, n_expert]、1 専門家ぶんだけ dequantize
+            for L in range(m.n_layer):
+                name = f"blk.{L}.ffn_down_exps.weight"
+                ne = [int(x) for x in self.w.tensor(name).shape] if self.w.has_tensor(name) else None
+                if ne != [m.n_ff_at(L), m.n_embd, m.n_expert]:
+                    bad.append(f"{name} ne={ne}")
+            mat = self.w.expert_down(self.L, 0)
+            if mat.shape != (m.n_embd, m.n_ff_at(self.L)) or not np.isfinite(mat).all():
+                bad.append(f"L{self.L} 専門家 0 の dequant {mat.shape}")
+            return VResult("V1", "形状と dequantize", "fail" if bad else "pass",
+                           f"全 {m.n_layer} 層の ne=[n_ff, n_embd, n_expert]、L{self.L} 専門家 0 を dequantize"
+                           + (f" / 不一致: {bad}" if bad else ""), {"bad": bad})
         for L in range(m.n_layer):
             name = f"blk.{L}.ffn_down.weight"
             if not self.w.has_tensor(name):
@@ -105,6 +117,45 @@ class Verifier:
         return VResult("V1", "形状と dequantize", st,
                        f"全 {m.n_layer} 層の ne=[n_ff, n_embd]、L{checked} を dequantize → (n_embd, n_ff)=({m.n_embd}, {m.n_ff}) {m.ffn_down_qtype}"
                        + (f" / 不一致: {bad}" if bad else ""), {"bad": bad})
+
+    # --- V26: 残差が複数本の arch(hyper-connections)--------------------------------------------
+
+    def v26_hc_streams(self) -> VResult:
+        """層の FFN の書き込みは、どの流れにも同じ向きで足される(倍率だけ違う)。だから流れの平均を残差として読んでよい。
+        l_last-L(FFN の後)− 最初の hc_combine-L(attention の後)が、流れごとに ffn_out-L の定数倍であることを確かめる。"""
+        e, L = self.e, self.L
+        hc = e.hc_streams
+        names = {f"l_last-{L}", f"hc_combine-{L}", f"ffn_out-{L}"}
+        cap = Capture()
+        ctx = e.probe_ctx(cap, need=max(len(x) for x in self.prompt_ids))
+        cap.hc_streams = 0                               # ここだけ生の [n_embd, hc, T] を見る
+        cap.set_wanted(lambda n: n in names)
+        cos, scale = [], []
+        try:
+            for ids in self.prompt_ids:
+                e.clear_memory(ctx)
+                e.prefill(ctx, [ids])
+                got = cap.take()
+                missing = names - set(got)
+                if missing:
+                    return VResult("V26", "残差の流れ", "fail", f"捕捉できません: {sorted(missing)}")
+                n = e.n_embd
+                d = (got[f"l_last-{L}"] - got[f"hc_combine-{L}"]).reshape(-1, hc, n).astype(np.float64)
+                f = got[f"ffn_out-{L}"].astype(np.float64)
+                keep = np.linalg.norm(f, axis=1) > 0
+                d, f = d[keep], f[keep]
+                dot = np.einsum("tcn,tn->tc", d, f)
+                nn = np.linalg.norm(d, axis=2) * np.linalg.norm(f, axis=1, keepdims=True)
+                cos.append(np.abs(dot / np.maximum(nn, 1e-30)).ravel())
+                scale.append((dot / np.maximum(np.einsum("tn,tn->t", f, f)[:, None], 1e-30)).ravel())
+        finally:
+            cap.hc_streams = hc
+        cos, scale = np.concatenate(cos), np.concatenate(scale)
+        ok = bool(np.quantile(cos, 0.01) > 0.999 and scale.min() >= -1e-3 and scale.max() <= 2 + 1e-3)
+        return VResult("V26", "残差の流れ", "pass" if ok else "fail",
+                       f"{hc} 本、L{L}: FFN の書き込みと ffn_out の |cos| の 1% 点 {np.quantile(cos, 0.01):.5f}、"
+                       f"流れごとの倍率 {scale.min():.3f}〜{scale.max():.3f}(0〜2 のはず)",
+                       {"cos_q01": float(np.quantile(cos, 0.01)), "scale": [float(scale.min()), float(scale.max())]})
 
     # --- V2 -------------------------------------------------------------------------------------
 

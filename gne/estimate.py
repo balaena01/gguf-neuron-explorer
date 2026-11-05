@@ -45,7 +45,7 @@ class Speed:
 
     def __init__(self, session):
         m = session.meta
-        self.gb = Path(session.weights.path).stat().st_size / 1e9
+        self.gb = session.weights.meta.file_size / 1e9
         self.params_b = sum(math.prod(int(x) for x in t.shape) for t in session.weights.gguf.tensors) / 1e9
         self.eff = self.gb + 0.79 * self.params_b
         n_gpu = session._engine_kw.get("n_gpu_layers", -1)

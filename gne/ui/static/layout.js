@@ -16,12 +16,31 @@ export const slabX = (L) => layerX(L) + GEOM.SLAB_DX;
 
 // 層のシートの形。dense: side×side の 1 枚。moe: 専門家ごとの tile×tile の正方形を g×g に並べた 1 枚
 // (専門家が 16 以下でも同じ並べ方で、すき間を広めにする。§4.1 との違いは verification.md)。
-export function sheetSpec(layer, gridSide) {
+// 全ニューロンの点が多すぎるモデル(専門家 512 × 640 × 48 層で 1,570 万点)は、ブラウザが固まるので専門家を 1 点で描く(coarse)。
+// シートの住所(通し番号 = 専門家 × n_ff + n)は変わらない。点が表すのが専門家になるだけ。
+export const COARSE_POINTS = 5000000;
+
+export function coarseLayout(arch, force = false) {
+  const total = arch.layers.reduce((a, l) => a + (l.ffn === "dense" ? l.n_ff : l.ffn.startsWith("moe") ? l.n_ff * l.n_expert : 0), 0);
+  if ((!force && total <= COARSE_POINTS) || !arch.layers.some((l) => l.ffn.startsWith("moe"))) return { coarse: false, gridSide: arch.grid_side };
+  const side = (l) => (l.ffn.startsWith("moe") ? Math.ceil(Math.sqrt(l.n_expert)) : l.ffn === "dense" ? Math.ceil(Math.sqrt(l.n_ff)) : 1);
+  return { coarse: true, gridSide: Math.max(1, ...arch.layers.map(side)) };
+}
+
+export function sheetSpec(layer, gridSide, coarse = false) {
   const S = GEOM.S;
   if (layer.ffn === "dense") {
     const side = Math.ceil(Math.sqrt(layer.n_ff));
     const ext = S * side / gridSide;
     return { kind: "dense", n: layer.n_ff, side, ext, tile: side, g: 1, tileExt: ext, pitch: ext, shared: null };
+  }
+  if (layer.ffn.startsWith("moe") && coarse) {
+    const g = Math.ceil(Math.sqrt(layer.n_expert));
+    const ext = S * g / gridSide, pitch = ext / g;
+    return { kind: "moe", coarse: true, n: layer.n_ff * layer.n_expert, nExpert: layer.n_expert, nPer: layer.n_ff, side: g,
+             ext, tile: 1, g, tileExt: pitch * (1 - GEOM.TILE_GAP), pitch,
+             // 共有の専門家は毎トークン動くので、まとめずにニューロンのまま別枠で描く
+             shared: layer.n_ff_shexp ? { n: layer.n_ff_shexp, side: Math.ceil(Math.sqrt(layer.n_ff_shexp)), ext: pitch * 3 } : null };
   }
   if (layer.ffn.startsWith("moe")) {
     const tile = Math.ceil(Math.sqrt(layer.n_ff));
@@ -49,7 +68,7 @@ export function cellYZ(spec, cell) {
     const d = spec.ext / spec.side;
     return [Y0 + spec.ext - (row + 0.5) * d, -spec.ext / 2 + (col + 0.5) * d];
   }
-  const e = Math.floor(cell / spec.nPer), k = cell % spec.nPer;
+  const e = Math.floor(cell / spec.nPer), k = spec.coarse ? 0 : cell % spec.nPer;
   const tr = Math.floor(e / spec.g), tc = e % spec.g;
   const row = Math.floor(k / spec.tile), col = k % spec.tile;
   const d = spec.tileExt / spec.tile;

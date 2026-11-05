@@ -262,7 +262,7 @@ export class RecipePanel {
       <p class="muted note">${t("dose は rel(その層の残差ノルムの中央値に対する大きさ)。マップに + は黄、− は赤紫の輪で出ます。")}</p>
       <div class="rc-actions">
         <button id="rc-chat"${r.empty() ? " disabled" : ""}>${t("3 列チャットで試す")}</button>
-        <button id="rc-export"${r.addSpecs().length ? "" : " disabled"}>${t("cvec を書き出す")}</button>
+        <button id="rc-export"${r.addSpecs().length && document.body.dataset.cvec !== "off" ? "" : " disabled"}>${t("cvec を書き出す")}</button>
         <label class="muted"><input type="checkbox" id="rc-verify"> ${t("llama.cpp で確かめる")}</label>
         <button id="rc-lora"${r.heads().length || r.projs().length ? "" : " disabled"} title="${t("ヘッドの方向成分(proj)と倍率(gain)を、llama.cpp の --lora で使う LoRA アダプタか、重みに焼き込んだ GGUF に書き出す")}">${t("LoRA・焼き込み")}${this.lxOpen ? " ▴" : " ▾"}</button>
       </div>

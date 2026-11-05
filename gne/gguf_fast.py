@@ -10,12 +10,14 @@ gguf-py の GGUFReader は語彙(15〜25 万語)とマージ表を 1 要素ず�
 from __future__ import annotations
 
 import struct
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-from gguf import GGML_QUANT_SIZES, GGMLQuantizationType, GGUFValueType
-from gguf.quants import quant_shape_to_byte_shape
+from gguf import GGMLQuantizationType, GGUFValueType
+
+from .quant import block_sizes, byte_shape, qtype_of
 
 _SCALAR = {
     GGUFValueType.UINT8: "<B", GGUFValueType.INT8: "<b", GGUFValueType.UINT16: "<H", GGUFValueType.INT16: "<h",
@@ -52,13 +54,43 @@ class FastTensor:
         dt = _TENSOR_NP.get(self.tensor_type)
         if dt is None:
             raw = self._mm[self.data_offset:self.data_offset + self.n_bytes]
-            return raw.reshape(quant_shape_to_byte_shape(np_dims, self.tensor_type))
+            return raw.reshape(byte_shape(np_dims, self.tensor_type))
         return self._mm[self.data_offset:self.data_offset + self.n_bytes].view(dt).reshape(np_dims)
 
 
+_SPLIT_RE = re.compile(r"^(?P<stem>.*)-(?P<no>\d{5})-of-(?P<count>\d{5})\.gguf$")
+
+
+def split_paths(path: str | Path) -> list[Path] | None:
+    """分割 GGUF(NAME-00001-of-00003.gguf)のファイルを番号順に。分割でなければ None。どのファイルを渡してもよい。"""
+    p = Path(path)
+    m = _SPLIT_RE.match(p.name)
+    if not m:
+        return None
+    n = int(m["count"])
+    return [p.with_name(f"{m['stem']}-{i:05d}-of-{n:05d}.gguf") for i in range(1, n + 1)]
+
+
+def first_shard(path: str | Path) -> Path:
+    """llama.cpp は 1 番目のファイルから読む。分割でなければそのまま。"""
+    parts = split_paths(path)
+    return parts[0] if parts else Path(path)
+
+
 class FastGGUF:
-    def __init__(self, path: str | Path):
-        self.path = Path(path)
+    """1 ファイルの GGUF。分割 GGUF は 1 番目のファイルのメタデータに、全ファイルのテンソルを合わせて 1 つに見せる。"""
+
+    def __init__(self, path: str | Path, *, _part: bool = False):
+        path = Path(path)
+        parts = None if _part else split_paths(path)
+        if parts:
+            missing = [p.name for p in parts if not p.exists()]
+            if missing:
+                raise ValueError(f"分割 GGUF のファイルが足りません: {', '.join(missing)}")
+            path = parts[0]
+        self.path = path
+        self.parts = parts or [path]
+        self.n_bytes = sum(p.stat().st_size for p in self.parts)
         self._mm = np.memmap(self.path, mode="r")
         buf = memoryview(self._mm)
         if bytes(buf[:4]) != b"GGUF":
@@ -106,14 +138,23 @@ class FastGGUF:
             off += 4 + 8 * n_dims
             ttype, toff = struct.unpack_from("<IQ", buf, off)
             off += 12
-            infos.append((name, dims, GGMLQuantizationType(ttype), toff))
+            infos.append((name, dims, qtype_of(ttype), toff))
         align = int(self.values.get("general.alignment", 32))
         start = off + (-off % align)
         self.tensors: list[FastTensor] = []
         for name, dims, ttype, toff in infos:
             n_el = int(np.prod(dims)) if dims else 1
-            bs, ts = GGML_QUANT_SIZES[ttype]
+            bs, ts = block_sizes(ttype)
             self.tensors.append(FastTensor(name, ttype, dims, n_el, n_el * ts // bs, start + toff, self._mm))
+        for p in self.parts[1:]:                # 分割の残りはテンソルだけ受け取る(メタデータは 1 番目のもの)
+            self.tensors += FastGGUF(p, _part=True).tensors
+        want = self.values.get("split.tensors.count")
+        if len(self.parts) > 1 and want is not None and int(want) != len(self.tensors):
+            raise ValueError(f"{self.path.name}: テンソルが {len(self.tensors)} 個しかありません(split.tensors.count = {want})")
+
+    @property
+    def is_split(self) -> bool:
+        return len(self.parts) > 1
 
     @staticmethod
     def _str(buf, off: int) -> tuple[str, int]:

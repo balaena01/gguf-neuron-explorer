@@ -26,7 +26,8 @@ import llama_cpp._logger as _llama_logger
 from llama_cpp import llama_cpp as C
 
 from .capture import Capture
-from .steer import cvec_buffer
+from .gguf_fast import first_shard
+from .steer import GneError, cvec_buffer
 
 _backend_ready = False
 
@@ -43,6 +44,7 @@ def log_softmax(logits: np.ndarray) -> np.ndarray:
     return (x - np.log(np.exp(x).sum(axis=-1, keepdims=True))).astype(np.float32, copy=False)
 
 
+NO_CVEC = {"qwen4exp"}   # グラフが build_cvec を呼ばない arch(llama.cpp src/models/qwen4exp.cpp)。set_cvec しても何も起きない
 KEEP = object()          # generate_greedy の schedule が「control vector はそのまま」を表す
 
 
@@ -188,7 +190,7 @@ class Engine:
                  mmproj: str | Path | None = None):
         _llama_logger.set_verbose(verbose)
         _backend_init()
-        self.path = Path(path)
+        self.path = first_shard(path)             # 分割 GGUF は 1 番目のファイルから読む
         mp = C.llama_model_default_params()
         mp.n_gpu_layers = n_gpu_layers
         self.model = C.llama_model_load_from_file(str(self.path).encode(), mp)
@@ -207,6 +209,9 @@ class Engine:
         self.n_threads = n_threads or max(1, (os.cpu_count() or 2) // 2)
         self.n_gpu_layers = n_gpu_layers
         self.chat_template = self.meta_str("tokenizer.chat_template")
+        self.arch = self.meta_str("general.architecture") or ""
+        self.hc_streams = int(self.meta_str(f"{self.arch}.hyper_connection.count") or 0)   # 残差の本数(0 = 1 本)
+        self.cvec_supported = self.arch not in NO_CVEC
         self._steer: _Ctx | None = None
         self._probe: _Ctx | None = None
         self._probe_logits_all = False
@@ -259,6 +264,7 @@ class Engine:
         if logits_all:
             p.n_outputs_max_per_seq = 0   # 既定 1(各 seq 最終位置だけ)。0 = n_outputs_max
         if capture is not None:
+            capture.hc_streams = self.hc_streams
             capture.install(p)
         ptr = C.llama_init_from_model(self.model, p)
         if not ptr:
@@ -461,6 +467,9 @@ class Engine:
 
         常に全層分 (n_layer-1)*n_embd のゼロ埋めバッファを渡す(§5.3 の古いデータ対策)。
         layer_range を渡すと il_start/il_end をその範囲に固定する(§10 4(a))。"""
+        if vectors and not self.cvec_supported:
+            raise GneError("ARCH_UNSUPPORTED", f"{self.arch} のグラフは control vector を読みません。足しても何も起きないので止めました。"
+                           "gain・射影(proj)・ablate は LoRA で動きます")
         if not vectors:
             rc = C.llama_set_adapter_cvec(ctx.ptr, None, 0, self.n_embd, -1, -1)
         else:

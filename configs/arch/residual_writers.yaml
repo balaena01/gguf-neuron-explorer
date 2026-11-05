@@ -10,7 +10,9 @@ candidates: [attn_output, ssm_out, ffn_down]
 #           (build_layer_attn_linear の最後で build_lora_mm(ssm_out))。FFN は build_ffn の build_lora_mm(down)。
 #           attn_post_norm は FFN の前の norm で、残差は norm の前から取る(pre-norm)
 #   qwen3 / llama: build_attn の build_lora_mm(wo) と build_ffn の build_lora_mm(down)
-verified: [qwen35, qwen3, llama]
+#   qwen4exp: 線形注意は ssm_out、attention は attn_output、FFN は ffn_down_exps と ffn_down_shexp(build_layer_attn_linear・build_layer_attn・build_layer_ffn)。
+#           どれも流れごとの倍率をかけて全流れに足すので、向きは保たれる。L1 の ple_value は norm と畳み込みを通るのでライターに入れない
+verified: [qwen35, qwen3, llama, qwen4exp]
 
 # ライターの出力が norm を通ってから残差に足される arch(post-norm)。射影は厳密には保たれないので近似として警告する
 post_norm: [gemma2, gemma3, gemma3n, gemma4, gemma-embedding, olmo2, glm4, exaone4, grok, plamo2, plamo3, afmoe]

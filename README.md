@@ -357,6 +357,7 @@ The documentation is in Japanese:
 - [docs/agent_playbook.md](docs/agent_playbook.md): how to read the results.
 - [docs/setup.md](docs/setup.md): CUDA / ROCm under WSL, one environment per GPU, and workers.
 - [CHiPS: a few heads between knowing and answering](https://balaena01.github.io/chips-steering/): the write-up, with measurements and data.
+- [docs/qwen4exp.md](docs/qwen4exp.md): Qwen3.8-Flash-Next (`qwen4exp`): split GGUF files, four residual streams, and what works without control vectors.
 - [docs/head-component-steering.md](docs/head-component-steering.md): CHiPS, which changes only the component of a few causally chosen attention heads along a direction (`mode: proj`, `gne direction score`, `gne heads causal`, `gne heads allocate`, `gne eval --compare-methods`), and how it relates to full ablation.
 - [docs/persona_workflow.md](docs/persona_workflow.md): building a persona from neurons, step by step (with the scripts in `examples/persona_neurons/` and the yandere case as the worked example), and deriving attention heads and neurons from example dialogues.
 

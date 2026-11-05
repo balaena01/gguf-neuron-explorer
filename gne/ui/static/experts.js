@@ -94,7 +94,10 @@ export class ExpertPanel {
     };
     const other = [k !== null && k !== 0 && k !== 2 ? `${t("レシピ")} ×${fmt(k, 2)}` : "", r !== null && r !== 1 && r !== -1 ? `${t("レシピ")} route ${sgn(r, 2)}` : ""]
       .filter(Boolean).map((x) => `<span class="muted mono h-cur">${x}</span>`).join("");
-    return `${gb(0, t("×0(消す)"))}${gb(2, t("×2(強める)"))}${this.hasBias(d.layer) ? rb(-1) + rb(1) : ""}${other}`;
+    const gains = document.body.dataset.split === "1"     // スケールパッチは 1 ファイルにしか当てられない
+      ? `<span class="muted" title="${t("llama-gguf-split --merge で 1 つにすると使えます")}">${t("分割 GGUF なので専門家全体の ×k は使えません")}</span>`
+      : `${gb(0, t("×0(消す)"))}${gb(2, t("×2(強める)"))}`;
+    return `${gains}${this.hasBias(d.layer) ? rb(-1) + rb(1) : ""}${other}`;
   }
 
   // 使われ方(gne stats act の MoE の層): 選択率、観測数、選ばれたときの重みの平均、よく選ばれるトークン

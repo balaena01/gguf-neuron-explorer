@@ -189,7 +189,7 @@ export class NeuronPanel {
         <div class="n-row"><input class="n-name" placeholder="${t("名前(入力して Enter か欄の外で保存)")}" value="${esc(d.name || "")}" spellcheck="false">
           ${this.recipeButtons(d)}</div>`}
         ${moe ? `<div class="n-row n-moe">${this.gainButtons(d)}<button class="small" id="n-expert" title="${t("この専門家(L{L} E{e})を EXPERT パネルで開く", { L: d.layer, e: d.expert })}">${t("EXPERT パネルで開く")}</button></div>
-        <p class="muted note n-moe-note">${t("MoE の専門家のニューロン。+ / − は方向押し(専門家が選ばれたかに関係なく、全トークンでこのニューロンの書き込み方向を足す)。×0 / ×2 の gain は専門家が選ばれたときだけ効く本当のニューロン押し。")}</p>` : ""}
+        <p class="muted note n-moe-note">${document.body.dataset.cvec === "off" ? t("MoE の専門家のニューロン。×k は、この専門家が選ばれたときだけ効く gain です") : t("MoE の専門家のニューロン。+ / − は方向押し(専門家が選ばれたかに関係なく、全トークンでこのニューロンの書き込み方向を足す)。×0 / ×2 の gain は専門家が選ばれたときだけ効く本当のニューロン押し。")}</p>` : ""}
       </div>
       <div class="tabs">
         <button data-tab="examples">Examples</button><button data-tab="chat"${rnd ? ` disabled title="${t("ランダム方向の対照ではチャットできません")}"` : ""}>Chat</button>
@@ -285,6 +285,7 @@ export class NeuronPanel {
   }
 
   recipeButtons(d) {
+    if (document.body.dataset.cvec === "off") return `<span class="muted" title="${t("このモデルのグラフは control vector を読みません。gain を使ってください")}">${t("足す押し方は使えません")}</span>`;
     const cur = this.inRecipe(d.layer, d.neuron);
     const on = (sign) => cur !== null && Math.sign(cur) === sign;
     const b = (sign, label) => `<button data-rc="${sign}" class="${on(sign) ? `on ${sign > 0 ? "plus" : "minus"}` : ""}"

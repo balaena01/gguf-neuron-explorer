@@ -392,6 +392,15 @@ def verify(c: Common, holder: dict,
                lambda: VResult("V14", "射影消去の LoRA と bake の一致", "skip",
                                "2 GiB 以上のモデルは省きます(gne ablate --bake --verify で確かめられます)"))]
     results, bench_result = [], None
+    # 確かめる対象が無い検査は省く(失敗ではない)。MoE の検査は tests/test_change05.py と gne experts、残差の流れは V26
+    why = {}
+    if not s.engine.cvec_supported:
+        why |= dict.fromkeys(("V3", "V4", "V12"), f"{s.meta.arch} のグラフは control vector を読みません")
+    if s.meta.n_expert:
+        why |= dict.fromkeys(("V2", "V11", "V13", "V14"), "全層 MoE です。この検査は dense の ffn_down が前提です(MoE は V24 と gne experts で確かめます)")
+    steps = [(vid, (lambda vid=vid, fn=fn: VResult(vid, "省略", "skip", why[vid]) if vid in why else fn())) for vid, fn in steps]
+    if s.engine.hc_streams:
+        steps.append(("V26", v.v26_hc_streams))
 
     def show(r):
         results.append(r)
@@ -402,7 +411,9 @@ def verify(c: Common, holder: dict,
             show(fn())
         except Exception as ex:  # noqa: BLE001
             show(VResult(vid, "例外", "fail", repr(ex)))
-    if bench:
+    if bench and not s.engine.cvec_supported:
+        show(VResult("V7", "ベンチ", "skip", "control vector を読まない arch です"))
+    elif bench:
         bench_result = run_bench(s.engine, layer=v.L, reps=5)
         show(VResult("V7", "ベンチ", "info",
                      f"set_cvec+prefill {bench_result['set_plus_prefill_ms']:.1f} ms(うち再予約 {bench_result['reserve_ms']:.1f} ms)、"

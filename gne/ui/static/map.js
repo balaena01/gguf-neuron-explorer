@@ -6,7 +6,7 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { t } from "./i18n.js";
-import { GEOM, cellYZ, layerX, sharedCell, sharedYZ, sheetSpec, sheetX, slabX, yzCell } from "./layout.js";
+import { GEOM, cellYZ, coarseLayout, layerX, sharedCell, sharedYZ, sheetSpec, sheetX, slabX, yzCell } from "./layout.js";
 
 export const COLORS = {
   idle: [16, 20, 27],          // データ無し: 非常に暗い青灰(明るさは画面上の点の密度で割り戻す)
@@ -33,6 +33,7 @@ const VERT = /* glsl */ `
 attribute vec3 iPos;
 attribute vec4 aColor;
 attribute float aLayer;
+attribute float aScale;
 uniform float uSize;
 uniform float uScale;
 uniform float uFocus;
@@ -44,7 +45,7 @@ void main() {
   vec4 mv = modelViewMatrix * vec4(iPos, 1.0);
   float depth = -mv.z;
   float minPx = uFront > 0.5 ? 1.6 : mix(1.6, 4.0, aColor.a);            // 全体ビューでは光る点を 4 px 以上に
-  float s = clamp(uSize, minPx * depth / uScale, 24.0 * depth / uScale);   // 画面で 1.6〜24 px
+  float s = clamp(uSize * aScale, minPx * depth / uScale, 24.0 * depth / uScale);   // 画面で 1.6〜24 px
   if (uFront > 0.5) s *= mix(1.0, 1.5, aColor.a);                         // 正面ビューでも光る点は少し大きく
   mv.xy += position.xy * s;
   gl_Position = projectionMatrix * mv;
@@ -95,8 +96,22 @@ function segHitsRect(x1, y1, x2, y2, q) {
 const MAX_AGENT_LABELS = 30;
 const escHTML = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
+// coarse の層: 通し番号順の色を、専門家ごとに一番目立つ 1 点へまとめる。共有の専門家はそのまま
+function coarsen(rgba, s) {
+  const nShared = s.shared ? s.shared.n : 0;
+  const out = new Uint8Array((s.nExpert + nShared) * 4);
+  const pick = (to, from, n) => {
+    let best = from;
+    for (let i = from; i < from + n; i++) if (rgba[4 * i + 3] > rgba[4 * best + 3]) best = i;
+    for (let c = 0; c < 4; c++) out[4 * to + c] = rgba[4 * best + c];
+  };
+  for (let e = 0; e < s.nExpert; e++) pick(e, e * s.nPer, s.nPer);
+  if (nShared && rgba.length >= 4 * (s.n + nShared)) out.set(rgba.subarray(4 * s.n, 4 * (s.n + nShared)), 4 * s.nExpert);
+  return out;
+}
+
 export class LayerMap {
-  constructor(container, arch, { onHover, onClick, onLayer, onContext, onOpen, overlay } = {}) {
+  constructor(container, arch, { onHover, onClick, onLayer, onContext, onOpen, overlay, forceCoarse = false } = {}) {
     this.container = container;
     this.arch = arch;
     this.onHover = onHover || (() => {});
@@ -114,7 +129,10 @@ export class LayerMap {
     this.neuronAt = [];                // その逆: 格子の番号 → ニューロン
     this.linkEdges = null;             // 配線(§4.7)
     this.overlay = overlay || null;    // 層番号などの HTML を重ねる要素
-    this.specs = arch.layers.map((l) => sheetSpec(l, arch.grid_side));
+    const lay = coarseLayout(arch, forceCoarse);
+    this.coarse = lay.coarse;
+    this.gridSide = lay.gridSide;
+    this.specs = arch.layers.map((l) => sheetSpec(l, this.gridSide, this.coarse));
     this.front = null;                 // 層正面ビューの層
     this.structDim = 1;                // mixer の板の明るさ(overlay 中は下げる)
     this.badges = [];
@@ -180,18 +198,20 @@ export class LayerMap {
   // --- 点群 -------------------------------------------------------------------------------------------
   _buildPoints() {
     const specs = this.specs;
-    const counts = specs.map((s) => s.n + (s.shared ? s.shared.n : 0));
+    const drawn = (s) => (s.coarse ? s.nExpert : s.n);                 // coarse は専門家 1 つにつき 1 点
+    const counts = specs.map((s) => drawn(s) + (s.shared ? s.shared.n : 0));
     const total = counts.reduce((a, b) => a + b, 0);
     this.offsets = new Int32Array(specs.length + 1);
     for (let L = 0; L < specs.length; L++) this.offsets[L + 1] = this.offsets[L] + counts[L];
     const pos = new Float32Array(total * 3);
     const col = new Uint8Array(total * 4);            // RGBA8(RGB8 は D3D に頂点形式が無く遅い、F33)
     const lay = new Float32Array(total);
+    const scl = new Float32Array(total).fill(1);
     for (let L = 0; L < specs.length; L++) {
       const s = specs[L], x = sheetX(L);
       let p = this.offsets[L];
-      for (let c = 0; c < s.n; c++, p++) {
-        const [y, z] = cellYZ(s, c);
+      for (let c = 0; c < drawn(s); c++, p++) {
+        const [y, z] = cellYZ(s, s.coarse ? c * s.nPer : c);
         pos[3 * p] = x; pos[3 * p + 1] = y; pos[3 * p + 2] = z;
         lay[p] = L;
       }
@@ -200,10 +220,12 @@ export class LayerMap {
           const [y, z] = sharedYZ(s, k);
           pos[3 * p] = x; pos[3 * p + 1] = y; pos[3 * p + 2] = z;
           lay[p] = L;
+          if (s.coarse) scl[p] = (s.shared.ext / s.shared.side) / s.pitch;
         }
       }
     }
-    for (let i = 0; i < total; i++) col.set([...COLORS.idle, 0], 4 * i);
+    const idle = [...COLORS.idle, 0];
+    for (let i = 0; i < total; i++) { col[4 * i] = idle[0]; col[4 * i + 1] = idle[1]; col[4 * i + 2] = idle[2]; col[4 * i + 3] = 0; }
     const g = new THREE.InstancedBufferGeometry();
     g.setAttribute("position", new THREE.Float32BufferAttribute([-0.5, -0.5, 0, 0.5, -0.5, 0, 0.5, 0.5, 0, -0.5, 0.5, 0], 3));
     g.setIndex([0, 1, 2, 0, 2, 3]);
@@ -212,8 +234,9 @@ export class LayerMap {
     this.colorAttr.setUsage(THREE.DynamicDrawUsage);
     g.setAttribute("aColor", this.colorAttr);
     g.setAttribute("aLayer", new THREE.InstancedBufferAttribute(lay, 1));
+    g.setAttribute("aScale", new THREE.InstancedBufferAttribute(scl, 1));
     g.instanceCount = total;
-    const spacing = GEOM.S / this.arch.grid_side;
+    const spacing = GEOM.S / this.gridSide;
     this.uniforms = {
       uSize: { value: spacing * 0.9 }, uScale: { value: 1 }, uFocus: { value: 0 }, uFront: { value: 0 },
       uXray: { value: Math.max(4, specs.length / 3) },
@@ -279,6 +302,19 @@ export class LayerMap {
 
   // 層 L の色をまとめて書き換える(rgba: Uint8Array(n*4)、MoE は専門家の通し番号順。a は目立たせる度合い)
   setLayerColors(L, rgba) {
+    const s = this.specs[L];
+    const d = this._detail;
+    if (d && d.layer === L) {                       // 広げている専門家には、その専門家の分をそのまま
+      const a = d.color.array, from = 4 * d.expert * s.nPer;
+      a.set(rgba.subarray(from, from + a.length));
+      d.color.needsUpdate = true;
+    }
+    if (s.coarse) rgba = coarsen(rgba, s);
+    if (d && d.layer === L) {
+      d.saved = rgba.slice(0, 4 * s.nExpert);
+      rgba = rgba.slice();
+      rgba.fill(0, 0, 4 * s.nExpert);               // 広げている間、その層の専門家の点は隠す
+    }
     const o = this.offsets[L] * 4;
     const n = Math.min(rgba.length, (this.offsets[L + 1] - this.offsets[L]) * 4);
     this.colorAttr.array.set(rgba.subarray(0, n), o);
@@ -426,6 +462,15 @@ export class LayerMap {
   resetColors() {
     const a = this.colorAttr.array;
     for (let i = 0; i < this.nPoints; i++) a.set([...COLORS.idle, 0], 4 * i);
+    const dt = this._detail;
+    if (dt) {                                 // 広げている層の専門家の点は隠したまま。戻すときは何も光っていない
+      const o = this.offsets[dt.layer] * 4;
+      dt.saved = a.slice(o, o + 4 * dt.nExpert);
+      a.fill(0, o, o + 4 * dt.nExpert);
+      const c = dt.color.array;
+      for (let i = 0; i < c.length; i += 4) { c[i] = COLORS.idle[0]; c[i + 1] = COLORS.idle[1]; c[i + 2] = COLORS.idle[2]; c[i + 3] = 0; }
+      dt.color.needsUpdate = true;
+    }
     this.colorAttr.clearUpdateRanges();
     this.colorAttr.needsUpdate = true;
     this._fullUpload = true;                 // 次の描画で全体を送る
@@ -566,7 +611,7 @@ export class LayerMap {
     // 開いているニューロンの輪は、全体ビューとその層の正面ビューで出す。3D の線は全体ビューだけ(正面ビューは 2D の札と線)
     if (this._marker) this._marker.visible = !!this._markerAt && (front === null || front === this._markerAt[0]);
     if (this._links) this._links.visible = front === null;
-    for (const m of this._tileObjs || []) m.visible = front === null || m.userData.layer === front;
+    this._showTiles();
     this._overlayDirty = true;
   }
 
@@ -580,6 +625,7 @@ export class LayerMap {
 
   // 斜め手前・やや上から見て、層の列全体が画面の中央に収まる距離と位置を探す
   resetView() {
+    if (this._detail) this.setExpertDetail(null);
     const n = this.specs.length;
     const dir = new THREE.Vector3(-0.66, 0.40, 0.64).normalize();
     const corners = this._corners(0, n - 1);
@@ -631,6 +677,7 @@ export class LayerMap {
 
   frontView(L, { keepMarker = false } = {}) {
     const s = this.specs[L], ext = Math.max(s.ext, GEOM.S * 0.6);
+    if (this._detail && this._detail.layer !== L) this.setExpertDetail(null);
     this.front = L;
     this._userMoved = false;
     this.uniforms.uFront.value = 1;
@@ -649,6 +696,7 @@ export class LayerMap {
 
   focusNeuron(L, n) {
     this.frontView(L);
+    if (this.specs[L] && this.specs[L].coarse) this.setExpertDetail(L, Math.floor(n / this.specs[L].nPer));
     this.markNeuron(L, n);
   }
 
@@ -664,7 +712,8 @@ export class LayerMap {
       this._marker.rotation.y = -Math.PI / 2;
       this.scene.add(this._marker);
     }
-    const r = (GEOM.S / this.arch.grid_side) * 2.2;
+    const sp = this.specs[L], dt = this._detail && this._detail.layer === L ? this._detail : null;
+    const r = sp.coarse ? (dt ? dt.cell : sp.pitch) * 0.9 : (GEOM.S / this.gridSide) * 2.2;   // 1 点 = 1 専門家の地図は格子が粗いので、隣の点に掛からない大きさに
     this._marker.scale.set(r, r, r);
     this._marker.position.set(p[0] - 0.005, p[1], p[2]);
     this._marker.visible = true;
@@ -674,6 +723,11 @@ export class LayerMap {
   neuronPosition(L, n) {
     const s = this.specs[L];
     if (!s || n < 0 || n >= s.n) return null;
+    const dt = this._detail;
+    if (dt && dt.layer === L && Math.floor(n / s.nPer) === dt.expert) {       // 広げた専門家のニューロン
+      const k = n % s.nPer, row = Math.floor(k / dt.side), c = k % dt.side;
+      return [sheetX(L) - 0.002, GEOM.Y0 + s.ext - (row + 0.5) * dt.cell, -s.ext / 2 + (c + 0.5) * dt.cell];
+    }
     const cell = this.cellOf[L];
     const [y, z] = cellYZ(s, cell ? cell[n] : n);
     return [sheetX(L), y, z];
@@ -760,12 +814,23 @@ export class LayerMap {
       }
     } else {
       const s = this.specs[this.front];
-      if (s.kind === "moe") {                // 専門家のタイルの行の左に、その行の最初の専門家番号
+      const dt = this._detail && this._detail.layer === this.front ? this._detail : null;
+      if (dt) {                              // 広げた専門家の行の左に、その行の最初のニューロン番号
+        for (let row = 0; row * dt.side < s.nPer; row++) {
+          const p = this._toScreen(new THREE.Vector3(sheetX(this.front), GEOM.Y0 + s.ext - (row + 0.5) * dt.cell, -s.ext / 2 - s.ext * 0.04));
+          items.push({ x: p.x - r.left, y: p.y - r.top, text: `N${row * dt.side}`, cls: "ex" });
+        }
+      } else if (s.kind === "moe") {         // 専門家のタイルの行の左に、その行の最初の専門家番号
         for (let row = 0; row * s.g < s.nExpert; row++) {
           const [y, z] = cellYZ(s, row * s.g * s.nPer + Math.floor(s.tile / 2) * s.tile);
           const p = this._toScreen(new THREE.Vector3(sheetX(this.front), y, z - s.pitch * 0.5 - s.ext * 0.04));
           items.push({ x: p.x - r.left, y: p.y - r.top, text: `E${row * s.g}`, cls: "ex" });
         }
+      }
+      if (s.coarse && s.shared) {            // 共有の専門家の別枠の上に名前
+        const [y, z] = sharedYZ(s, Math.floor(s.shared.side / 2));
+        const p = this._toScreen(new THREE.Vector3(sheetX(this.front), y + s.shared.ext * 0.12, z));
+        items.push({ x: p.x - r.left, y: p.y - r.top, text: t("共有 {n}", { n: s.shared.n }), cls: "ax-end" });
       }
     }
     const marked = [];
@@ -1011,6 +1076,73 @@ export class LayerMap {
   }
 
   // レイと各層のシート平面 x = sheetX(L) の交点。シートの中ならセル → ニューロン。複数当たればカメラに近い層。
+  // coarse の層で専門家を 1 つ広げる: その層の専門家の点を隠し、シートの大きさでその専門家のニューロンを描く。null で戻す
+  setExpertDetail(L, e) {
+    const d = this._detail;
+    if (d) {
+      this.scene.remove(d.mesh);
+      d.mesh.geometry.dispose();
+      const o = this.offsets[d.layer] * 4, a = this.colorAttr.array;
+      if (d.saved) a.set(d.saved, o); else for (let i = 0; i < d.nExpert; i++) a.set([...COLORS.idle, 0], o + 4 * i);
+      this.colorAttr.addUpdateRange(o, 4 * d.nExpert);
+      this.colorAttr.needsUpdate = true;
+      this._detail = null;
+      this._overlayDirty = true;
+    }
+    const s = L === null || L === undefined ? null : this.specs[L];
+    if (!s || !s.coarse || !(e >= 0 && e < s.nExpert)) {
+      this._showTiles();
+      if (this._markerAt) this.markNeuron(...this._markerAt);       // 輪を専門家の点に戻す
+      return false;
+    }
+    const n = s.nPer, side = Math.ceil(Math.sqrt(n)), cell = s.ext / side, x = sheetX(L) - 0.002;
+    const pos = new Float32Array(n * 3), col = new Uint8Array(n * 4), lay = new Float32Array(n).fill(L);
+    const scl = new Float32Array(n).fill(cell / s.pitch);
+    for (let k = 0; k < n; k++) {
+      const row = Math.floor(k / side), c = k % side;
+      pos[3 * k] = x; pos[3 * k + 1] = GEOM.Y0 + s.ext - (row + 0.5) * cell; pos[3 * k + 2] = -s.ext / 2 + (c + 0.5) * cell;
+      col[4 * k] = COLORS.idle[0]; col[4 * k + 1] = COLORS.idle[1]; col[4 * k + 2] = COLORS.idle[2];
+    }
+    const g = new THREE.InstancedBufferGeometry();
+    g.setAttribute("position", this.points.geometry.getAttribute("position"));
+    g.setIndex(this.points.geometry.getIndex());
+    g.setAttribute("iPos", new THREE.InstancedBufferAttribute(pos, 3));
+    const color = new THREE.InstancedBufferAttribute(col, 4, true);
+    color.setUsage(THREE.DynamicDrawUsage);
+    g.setAttribute("aColor", color);
+    g.setAttribute("aLayer", new THREE.InstancedBufferAttribute(lay, 1));
+    g.setAttribute("aScale", new THREE.InstancedBufferAttribute(scl, 1));
+    g.instanceCount = n;
+    const mesh = new THREE.Mesh(g, this.material);
+    mesh.frustumCulled = false;
+    mesh.renderOrder = 3;
+    this.scene.add(mesh);
+    const o = this.offsets[L] * 4, a = this.colorAttr.array;
+    const saved = a.slice(o, o + 4 * s.nExpert);
+    a.fill(0, o, o + 4 * s.nExpert);
+    this.colorAttr.addUpdateRange(o, 4 * s.nExpert);
+    this.colorAttr.needsUpdate = true;
+    this._detail = { layer: L, expert: e, mesh, color, side, cell, saved, nExpert: s.nExpert };
+    this._overlayDirty = true;
+    this._showTiles();
+    if (this._markerAt) this.markNeuron(...this._markerAt);
+    return true;
+  }
+
+  _showTiles() {
+    const d = this._detail;
+    for (const m of this._tileObjs || []) m.visible = (this.front === null || m.userData.layer === this.front) && !(d && m.userData.layer === d.layer);
+  }
+
+  _detailHit(s, L, y, z) {
+    const d = this._detail;
+    if (!d || d.layer !== L) return null;
+    const u = (z + s.ext / 2) / s.ext, v = (GEOM.Y0 + s.ext - y) / s.ext;
+    if (u < 0 || u >= 1 || v < 0 || v >= 1) return -1;
+    const k = Math.floor(v * d.side) * d.side + Math.floor(u * d.side);
+    return k < s.nPer ? k : -1;
+  }
+
   _pick(m) {
     this._ray.setFromCamera(new THREE.Vector2(m.x, m.y), this.camera);
     const o = this._ray.ray.origin, d = this._ray.ray.direction;
@@ -1021,12 +1153,18 @@ export class LayerMap {
       const t = (sheetX(L) - o.x) / d.x;
       if (t <= 0 || (best && t >= best.t)) continue;
       const y = o.y + t * d.y, z = o.z + t * d.z, s = this.specs[L];
+      const k = this._detailHit(s, L, y, z);
+      if (k !== null && k >= 0) {                                            // 広げた専門家のニューロン
+        const e = this._detail.expert;
+        best = { layer: L, t, shared: false, px: m.px, py: m.py, expert: e, neuron: k, cell: e * s.nPer + k, coarse: false };
+        continue;
+      }
       let cell = yzCell(s, y, z), shared = false;
       if (cell < 0) { cell = sharedCell(s, y, z); shared = cell >= 0; }
       if (cell < 0) continue;
       const hit = { layer: L, t, shared, px: m.px, py: m.py };
       if (shared) hit.neuron = cell;
-      else if (s.kind === "moe") { hit.expert = Math.floor(cell / s.nPer); hit.neuron = cell % s.nPer; hit.cell = cell; }
+      else if (s.kind === "moe") { hit.expert = Math.floor(cell / s.nPer); hit.neuron = cell % s.nPer; hit.cell = cell; hit.coarse = !!s.coarse; }
       else {
         const inv = this.neuronAt[L];
         hit.neuron = inv ? inv[cell] : cell; hit.cell = cell;

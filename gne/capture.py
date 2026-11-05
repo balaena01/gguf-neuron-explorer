@@ -51,6 +51,9 @@ class Capture:
         self.duplicates: set[str] = set()   # 1 つのグラフに同名ノードが複数あった名前(先に来た方を採った)
         self._first: str | None = None      # いまのグラフの先頭ノードの名前
         self.skipped: dict[str, str] = {}   # F32 以外・非連続で回収できなかった名前 → 理由
+        # 残差が複数本の arch(qwen4exp の hyper-connections)では層の出力が l_last-L = [n_embd, hc, T]。
+        # 本数を入れると l_out-L という名前で流れの平均(n_tokens, n_embd)を返す。他のコードは今までどおり l_out-L を見ればよい
+        self.hc_streams = 0
         self._cb = C.ggml_backend_sched_eval_callback(self._on_tensor)  # 参照を保持(GC 対策)
 
     def install(self, cparams: C.llama_context_params) -> None:
@@ -83,6 +86,9 @@ class Capture:
                 out.setdefault(name, []).append(arr)
         return {k: (v[0] if len(v) == 1 else np.concatenate(v, axis=0)) for k, v in out.items()}
 
+    def _canon(self, name: str) -> str:
+        return "l_out-" + name[7:] if self.hc_streams and name.startswith("l_last-") else name
+
     def _ask(self, name: str) -> bool:
         if self._first is None:
             self._first = name
@@ -101,7 +107,7 @@ class Capture:
 
     def _on_tensor(self, t: int, ask: bool, _ud) -> bool:
         try:
-            name = libggml.ggml_get_name(t).decode("utf-8", "replace")
+            name = self._canon(libggml.ggml_get_name(t).decode("utf-8", "replace"))
             if ask:
                 return self._ask(name)
             if not self._wanted(name):
@@ -119,7 +125,10 @@ class Capture:
             buf = np.empty(nelem, dtype=np.int32 if name.split("-")[0] in INT_NAMES else np.float32)
             libggml.ggml_backend_tensor_get(t, buf.ctypes.data, 0, nbytes)   # GPU でもホストでも動く
             # ggml は ne0 が最内側: [ne0, ne1(, ...)] → numpy (nrows, ne0)
-            self._store(name, buf.reshape(nrows, nelem // nrows))
+            arr = buf.reshape(nrows, nelem // nrows)
+            if self.hc_streams and name.startswith("l_out-"):
+                arr = arr.reshape(nrows // self.hc_streams, self.hc_streams, -1).mean(axis=1)
+            self._store(name, arr)
             return True
         except Exception as e:  # noqa: BLE001  コールバック内の例外は C 側に投げられない
             self.skipped["<callback error>"] = repr(e)

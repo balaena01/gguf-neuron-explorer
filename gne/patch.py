@@ -183,6 +183,9 @@ class Patcher:
     """1 つの GGUF(元のファイル)のテンソルからパッチを作る。バイトは元のファイルから読む。"""
 
     def __init__(self, weights):
+        if weights.gguf.is_split:          # 書き換えるテンソルは 2 番目以降のファイルにあり、作業用コピーも 1 ファイルしか作らない
+            raise GneError("UNSUPPORTED_QUANT", f"{Path(weights.path).name} は分割 GGUF なのでスケールパッチを当てられません",
+                           "llama-gguf-split --merge で 1 つにするか、ニューロン単位の gain(LoRA)を使ってください")
         self.w = weights
         self.mm = np.memmap(weights.path, mode="r")
 

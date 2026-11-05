@@ -33,3 +33,10 @@
 - 言語の部分(本体)は gne で読めて、文章の押し方は今までと同じ。音声の出力は llama.cpp の `llama-tts`・`llama-server` が受け持つ(`-mm mmproj`)。
 - 押した結果を声にするには、レシピを `gne export-cvec` で control vector にして `--control-vector` で渡す。when は無い(全位置に足す)。
 - 読み上げの声の指定は、GGUF の `tokenizer.chat_template.tts` が決める。LFM3-Omni は female / male だけで、それ以外は female になる。言語の欄は知らない値をそのまま文に入れるので、声の様子を書き足して試せる(効きは弱い)。
+
+## 残差が複数本・分割 GGUF のモデル(qwen4exp、Qwen3.8-Flash-Next)
+
+- 手順は `docs/qwen4exp.md`。実物は最小 66 GB なので、手元では `tests/tools/make_tiny_qwen4exp.py` の小さい乱数のモデルで動作を確かめる。
+- 使えないもの: `add` と方向(`direction`)の足し算、`export-cvec`。グラフが control vector を読まないので、gne は止める。`gain`・射影(`proj`)・ablate の LoRA は動く。
+- 残差は 4 本の流れ。`l_out-L` は流れの平均で読む。
+- 分割 GGUF は 1 番目のファイルを渡す。焼き込み(bake)はできないので、LoRA を使うか `llama-gguf-split --merge` で 1 つにする。

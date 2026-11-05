@@ -14,16 +14,16 @@ from pathlib import Path
 
 import numpy as np
 from gguf import GGMLQuantizationType, GGUFReader
-from gguf import quants as gquants
 
-from .gguf_fast import FastGGUF
+from .gguf_fast import FastGGUF, first_shard
+from .quant import can_dequantize, dequantize
 
 _NATIVE_TYPES = {GGMLQuantizationType.F32, GGMLQuantizationType.F16}
 
 
 def dequantizable(qtype: GGMLQuantizationType) -> bool:
-    """gguf-py に Python 実装の dequantize がある型か(F32/F16 は numpy がそのまま扱う)。"""
-    return qtype in _NATIVE_TYPES or qtype in gquants._type_traits
+    """dequantize できる型か(F32/F16 は numpy がそのまま扱う。他は gguf-py か libggml)。"""
+    return qtype in _NATIVE_TYPES or can_dequantize(qtype)
 
 
 def tensor_to_f32(tensor) -> np.ndarray:
@@ -33,12 +33,12 @@ def tensor_to_f32(tensor) -> np.ndarray:
         return np.asarray(tensor.data, dtype=np.float32)
     if qtype == GGMLQuantizationType.F16:
         return np.asarray(tensor.data).astype(np.float32)
-    if qtype not in gquants._type_traits:
+    if not can_dequantize(qtype):
         raise NotImplementedError(
-            f"{tensor.name}: 量子化型 {qtype.name} は gguf-py で dequantize できません。"
+            f"{tensor.name}: 量子化型 {qtype.name} は dequantize できません。"
             " F16 / Q8_0 版の GGUF を用意してください。"
         )
-    return gquants.dequantize(tensor.data, qtype).astype(np.float32, copy=False)
+    return dequantize(tensor.data, qtype)
 
 
 EXPERT_CACHE_BYTES = 1 << 30           # 専門家ごとに dequantize した行列を覚えておく上限(CHANGE-05 §I)
@@ -57,9 +57,9 @@ def _slab_to_f32(tensor, e: int) -> np.ndarray:
         return part.astype(np.float32)
     if qtype == GGMLQuantizationType.F16:
         return part.astype(np.float32)
-    if qtype not in gquants._type_traits:
-        raise NotImplementedError(f"{tensor.name}: 量子化型 {qtype.name} は gguf-py で dequantize できません")
-    return gquants.dequantize(part, qtype).astype(np.float32, copy=False)
+    if not can_dequantize(qtype):
+        raise NotImplementedError(f"{tensor.name}: 量子化型 {qtype.name} は dequantize できません")
+    return dequantize(part, qtype)
 
 
 @dataclass
@@ -89,9 +89,9 @@ def _slug(s: str) -> str:
     return re.sub(r"[^a-z0-9.]+", "-", s.lower()).strip("-") or "model"
 
 
-def compute_model_id(path: Path, name: str) -> str:
-    """general.name + ファイルサイズ + 先頭 1MB の hash(§6.4)。"""
-    size = path.stat().st_size
+def compute_model_id(path: Path, name: str, size: int | None = None) -> str:
+    """general.name + ファイルサイズ + 先頭 1MB の hash(§6.4)。分割 GGUF は全ファイルの合計サイズ。"""
+    size = path.stat().st_size if size is None else size
     h = hashlib.sha256(str(size).encode())
     with open(path, "rb") as f:
         h.update(f.read(1 << 20))
@@ -100,7 +100,7 @@ def compute_model_id(path: Path, name: str) -> str:
 
 class Weights:
     def __init__(self, path: str | Path, *, cache_layers: int = 2):
-        self.path = Path(path)
+        self.path = first_shard(path)
         self.gguf = FastGGUF(self.path)
         self._reader: GGUFReader | None = None
         self._tensors = {t.name: t for t in self.gguf.tensors}
@@ -114,6 +114,8 @@ class Weights:
     @property
     def reader(self) -> GGUFReader:
         """gguf-py の GGUFReader(全フィールドを読む、遅い)。bake で全メタデータを写すときだけ使う。"""
+        if self.gguf.is_split:
+            raise NotImplementedError(f"{self.path.name} は分割 GGUF なので焼き込めません。LoRA を使うか、llama-gguf-split --merge で 1 つにしてください")
         if self._reader is None:
             self._reader = GGUFReader(self.path)
         return self._reader
@@ -129,6 +131,8 @@ class Weights:
         n_layer = int(self.field(f"{arch}.block_count"))
         n_embd = int(self.field(f"{arch}.embedding_length"))
         ff = self.field(f"{arch}.feed_forward_length")
+        if ff is None:                       # 全層 MoE で feed_forward_length を持たない arch(qwen4exp)
+            ff = self.field(f"{arch}.expert_feed_forward_length", 0)
         if isinstance(ff, list):
             n_ff_per_layer = [int(x) for x in ff]
             n_ff = n_ff_per_layer[0]
@@ -148,7 +152,7 @@ class Weights:
 
         return ModelMeta(
             path=self.path,
-            model_id=compute_model_id(self.path, name),
+            model_id=compute_model_id(self.path, name, self.gguf.n_bytes),
             name=name,
             arch=arch,
             n_layer=n_layer,
@@ -162,7 +166,7 @@ class Weights:
             tied_output="output.weight" not in self._tensors,
             chat_template=self.field("tokenizer.chat_template"),
             ffn_down_qtype=down0.tensor_type.name if down0 is not None else "missing",
-            file_size=self.path.stat().st_size,
+            file_size=self.gguf.n_bytes,
         )
 
     def has_tensor(self, name: str) -> bool:
@@ -184,6 +188,11 @@ class Weights:
                        "専門家が選ばれたときだけ効く本当のニューロン押しは gain(CHANGE-05 §C)")
         if m.ffn_down_scale:
             out.append("ffn_down.scale があります(BitNet 系): raw dose に係数 s を掛けます")
+        hc = int(self.field(f"{m.arch}.hyper_connection.count", 0) or 0)
+        if hc:
+            out.append(f"残差が {hc} 本の流れです(hyper-connections): 残差は流れの平均で読みます")
+        if m.arch == "qwen4exp":
+            out.append("qwen4exp のグラフは control vector を読みません: add と方向の押し方は使えません。gain・射影(proj)は LoRA で動きます")
         try:
             qtype = GGMLQuantizationType[m.ffn_down_qtype]
             if not dequantizable(qtype):
@@ -402,6 +411,11 @@ class Weights:
 
     def output_norm_weight(self) -> np.ndarray:
         """最終 RMSNorm の γ。Qwen3-Next/3.5・Gemma の「1 + w」は変換時に畳み込まれている(conversion/qwen.py, gemma.py)。"""
+        if not self.has_tensor("output_norm.weight") and self.has_tensor("output_hc_norm.weight"):
+            # 残差が複数本の arch(qwen4exp)は最後の混ぜ合わせが norm を兼ねる。流れごとの係数の平均で近似する(ゲートは入力に依るので入らない)
+            hc = int(self.field(f"{self.meta.arch}.hyper_connection.count"))
+            g = np.asarray(tensor_to_f32(self.tensor("output_hc_norm.weight")), dtype=np.float32).reshape(hc, -1)
+            return g.mean(axis=0)
         return np.asarray(tensor_to_f32(self.tensor("output_norm.weight")), dtype=np.float32).reshape(-1)
 
     def output_tensor_name(self) -> str:
@@ -419,7 +433,7 @@ class Weights:
             elif t.tensor_type == GGMLQuantizationType.F16:
                 rows = np.asarray(part).astype(np.float32)
             elif dequantizable(t.tensor_type):
-                rows = gquants.dequantize(np.asarray(part), t.tensor_type).astype(np.float32, copy=False)
+                rows = dequantize(np.asarray(part), t.tensor_type)
             else:
                 raise NotImplementedError(f"{t.name}: 量子化型 {t.tensor_type.name} は dequantize できません")
             yield i, rows
@@ -432,7 +446,7 @@ class Weights:
             return rows.astype(np.float32)
         if t.tensor_type == GGMLQuantizationType.F16:
             return rows.view(np.float16).astype(np.float32) if rows.dtype != np.float16 else rows.astype(np.float32)
-        return gquants.dequantize(rows, t.tensor_type).astype(np.float32, copy=False)
+        return dequantize(rows, t.tensor_type)
 
     def unit_direction(self, L: int, n: int) -> np.ndarray:
         col = self.down_column(L, n)

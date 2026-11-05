@@ -41,6 +41,9 @@ class LayerInfo:
     has_router_bias: bool = False
     routing: str = ""                # softmax_topk / sigmoid_topk / group_topk(MoE の層だけ)
     norm_topk: bool | None = None
+    # qwen4exp: 疎な attention(上位 top_k の位置だけを見る。0 = 全位置)と n-gram 埋め込みの層
+    sparse_top_k: int = 0
+    has_ple: bool = False
 
 
 @dataclass
@@ -51,6 +54,7 @@ class ArchInfo:
     n_vocab: int
     layers: list[LayerInfo]
     grid_side: int             # シートの一辺の最大(§4.1)
+    hc_streams: int = 0        # 残差の本数(hyper-connections。0 = ふつうの 1 本)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -91,6 +95,8 @@ def arch_info(weights) -> ArchInfo:
     head = get(f"{arch}.attention.head_count")
     head_kv = get(f"{arch}.attention.head_count_kv")
     layers = []
+    compress = get(f"{arch}.attention.compress_ratios")
+    top_k = int(get(f"{arch}.attention.indexer.top_k", 0) or 0)
     for L in range(m.n_layer):
         ts = by_layer.get(L, {})
         names = set(ts)
@@ -138,6 +144,7 @@ def arch_info(weights) -> ArchInfo:
         norm = get(f"{arch}.expert_weights_norm")
         layers.append(LayerInfo(L, mixer, nh, nkv, ffn, n_ff, n_exp, used, n_shexp,
                                 "post_ffw_norm.weight" in ts, hd, writer if wt is not None else None, outs,
-                                bias, routing, None if norm is None or not ffn.startswith("moe") else bool(norm)))
+                                bias, routing, None if norm is None or not ffn.startswith("moe") else bool(norm),
+                                top_k if mixer == "attention" and _per_layer(compress, L) else 0, has("ple_")))
     side = max([sheet_side(li) for li in layers] + [1])
-    return ArchInfo(arch, m.n_layer, m.n_embd, m.n_vocab, layers, side)
+    return ArchInfo(arch, m.n_layer, m.n_embd, m.n_vocab, layers, side, int(get(f"{arch}.hyper_connection.count", 0) or 0))

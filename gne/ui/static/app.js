@@ -74,7 +74,8 @@ function describeLayer(L) {
   const ffn = li.ffn === "dense" ? `MLP ${li.n_ff}` : li.ffn.startsWith("moe")
     ? `MoE ${li.n_expert}×${li.n_ff} (${t("使用 {n}", { n: li.n_expert_used })})${li.n_ff_shexp ? ` + shared ${li.n_ff_shexp}` : ""}` : t("FFN なし");
   const heads = li.n_head ? ` ${li.n_head}h${li.n_head_kv && li.n_head_kv !== li.n_head ? `/${li.n_head_kv}kv` : ""}` : "";
-  return `L${L} ${mixerLabel(li)}${heads} · ${ffn}`;
+  const extra = (li.sparse_top_k ? ` · ${t("疎 top {k}", { k: li.sparse_top_k })}` : "") + (li.has_ple ? ` · ${t("n-gram 埋め込み")}` : "");
+  return `L${L} ${mixerLabel(li)}${heads}${extra} · ${ffn}`;
 }
 
 // --- hover の吹き出し(§4.6): L N、名前、sweep の上位語、steer ±、logit ±、今の overlay の値 ---------------------
@@ -113,6 +114,10 @@ function headTooltipHTML(h) {
 // MoE の専門家のニューロン(CHANGE-05 G): L E N、名前、今の overlay の値(選択率・専門家の z・ほかは値)、fires で選ばれたか、レシピ
 function expertTooltipHTML(h) {
   const L = h.layer, li = state.arch.layers[L], flat = h.expert * li.n_ff + h.neuron, lines = [];
+  if (h.coarse) {                                    // 点は専門家。ニューロンは EXPERT パネルで見る
+    lines.push(`<span class="t-id">L${L} E${h.expert}</span><span class="t-name">${t("{n} ニューロン。クリックで EXPERT パネル", { n: li.n_ff })}</span>`);
+    return lines.join("<br>");
+  }
   const name = state.model ? (state.model.names || {})[`${L}:${flat}`] : null;
   lines.push(`<span class="t-id">L${L} E${h.expert} N${h.neuron}</span>${name ? `<span class="t-name">${esc(name)}</span>` : ""}`);
   if (!state.model) return lines.join("<br>");
@@ -264,8 +269,12 @@ function legend() {
   const st = state.model && state.arch.layers.some((li) => li.head_dim)
     ? t("各層 = 手前の板(mixer、上辺の刻み = ヘッド。マウスを当てると番号、クリックで HEAD パネル)+ 奥のシート(MLP の全ニューロン{moe})、下の線 = 残差", { moe })
     : t("各層 = 手前の板(mixer、上辺の刻みが head の数)+ 奥のシート(MLP の全ニューロン{moe})、下の線 = 残差", { moe });
+  const big = state.map && state.map.coarse ? `<div class="note st">${t("MoE は 1 トークンで一部の専門家だけが動くので、1 点 = 1 専門家で描いています。点をクリックすると中のニューロンが広がります。右の小さい四角は毎トークン動く共有の専門家です")}</div>` : "";
+  const dt = state.map && state.map._detail;
+  const back = dt ? `<div class="detail-row">${t("L{L} E{e} のニューロンを表示中", { L: dt.layer, e: dt.expert })} <button class="small" id="detail-back">${t("専門家の格子に戻す")}</button></div>` : "";
+  const streams = state.arch.hc_streams ? `<div class="note st">${t("残差は {n} 本の流れで、読むときはその平均を使います", { n: state.arch.hc_streams })}</div>` : "";
   $("#legend").innerHTML = `<div>${color}</div>${fh}${frame}<div>${parts.join("")}</div>${marks.length ? `<div>${marks.join("")}</div>` : ""}${links}` +
-    `<div class="note st">${st}</div>` +
+    back + big + streams + `<div class="note st">${st}</div>` +
     `<div class="note">${lay}</div>`;
 }
 
@@ -717,6 +726,11 @@ function openExpert({ layer, expert }) {
   state.expertFocus = { layer, expert };
   expandRight("expert");
   expertPanel.open({ layer, expert });
+  if (state.map.coarse) {                                                // 1 点 = 1 専門家の地図では、開いた専門家の中を広げる
+    state.map.frontView(layer);
+    state.map.setExpertDetail(layer, expert);
+    if (state.overlay.values.has(layer)) recolor();
+  }
   updateTileFrames();
   history.replaceState(null, "", `#L${layer}/E${expert}`);
   $("#jump").value = `L${layer} E${expert}`;
@@ -1046,6 +1060,8 @@ async function main() {
   } else {
     state.model = await getJSON("/api/model");
     state.arch = state.model.arch;
+    document.body.dataset.cvec = state.model.meta.cvec_supported === false ? "off" : "on";
+    document.body.dataset.split = state.model.meta.is_split ? "1" : "0";
     await refreshExperts();
     checkStale();
   }
@@ -1062,6 +1078,7 @@ async function main() {
         $("#jump").value = h.expert !== undefined ? `L${h.layer} E${h.expert} N${h.neuron}` : h.shared ? `L${h.layer} S N${h.neuron}` : `L${h.layer} N${h.neuron}`;
         return;
       }
+      if (h.coarse) { openExpert({ layer: h.layer, expert: h.expert }); return; }   // 点が専門家のとき
       if (h.expert !== undefined) { openNeuron({ layer: h.layer, n: h.cell }, { focus: false }); return; }   // MoE は通し番号で
       openNeuron({ layer: h.layer, n: h.neuron }, { focus: false });
     },
@@ -1071,8 +1088,15 @@ async function main() {
       if (state.model) computeMenu(ev, L, state.arch.layers[L], state.model.coverage[L], { onStart: startJob, arch: state.arch, model: state.model });
     },
     overlay: $("#overlay"),
+    forceCoarse: params.get("coarse") === "1",
   });
   state.initMs = performance.now() - t0;
+  $("#legend").addEventListener("click", (ev) => {                       // 広げた専門家を閉じて、専門家の格子に戻す
+    if (ev.target.id !== "detail-back") return;
+    state.map.setExpertDetail(null);
+    if (state.overlay.values.has(state.map.front)) recolor();
+    legend();
+  });
   rank = new RankList($("#rank"), { onOpen: (u) => openNeuron(u) });
   searchList = new SearchList($("#search-list"), { onOpen: (u) => openNeuron(u), onClose: () => { $("#search-q").value = ""; closeSearch(); } });
   if (state.model) {
