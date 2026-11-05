@@ -585,3 +585,16 @@ def test_writers_split_adds_up_to_the_gap(session, pipeline):
     assert any(abs(r["moe"]) > 0 for r in d["rows"]) and any(abs(r["shared"]) > 0 for r in d["rows"])
     assert set(d["experts"]) == {"5", "6"} and d["experts"]["6"][0]["diff"] >= d["experts"]["6"][-1]["diff"]
     assert "prompt" not in json.dumps(d)                     # 質問の文を残さない
+
+
+def test_allocate_leaves_out_heads_in_the_score_layers(session, pipeline, monkeypatch):
+    """物差しの層とそれより後のヘッドは、測る量を直接動かすだけなので、既定では配分の候補にしない。"""
+    import gne.causal as causal
+    session.heads_causal("tiny", layers=[0, 1, 5], score_layers=[5, 6], name="tiny_sl", b_examples=4)
+    seen = []
+    monkeypatch.setattr(causal, "allocate", lambda *a, **k: seen.append(k["candidates"]) or {})
+    kw = {"candidates": "tiny_sl", "target": -1.0, "score_layer": 6}
+    session.heads_allocate("tiny", **kw)
+    session.heads_allocate("tiny", include_score_layers=True, **kw)
+    out, inc = ({r["layer"] for r in rows if r.get("head") is not None} for rows in seen)
+    assert out == {0, 1} and inc == {0, 1, 5}

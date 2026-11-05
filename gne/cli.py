@@ -1743,7 +1743,9 @@ def heads_causal(c: Common, holder: dict,
                  out_name: Optional[str] = typer.Option(None, "--out-name", help="保存名(既定は方向の名前)"),
                  direction_layer: str = typer.Option("own", "--direction-layer", help="marginal の射影の方向: own(ヘッドの層)/ base(基準層)"),
                  sort: str = typer.Option("auto", "--sort", help="表の並び: auto(ablate は causal_max、marginal は eta)/ causal / contrib / ratio / eta"),
-                 show: int = typer.Option(30, "--show")):
+                 show: int = typer.Option(30, "--show"),
+                 max_examples: Optional[int] = typer.Option(None, "--max-examples", help="止めて測る質問の数(等間隔に間引く。既定は全部)"),
+                 include_score_layers: bool = typer.Option(False, "--include-score-layers", help="物差しの層とそれより後のヘッドも候補にする(既定は外す。測る量を直接動かすだけで、振る舞いは変わりにくい)")):
     """因果スクリーニング(CHANGE-06 C): ヘッドを止めた(ablate)/ 強めた(marginal)ときの、生成なしの点数の下がり方。
     各行に直接の寄与 contrib(r̂ᵀW[:, blk]·x の平均)と causal / contrib の比を並べる(1 より大きければ間接の経路、
     小さければ補い合い。物差しの層より後ろのヘッドは contrib が 0 なので causal_max で見る)。
@@ -1753,7 +1755,7 @@ def heads_causal(c: Common, holder: dict,
                        score_layers=_ints(score_layers), primary=primary, base_recipe=base_recipe, base_units=base_unit,
                        delta_s=delta_s, hard=hard, hard_subset=hard_subset, b_side_max=b_side_max, top_layers=top_layers,
                        positions=positions, subset=subset, b_examples=b_examples, name=out_name,
-                       direction_layer=direction_layer)
+                       direction_layer=direction_layer, max_examples=max_examples, include_score_layers=include_score_layers)
     P = d["primary"]
     lines = [f"{d['path']}({d['n_rows']} ヘッド、mode={mode}、物差し L{','.join(map(str, d['score_layers']))}(主 L{P})、"
              f"{d['seconds']:.0f} 秒)",
@@ -1839,7 +1841,8 @@ def heads_allocate(c: Common, holder: dict,
                    method: str = typer.Option("proportional", "--method", help="proportional(s ∝ η で全体を上げる)/ greedy(いちばん効くヘッドを 1 本ずつ上げる)"),
                    remain_threshold: float = typer.Option(0.0, "--remain-threshold", help="「残る」とみなす点数"),
                    direction_layer: str = typer.Option("own", "--direction-layer"),
-                   out_name: Optional[str] = typer.Option(None, "--out-name", help="保存名(既定は方向の名前)")):
+                   out_name: Optional[str] = typer.Option(None, "--out-name", help="保存名(既定は方向の名前)"),
+                   include_score_layers: bool = typer.Option(False, "--include-score-layers", help="物差しの層とそれより後のヘッドも候補にする(既定は外す。測る量を直接動かすだけで、振る舞いは変わりにくい)")):
     """効率ベースの強さ配分(CHANGE-06 D): 効きにくい例を選び、効率 η を測って s ∝ η で配り、全体の大きさを二分探索して、
     ヘッド数を変えた組の比較表を出す。残る件数と B 側のずれが同程度なら、ヘッド数が最小の組を推す。"""
     s = holder["session"] = c.session()
@@ -1847,7 +1850,8 @@ def heads_allocate(c: Common, holder: dict,
                          n_heads=_ints(n_heads) or [6, 5, 4], hard=hard, hard_subset=hard_subset,
                          proportional_to=proportional_to, from_zero=from_zero, b_side_max=b_side_max,
                          base_recipe=base_recipe, delta_s=delta_s, pool=pool, s_max=s_max, method=method,
-                         remain_threshold=remain_threshold, direction_layer=direction_layer, name=out_name)
+                         remain_threshold=remain_threshold, direction_layer=direction_layer, name=out_name,
+                         include_score_layers=include_score_layers)
     lines = [f"{d['path']}(L{d['score_layer']}、目標 {d['target']:g}、A {d['n_a']} 例・効きにくい例 {d['hard']['n']}、"
              f"無介入 A {d['base_a_mean']:.2f} / B {d['base_b_mean']:.2f}、{d['seconds']:.0f} 秒)",
              f"  {'数':>3} {'最大s':>6} {'残る':>5} {'A最大':>7} {'B直交':>7} {'B変化':>7} {'秒':>5}  組"]
@@ -1937,13 +1941,15 @@ def heads_pipeline(c: Common, holder: dict,
                    max_examples: Optional[int] = typer.Option(None, "--max-examples", help="止めて測る段階で使う質問の数(既定 64、等間隔に間引く)"),
                    positions: Optional[str] = typer.Option(None, "--positions", help="方向を作る位置: last(既定)/ response など"),
                    top_layers: Optional[int] = typer.Option(None, "--top-layers"), hard: Optional[int] = typer.Option(None, "--hard"),
+                   include_score_layers: bool = typer.Option(False, "--include-score-layers", help="物差しの層とそれより後のヘッドも候補にする(既定は外す。測る量を直接動かすだけで、振る舞いは変わりにくい)"),
                    fresh: bool = typer.Option(False, "--fresh", help="作り済みの方向と因果の結果を使い回さず、最初から作り直す"),
                    yes: bool = _YES):
     """対照集合から、方向づくり → 基準層 → 因果スクリーニング(層ごと → ヘッド 1 個ずつ止める)→ 強さの配分(効き目に比例した
     最初の組を二分探索 → 点数が残りやすい質問で効率を測って 0 から配り直す → ヘッド数を変えた組の比較)を 1 回で回す。"""
     s = holder["session"] = c.session()
     over = {"target": target, "n_heads": _ints(n_heads), "max_examples": max_examples, "positions": positions,
-            "top_layers": top_layers, "hard": hard, "resume": False if fresh else None}
+            "top_layers": top_layers, "hard": hard, "resume": False if fresh else None,
+            "include_score_layers": True if include_score_layers else None}
     _gate(s, "head_pipeline", {"spec": str(spec), **{k: v for k, v in over.items() if v is not None}}, yes, None)
     d = s.heads_pipeline(spec, **over)
     sc, ca, al = d["score"], d["causal"], d["allocate"]

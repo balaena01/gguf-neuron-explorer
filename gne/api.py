@@ -1604,7 +1604,7 @@ class Session:
                      hard: int = 16, hard_subset: str | list[int] | None = None, b_side_max: float | None = None,
                      top_layers: int = 4, positions: str = "last", subset: str = "all", b_examples: int = 16,
                      name: str | None = None, direction_layer: str = "own", max_examples: int | None = None,
-                     drift_max: float | None = 0.5) -> dict:
+                     drift_max: float | None = 0.5, include_score_layers: bool = False) -> dict:
         """CHANGE-06 C: 因果スクリーニング。ablate は層単位(layers="auto" のとき)→ 下がり方の大きい top_layers 層のヘッドを
         1 個ずつ止める。marginal は base_recipe / base_units の組から s を delta_s 上げたときの効きにくい例での効率 η。
         結果は <root>/heads/<model_id>/<name>.causal.jsonl(と .causal.json)。"""
@@ -1630,7 +1630,14 @@ class Session:
                 for r in layer_rows:
                     if drift_max is not None and (r.get("drift_orth_b") or 0) > drift_max:
                         r["excluded"] = "breaks"
-                pos = sorted((r for r in layer_rows if r["causal_max"] > 0 and not r.get("excluded")), key=lambda r: -r["causal_max"])
+                # 物差しの層とそれより後の層のヘッドは、測る量を直接動かすので効率が高く見えるが、振る舞いはほとんど変わらなかった
+                # (docs/head-component-steering.md)。既定では 1 個ずつ測る層から外す
+                first = min(st.score_layers)
+                ok = [r for r in layer_rows if r["causal_max"] > 0 and not r.get("excluded")]
+                early = [r for r in ok if r["layer"] < first]
+                if not include_score_layers and not early and ok:
+                    self.warn(f"物差しの層 L{first} より前に、止めて点数が下がる層がないので、物差しの層のヘッドも測ります")
+                pos = sorted(ok if include_score_layers or not early else early, key=lambda r: -r["causal_max"])
                 Ls = sorted(r["layer"] for r in pos[:max(1, top_layers)])
             elif layers in ("auto", "all", None):
                 Ls = head_layers(self, max(st.score_layers))
@@ -1704,7 +1711,7 @@ class Session:
                        b_side_max: float | None = None, base_recipe: str | Path | None = None, delta_s: float = 3.0,
                        pool: int = 30, s_max: float | None = None, remain_threshold: float = 0.0, positions: str | None = None,
                        subset: str | None = None, direction_layer: str = "own", name: str | None = None,
-                       max_examples: int | None = None, method: str = "proportional") -> dict:
+                       max_examples: int | None = None, method: str = "proportional", include_score_layers: bool = False) -> dict:
         """CHANGE-06 D: 効率ベースの強さ配分。candidates は heads causal の結果(名前か .causal.jsonl のパス、既定は方向の名前)。
         method は proportional(s ∝ η で全体を二分探索、s_max の既定 30)か greedy(1 本ずつ上げる、s_max の既定はなし)。"""
         from .causal import allocate, causal_paths, load_causal
@@ -1718,6 +1725,14 @@ class Session:
         if score_layer is None:
             sl = summ.get("score_layers") or []
             score_layer = int(sl[-1]) if sl else int(summ.get("primary") or 0)
+        if not include_score_layers:              # 物差しの層とそれより後のヘッドは候補にしない(heads_causal と同じ理由)
+            first = min([int(x) for x in summ.get("score_layers") or []] + [int(score_layer)])
+            kept = [r for r in rows if r.get("head") is None or int(r["layer"]) < first]
+            if any(r.get("head") is not None for r in kept):
+                rows = kept
+            else:
+                self.warn(f"物差しの層 L{first} より前のヘッドが候補にないので、物差しの層のヘッドも使います"
+                          "(heads causal を前の層で測ると外せます)")
         base = proj_heads(Recipe.load(self.recipe_path(base_recipe))) if base_recipe else None
         return allocate(self, ds, cs, candidates=rows, target=float(target), score_layer=int(score_layer),
                         hard_subset=hard_subset, n_heads=tuple(n_heads), proportional_to=proportional_to,
@@ -1729,7 +1744,8 @@ class Session:
                         progress=self.progress)
 
     PIPELINE_DEFAULTS = {"positions": "last", "score_positions": "last", "target": None, "n_heads": [6, 5, 4], "hard": 16,
-                         "top_layers": 4, "max_examples": 64, "s_max": 30.0, "direction_layer": "own", "resume": True}
+                         "top_layers": 4, "max_examples": 64, "s_max": 30.0, "direction_layer": "own", "resume": True,
+                         "include_score_layers": False}
 
     def heads_pipeline(self, spec: dict | str | Path, **over) -> dict:
         """対照集合(JSON か YAML、または dict)から、方向づくり → 基準層 → 因果スクリーニング → 強さの配分 を 1 回で回す。
@@ -1809,7 +1825,8 @@ class Session:
             reused.append("causal")
         else:
             c = self.heads_causal(name, contrast=path, mode="ablate", layers="auto", top_layers=int(pipe["top_layers"]),
-                                  positions=sp, max_examples=mx, direction_layer=pipe["direction_layer"])
+                                  positions=sp, max_examples=mx, direction_layer=pipe["direction_layer"],
+                                  include_score_layers=bool(pipe["include_score_layers"]))
         out["causal"] = {"reused": "causal" in reused, "path": c["path"], "score_layers": c["score_layers"], "primary": c["primary"],
                          "base_scores": c["base_scores"], "n_rows": c["n_rows"], "n_a": c["n_a"], "n_b": c["n_b"],
                          "layers": c.get("layers"), "measured_layers": sorted({r["layer"] for r in c["rows"]}),
@@ -1819,7 +1836,8 @@ class Session:
         tgt, tgt_from = self._pipeline_target(pipe["target"], bs)
         a = self.heads_allocate(name, contrast=path, target=float(tgt), score_layer=S, n_heads=tuple(int(x) for x in pipe["n_heads"]),
                                 hard=int(pipe["hard"]), s_max=float(pipe["s_max"]), positions=sp,
-                                direction_layer=pipe["direction_layer"], max_examples=mx, remain_threshold=float(tgt))
+                                direction_layer=pipe["direction_layer"], max_examples=mx, remain_threshold=float(tgt),
+                                include_score_layers=bool(pipe["include_score_layers"]))
         out["allocate"] = a
         out["reused"] = reused
         out["target"], out["target_from"] = float(tgt), tgt_from
