@@ -46,13 +46,17 @@ def run_bench(engine: Engine, *, layer: int | None = None, reps: int = 10, gen_t
         v = rng.standard_normal(e.n_embd).astype(np.float32)
         return {L: v * (10.0 / np.linalg.norm(v))}
 
+    def set_vec(**kw) -> None:                # control vector を読まない arch(qwen4exp)では、set の分を 0 として prefill だけ測る
+        if e.cvec_supported:
+            e.set_cvec(ctx, vec(), **kw)
+
     def prefill() -> float:
         e.clear_memory(ctx)
         t = time.perf_counter()
         e.prefill(ctx, seqs)
         return time.perf_counter() - t
 
-    e.set_cvec(ctx, vec())
+    set_vec()
     for _ in range(3):
         prefill()
 
@@ -61,14 +65,14 @@ def run_bench(engine: Engine, *, layer: int | None = None, reps: int = 10, gen_t
     t_set, t_after = [], []
     for _ in range(reps):
         t = time.perf_counter()
-        e.set_cvec(ctx, vec())
+        set_vec()
         t_set.append(time.perf_counter() - t)
         t_after.append(prefill())
 
     t_set_fixed, t_after_fixed = [], []
     for _ in range(reps):
         t = time.perf_counter()
-        e.set_cvec(ctx, vec(), layer_range=(1, e.n_layer - 1))
+        set_vec(layer_range=(1, e.n_layer - 1))
         t_set_fixed.append(time.perf_counter() - t)
         t_after_fixed.append(prefill())
 

@@ -1580,6 +1580,23 @@ class Session:
             d["base_layer"], d["base_recorded"], d["base_manual"] = int(set_base), True, True
         return {"contrast": str(ds.meta.get("source") if contrast is None else contrast), **d}
 
+    def heads_writers(self, direction: str, *, contrast: str | Path | None = None, ref_layer: int | None = None,
+                      expert_layers: list[int] | None = None, max_examples: int | None = 64, positions: str = "last",
+                      name: str | None = None, top: int = 12) -> dict:
+        """方向の A − B の差を、層ごとに attention・専門家・共有の専門家の書き込みに分ける(components.py)。質問の文は保存しない。"""
+        from .components import component_writes
+        ds, cs, _ = self._direction_contrast(direction, contrast)
+        name = name or ds.name
+        if not re.fullmatch(r"[\w.\-]+", name):
+            raise GneError("BAD_ARGS", f"名前 {name!r} は英数字・_・-・. だけにしてください")
+        self.engine.free_steer()
+        d = component_writes(self, ds, cs, ref_layer=ref_layer, positions=positions, max_examples=max_examples,
+                             expert_layers=expert_layers, top=top, progress=self.progress)
+        out = self.store.heads_dir(self.meta.model_id) / f"{name}.writers.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(d, ensure_ascii=False, indent=1), encoding="utf-8")
+        return {**d, "name": name, "path": str(out)}
+
     def heads_causal(self, direction: str, *, contrast: str | Path | None = None, mode: str = "ablate",
                      layers: str | list[int] | None = "auto", candidates: str | list | None = None,
                      score_layers: list[int] | None = None, primary: int | None = None,

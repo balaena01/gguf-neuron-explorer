@@ -37,6 +37,8 @@ app.add_typer(experts_app, name="experts")
 # gne direction(方向を作る)は、サブコマンドが無ければ従来どおり動くグループ。gne direction score は速い物差し(CHANGE-06 B)
 direction_app = typer.Typer(no_args_is_help=False, invoke_without_command=True)
 app.add_typer(direction_app, name="direction")
+from .modal_cli import modal_app  # noqa: E402
+app.add_typer(modal_app, name="modal")
 headproj_app = typer.Typer(no_args_is_help=True, help="ヘッドの方向成分の射影(mode: proj)の書き出し(CHANGE-06 E)")
 app.add_typer(headproj_app, name="headproj")
 
@@ -1789,6 +1791,33 @@ def _allocate_note(r: dict, d: dict) -> list[str]:
            "no_gain": "どのヘッドを上げても点数が下がらないので止めました", "s_max": "全部のヘッドが s の上限に当たりました",
            "steps": "上げる回数の上限に達しました"}
     return [f"      {why[stop]}"] if stop in why else []
+
+
+@gne_command(heads_app, "writers", "heads writers")
+def heads_writers(c: Common, holder: dict,
+                  name: str = typer.Option(..., "--name", help="方向の名前"),
+                  contrast: Optional[Path] = typer.Option(None, "--contrast", help="対照集合(既定は方向を作った対照集合)"),
+                  ref_layer: Optional[int] = typer.Option(None, "--ref-layer", help="寄与を測る方向の層(既定は基準層)"),
+                  expert_layers: Optional[str] = typer.Option(None, "--expert-layers", help="専門家ごとにも分ける層(例 36,42-46)"),
+                  max_examples: int = typer.Option(64, "--max-examples", help="使う質問の数(等間隔に間引く)"),
+                  top: int = typer.Option(12, "--top", help="層ごとに出す専門家の数"),
+                  out_name: Optional[str] = typer.Option(None, "--out-name", help="保存名(既定は方向の名前)")):
+    """方向の差を、層ごとに attention・専門家・共有の専門家の書き込みに分ける。どこを探すかを決めるために使う。"""
+    s = holder["session"] = c.session()
+    d = s.heads_writers(name, contrast=contrast, ref_layer=ref_layer, expert_layers=parse_layers(expert_layers) if expert_layers else None,
+                        max_examples=max_examples, name=out_name, top=top)
+    gap = d["gap"] or 1.0
+    t = d["totals"]
+    lines = [f"{d['path']}(L{d['ref_layer']} の方向、A {d['n']['A']} 問・B {d['n']['B']} 問、{d['positions']}、A−B の差 {d['gap']:.2f}、"
+             f"足し合わせの誤差 {d['sum_error'] * 100:.1f}%)",
+             f"合計: attention {t['attention'] / gap:+.0%}・専門家 {t['moe'] / gap:+.0%}・共有 {t['shared'] / gap:+.0%}",
+             f"{'層':>4} {'種類':<8} {'attention':>10} {'専門家':>8} {'共有':>8}"]
+    for r in d["rows"]:
+        if max(abs(r["attention"]), abs(r["moe"]), abs(r["shared"])) >= 0.02 * abs(gap):
+            lines.append(f"{r['layer']:>4} {r['kind']:<8} {r['attention']:>+10.2f} {r['moe']:>+8.2f} {r['shared']:>+8.2f}")
+    for L, rows in d["experts"].items():
+        lines.append(f"L{L} の専門家(差の大きい順): " + " ".join(f"E{x['expert']}({x['diff']:+.2f}、A {x['rate_a']:.0%}/B {x['rate_b']:.0%})" for x in rows))
+    return d, "\n".join(lines), 0
 
 
 @gne_command(heads_app, "allocate", "heads allocate")

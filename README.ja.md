@@ -60,7 +60,7 @@ llama-cpp-python 経由で llama.cpp の上で動くので、手元の量子化�
 - RTX 3080 12 GB、WSL2、CUDA 12.4、Python 3.12、ソースからビルドした llama-cpp-python 0.3.36。
 - モデル: Qwen3-0.6B、Qwen3.5-4B（線形注意との混合）、SmolLM2-135M-Instruct（arch `llama`）。どれも Q8_0。
 - Metal では試していません。
-- MoE モデルはまだ対象外です。Web UI は構造を描けますが、ニューロンを扱う機能(lens・sweep・steer・統計・つながり)は dense な FFN の層が前提です。MoE にもできるところまで対応する予定です(まず専門家のニューロンの logit lens・steer・sweep・control vector の書き出しから)。
+- MoE モデル: granite-3.1-1b-a400m と LFM2-8B-A1B。[MoE(専門家を選ぶモデル)](#moe専門家を選ぶモデル)を見てください。
 - 初めて使うモデルでは、まず `gne verify` で確かめてください。
 
 ## インストール
@@ -272,6 +272,19 @@ gne fieldtest -m baked.gguf --against original.gguf --bench gsm8k,mmlu_pro,math5
 - 人格は保たれ、変わるのは作り話の細部だけです(Q8_0 では「Extrali … Xeno-888」)。
 - 2 ビットでは押せる強さの幅が狭くなります。+1.0 で日本語の答えが崩れました。
 - Q3_K_M はこの層の `ffn_down` を Q4_K で持っているので、列が Q4_K_M と同じになります。
+
+### 手元の GPU に載らないモデル: Modal
+
+`gne modal` は、gne のコマンドを [Modal](https://modal.com/) の GPU で実行します。重みは Modal の Volume に直接落とすので手元のディスクを使わず、課金はコマンドが動いている間だけです。
+
+```bash
+gne modal fetch unsloth/Qwen3.8-Flash-Next-GGUF --include '*UD-IQ1_S*'
+gne modal put spec.json
+gne modal run -- heads pipeline --spec /data/inputs/spec.json -m /models/.../....gguf --yes
+gne modal get gne/<model_id> ./results
+```
+
+Modal に上がるのは、git で追跡している `gne/` と `configs/`、`gne modal put` で名指ししたファイルだけです。詳しくは [docs/modal.md](docs/modal.md) を見てください。実物の重みではまだ動かしていません。
 
 ## Web UI
 

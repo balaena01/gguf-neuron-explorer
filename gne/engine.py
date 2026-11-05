@@ -206,7 +206,7 @@ class Engine:
         self.n_batch = n_batch
         self.probe_ubatch = probe_ubatch
         self.kv_unified = kv_unified
-        self.n_threads = n_threads or max(1, (os.cpu_count() or 2) // 2)
+        self.n_threads = n_threads or int(os.environ.get("GNE_THREADS") or 0) or max(1, (os.cpu_count() or 2) // 2)
         self.n_gpu_layers = n_gpu_layers
         self.chat_template = self.meta_str("tokenizer.chat_template")
         self.arch = self.meta_str("general.architecture") or ""

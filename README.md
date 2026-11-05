@@ -56,7 +56,7 @@ Tested on:
 - RTX 3080 12 GB under WSL2, CUDA 12.4, Python 3.12, llama-cpp-python 0.3.36 built from source.
 - Models: Qwen3-0.6B, Qwen3.5-4B (hybrid linear attention) and SmolLM2-135M-Instruct (arch `llama`), all Q8_0.
 - Metal has not been tested.
-- MoE models are not supported yet. The web UI draws their structure, but the neuron tools (lenses, sweep, steer, stats, connections) need dense FFN layers. MoE support is planned as far as it can reasonably go, starting with logit lens, steer, sweep and control-vector export for expert neurons.
+- MoE models: granite-3.1-1b-a400m and LFM2-8B-A1B. See [Mixture of Experts](#mixture-of-experts).
 - On a model you have not used before, run `gne verify` first.
 
 ## Install
@@ -265,6 +265,19 @@ A neuron found on one quant carries over to other quants of the same model. Chec
 - The persona stays; only the made-up details change (Q8_0 says "Extrali … Xeno-888").
 - At 2 bits the usable dose range narrows: +1.0 already breaks the Japanese answer.
 - Q3_K_M stores this layer's `ffn_down` as Q4_K, which is why its column matches Q4_K_M.
+
+### Models too big for your GPU: Modal
+
+`gne modal` runs any `gne` command on a [Modal](https://modal.com/) GPU. Weights go straight to a Modal Volume, so they never touch your disk, and you pay only while the command runs.
+
+```bash
+gne modal fetch unsloth/Qwen3.8-Flash-Next-GGUF --include '*UD-IQ1_S*'
+gne modal put spec.json
+gne modal run -- heads pipeline --spec /data/inputs/spec.json -m /models/.../....gguf --yes
+gne modal get gne/<model_id> ./results
+```
+
+Only git-tracked files in `gne/` and `configs/`, plus what you name in `gne modal put`, are uploaded. See [docs/modal.md](docs/modal.md) (Japanese). This has not run on real weights yet.
 
 ## Web UI
 

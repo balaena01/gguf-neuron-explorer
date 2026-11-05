@@ -568,3 +568,20 @@ def test_head_projection_moves_every_stream_only_along_the_direction(session, pi
     along = d @ r
     assert np.linalg.norm(d) > 0 and (np.abs(along).sum(axis=0) > 0).all()    # どの流れも動く
     assert np.linalg.norm(d - along[..., None] * r) < 1e-3 * np.linalg.norm(d)
+
+
+def test_bench_works_without_control_vectors(session):
+    """gne bench の実測が見積もりの元になるので、control vector を読まない arch でも測れる。"""
+    from gne.bench import run_bench
+    r = run_bench(session.engine, layer=2, reps=2, gen_tokens=4)
+    assert r["set_plus_prefill_ms"] > 0 and r["gen"]["single"]["tok_per_s"] > 0
+
+
+def test_writers_split_adds_up_to_the_gap(session, pipeline):
+    """attention・専門家・共有の専門家の書き込みの差を足すと、参照の層の A − B の差になる。"""
+    d = session.heads_writers("tiny", ref_layer=6, expert_layers=[5, 6], max_examples=8)
+    assert d["sum_error"] < 1e-3, d
+    assert [r["layer"] for r in d["rows"]] == list(range(7))
+    assert any(abs(r["moe"]) > 0 for r in d["rows"]) and any(abs(r["shared"]) > 0 for r in d["rows"])
+    assert set(d["experts"]) == {"5", "6"} and d["experts"]["6"][0]["diff"] >= d["experts"]["6"][-1]["diff"]
+    assert "prompt" not in json.dumps(d)                     # 質問の文を残さない

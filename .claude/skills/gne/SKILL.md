@@ -61,6 +61,7 @@ dose は既定で rel(その層の残差の大きさに対する比)。0.5 で�
 | 書き出す | `export-cvec`・`gain`・`headproj export`・`bake` | `export_cvec`・`gain_export`・`headproj_export`・`bake` | llama.cpp の `--control-vector`・`--lora` |
 | 人と一緒に見る | `serve` | `ui_highlight`・`ui_note`・`ui_open` | 127.0.0.1 だけで待ち受ける |
 | 他のアプリから使う | `serve --openai` | — | `extra_body={"gne": {"recipe": ..., "when": ...}}` |
+| 手元に載らないモデル | `modal fetch`・`modal run -- <コマンド>` | — | 課金は動いている間だけ。`docs/modal.md` |
 
 性格づくりの補助スクリプトは `examples/persona_neurons/`(lexsearch・screen・tune・compare)。強さを会話の途中で変える例は `examples/strength/`。
 

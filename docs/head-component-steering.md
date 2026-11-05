@@ -315,6 +315,7 @@ A 側と B 側のそれぞれで点数を出す。生成しないので 1 条件
 | 3.2 方向を測る | `gne direction --contrast <対照集合>`(`direction`) | なし(`--positions response` は返事を作る) |
 | 3.2 基準層・後段の層とのコサイン、3.3 速い物差し | `gne direction score --name <方向>`(`direction_score`) | なし |
 | 3.4 因果で絞る | `gne heads causal --name <方向>`(層単位 → ヘッド単位、`heads_causal`) | なし |
+| どこを探すかを決める(方向の差を attention・専門家・共有の専門家に分ける) | `gne heads writers --name <方向>`(`--expert-layers` で専門家ごとにも) | なし |
 | 3.5〜3.6 組を作り、効率で配り直す・ヘッド数を減らす | `gne heads allocate --name <方向> --target <点数>`(`heads_allocate`)。比を固定しないなら `--method greedy` | なし |
 | 3.2〜3.6 をまとめて回す | `gne heads pipeline --spec <JSON>`(`heads_pipeline`、UI の direction ビューで JSON を読み込んでも回せる。用途別のひな形は `configs/pipeline/`) | なし |
 | 組で消し切れない質問から、足すヘッドを探す | `gne heads refine --name <配分> --n-heads N`(`heads_refine`、UI の比較表の「残りから追加」)。残りの質問を A、元の B を B にし、両側に組を当てたまま方向を作り直して一括に流し、元の組と合わせたレシピを作って測り直す | なし |

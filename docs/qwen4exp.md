@@ -42,7 +42,7 @@ L1 の n-gram の書き込みは、norm と畳み込みを通るので、射影�
 ```
 gne info -m Qwen3.8-Flash-Next-UD-IQ1_S-00001-of-00003.gguf
 gne verify -m ...-00001-of-00003.gguf --layer 2
-gne steer -m ...-00001-of-00003.gguf -p "Who are you?"
+gne steer -m ...-00001-of-00003.gguf --unit 24:H0:x0 --compare -p "Who are you?"
 gne heads pipeline --spec configs/pipeline/two_personas.json -m ...-00001-of-00003.gguf
 gne serve -m ...-00001-of-00003.gguf
 ```
