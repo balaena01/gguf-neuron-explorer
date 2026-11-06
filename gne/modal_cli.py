@@ -257,6 +257,7 @@ def hf_upload(paths: list[str] = typer.Argument(..., help="Volume の上のフ�
               repo: str = typer.Option(..., "--repo", help="Hugging Face のリポジトリ(例 user/name)"),
               public: bool = typer.Option(False, "--public", help="公開リポジトリにする(既定は非公開)"),
               card: Optional[Path] = typer.Option(None, "--card", exists=True, help="モデルカード(README.md として上げる)"),
+              remove: Optional[list[str]] = typer.Option(None, "--remove", help="リポジトリから消すファイル(名前を変えたときの古いファイルなど)"),
               dry_run: bool = typer.Option(False, "--dry-run", help="実行する modal コマンドを出すだけ")):
     """Volume の上のファイルを、手元を通さず Hugging Face に上げる。トークンは Modal のシークレット huggingface(HF_TOKEN)から読む
     (modal secret create huggingface HF_TOKEN=<トークン>)。上げたものは外から見えるので、名前とモデルカードを確かめてから使う。"""
@@ -265,6 +266,8 @@ def hf_upload(paths: list[str] = typer.Argument(..., help="Volume の上のフ�
         args += ["--no-private"]
     if card:
         args += ["--card-path", str(card.resolve())]
+    if remove:
+        args += ["--remove-json", json.dumps(list(remove))]
     _call(args, dry_run)
 
 

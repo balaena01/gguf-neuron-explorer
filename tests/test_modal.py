@@ -138,6 +138,8 @@ def test_hf_upload_is_private_unless_asked(fake_modal, tmp_path):
     assert c1[:2] == ["run", f"{UPLOAD_FILE}::main"] and json.loads(_opt(c1, "--paths-json")) == ["export/a.gguf", "export/b.gguf"]
     assert "--no-private" not in c1 and _opt(c1, "--card-path") == str(card.resolve())
     assert "--no-private" in c2
+    assert runner.invoke(modal_app, ["hf-upload", "--repo", "me/x", "export/new.gguf", "--remove", "old.gguf"]).exit_code == 0
+    assert json.loads(_opt(fake_modal()[-1], "--remove-json")) == ["old.gguf"]
 
 
 def test_missing_modal_command_says_how_to_install(monkeypatch):

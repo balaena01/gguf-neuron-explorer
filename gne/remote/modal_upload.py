@@ -17,7 +17,7 @@ image = modal.Image.debian_slim(python_version="3.12").uv_pip_install("huggingfa
 
 @app.function(image=image, cpu=4, memory=8192, timeout=6 * 3600, volumes={DATA: data.read_only()},
               secrets=[modal.Secret.from_name("huggingface")])
-def upload(repo: str, paths: list[str], private: bool, card: str = "") -> list[str]:
+def upload(repo: str, paths: list[str], private: bool, card: str = "", remove: list[str] | None = None) -> list[str]:
     from huggingface_hub import HfApi
     api = HfApi(token=os.environ["HF_TOKEN"])
     api.create_repo(repo, private=private, exist_ok=True, repo_type="model")
@@ -32,11 +32,14 @@ def upload(repo: str, paths: list[str], private: bool, card: str = "") -> list[s
         api.upload_file(path_or_fileobj=str(src), path_in_repo=src.name, repo_id=repo)
         done.append(src.name)
         print("上げた", src.name, flush=True)
+    for name in remove or []:                     # 名前を変えたときの古いファイルなど
+        api.delete_file(path_in_repo=name, repo_id=repo)
+        print("消した", name, flush=True)
     return done
 
 
 @app.local_entrypoint()
-def main(repo: str, paths_json: str, private: bool = True, card_path: str = "") -> None:
+def main(repo: str, paths_json: str, private: bool = True, card_path: str = "", remove_json: str = "[]") -> None:
     card = Path(card_path).read_text(encoding="utf-8") if card_path else ""
-    for name in upload.remote(repo, json.loads(paths_json), private, card):
+    for name in upload.remote(repo, json.loads(paths_json), private, card, json.loads(remove_json)):
         print(name)

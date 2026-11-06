@@ -66,7 +66,7 @@ modal secret create huggingface HF_TOKEN=<トークン>
 gne modal hf-upload --repo <ユーザー>/<名前> --card README.md export/<名前>-00001-of-00004.gguf export/<名前>-00002-of-00004.gguf ...
 ```
 
-既定は非公開のリポジトリで、`--public` で公開にする。Modal から外への転送は課金の対象だが、Starter プランは月 1 TiB まで無料。
+既定は非公開のリポジトリで、`--public` で公開にする。名前を変えたときの古いファイルなど、上げたあとで消すものは `--remove <ファイル名>` で指定する(何度でも書ける)。消したファイルもコミットの履歴には残る。Modal から外への転送は課金の対象だが、Starter プランは月 1 TiB まで無料。
 
 ## 選ぶ GPU
 
