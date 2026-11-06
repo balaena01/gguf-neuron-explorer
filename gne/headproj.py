@@ -258,6 +258,79 @@ def bake_proj_gguf(weights, recipe: Recipe, dst: str | Path, directions: DirSour
     return {**rep, "sidecar": str(side), **(layer_summary(weights, heads, extra) if heads else {})}
 
 
+def bake_proj_split(weights, recipe: Recipe, dst: str | Path, directions: DirSource, *, requant: str = "keep",
+                    warn: Callable[[str], None] | None = None) -> dict:
+    """分割 GGUF への焼き込み。書き換える書き込み行列は元と同じ型で量子化し直して同じ場所に書き戻すので、
+    ファイルの大きさもヘッダーも変わらない(gne.* のメタデータは入れられないので、記録は <1 番目>.headproj.json に残す)。
+    書き換えのない分割ファイルはそのまま写す。dst は出力の 1 番目のファイル(-00001-of-0000N.gguf で終わらなければ付ける)。
+    requant="keep" は元と同じ型でその場に書き戻す(大きさが変わらない。小さな編集は量子化の粗さに埋もれやすい)。
+    "f16" / "q8_0" は書き換えるテンソルだけその型にして、それを含む分割ファイルを書き直す(少し大きくなるが編集が残る)。"""
+    import re
+    import shutil
+    from .gguf_fast import _SPLIT_RE
+    from .quant import dequantize, quantize
+    if recipe.gain_units:
+        raise GneError("BAD_RECIPE", "分割 GGUF への焼き込みは proj のユニットだけです(gain は LoRA で使ってください)")
+    heads = proj_heads(recipe)
+    if not heads:
+        raise GneError("BAD_RECIPE", "proj のユニットがありません")
+    parts = [Path(p) for p in weights.gguf.parts]
+    dst = Path(dst)
+    m = _SPLIT_RE.match(dst.name)
+    stem = m["stem"] if m else re.sub(r"\.gguf$", "", dst.name)
+    outs = [dst.parent / f"{stem}-{k + 1:05d}-of-{len(parts):05d}.gguf" for k in range(len(parts))]
+    if any(o.resolve() == p.resolve() for o, p in zip(outs, parts)):
+        raise GneError("BAD_ARGS", "出力が元のファイルと同じです")
+    b = ProjBuilder(weights, directions, direction_layer=recipe.direction_layer)
+    tens = b.tensors(heads, warn)
+    if requant not in ("keep", "f16", "q8_0"):
+        raise GneError("BAD_ARGS", "--requant は keep・f16・q8_0 です")
+    from gguf import GGMLQuantizationType as _Q
+    target = {"f16": _Q.F16, "q8_0": _Q.Q8_0}.get(requant)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if target is None:
+        for p, o in zip(parts, outs):
+            shutil.copyfile(p, o)
+    replace: dict[int, dict] = {}
+    modified, worst = [], 0.0
+    for name, (A, B) in sorted(tens.items()):
+        t = weights.tensor(name)
+        k = [p.resolve() for p in parts].index(Path(t._mm.filename).resolve())   # マウント先が別名のことがある(Modal の Volume)
+        data = t.data
+        W = (data.astype(np.float32) if data.dtype != np.uint8 else dequantize(data, t.tensor_type)).reshape(B.shape[0], -1)
+        W2 = W + B.astype(np.float32) @ A.astype(np.float32)
+        q = target or t.tensor_type
+        raw = quantize(W2, q)
+        if target is None and len(raw) != t.n_bytes:
+            raise GneError("INTERNAL", f"{name}: 書き戻す大きさ {len(raw)} が元の {t.n_bytes} と違います")
+        back = dequantize(np.frombuffer(raw, np.uint8).reshape(W2.shape[0], -1), q).reshape(W2.shape)
+        dW = W2 - W
+        err = float(np.linalg.norm(back - W2) / max(np.linalg.norm(dW), 1e-12))     # 量子化し直しで失った分 ÷ 編集の大きさ
+        worst = max(worst, err)
+        if target is None:
+            with open(outs[k], "r+b") as f:
+                f.seek(t.data_offset)
+                f.write(raw)
+        else:
+            replace.setdefault(k, {})[name] = (q, raw)
+        modified.append({"tensor": name, "type": t.tensor_type.name, "to": q.name, "file": outs[k].name, "requant_error": err})
+    if target is not None:                        # 型を変えたテンソルを含む分割ファイルだけ書き直し、他は写す
+        from .gguf_fast import rewrite_gguf
+        for k, (p, o) in enumerate(zip(parts, outs)):
+            if k in replace:
+                rewrite_gguf(p, o, replace[k])
+            else:
+                shutil.copyfile(p, o)
+    meta = proj_meta(heads, b)
+    side = Path(str(outs[0]) + ".headproj.json")
+    side.write_text(json.dumps({"recipe": recipe.to_dict(), "headproj": meta, "modified": modified,
+                                "requant": "same type, in place" if target is None else requant},
+                               ensure_ascii=False, indent=1), encoding="utf-8")
+    return {"path": str(outs[0]), "parts": [str(o) for o in outs], "bytes": sum(o.stat().st_size for o in outs),
+            "modified": [x["tensor"] for x in modified], "requant_error_max": worst, "sidecar": str(side),
+            **layer_summary(weights, heads, tens)}
+
+
 # --- ランダム対照(F.2)-------------------------------------------------------------------------------
 
 def control_pool(weights, recipe: Recipe, *, pool: str = "before", score_layers: list[int] | None = None) -> list[tuple[int, int]]:

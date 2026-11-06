@@ -503,6 +503,10 @@ def allocate(session, ds, cs, *, candidates, target: float, score_layer: int, ha
                                          target, 30.0 if s_max is None else s_max)
         cur = [ProjHead(L, h, alpha * w, ds.name) for L, h, w in wts]
         init = {"heads": [p.spec() for p in cur], "alpha": alpha, "mean_a": val, "reached": reached}
+        ipath = session.store.heads_dir(session.meta.model_id) / f"{name}.alloc-initial.yaml"   # 効率で配り直す前の組も試せるように残す
+        Recipe(heads_to_units(cur, ds.name), session.meta.model_id, name=f"{name}-initial", default_direction=ds.name,
+               direction_layer=direction_layer).save(ipath)
+        init["recipe"] = str(ipath)
     # 効きにくい例
     if hard_subset is not None:
         h_idx = load_hard(session, st, hard_subset) if isinstance(hard_subset, str | Path) else list(hard_subset)

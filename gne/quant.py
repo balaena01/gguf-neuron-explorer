@@ -70,6 +70,10 @@ def can_dequantize(q) -> bool:
 
 def dequantize(raw: np.ndarray, q) -> np.ndarray:
     """量子化バイト列(最内軸がバイト)→ float32。形状は要素の並び (..., 要素数)。gguf-py にある型はそちら、無ければ libggml。"""
+    name = getattr(q, "name", "")
+    if name in ("F32", "F16") and np.asarray(raw).dtype == np.uint8:     # 量子化していない型のバイト列
+        a = np.ascontiguousarray(raw)
+        return a.view(np.float32 if name == "F32" else np.float16).astype(np.float32)
     if isinstance(q, GGMLQuantizationType) and q in gquants._type_traits:
         return gquants.dequantize(raw, q).astype(np.float32, copy=False)
     fn = getattr(libggml, f"dequantize_row_{q.name.lower().replace('_k', '_K')}", None)
@@ -88,3 +92,35 @@ def dequantize(raw: np.ndarray, q) -> np.ndarray:
     for i in range(src.shape[0]):
         fn(src[i].ctypes.data, out[i].ctypes.data, k)
     return out.reshape(*raw.shape[:-1], k)
+
+
+def quantize(x: np.ndarray, q) -> bytes:
+    """float32 の行列(最内軸が 1 行)→ 型 q のバイト列。dequantize の逆。imatrix の要る型(IQ 系の一部)は断る。"""
+    x = np.ascontiguousarray(np.asarray(x, dtype=np.float32))
+    name = getattr(q, "name", str(q))
+    if name == "F32":
+        return x.tobytes()
+    if name == "F16":
+        return x.astype(np.float16).tobytes()
+    if isinstance(q, GGMLQuantizationType) and name == "BF16":
+        return gquants.quantize(x, q).tobytes()
+    v = _value(q)
+    libggml.ggml_quantize_requires_imatrix.restype = ctypes.c_bool
+    libggml.ggml_quantize_requires_imatrix.argtypes = [ctypes.c_int]
+    if libggml.ggml_quantize_requires_imatrix(v):
+        raise NotImplementedError(f"量子化型 {name} は imatrix なしでは量子化できません")
+    if v not in _inited:
+        libggml.ggml_quantize_init(v)
+        _inited.add(v)
+    bs, ts = block_sizes(q)
+    rows, n = x.reshape(-1, x.shape[-1]).shape
+    if n % bs:
+        raise ValueError(f"{name}: 行の長さ {n} がブロック {bs} の倍数ではありません")
+    out = np.empty(rows * (n // bs) * ts, dtype=np.uint8)
+    fn = libggml.ggml_quantize_chunk
+    fn.restype = ctypes.c_size_t
+    fn.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int64, ctypes.c_int64, ctypes.c_int64, ctypes.c_void_p]
+    size = fn(v, x.ctypes.data, out.ctypes.data, 0, rows, n, None)
+    if size != out.size:
+        raise RuntimeError(f"{name}: 量子化の大きさ {size} が {out.size} と合いません")
+    return out.tobytes()

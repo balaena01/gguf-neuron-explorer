@@ -598,3 +598,187 @@ def test_allocate_leaves_out_heads_in_the_score_layers(session, pipeline, monkey
     session.heads_allocate("tiny", include_score_layers=True, **kw)
     out, inc = ({r["layer"] for r in rows if r.get("head") is not None} for rows in seen)
     assert out == {0, 1} and inc == {0, 1, 5}
+
+
+@pytest.mark.parametrize("name,tol", [("Q8_0", 0.01), ("Q6_K", 0.03), ("Q5_0", 0.06), ("F16", 0.001), ("F32", 1e-7)])
+def test_quantize_is_the_inverse_of_dequantize(name, tol):
+    """分割 GGUF に焼き込むとき、書き込み行列を元と同じ型で量子化し直す。"""
+    from gne.quant import block_sizes, dequantize, quantize, qtype_of
+    q = next(qtype_of(i) for i in range(64) if _safe_name(qtype_of, i) == name)
+    x = np.random.default_rng(0).standard_normal((4, 512)).astype(np.float32)
+    raw = quantize(x, q)
+    bs, ts = block_sizes(q)
+    assert len(raw) == 4 * 512 // bs * ts
+    back = dequantize(np.frombuffer(raw, np.uint8).reshape(4, -1), q).reshape(4, 512)
+    assert np.linalg.norm(back - x) / np.linalg.norm(x) < tol
+
+
+def test_bake_into_a_split_file_matches_the_lora(session, pipeline, tmp_path):
+    """分割のまま焼き込んだ版は、同じレシピの LoRA を当てた元のファイルと同じ出力で、書き換えのない分割ファイルは元と同じ中身。"""
+    import hashlib
+    from gne.engine import Engine
+    from gne.headproj import bake_proj_split, export_proj_lora
+    from gne.steer import Recipe, Unit
+    from gne.weights import Weights
+    (tmp_path / "real").mkdir()
+    tiny.write(tmp_path / "real/tiny.gguf", split_tensors=120)
+    (tmp_path / "src").symlink_to(tmp_path / "real")                 # Modal の Volume のように、別名のパスから読む
+    first = tmp_path / "src" / sorted(p.name for p in (tmp_path / "real").glob("*.gguf"))[0]
+    w = Weights(first)
+    dirs = {"tiny": session.direction_set("tiny")}
+    rec = Recipe([Unit(3, None, 0.0, "head", mode="proj", k=6.0, head=1, direction="tiny"),
+                  Unit(5, None, 0.0, "head", mode="proj", k=3.0, head=0, direction="tiny")], w.meta.model_id, name="t")
+    d = bake_proj_split(w, rec, tmp_path / "out/baked.gguf", dirs)
+    assert len(d["parts"]) == len(w.gguf.parts) and d["requant_error_max"] < 1e-5
+    digest = lambda p: hashlib.sha256(Path(p).read_bytes()).hexdigest()
+    changed = {Path(p).name for p in d["parts"]} & {x["file"] for x in json.loads(Path(d["sidecar"]).read_text())["modified"]}
+    for src, out in zip(w.gguf.parts, d["parts"]):
+        assert (digest(src) == digest(out)) == (Path(out).name not in changed)
+    lora = tmp_path / "t.lora.gguf"
+    export_proj_lora(w, rec, lora, dirs)
+    ids = session.engine.tokenize(TEXT, add_special=False, parse_special=False)
+
+    def logits(path, lo):
+        e = Engine(path, n_gpu_layers=0, n_ctx=1024, n_seq_max=1)
+        try:
+            ctx = e.steer_ctx()
+            e.set_lora(ctx, lo)
+            e.clear_memory(ctx)
+            return e.prefill(ctx, [ids]).logits.copy()
+        finally:
+            e.close()
+    a, b = logits(first, [(lora, 1.0)]), logits(d["path"], None)
+    np.testing.assert_allclose(a, b, rtol=1e-4, atol=1e-4)
+    assert not np.allclose(a, logits(first, None))
+
+
+def test_recipes_with_different_directions_combine(tmp_path):
+    from gne.steer import Recipe, Unit, combine_recipes
+    a = Recipe([Unit(3, None, 0.0, "head", mode="proj", k=2.0, head=1)], "m", name="a", default_direction="d1")
+    b = Recipe([Unit(5, None, 0.0, "head", mode="proj", k=3.0, head=0)], "m", name="b", default_direction="d2")
+    r = combine_recipes([a, b], name="ab")
+    r.save(tmp_path / "ab.yaml")
+    back = Recipe.load(tmp_path / "ab.yaml")
+    assert [(u.layer, u.head, u.k, u.direction) for u in back.units] == [(3, 1, 2.0, "d1"), (5, 0, 3.0, "d2")]
+    with pytest.raises(Exception, match="モデル"):
+        combine_recipes([a, Recipe([], "other", name="c")])
+
+
+def test_heads_only_abliteration_is_a_lora_on_moe(session, pipeline, tmp_path):
+    """MoE のモデルでは gne ablate の LoRA は断られるが、attention の書き込みだけなら全ヘッドの proj で LoRA にできる。"""
+    from typer.testing import CliRunner
+    from gne.cli import app
+    out = tmp_path / "abl.lora.gguf"
+    r = CliRunner().invoke(app, ["--root", str(session.store.root), "--n-gpu-layers", "0", "headproj", "ablate", "-m", str(session.weights.path),
+                                 "--direction", "tiny", "--layers", "1-6", "--per-layer", "--out", str(out)])
+    assert r.exit_code == 0, r.output
+    assert out.exists() and "LoRA" in r.output
+    e = session.engine
+    ids = e.tokenize(TEXT, add_special=False, parse_special=False)
+    ctx = e.steer_ctx()
+    e.set_lora(ctx, None)
+    e.clear_memory(ctx)
+    a = e.prefill(ctx, [ids]).logits.copy()
+    e.set_lora(ctx, [(out, 1.0)])
+    e.clear_memory(ctx)
+    b = e.prefill(ctx, [ids]).logits.copy()
+    e.set_lora(ctx, None)
+    e.drop_lora(out)
+    assert not np.allclose(a, b)
+
+
+def test_allocate_needs_a_score_layer_and_can_limit_layers(session, pipeline, monkeypatch, tmp_path):
+    """候補の層を絞れる。.causal.json が無いときは、黙って L0 で測らずに止まる。"""
+    import shutil
+    import gne.causal as causal
+    seen = []
+    monkeypatch.setattr(causal, "allocate", lambda *a, **k: seen.append(k["candidates"]) or {})
+    session.heads_allocate("tiny", target=-1.0, candidate_layers=[4])
+    assert {r["layer"] for r in seen[0] if r.get("head") is not None} <= {4}
+    src = Path(causal.causal_paths(session, "tiny")[0])
+    lone = tmp_path / "lone.causal.jsonl"
+    shutil.copy(src, lone)
+    with pytest.raises(Exception, match="物差しの層"):
+        session.heads_allocate("tiny", target=-1.0, candidates=str(lone))
+
+
+def test_behave_counts_matches_judge_labels_and_seeds(session, pipeline, tmp_path):
+    """gne behave: レシピを当てて答えさせ、一致・読み手の判定・空・繰り返し・切れた数を数え、返事はファイルにだけ残す。"""
+    from typer.testing import CliRunner
+    from gne.cli import app
+    qs = tmp_path / "q.json"
+    qs.write_text(json.dumps(["Say hello.", "Name a color.", "Count to three."]))
+    jt = tmp_path / "judge.txt"
+    jt.write_text("Question: {q}\nReply: {a}\nAnswer with X or Y.")
+    rec = Path(pipeline["recommended"]["recipe"])
+    r = CliRunner().invoke(app, ["--root", str(session.store.root), "--n-gpu-layers", "0", "behave", "-m", str(session.weights.path),
+                                 "--prompts", str(qs), "--recipe", str(rec), "--match", "e", "--judge", str(jt), "--labels", "X,Y",
+                                 "--max-tokens", "6", "--temperature", "0.7", "--seeds", "1,2", "--name", "t"])
+    assert r.exit_code == 0, r.output
+    d = json.loads(Path(session.store.root / "behave" / session.meta.model_id / "t.json").read_text())
+    assert [x["seed"] for x in d["runs"]] == [1, 2] and d["recipe"]["units"]
+    for run in d["runs"]:
+        c = run["counts"]
+        assert c["n"] == 3 and sum(c["labels"].values()) == 3 and c["at_limit"] <= 3 and "match" in c
+        assert all("label" in x and "text" in x for x in run["replies"])
+    assert "Say hello" not in r.output                      # 画面には数だけ
+
+
+def test_bake_into_a_split_file_can_change_the_type(session, pipeline, tmp_path):
+    """書き換えるテンソルだけ F16 にして、その分割ファイルを書き直す。メタデータはそのまま、読み込めて、LoRA 版と同じ答えになる。"""
+    from gne.engine import Engine
+    from gne.gguf_fast import FastGGUF
+    from gne.headproj import bake_proj_split, export_proj_lora
+    from gne.steer import Recipe, Unit
+    from gne.weights import Weights
+    (tmp_path / "src").mkdir()
+    first = tiny.write(tmp_path / "src/tiny.gguf", split_tensors=120)
+    w = Weights(first)
+    dirs = {"tiny": session.direction_set("tiny")}
+    rec = Recipe([Unit(L, None, 0.0, "head", mode="proj", k=1.0, head=h, direction="tiny") for L in (2, 3) for h in (0, 1)], w.meta.model_id, name="t")
+    d = bake_proj_split(w, rec, tmp_path / "out/baked.gguf", dirs, requant="f16")
+    g = FastGGUF(d["path"])
+    assert {t.name: t.tensor_type.name for t in g.tensors if t.name in d["modified"]} == {n: "F16" for n in d["modified"]}
+    assert g.values == FastGGUF(first).values                  # メタデータはそのまま
+    lora = tmp_path / "t.lora.gguf"
+    export_proj_lora(w, rec, lora, dirs)
+    ids = session.engine.tokenize(TEXT, add_special=False, parse_special=False)
+
+    def logits(path, lo):
+        e = Engine(path, n_gpu_layers=0, n_ctx=1024, n_seq_max=1)
+        try:
+            ctx = e.steer_ctx()
+            e.set_lora(ctx, lo)
+            e.clear_memory(ctx)
+            return e.prefill(ctx, [ids]).logits.copy()
+        finally:
+            e.close()
+    a, b = logits(first, [(lora, 1.0)]), logits(d["path"], None)
+    assert np.abs(a - b).max() < 0.05 and (a.argmax(-1) == b.argmax(-1)).all()
+
+
+def test_lora_can_be_written_in_f16(session, pipeline, tmp_path):
+    """LoRA を F16 で書くと大きさが半分になり、出力は F32 の LoRA とほぼ同じ。"""
+    from gne.gguf_fast import FastGGUF
+    rec = pipeline["recommended"]["recipe"]
+    a = session.headproj_export(Recipe_load(rec), tmp_path / "a.lora.gguf")
+    b = session.headproj_export(Recipe_load(rec), tmp_path / "b.lora.gguf", lora_f16=True)
+    ta = {t.name: t.tensor_type.name for t in FastGGUF(a["path"]).tensors}
+    tb = {t.name: t.tensor_type.name for t in FastGGUF(b["path"]).tensors}
+    assert set(ta.values()) == {"F32"} and set(tb.values()) == {"F16"} and ta.keys() == tb.keys()
+    e = session.engine
+    ids = e.tokenize(TEXT, add_special=False, parse_special=False)
+    ctx = e.steer_ctx()
+    outs = []
+    for p in (a["path"], b["path"]):
+        e.set_lora(ctx, [(p, 1.0)])
+        e.clear_memory(ctx)
+        outs.append(e.prefill(ctx, [ids]).logits.copy())
+        e.set_lora(ctx, None)
+        e.drop_lora(p)
+    assert np.abs(outs[0] - outs[1]).max() < 0.05
+
+
+def Recipe_load(p):
+    from gne.steer import Recipe
+    return Recipe.load(p)

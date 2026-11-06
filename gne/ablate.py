@@ -143,7 +143,8 @@ def projection_rows(weights, R: np.ndarray, *, layers: list[int] | None = None,
     (ライターを 1 つずつ dequantize するので、層選びで候補が多くても重みを読むのは 1 回)。"""
     m = weights.meta
     if m.n_expert:
-        raise GneError("ARCH_UNSUPPORTED", "MoE の射影消去は LoRA では未対応です(gne ablate --bake を使ってください)")
+        raise GneError("ARCH_UNSUPPORTED", "MoE の射影消去は LoRA では未対応です(gne ablate --bake を使ってください)",
+                       "attention の書き込みだけなら gne headproj ablate --direction <方向> で LoRA にできます")
     R = np.atleast_2d(np.asarray(R, dtype=np.float32))
     if R.shape[1] != m.n_embd:
         raise GneError("BAD_DIRECTION", f"方向の長さ {R.shape[1]} が n_embd={m.n_embd} と違います")

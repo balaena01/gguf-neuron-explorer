@@ -29,6 +29,11 @@ gne modal run -- heads pipeline --spec /data/inputs/spec.json -m /models/.../...
 # 結果を持ち帰る
 gne modal ls gne
 gne modal get gne/<model_id> ./results
+
+# 動いているアプリ・止める・今月の料金
+gne modal ps
+gne modal stop --all
+gne modal cost
 ```
 
 `--` のあとは、手元の gne に渡すのと同じ引数を書く。自分の Python のスクリプトを動かすときは、`gne modal put` で上げて `gne modal run --script /data/inputs/x.py -- 引数` とする。見積もりが 30 分を超えるコマンドは確認で止まるので、`--yes` を付ける。
@@ -51,6 +56,17 @@ Web UI を Modal の GPU で動かし、手元のブラウザの `http://127.0.0
 - 保存したレシピは `/data/gne` に残る。
 - Modal の公開 URL は使わない。`gne serve` はコンテナの中でも 127.0.0.1 だけで待ち受け、その接続だけの使い捨ての鍵を持つ SSH のトンネルでつなぐ。SSH はパスワードでは入れず、UI のポートへの転送しかできない。
 - チャットの内容は Modal のコンテナを通る。ログには出ない。
+
+## Hugging Face に上げる
+
+作ったモデルは手元に移さず、Modal から直接上げられる。トークンは一度だけ Modal のシークレットに入れる(書き込み権限のトークン)。
+
+```
+modal secret create huggingface HF_TOKEN=<トークン>
+gne modal hf-upload --repo <ユーザー>/<名前> --card README.md export/<名前>-00001-of-00004.gguf export/<名前>-00002-of-00004.gguf ...
+```
+
+既定は非公開のリポジトリで、`--public` で公開にする。Modal から外への転送は課金の対象だが、Starter プランは月 1 TiB まで無料。
 
 ## 選ぶ GPU
 

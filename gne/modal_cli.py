@@ -20,6 +20,7 @@ import typer
 
 APP_FILE = Path(__file__).resolve().parent / "remote" / "modal_app.py"
 FETCH_FILE = APP_FILE.with_name("modal_fetch.py")
+UPLOAD_FILE = APP_FILE.with_name("modal_upload.py")
 MODELS_VOL, DATA_VOL = "gne-models", "gne-data"
 modal_app = typer.Typer(no_args_is_help=True, help="Modal の GPU で gne を回す(docs/modal.md)。料金は https://modal.com/pricing")
 
@@ -206,6 +207,65 @@ def serve(model: str = typer.Option(..., "--model", "-m", help="コンテナの�
                 except subprocess.TimeoutExpired:
                     proc.kill()
     raise typer.Exit(0 if proc.returncode in (0, -15, None) else proc.returncode)
+
+
+def running_apps(exe: str) -> list[dict]:
+    """止まっていない gne のアプリ(gne と gne-fetch)。"""
+    out = subprocess.run([exe, "app", "list", "--json"], capture_output=True, text=True)
+    if out.returncode:
+        sys.stderr.write(out.stderr[-500:])
+        raise typer.Exit(out.returncode)
+    apps = json.loads(out.stdout or "[]")
+    return [a for a in apps if a.get("description") in ("gne", "gne-fetch", "gne-upload") and not str(a.get("state", "")).startswith("stopped")]
+
+
+@modal_app.command("ps")
+def ps():
+    """動いている gne のアプリ(止まりかけを含む)。課金が続いているかを確かめるのに使う。"""
+    apps = running_apps(_modal())
+    for a in apps:
+        print(f"{a['app_id']}  {a['description']:9} {a['state']:12} タスク {a.get('tasks')}  {a.get('created_at')}")
+    print(f"動いているアプリ: {len(apps)} 件")
+
+
+@modal_app.command("stop")
+def stop(app_ids: Optional[list[str]] = typer.Argument(None, help="止めるアプリの ID(省くと --all が要る)"),
+         all_: bool = typer.Option(False, "--all", help="動いている gne のアプリを全部止める")):
+    """アプリを止める(コンテナも止まり、課金も止まる)。止まったかは gne modal ps で確かめる。"""
+    exe = _modal()
+    ids = list(app_ids or []) or ([a["app_id"] for a in running_apps(exe)] if all_ else [])
+    if not ids:
+        raise typer.BadParameter("止めるアプリの ID か --all を指定してください")
+    bad = [i for i in ids if not stop_app(exe, i)]
+    raise typer.Exit(1 if bad else 0)
+
+
+@modal_app.command("cost")
+def cost(period: str = typer.Option("this month", "--for", help="期間(today / this month / last month など)")):
+    """Modal の課金の合計(modal billing report)。月の上限は Modal の Usage & Billing で決める。"""
+    out = subprocess.run([_modal(), "billing", "report", "--for", period, "--json"], capture_output=True, text=True)
+    if out.returncode:
+        sys.stderr.write(out.stderr[-500:])
+        raise typer.Exit(out.returncode)
+    rows = json.loads(out.stdout or "[]")
+    total = sum(float(r.get("Cost", r.get("cost", 0)) or 0) for r in rows)
+    print(f"{period}: ${total:.2f}")
+
+
+@modal_app.command("hf-upload")
+def hf_upload(paths: list[str] = typer.Argument(..., help="Volume の上のファイル(例 export/x-00001-of-00004.gguf)"),
+              repo: str = typer.Option(..., "--repo", help="Hugging Face のリポジトリ(例 user/name)"),
+              public: bool = typer.Option(False, "--public", help="公開リポジトリにする(既定は非公開)"),
+              card: Optional[Path] = typer.Option(None, "--card", exists=True, help="モデルカード(README.md として上げる)"),
+              dry_run: bool = typer.Option(False, "--dry-run", help="実行する modal コマンドを出すだけ")):
+    """Volume の上のファイルを、手元を通さず Hugging Face に上げる。トークンは Modal のシークレット huggingface(HF_TOKEN)から読む
+    (modal secret create huggingface HF_TOKEN=<トークン>)。上げたものは外から見えるので、名前とモデルカードを確かめてから使う。"""
+    args = ["run", f"{UPLOAD_FILE}::main", "--repo", repo, "--paths-json", json.dumps([p.lstrip("/") for p in paths])]
+    if public:
+        args += ["--no-private"]
+    if card:
+        args += ["--card-path", str(card.resolve())]
+    _call(args, dry_run)
 
 
 @modal_app.command("ls")

@@ -28,9 +28,10 @@ Qwen4 の試作アーキテクチャ。177B パラメータで、一番小さい
 | CHiPS の射影(`proj`)、`gain`、`heads pipeline` | 使える | LoRA で動く。V24・V25 で確かめた(小さいモデル)。分割ファイルのままでも 1 ファイル版と同じ出力で、射影は 4 本の流れのどれでも r̂ の向きだけを動かす |
 | 専門家・ニューロンの `gain` | 使える | LoRA で動く |
 | 方向の読み取り(`direction`、`reverse`、`heads causal`) | 使える | 残差の平均を読む |
-| `ablate` の LoRA | ヘッドの書き込みだけ | MoE の `ffn_down_exps` は LoRA では射影できない |
+| `ablate` の LoRA | 使えない | MoE の `ffn_down_exps` を LoRA で射影できないので断る。attention の書き込みから方向を消すだけなら、`gne headproj ablate --direction <方向> --per-layer --layers 1-47` で LoRA にできる(L0 は止めると中立の入力まで崩れるので外す) |
 | `add`、`direction` の足し算、`export-cvec`、`when` | 使えない | グラフが `build_cvec` を呼ばない。gne はエラーで止める |
-| 焼き込み(bake) | 分割のままでは使えない | `llama-gguf-split --merge` で 1 つにする。ディスクも同じだけ要る |
+| `headproj export --bake` | 分割のまま使える | 書き換える書き込み行列を元と同じ型で量子化し直し、同じ場所に書き戻す。ファイルの大きさもヘッダーも変わらず、書き換えのない分割ファイルはそのまま写す。記録は `<1 番目>.headproj.json` |
+| gain・ablate の焼き込み | 分割のままでは使えない | `llama-gguf-split --merge` で 1 つにする。ディスクも同じだけ要る |
 | 専門家全体の ×k | 分割のままでは使えない | スケールパッチで書くので、結合と作業用コピーの分のディスクが要る。IQ1_S の `ffn_down_exps` は Q2_0 で、スケールパッチの対応外。UI にはボタンが出ない |
 
 L1 の n-gram の書き込みは、norm と畳み込みを通るので、射影では消えない。

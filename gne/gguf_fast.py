@@ -130,6 +130,7 @@ class FastGGUF:
                     fmt = _SCALAR[vtype]
                     self.values[key], = struct.unpack_from(fmt, buf, off)
                     off += struct.calcsize(fmt)
+        kv_end = off                             # ここからテンソルの一覧(書き直すときにメタデータのバイト列をそのまま写す)
         infos = []
         for _ in range(n_tensors):
             name, off = self._str(buf, off)
@@ -140,6 +141,7 @@ class FastGGUF:
             off += 12
             infos.append((name, dims, qtype_of(ttype), toff))
         align = int(self.values.get("general.alignment", 32))
+        self.alignment, self.kv_end = align, kv_end
         start = off + (-off % align)
         self.tensors: list[FastTensor] = []
         for name, dims, ttype, toff in infos:
@@ -170,3 +172,32 @@ class FastGGUF:
 
     def get(self, key: str, default=None):
         return self.values.get(key, default)
+
+
+def rewrite_gguf(src: str | Path, dst: str | Path, replace: dict[str, tuple[GGMLQuantizationType, bytes]]) -> None:
+    """1 つの GGUF ファイル(分割の 1 つでもよい)を、指定したテンソルだけ型とバイト列を差し替えて書き直す。メタデータの
+    バイト列はそのまま写す(分割の 2 番目以降は split.* だけを持つので、gguf-py の書き出しだと余計なキーが入る)。"""
+    g = FastGGUF(src, _part=True)
+    buf = memoryview(g._mm)
+    align = g.alignment
+    plan, off = [], 0
+    for t in g.tensors:
+        q, raw = replace.get(t.name, (t.tensor_type, None))
+        size = len(raw) if raw is not None else t.n_bytes
+        off += -off % align
+        plan.append((t, q, raw, off))
+        off += size
+    missing = set(replace) - {t.name for t in g.tensors}
+    if missing:
+        raise ValueError(f"{Path(src).name} に無いテンソル: {sorted(missing)[:3]}")
+    with open(dst, "wb") as f:
+        f.write(bytes(buf[:g.kv_end]))
+        for t, q, _, toff in plan:
+            name = t.name.encode("utf-8")
+            f.write(struct.pack("<Q", len(name)) + name + struct.pack("<I", len(t.shape)))
+            f.write(struct.pack(f"<{len(t.shape)}Q", *t.shape) + struct.pack("<IQ", int(getattr(q, "value", q)), toff))
+        f.write(b"\0" * (-f.tell() % align))
+        base = f.tell()
+        for t, _, raw, toff in plan:
+            f.write(b"\0" * (base + toff - f.tell()))
+            f.write(raw if raw is not None else bytes(buf[t.data_offset:t.data_offset + t.n_bytes]))

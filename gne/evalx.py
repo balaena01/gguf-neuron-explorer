@@ -175,7 +175,7 @@ def _msgs(p: str | list[dict]) -> list[dict]:
 
 
 def _generate(session, items: list[tuple[str | list[dict], int]], vecs, lora, when: str,
-              tick: Callable[[int], None], sampling=None) -> list[dict]:
+              tick: Callable[[int], None], sampling=None, thinking: bool = False) -> list[dict]:
     """items: [(プロンプトか会話, max_tokens)]。when = all ならまとめて(n_seq_max 本ずつ、n_ctx に収まる分)、それ以外は 1 本ずつ。
     sampling(engine.Sampling)を渡すとサンプリングで生成する。乱数は「seed + まとまりの番号」と、まとまりの中の位置で決まるので、
     同じ items を同じ順に渡せば(押し方を変えても)同じ乱数で引く。既定は greedy。"""
@@ -197,7 +197,7 @@ def _generate(session, items: list[tuple[str | list[dict], int]], vecs, lora, wh
     e.set_lora(ctx, lora)
     try:
         e.set_cvec(ctx, vecs or None)
-        seqs = [e.tokenize_prompt(e.render_chat(_msgs(p))) for p, _ in items]
+        seqs = [e.tokenize_prompt(e.render_chat(_msgs(p), enable_thinking=thinking)) for p, _ in items]
         by_mt: dict[int, list[int]] = {}
         for i, (_, mt) in enumerate(items):
             by_mt.setdefault(mt, []).append(i)

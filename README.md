@@ -277,7 +277,7 @@ gne modal run -- heads pipeline --spec /data/inputs/spec.json -m /models/.../...
 gne modal get gne/<model_id> ./results
 ```
 
-Only git-tracked files in `gne/` and `configs/`, plus what you name in `gne modal put`, are uploaded. See [docs/modal.md](docs/modal.md) (Japanese). This has not run on real weights yet.
+`gne modal hf-upload` pushes files from the volume straight to Hugging Face, using a token stored as a Modal secret. `gne modal ps`, `gne modal stop --all` and `gne modal cost` show what is running, stop it, and show this month's bill. Only git-tracked files in `gne/` and `configs/`, plus what you name in `gne modal put`, are uploaded. See [docs/modal.md](docs/modal.md) (Japanese). This has not run on real weights yet.
 
 ## Web UI
 

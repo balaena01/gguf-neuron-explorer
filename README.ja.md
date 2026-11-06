@@ -284,7 +284,7 @@ gne modal run -- heads pipeline --spec /data/inputs/spec.json -m /models/.../...
 gne modal get gne/<model_id> ./results
 ```
 
-Modal に上がるのは、git で追跡している `gne/` と `configs/`、`gne modal put` で名指ししたファイルだけです。詳しくは [docs/modal.md](docs/modal.md) を見てください。実物の重みではまだ動かしていません。
+`gne modal hf-upload` で、Volume の上のファイルを手元を通さず Hugging Face に上げられます(トークンは Modal のシークレットに入れます)。`gne modal ps`・`gne modal stop --all`・`gne modal cost` で、動いているアプリの確認、停止、今月の料金が分かります。Modal に上がるのは、git で追跡している `gne/` と `configs/`、`gne modal put` で名指ししたファイルだけです。詳しくは [docs/modal.md](docs/modal.md) を見てください。実物の重みではまだ動かしていません。
 
 ## Web UI
 

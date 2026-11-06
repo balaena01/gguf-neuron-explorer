@@ -135,9 +135,10 @@ def lora_tensors(weights, by_layer: dict[int, list[tuple[int, float]]]) -> dict[
 
 def export_gain_lora(weights, recipe: Recipe, path: str | Path, *,
                      extra: dict[str, tuple[np.ndarray, np.ndarray]] | None = None, extra_meta: dict | None = None,
-                     strip_meta: bool = False) -> dict:
+                     strip_meta: bool = False, f16: bool = False) -> dict:
     """gain ユニット(ニューロンの ffn_up とヘッドの W_O)を LoRA アダプタ GGUF に書く。extra は同じファイルに入れる
     書き込み行列の LoRA(ヘッドの方向成分の射影 CHANGE-06。同じテンソルのヘッドの gain とは A・B を連結して 1 つにする)。"""
+    cast = (lambda x: np.asarray(x, dtype=np.float16)) if f16 else (lambda x: x)   # LoRA を F16 で書く(大きさが半分)
     from .headproj import merge_tensors
     by_layer = gain_by_layer(recipe.units)
     heads = head_gain_by_layer(recipe.units)
@@ -170,17 +171,17 @@ def export_gain_lora(weights, recipe: Recipe, path: str | Path, *,
         if extra_meta is not None:
             w.add_key_value("gne.headproj", json.dumps(extra_meta, ensure_ascii=False), GGUFValueType.STRING)
     for L, (A, B) in tens.items():
-        w.add_tensor(f"blk.{L}.ffn_up.weight.lora_a", A)
-        w.add_tensor(f"blk.{L}.ffn_up.weight.lora_b", B)
+        w.add_tensor(f"blk.{L}.ffn_up.weight.lora_a", cast(A))
+        w.add_tensor(f"blk.{L}.ffn_up.weight.lora_b", cast(B))
     for name, (A, B) in sorted(htens.items(), key=lambda x: int(x[0].split(".")[1])):
-        w.add_tensor(f"{name}.lora_a", A)
-        w.add_tensor(f"{name}.lora_b", B)
+        w.add_tensor(f"{name}.lora_a", cast(A))
+        w.add_tensor(f"{name}.lora_b", cast(B))
     for L, (A, B) in etens.items():                              # numpy (E, r, n_embd) → ne [n_embd, r, E]
-        w.add_tensor(f"blk.{L}.ffn_up_exps.weight.lora_a", A)
-        w.add_tensor(f"blk.{L}.ffn_up_exps.weight.lora_b", B)
+        w.add_tensor(f"blk.{L}.ffn_up_exps.weight.lora_a", cast(A))
+        w.add_tensor(f"blk.{L}.ffn_up_exps.weight.lora_b", cast(B))
     for L, (A, B) in stens.items():
-        w.add_tensor(f"blk.{L}.ffn_up_shexp.weight.lora_a", A)
-        w.add_tensor(f"blk.{L}.ffn_up_shexp.weight.lora_b", B)
+        w.add_tensor(f"blk.{L}.ffn_up_shexp.weight.lora_a", cast(A))
+        w.add_tensor(f"blk.{L}.ffn_up_shexp.weight.lora_b", cast(B))
     w.write_header_to_file()
     w.write_kv_data_to_file()
     w.write_tensors_to_file()

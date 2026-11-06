@@ -515,7 +515,7 @@ class Session:
 
     def gain(self, recipe: Recipe | list[str], out: str | Path, *, bake: bool = False, requant: str = "auto",
              via_f16: bool = False, imatrix: str | None = None, llama_quantize: str | None = None,
-             strip_meta: bool = False, into: str | Path | None = None) -> dict:
+             strip_meta: bool = False, into: str | Path | None = None, lora_f16: bool = False) -> dict:
         """gain ユニットを LoRA アダプタ GGUF(既定)か、W_up(ヘッドは W_O)を書き換えた GGUF(bake)に書き出す(§6.16、CHANGE-04 D)。
         strip_meta なら gne の記録(gne.* のメタデータ・レシピ・名前の印・横の .headproj.json)を残さない(人に渡す版)。
         書いたあと、メタデータに手元のパスらしい文字列が残っていないかも確かめる(local_path_keys)。
@@ -569,7 +569,7 @@ class Session:
                 rep = bake_gain_gguf(W, recipe, out, requant=requant, extra=extra, extra_meta=extra_meta,
                                      strip_meta=strip_meta)
             else:
-                rep = export_gain_lora(W, recipe, out, extra=extra, extra_meta=extra_meta, strip_meta=strip_meta)
+                rep = export_gain_lora(W, recipe, out, extra=extra, extra_meta=extra_meta, strip_meta=strip_meta, f16=lora_f16)
         rep.update(summary)
         if into is not None:
             rep["into"] = Path(W.path).name if strip_meta else str(W.path)
@@ -1580,6 +1580,27 @@ class Session:
             d["base_layer"], d["base_recorded"], d["base_manual"] = int(set_base), True, True
         return {"contrast": str(ds.meta.get("source") if contrast is None else contrast), **d}
 
+    def behave(self, prompts: str | Path | list, *, recipes: list | None = None, match: str | None = None,
+               judge: str | None = None, labels: str = "R,P,C", max_tokens: int = 400, thinking: bool = False,
+               temperature: float = 0.0, seeds: list[int] | None = None, name: str = "behave") -> dict:
+        """レシピ(複数なら重ねる)を当てて質問集に答えさせ、正規表現の一致と読み手の判定を数える(behave.py)。"""
+        from .behave import behave, load_prompts
+        from .steer import combine_recipes
+        if not re.fullmatch(r"[\w.\-]+", name):
+            raise GneError("BAD_ARGS", f"名前 {name!r} は英数字・_・-・. だけにしてください")
+        qs = load_prompts(prompts) if isinstance(prompts, str | Path) else list(prompts)
+        rs = [Recipe.load(self.recipe_path(r)) if isinstance(r, str | Path) else self._as_recipe(r) for r in (recipes or [])]
+        rec = combine_recipes(rs, name=name) if rs else None
+        vecs = self.vectors(rec)[0] if rec is not None and rec.add_units else None
+        d = behave(self, qs, lora=self.lora_for(rec), vectors=vecs or None, match=match, judge=judge, labels=labels,
+                   max_tokens=max_tokens, thinking=thinking, temperature=temperature, seeds=seeds, progress=self.progress)
+        out = self.store.root / "behave" / self.meta.model_id / f"{name}.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        d.update(name=name, recipe=rec.to_dict() if rec is not None else None)
+        out.write_text(json.dumps(d, ensure_ascii=False, indent=1), encoding="utf-8")
+        return {**{k: v for k, v in d.items() if k != "runs"}, "path": str(out),
+                "runs": [{k: v for k, v in r.items() if k != "replies"} for r in d["runs"]]}
+
     def heads_writers(self, direction: str, *, contrast: str | Path | None = None, ref_layer: int | None = None,
                       expert_layers: list[int] | None = None, max_examples: int | None = 64, positions: str = "last",
                       name: str | None = None, top: int = 12) -> dict:
@@ -1711,7 +1732,8 @@ class Session:
                        b_side_max: float | None = None, base_recipe: str | Path | None = None, delta_s: float = 3.0,
                        pool: int = 30, s_max: float | None = None, remain_threshold: float = 0.0, positions: str | None = None,
                        subset: str | None = None, direction_layer: str = "own", name: str | None = None,
-                       max_examples: int | None = None, method: str = "proportional", include_score_layers: bool = False) -> dict:
+                       max_examples: int | None = None, method: str = "proportional", include_score_layers: bool = False,
+                       candidate_layers: list[int] | None = None) -> dict:
         """CHANGE-06 D: 効率ベースの強さ配分。candidates は heads causal の結果(名前か .causal.jsonl のパス、既定は方向の名前)。
         method は proportional(s ∝ η で全体を二分探索、s_max の既定 30)か greedy(1 本ずつ上げる、s_max の既定はなし)。"""
         from .causal import allocate, causal_paths, load_causal
@@ -1724,7 +1746,13 @@ class Session:
         summ = json.loads(sp.read_text(encoding="utf-8")) if sp.exists() else {}
         if score_layer is None:
             sl = summ.get("score_layers") or []
-            score_layer = int(sl[-1]) if sl else int(summ.get("primary") or 0)
+            if not sl and summ.get("primary") is None:      # 黙って L0 で測らない
+                raise GneError("BAD_ARGS", f"{sp.name} が無いので物差しの層が分かりません",
+                               "--score-layer を付けるか、.causal.jsonl と同じ名前の .causal.json を横に置いてください")
+            score_layer = int(sl[-1]) if sl else int(summ.get("primary"))
+        if candidate_layers is not None:          # 候補のヘッドを指定した層に絞る
+            keep = {int(x) for x in candidate_layers}
+            rows = [r for r in rows if r.get("head") is None or int(r["layer"]) in keep]
         if not include_score_layers:              # 物差しの層とそれより後のヘッドは候補にしない(heads_causal と同じ理由)
             first = min([int(x) for x in summ.get("score_layers") or []] + [int(score_layer)])
             kept = [r for r in rows if r.get("head") is None or int(r["layer"]) < first]
@@ -2322,7 +2350,7 @@ round_01.scores.txt に「番号 P C」を 1 行ずつ書く(例: 17 3 4)。全�
     def headproj_export(self, recipe: Recipe | list[str], out: str | Path, *, bake: bool = False, requant: str = "q8_0",
                         via_f16: bool = False, imatrix: str | None = None, llama_quantize: str | None = None,
                         verify: bool = False, contrast: str | Path | None = None, strip_meta: bool = False,
-                        into: str | Path | None = None) -> dict:
+                        into: str | Path | None = None, lora_f16: bool = False) -> dict:
         """CHANGE-06 E: proj のユニット(と gain)を LoRA(既定)か、書き込み行列だけ量子化し直した GGUF に書き出す
         (gne gain と同じ経路)。verify なら焼き込み版と LoRA 版を V26 の 4 項目で比べる。"""
         recipe = self._as_recipe(recipe)
@@ -2331,8 +2359,14 @@ round_01.scores.txt に「番号 P C」を 1 行ずつ書く(例: 17 3 4)。全�
         if into is not None and verify and Path(into).resolve() != Path(self.weights.path).resolve():
             raise GneError("BAD_ARGS", "別のモデルに焼き込むときは、LoRA 版との比較(verify)はできません",
                            "焼き込む先のモデルを読み直して eval で確かめてください")
-        d = self.gain(recipe, out, bake=bake, requant="q8_0" if via_f16 else requant, via_f16=via_f16,
-                      imatrix=imatrix, llama_quantize=llama_quantize, strip_meta=strip_meta, into=into)
+        if bake and into is None and self.weights.gguf.is_split:     # 分割のままでは、同じ型で書き戻す(大きさを変えない)
+            from .headproj import bake_proj_split
+            rq = "f16" if requant == "f16" else "q8_0" if requant == "q8_0" else "keep"
+            d = bake_proj_split(self.weights, recipe, out, self.direction_set, requant=rq, warn=self.warn)
+            d.update(kind="bake", requant=rq, recipe=recipe.to_dict())
+        else:
+            d = self.gain(recipe, out, bake=bake, requant="q8_0" if via_f16 else requant, via_f16=via_f16,
+                          imatrix=imatrix, llama_quantize=llama_quantize, strip_meta=strip_meta, into=into, lora_f16=lora_f16)
         if verify:
             if not bake:
                 raise GneError("BAD_ARGS", "--verify は --bake と一緒に使います(焼き込み版と LoRA 版を比べる)")

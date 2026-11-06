@@ -720,3 +720,29 @@ def bake_bias_gguf(weights, vectors: dict[int, np.ndarray], src: str | Path, dst
     w.close()
     report.n_tensors = len(plan)
     return report
+
+
+def combine_recipes(recipes: list[Recipe], name: str | None = None) -> Recipe:
+    """複数のレシピのユニットを 1 つにまとめる。方向を省いた proj のユニットには、元のレシピの既定の方向を書き込むので、
+    別の方向で作った組を重ねられる(LoRA は層と方向ごとに 1 本にまとまる)。"""
+    import dataclasses
+    if not recipes:
+        raise GneError("BAD_ARGS", "レシピがありません")
+    for key, label in (("model_id", "モデル"), ("dose_unit", "dose_unit"), ("when", "when"), ("direction_layer", "direction_layer")):
+        vals = {getattr(r, key) for r in recipes if getattr(r, key) is not None}
+        if len(vals) > 1:
+            raise GneError("BAD_RECIPE", f"{label} が違うレシピは重ねられません({', '.join(map(str, sorted(vals)))})")
+    ablates = [r.ablate for r in recipes if r.ablate is not None]
+    if len(ablates) > 1:
+        raise GneError("BAD_RECIPE", "方向の射影消去(ablate)を持つレシピは 1 つまでです")
+    units = []
+    for r in recipes:
+        for u in r.units:
+            u = dataclasses.replace(u)
+            if u.mode == "proj" and not u.direction:
+                u.direction = r.default_direction
+            units.append(u)
+    first = recipes[0]
+    return Recipe(units, first.model_id, dose_unit=first.dose_unit, name=name, when=first.when,
+                  ablate=ablates[0] if ablates else None, sampling=next((r.sampling for r in recipes if r.sampling), None),
+                  default_direction=first.default_direction, direction_layer=first.direction_layer)

@@ -91,6 +91,55 @@ def test_fetch_and_volume_commands(fake_modal, tmp_path):
     assert calls[2] == ["volume", "get", "gne-data", "gne/m1", str(tmp_path)]
 
 
+@pytest.fixture
+def fake_modal_json(tmp_path, monkeypatch):
+    """app list と billing report に決まった JSON を返し、呼ばれた引数を記録する modal コマンド。"""
+    log = tmp_path / "calls.jsonl"
+    exe = tmp_path / "bin" / "modal"
+    exe.parent.mkdir()
+    apps = [{"app_id": "ap-run", "description": "gne", "state": "ephemeral", "tasks": "1"},
+            {"app_id": "ap-old", "description": "gne", "state": "stopped", "tasks": "0"},
+            {"app_id": "ap-other", "description": "someone-else", "state": "deployed", "tasks": "1"},
+            {"app_id": "ap-fetch", "description": "gne-fetch", "state": "stopping...", "tasks": "1"}]
+    bill = [{"Cost": "1.25"}, {"Cost": "0.50"}]
+    exe.write_text(f"#!{sys.executable}\nimport json, sys\nopen({str(log)!r}, 'a').write(json.dumps(sys.argv[1:]) + chr(10))\n"
+                   f"if sys.argv[1:3] == ['app', 'list']: print(json.dumps({apps!r}))\n"
+                   f"if sys.argv[1:3] == ['billing', 'report']: print(json.dumps({bill!r}))\n")
+    exe.chmod(exe.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setenv("PATH", f"{exe.parent}{os.pathsep}{os.environ['PATH']}")
+    return lambda: [json.loads(x) for x in log.read_text().splitlines()]
+
+
+def test_ps_lists_only_running_gne_apps(fake_modal_json):
+    r = runner.invoke(modal_app, ["ps"])
+    assert r.exit_code == 0 and "ap-run" in r.output and "ap-fetch" in r.output
+    assert "ap-old" not in r.output and "ap-other" not in r.output and "2 件" in r.output
+
+
+def test_stop_all_stops_only_gne_apps(fake_modal_json):
+    assert runner.invoke(modal_app, ["stop", "--all"]).exit_code == 0
+    stops = [c for c in fake_modal_json() if c[:2] == ["app", "stop"]]
+    assert stops == [["app", "stop", "-y", "ap-run"], ["app", "stop", "-y", "ap-fetch"]]
+    assert runner.invoke(modal_app, ["stop"]).exit_code != 0
+
+
+def test_cost_sums_the_billing_report(fake_modal_json):
+    r = runner.invoke(modal_app, ["cost"])
+    assert r.exit_code == 0 and "$1.75" in r.output
+
+
+def test_hf_upload_is_private_unless_asked(fake_modal, tmp_path):
+    from gne.modal_cli import UPLOAD_FILE
+    card = tmp_path / "README.md"
+    card.write_text("card")
+    assert runner.invoke(modal_app, ["hf-upload", "--repo", "me/x", "export/a.gguf", "/export/b.gguf", "--card", str(card)]).exit_code == 0
+    assert runner.invoke(modal_app, ["hf-upload", "--repo", "me/x", "export/a.gguf", "--public"]).exit_code == 0
+    c1, c2 = fake_modal()
+    assert c1[:2] == ["run", f"{UPLOAD_FILE}::main"] and json.loads(_opt(c1, "--paths-json")) == ["export/a.gguf", "export/b.gguf"]
+    assert "--no-private" not in c1 and _opt(c1, "--card-path") == str(card.resolve())
+    assert "--no-private" in c2
+
+
 def test_missing_modal_command_says_how_to_install(monkeypatch):
     monkeypatch.setenv("PATH", "")
     r = runner.invoke(modal_app, ["run", "--", "info"])

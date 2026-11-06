@@ -942,6 +942,14 @@ class HeadsCausalOut(Envelope):                 # CHANGE-06 C(gne heads causal)
     seconds: float
 
 
+class BehaveOut(Envelope):                      # gne behave(振る舞いを数える)
+    model_config = ConfigDict(extra="allow")
+    name: str
+    path: str
+    n_prompts: int
+    runs: list[dict]
+
+
 class HeadsWritersOut(Envelope):                # gne heads writers(方向の差を書き手で分ける)
     model_config = ConfigDict(extra="allow")
     name: str
@@ -1106,7 +1114,7 @@ COMMAND_SCHEMAS: dict[str, type[Envelope]] = {
     "experts contrast": ExpertsContrastOut, "experts show": ExpertOut, "experts sweep": ExpertsSweepOut,
     "heads query": HeadsQueryOut,
     "connections": ConnectionsOut, "worker": WorkerOut, "writers": WritersOut, "writers-export": WritersExportOut,
-    "direction score": DirectionScoreOut, "heads causal": HeadsCausalOut, "heads writers": HeadsWritersOut, "heads allocate": HeadsAllocateOut,
+    "direction score": DirectionScoreOut, "heads causal": HeadsCausalOut, "heads writers": HeadsWritersOut, "behave": BehaveOut, "heads allocate": HeadsAllocateOut,
     "headproj export": GainOut, "headproj check": HeadprojCheckOut, "heads pipeline": HeadsPipelineOut,
     "heads candidates": HeadsCandidatesOut,
     "heads refine": HeadsRefineOut, "fieldtest": FieldtestOut,
