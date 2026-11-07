@@ -5,6 +5,8 @@
 - control_recipes: レシピの add ユニット(ニューロン・方向・ランダム)を、それぞれ同じ層・同じ rel の大きさの
   ランダムなユニットに差し替えた対照レシピ。ablate はランダムな単位ベクトルの消去("random-SEED")に差し替える。
   gain・query のユニットはそのまま残す(向きを持たないので)。
+- keyed_control_recipes: keyed(CHANGE-07)のユニットの鍵を擬似鍵 NAME~j(例の単位でラベルを並べ替えて作った鍵)に
+  替えた対照レシピ(E.2)。α・方向・層はそのまま。
 - null_pct: 効果が対照の何割より大きいか(1.0 = 全対照より上)。sweep の null_pct と同じ定義。
 """
 
@@ -81,6 +83,54 @@ def head_control_recipes(session, recipe: Recipe, n: int) -> list[Recipe]:
             units.append(Unit(L, None, 0.0, "head", mode=u.mode, k=u.k, head=h, direction=u.direction))
         out.append(recipe.like(units, name=f"{recipe.name or 'recipe'}-randhead{j}"))
     return out
+
+
+def _key_names(recipe: Recipe) -> list[str]:
+    """レシピの keyed のユニットが使う鍵の名前(~j は除いた本物の名前、出た順)。"""
+    from .keyed import split_key_spec
+    out: list[str] = []
+    for u in recipe.keyed_units:
+        k = u.key or recipe.default_key
+        if k:
+            base = split_key_spec(k)[0]
+            if base not in out:
+                out.append(base)
+    return out
+
+
+def keyed_control_cap(session, recipe: Recipe, key_of=None) -> int:
+    """keyed の擬似鍵の対照を何本作れるか(レシピが使う鍵の擬似鍵の本数の最小。keyed が無ければ 0)。
+    key_of(名前)→ KeySet を省くと session の鍵(<root>/keys/<model_id>/)から引く。"""
+    names = _key_names(recipe)
+    if not names:
+        return 0
+    if key_of is None:
+        from .keyed import load_key
+        key_of = getattr(session, "_key_of", None) or (lambda n: load_key(session, n))
+    return min(int(key_of(n).n_pseudo) for n in names)
+
+
+def pseudo_keyed(recipe: Recipe, j: int, units: list[Unit] | None = None) -> list[Unit]:
+    """units(省くとレシピのユニット)の keyed の鍵を擬似鍵 NAME~j に替えたユニットの列。鍵を省いたユニットはレシピの
+    default_key の擬似鍵をユニットに書き込む。α・方向・層・書き込み先と、keyed 以外のユニットはそのまま。"""
+    from dataclasses import replace
+
+    from .keyed import split_key_spec
+    out = []
+    for u in (recipe.units if units is None else units):
+        k = (u.key or recipe.default_key) if u.mode == "keyed" else None
+        out.append(replace(u, key=f"{split_key_spec(k)[0]}~{int(j)}") if k else u)
+    return out
+
+
+def keyed_control_recipes(session, recipe: Recipe, n: int, key_of=None) -> list[Recipe]:
+    """CHANGE-07 E.2: keyed のユニットの鍵を擬似鍵 NAME~j(gne direction key が保存した、例の単位で A・B のラベルを
+    釣り合わせて並べ替えた鍵)に替えた対照レシピ。本数は n と鍵の擬似鍵の本数の小さい方(擬似鍵が無い鍵なら空)。
+    keyed 以外のユニット(add・proj など)はそのまま残す(それらの対照は呼ぶ側で、evalx.control_set を参照)。"""
+    if n <= 0 or not recipe.keyed_units:
+        return []
+    m = min(int(n), keyed_control_cap(session, recipe, key_of))
+    return [recipe.like(pseudo_keyed(recipe, j), name=f"{recipe.name or 'recipe'}-pseudo{j}") for j in range(m)]
 
 
 def null_pct(value: float | None, ctrl: list[float | None]) -> float | None:

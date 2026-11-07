@@ -135,9 +135,12 @@ def lora_tensors(weights, by_layer: dict[int, list[tuple[int, float]]]) -> dict[
 
 def export_gain_lora(weights, recipe: Recipe, path: str | Path, *,
                      extra: dict[str, tuple[np.ndarray, np.ndarray]] | None = None, extra_meta: dict | None = None,
-                     strip_meta: bool = False, f16: bool = False) -> dict:
+                     extra_kv: dict[str, str] | None = None, strip_meta: bool = False, f16: bool = False) -> dict:
     """gain ユニット(ニューロンの ffn_up とヘッドの W_O)を LoRA アダプタ GGUF に書く。extra は同じファイルに入れる
-    書き込み行列の LoRA(ヘッドの方向成分の射影 CHANGE-06。同じテンソルのヘッドの gain とは A・B を連結して 1 つにする)。"""
+    書き込み行列の LoRA(ヘッドの方向成分の射影 CHANGE-06、鍵つきの書き込み CHANGE-07 の ffn_down・attn_output・
+    ffn_down_shexp・ffn_down_exps。同じテンソルのヘッドの gain とは A・B を連結して 1 つにする)。
+    extra_meta は gne.headproj の記録(従来どおり)、extra_kv はそのほかの gne.* の記録(名前 → JSON の文字列、例 gne.keyed)。
+    proj_rank は extra_meta(proj)を渡したときだけ extra から数える(proj と keyed を混ぜたときは呼ぶ側が数える)。"""
     cast = (lambda x: np.asarray(x, dtype=np.float16)) if f16 else (lambda x: x)   # LoRA を F16 で書く(大きさが半分)
     from .headproj import merge_tensors
     by_layer = gain_by_layer(recipe.units)
@@ -170,6 +173,8 @@ def export_gain_lora(weights, recipe: Recipe, path: str | Path, *,
         w.add_key_value("gne.source_model_id", m.model_id, GGUFValueType.STRING)
         if extra_meta is not None:
             w.add_key_value("gne.headproj", json.dumps(extra_meta, ensure_ascii=False), GGUFValueType.STRING)
+        for k, v in (extra_kv or {}).items():
+            w.add_key_value(k, v, GGUFValueType.STRING)
     for L, (A, B) in tens.items():
         w.add_tensor(f"blk.{L}.ffn_up.weight.lora_a", cast(A))
         w.add_tensor(f"blk.{L}.ffn_up.weight.lora_b", cast(B))
@@ -191,8 +196,8 @@ def export_gain_lora(weights, recipe: Recipe, path: str | Path, *,
     if heads:
         out["heads"] = {str(L): [[h, k] for h, k in hk] for L, hk in heads.items()}
         out["head_rank"] = {str(L): int(htens[weights.head_block(L, hk[0][0])[0]][0].shape[0]) for L, hk in heads.items()}
-    if extra:
-        out["proj_rank"] = {name.split(".")[1]: int(B.shape[1]) for name, (_, B) in extra.items()}
+    if extra and extra_meta is not None:
+        out["proj_rank"] = {name.split(".")[1]: int(B.shape[-1]) for name, (_, B) in extra.items()}
     if experts:
         out["experts"] = {str(L): [[e, n, k] for e, n, k in enk] for L, enk in experts.items()}
     if shared:
@@ -204,7 +209,8 @@ def _patch_targets(weights, recipe: Recipe) -> list[tuple[str, object, float, st
     """スケールパッチで書ける操作の一覧 [(テンソル, 行 / 専門家, k か delta, 種類)]。ヘッドの gain(W_O の列)のように
     列方向の操作があるか、テンソルの型がパッチに対応していなければ None。"""
     from .patch import supported
-    if head_gain_by_layer(recipe.units) or recipe.proj_units:    # 列方向(ヘッドの gain・方向成分の射影)はパッチで書けない
+    # 列方向(ヘッドの gain・方向成分の射影)と鍵つきの書き込み(rank 1 の足し算、CHANGE-07)はパッチで書けない
+    if head_gain_by_layer(recipe.units) or recipe.proj_units or recipe.keyed_units:
         return None
     out = []
     for L, nk in gain_by_layer(recipe.units).items():
@@ -262,20 +268,155 @@ def bake_gain_patch(weights, recipe: Recipe, dst: str | Path) -> dict:
             "bytes": Path(dst).stat().st_size, "method": "patch", "patch_bytes": ps.n_bytes, "ops": ps.ops}
 
 
+def _writer_base(weights, name: str) -> np.ndarray:
+    """焼き込みで変化量を足す書き込み行列の元の値(float32、numpy の形 (out, in)、専門家は (n_expert, out, in))。
+    ヘッドの書き込み行列(attn_output / ssm_out)は head_writer_matrix(形を確かめる)、それ以外(ffn_down・ffn_down_shexp・
+    ffn_down_exps など、CHANGE-07 の keyed)はテンソルをそのまま float32 にする(レビュー P12)。"""
+    from .weights import tensor_to_f32
+    parts = name.split(".")
+    if parts[0] == "blk" and len(parts) > 2 and parts[1].isdigit():
+        L = int(parts[1])
+        try:
+            li = weights.arch.layers[L]
+        except (IndexError, KeyError, AttributeError):
+            li = None
+        if li is not None and li.head_writer and li.head_dim and name == f"blk.{L}.{li.head_writer}.weight":
+            return weights.head_writer_matrix(L)
+    return tensor_to_f32(weights.tensor(name))
+
+
+def _decode_back(data: np.ndarray, qt, shape: tuple[int, ...]) -> np.ndarray:
+    """_encode した値を float32 に戻す(量子化し直しで失った分を測る用)。"""
+    if qt == GGMLQuantizationType.F32:
+        return np.asarray(data, dtype=np.float32).reshape(shape)
+    if qt == GGMLQuantizationType.F16:
+        return np.asarray(data).astype(np.float32).reshape(shape)
+    return np.asarray(gquants.dequantize(data, qt), dtype=np.float32).reshape(shape)
+
+# --- 専門家の 3 次元テンソルの焼き込み(CHANGE-07 の keyed expert:e)-------------------------------------------------
+# ffn_down_exps は (n_expert, out, in) で、大きなモデルでは 1 層で数億要素ある。テンソル全体を float32 にせず、
+# 専門家(スラブ)ごとに読んで書く。編集するのは LoRA の A・B が 0 でない専門家のスラブだけで、ほかのスラブは
+# 書き出す型が元と同じならバイトのまま写し、違えば 1 枚ずつ変換する。1 つのテンソルの型は 1 つなので、書き出す型を
+# 元と違う型(F16 など)にすると編集しないスラブも含めてテンソル全体の大きさが変わる(modified の bytes_from・bytes_to)。
+
+_ENCODABLE: dict = {}
+
+
+def _can_encode(qt) -> bool:
+    """gguf-py で量子化できる型か(F32・F16・BF16・Q4_0・Q4_1・Q5_0・Q5_1・Q8_0・MXFP4 など。K-quant・IQ は不可)。"""
+    if qt not in _ENCODABLE:
+        from gguf.constants import GGML_QUANT_SIZES
+        try:
+            bs = int(GGML_QUANT_SIZES[qt][0])
+            gquants.quantize(np.zeros((1, 256 * max(bs, 1)), np.float32), qt)
+            _ENCODABLE[qt] = True
+        except Exception:                                    # NotImplementedError・KeyError など
+            _ENCODABLE[qt] = False
+    return _ENCODABLE[qt]
+
+
+def _encode(W: np.ndarray, qt) -> np.ndarray:
+    if qt == GGMLQuantizationType.F32:
+        return np.asarray(W, dtype=np.float32)
+    if qt == GGMLQuantizationType.F16:
+        return np.asarray(W).astype(np.float16)
+    return gquants.quantize(np.asarray(W, dtype=np.float32), qt)
+
+
+def _expert_qtype(src, requant: str):
+    """専門家の 3 次元テンソルを書き出す型。f16 / q8_0 はその型。keep は元の型で書けるなら元の型(編集しない専門家の
+    スラブはバイトのまま)、書けない型(K-quant・IQ など)は 2 次元の keep と同じく Q8_0。"""
+    if requant == "f16":
+        return GGMLQuantizationType.F16
+    if requant == "q8_0":
+        return GGMLQuantizationType.Q8_0
+    return src if _can_encode(src) else GGMLQuantizationType.Q8_0
+
+
+class _SlabStream:
+    """専門家の 3 次元テンソルを、書くときにスラブ(専門家)ごとに作るもの(GGUFWriter.write_tensor_data に配列の代わりに
+    渡す: shape・dtype・nbytes・tofile)。編集したスラブは前もって作ったもの、ほかは元のバイトか 1 枚ずつ変換したもの。"""
+
+    def __init__(self, t, qt, edited: dict[int, np.ndarray], slab_shape: tuple[int, ...], dtype):
+        self.t, self.qt, self.edited = t, qt, edited
+        self.n = int(t.data.shape[0])
+        self.shape = (self.n, *slab_shape)
+        self.dtype = np.dtype(dtype)
+        self.nbytes = int(self.n * int(np.prod(slab_shape)) * self.dtype.itemsize)
+
+    def byteswap(self, inplace: bool = False):
+        raise GneError("INTERNAL", "専門家のテンソルの焼き込みはバイト順の入れ替えに対応していません")
+
+    def tofile(self, fout) -> None:
+        from .weights import _slab_to_f32
+        same = self.qt == self.t.tensor_type
+        for e in range(self.n):
+            if e in self.edited:
+                data = self.edited[e]
+            elif same:
+                data = np.ascontiguousarray(self.t.data[e])
+            else:
+                data = _encode(_slab_to_f32(self.t, e), self.qt)
+            if data.nbytes * self.n != self.nbytes:
+                raise GneError("INTERNAL", f"{self.t.name}: 専門家 {e} のスラブの大きさ {data.nbytes} が合いません")
+            data.tofile(fout)
+
+
+def _expert_bake(t, A: np.ndarray, B: np.ndarray, requant: str, via_f16: bool) -> tuple[_SlabStream, object, dict]:
+    """専門家の 3 次元テンソル t(numpy (n_expert, out, in))に W_e += B_e A_e を焼き込む書き出しの準備。A (n_expert, r, in)・
+    B (n_expert, out, r) が 0 でない専門家のスラブだけ float32 にして足し、書き出す型にしておく(1 枚ずつ、テンソル全体は
+    float32 にしない)。戻り値 (ストリーム, 書き出す型, modified の記録)。記録の requant_error は編集したスラブでの
+    ‖戻した値 − 書きたい値‖ / ‖B_e A_e‖(全専門家の和)、untouched は編集しないスラブの扱い(raw = バイトのまま)。"""
+    from .weights import _slab_to_f32
+    n_exp = int(t.data.shape[0])
+    if A.ndim != 3 or B.ndim != 3 or A.shape[0] != n_exp or B.shape[0] != n_exp:
+        raise GneError("INTERNAL", f"{t.name}: 専門家の LoRA の形 {A.shape} / {B.shape} が専門家の数 {n_exp} と合いません")
+    qt = _expert_qtype(t.tensor_type, requant)
+    edited: dict[int, np.ndarray] = {}
+    err2 = d2 = 0.0
+    for e in range(n_exp):
+        if not (np.any(A[e]) and np.any(B[e])):
+            continue
+        W = _slab_to_f32(t, e)
+        dW = B[e].astype(np.float64) @ A[e].astype(np.float64)
+        if dW.shape != W.shape:
+            raise GneError("INTERNAL", f"{t.name}: 専門家 {e} の変化量の形 {dW.shape} が元の行列 {W.shape} と違います")
+        want = (W.astype(np.float64) + dW).astype(np.float32)
+        edited[e] = _encode(want, qt)
+        if not via_f16:
+            back = _decode_back(edited[e], qt, W.shape)
+            err2 += float(np.sum(np.square(back.astype(np.float64) - want)))
+            d2 += float(np.sum(np.square(dW)))
+    probe = next(iter(edited.values())) if edited else _encode(_slab_to_f32(t, 0), qt)
+    st = _SlabStream(t, qt, edited, probe.shape, probe.dtype)
+    rec = {"tensor": t.name, "from": t.tensor_type.name, "to": qt.name, "experts": sorted(edited),
+           "untouched": "raw" if qt == t.tensor_type else f"{t.tensor_type.name}->{qt.name}",
+           "bytes_from": int(t.n_bytes), "bytes_to": st.nbytes}
+    if not via_f16 and d2 > 0:
+        rec["requant_error"] = float(np.sqrt(err2) / np.sqrt(d2))
+    return st, qt, rec
+
+
 def bake_gain_gguf(weights, recipe: Recipe, dst: str | Path, *, requant: str = "q8_0",
                    extra: dict[str, tuple[np.ndarray, np.ndarray]] | None = None, extra_meta: dict | None = None,
-                   via_f16: bool = False, strip_meta: bool = False) -> dict:
+                   extra_kv: dict[str, str] | None = None, via_f16: bool = False, strip_meta: bool = False) -> dict:
     """W_up[L] の行(ニューロン)と W_O の列ブロック(ヘッド)を k 倍した GGUF を作る。書き換えたテンソルだけ
     Q8_0(requant="q8_0")か F16 にし、他は生バイトのまま写す。requant="patch" はスケールパッチ(量子化を保ったまま
     ちょうど k 倍、bake_gain_patch)、"auto" はパッチで書ければパッチ、書けなければ Q8_0。専門家全体の gain と route は
-    パッチだけ。extra は書き込み行列に足す LoRA の変化量 B @ A(ヘッドの方向成分の射影、CHANGE-06)。gain と同じテンソルなら、
-    どちらも元の重みから計算した変化量を足す(LoRA を並べて当てたのと同じ)。"""
+    パッチだけ。extra は書き込み行列に足す LoRA の変化量 B @ A(ヘッドの方向成分の射影 CHANGE-06、鍵つきの書き込み CHANGE-07)。
+    元の行列は _writer_base で引く(ヘッドの行列に限らない)。専門家の 3 次元 (E, out, in) は専門家ごとに W_e += B_e A_e を
+    スラブごとに書く(_expert_bake。テンソル全体を float32 にしない。requant="keep" なら元の型で書ける型のとき元の型にして、
+    編集しない専門家のスラブはバイトのまま)。modified には書き換えたテンソルの元と後の大きさ(bytes_from・bytes_to)も入れる。
+    gain と同じテンソルなら、どちらも元の重みから計算した変化量を足す(LoRA を並べて当てたのと同じ)。
+    extra のテンソルは量子化し直しで失った分 ‖戻した値 − 書きたい値‖ / ‖B @ A‖ を modified の requant_error と
+    requant_error_max に返す(小さな rank 1 の編集が量子化の刻みに埋もれていないかの目安)。
+    extra_meta は gne.headproj、extra_kv はそのほかの gne.* の記録(例 gne.keyed)。"""
     if requant in ("patch", "auto"):
         if requant == "patch" or (_patch_targets(weights, recipe) is not None and not extra):
             return bake_gain_patch(weights, recipe, dst)
         requant = "q8_0"
     extra = extra or {}
-    if any(u.kind == "expert" for u in recipe.units):
+    if any(u.kind == "expert" and u.mode in ("gain", "route") for u in recipe.units):
         raise GneError("BAD_RECIPE", "専門家全体の gain と route はスケールパッチでだけ書けます", "--requant patch(か auto)")
     by_layer = gain_by_layer(recipe.units)
     heads = head_gain_by_layer(recipe.units)
@@ -284,7 +425,10 @@ def bake_gain_gguf(weights, recipe: Recipe, dst: str | Path, *, requant: str = "
     if by_layer:
         _check(weights, by_layer)
     head_tensors = {weights.head_block(L, hk[0][0])[0]: L for L, hk in heads.items()}
-    head_tensors.update({name: int(name.split(".")[1]) for name in extra})
+    missing = [n for n in extra if not weights.has_tensor(n)]
+    if missing:
+        raise GneError("BAD_ARGS", f"焼き込む先に {missing[0]} がありません(構造の違うモデル)")
+    targets = set(head_tensors) | set(extra)
     if requant not in ("q8_0", "f16", "keep"):
         raise GneError("BAD_ARGS", "--requant は q8_0・f16・keep(元が F32 / F16 / BF16 ならその型、量子化された型なら Q8_0)です")
     if Path(weights.path).resolve() == Path(dst).resolve():
@@ -292,27 +436,37 @@ def bake_gain_gguf(weights, recipe: Recipe, dst: str | Path, *, requant: str = "
     Path(dst).parent.mkdir(parents=True, exist_ok=True)
     tag = f" +gain:{recipe.name}" if recipe.name else " +gain"
     w = copy_gguf_header(weights, dst, tag=tag, recipe=recipe, strip=strip_meta)
-    if extra_meta is not None and not strip_meta:
-        w.add_key_value("gne.headproj", json.dumps(extra_meta, ensure_ascii=False), GGUFValueType.STRING)
+    if not strip_meta:
+        if extra_meta is not None:
+            w.add_key_value("gne.headproj", json.dumps(extra_meta, ensure_ascii=False), GGUFValueType.STRING)
+        for k, v in (extra_kv or {}).items():
+            w.add_key_value(k, v, GGUFValueType.STRING)
     plan, modified = [], []
     for t in weights.reader.tensors:
         hit = t.name.startswith("blk.") and t.name.endswith(".ffn_up.weight")
         L = int(t.name.split(".")[1]) if hit else None
-        W = None
+        W, dW = None, None
         if L in by_layer:
             W = np.array(weights.up_matrix(L), dtype=np.float32, copy=True)   # F32 のテンソルは読み取り専用の memmap
             for n, k in by_layer[L]:
                 W[n] *= k
-        elif t.name in head_tensors:
-            L = head_tensors[t.name]
-            W0 = weights.head_writer_matrix(L)
-            W = np.array(W0, dtype=np.float32, copy=True)
-            for h, k in heads.get(L, []):
-                _, lo, hi = weights.head_block(L, h)
+        elif t.name in extra and np.ndim(extra[t.name][0]) == 3 and t.name not in head_tensors:
+            st, qt, rec = _expert_bake(t, *extra[t.name], requant, via_f16)    # 専門家の 3 次元: スラブごと
+            plan.append((t.name, st, qt))
+            modified.append(rec)
+            continue
+        elif t.name in targets:
+            W = np.array(_writer_base(weights, t.name), dtype=np.float32, copy=True)
+            hl = head_tensors.get(t.name)
+            for h, k in (heads.get(hl, []) if hl is not None else []):
+                _, lo, hi = weights.head_block(hl, h)
                 W[:, lo:hi] *= k
-            if t.name in extra:                                   # 方向成分の射影: W + B @ A(A は元の W から作った r̂ᵀW)
+            if t.name in extra:                                   # W + B @ A(proj は元の W から作った r̂ᵀW、keyed は α d κᵀ)
                 A, B = extra[t.name]
-                W += (B.astype(np.float64) @ A.astype(np.float64)).astype(np.float32)
+                dW = np.matmul(B.astype(np.float64), A.astype(np.float64))          # 専門家の 3 次元は専門家ごとの積
+                if dW.shape != W.shape:
+                    raise GneError("INTERNAL", f"{t.name}: 変化量の形 {dW.shape} が元の行列 {W.shape} と違います")
+                W += dW.astype(np.float32)
         if W is not None:
             if requant == "keep" and t.tensor_type == GGMLQuantizationType.F32:      # 量子化していないモデル: 元の型のまま
                 data, qt = W.astype(np.float32), GGMLQuantizationType.F32
@@ -325,7 +479,12 @@ def bake_gain_gguf(weights, recipe: Recipe, dst: str | Path, *, requant: str = "
             else:
                 data, qt = gquants.quantize(W, GGMLQuantizationType.Q8_0), GGMLQuantizationType.Q8_0
             plan.append((t.name, data, qt))
-            modified.append({"tensor": t.name, "from": t.tensor_type.name, "to": qt.name})
+            rec = {"tensor": t.name, "from": t.tensor_type.name, "to": qt.name, "bytes_from": int(t.n_bytes),
+                   "bytes_to": int(data.nbytes)}
+            if dW is not None and not via_f16:                     # 量子化し直しで失った分 ÷ 編集の大きさ
+                back = _decode_back(data, qt, W.shape)
+                rec["requant_error"] = float(np.linalg.norm(back - W) / max(float(np.linalg.norm(dW)), 1e-12))
+            modified.append(rec)
         else:
             plan.append((t.name, t.data, t.tensor_type))
     if extra and not strip_meta:                                  # CHANGE-06 E.2: 書き換えたテンソルと元の型
@@ -340,7 +499,11 @@ def bake_gain_gguf(weights, recipe: Recipe, dst: str | Path, *, requant: str = "
     for _, data, _ in plan:
         w.write_tensor_data(data, tensor_endianess=weights.reader.endianess)
     w.close()
-    return {"path": str(dst), "modified": modified, "n_tensors": len(plan), "bytes": Path(dst).stat().st_size}
+    out = {"path": str(dst), "modified": modified, "n_tensors": len(plan), "bytes": Path(dst).stat().st_size}
+    errs = [m["requant_error"] for m in modified if "requant_error" in m]
+    if errs:
+        out["requant_error_max"] = max(errs)
+    return out
 
 
 def lora_cache_path(gain_dir: Path, recipe: Recipe) -> Path:

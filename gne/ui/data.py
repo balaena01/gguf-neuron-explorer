@@ -626,7 +626,8 @@ class UIData:
         return {**it, **self._get(("direction_cos", name), [ds.path], build)}
 
     def recipe_extras(self, name: str) -> dict:
-        """保存したレシピの、proj のユニット(CHANGE-06)が使う方向の既定(default_direction)と方向の層(direction_layer)。"""
+        """保存したレシピの、proj・keyed のユニット(CHANGE-06・07)が使う方向の既定(default_direction)と方向の層
+        (direction_layer)、keyed のユニットが使う鍵の既定(default_key)。"""
         import yaml
         p = self.s.store.recipes_dir() / f"{name}.yaml"
 
@@ -635,8 +636,72 @@ class UIData:
                 d = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
             except (OSError, ValueError, yaml.YAMLError):
                 d = {}
-            return {"default_direction": d.get("default_direction") or None, "direction_layer": str(d.get("direction_layer") or "own")}
+            if not isinstance(d, dict):
+                d = {}
+            return {"default_direction": d.get("default_direction") or None, "direction_layer": str(d.get("direction_layer") or "own"),
+                    "default_key": None if d.get("default_key") in (None, "") else str(d["default_key"])}
         return self._get(("recipe_extras", name), [p], build)
+
+    # --- CHANGE-07 G: 鍵つきの書き込み(direction ビューの「鍵」、recipe タブの keyed の鍵の選択) ----------------------------
+    def keys_list(self) -> list[dict]:
+        """<root>/keys/<model_id>/ の鍵の要約(Session.keys、パスなし)。ファイルの更新時刻が変わるまで覚えておく。"""
+        d = self.s.store.key_dir(self.s.meta.model_id)
+        ps = sorted(d.glob("*.npz"))
+        return self._get(("keys", tuple(p.name for p in ps)), ps, self.s.keys)
+
+    def key_one(self, name: str) -> dict:
+        """鍵 1 つ: 要約(層ごとの kn・gain・q_rank、作成の条件)と、作成のときの記録(mode・作成に使った例での AUC・外した層・
+        弱い層・dont_touch・返事の出どころ・擬似鍵の本数)。モデルは使わない。"""
+        from ..keyed import load_key
+        if not re.fullmatch(r"[\w.][\w.\-]*", name or ""):
+            raise GneError("BAD_ARGS", f"鍵の名前 {name!r} が不正です")
+        p = self.s.store.key_dir(self.s.meta.model_id) / f"{name}.npz"
+        if not p.exists():
+            raise GneError("NOT_FOUND", f"鍵 {name} がありません", "direction ビューの「鍵」か gne direction key で作れます")
+
+        def build():
+            ks = load_key(self.s, name)
+            info = ks.info or {}
+            keep = ("mode", "positions_b", "q_energy", "q_max_rank", "q_max_samples", "pseudo", "pseudo_method", "seed", "contrast",
+                    "replies", "dont_touch", "iv", "dropped", "weak", "q_rows", "build_auc")
+            return {**ks.summary(), "model_id": ks.model_id, "info": {k: info[k] for k in keep if k in info}}
+        return self._get(("key", name), [p], build)
+
+    def contrasts_list(self) -> list[dict]:
+        """鍵を作る対照集合の候補: リポジトリの configs/contrast/*.yaml と、<root>/contrasts/*.yaml(UI や JSON から受け取った
+        もの)。中身は YAML を読んで要約だけ(名前・質問の数・positions・dont_touch の群の名前・返事を持つか・mode)。
+        mode は positions が before:<正規表現> なら same(推論時と同じ文脈の返事の位置で側 A を作る)、それ以外は system。"""
+        import yaml
+
+        from ..store import CONFIGS
+        out = []
+        for src, d in (("configs", CONFIGS / "contrast"), ("root", self.s.store.contrast_dir())):
+            if not d.is_dir():
+                continue
+            for p in sorted(d.glob("*.yaml")):
+                def build(p=p):
+                    try:
+                        x = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+                    except (OSError, ValueError, yaml.YAMLError):
+                        return None
+                    if not isinstance(x, dict):
+                        return None
+                    qs = [x.get(k) for k in ("user_prompts", "prompts_a", "prompts_b")]
+                    n = max((len(q) for q in qs if isinstance(q, list)), default=None)
+                    dts = x.get("dont_touch") if isinstance(x.get("dont_touch"), list) else []
+                    pos = x.get("positions")
+                    return {"name": str(x.get("name") or p.stem), "positions": None if pos is None else str(pos),
+                            "positions_b": None if x.get("positions_b") is None else str(x["positions_b"]),
+                            "n_prompts": n, "dont_touch": [str(t.get("name") or f"dt{i}") if isinstance(t, dict) else f"dt{i}"
+                                                           for i, t in enumerate(dts)],
+                            "replies": any(x.get(k) is not None for k in ("replies", "replies_a", "replies_b")),
+                            "system_a": bool(x.get("system_a")), "recipe": x.get("recipe_a") is not None or x.get("recipe_b") is not None,
+                            "mode": "same" if str(pos or "").startswith("before:") else "system"}
+                it = self._get(("contrast", str(p)), [p], build)
+                if it is not None:
+                    label = f"configs/contrast/{p.name}" if src == "configs" else f"contrasts/{p.name}"
+                    out.append({**it, "file": p.stem, "label": label, "src": src, "path": str(p.resolve())})
+        return out
 
     # --- 方向とヘッドの一括(head_pipeline のジョブ、Session.heads_pipeline): direction ビューの「JSON から作る」 ----------
     def _pipeline_path(self, name: str) -> Path:

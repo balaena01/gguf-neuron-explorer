@@ -258,9 +258,23 @@ def parse_layers(spec: Optional[str]) -> Optional[list[int]]:
     return sorted(set(out))
 
 
+def _keyed_who(kind: str, expert=None) -> str:
+    """keyed の書き込み先の短い書き方(ユニットの記法と同じ: ffn / attn / S / Ee)。"""
+    return {"ffn": "ffn", "attn": "attn", "shared": "S"}.get(kind, f"E{expert}")
+
+
 def _units_text(units: list[dict]) -> str:
     rows = []
     for u in units:
+        if u.get("mode") == "keyed":                         # CHANGE-07: α は raw(d = r_L)
+            a = u.get("alpha", u.get("k"))
+            size = ""
+            if u.get("norm"):
+                size = f"、鍵が合った位置で |α|‖r_L‖={u['norm']:.2f}" + (
+                    f"(ρ の {u['rel_push']:.2f} 倍)" if u.get("rel_push") is not None else "")
+            rows.append(f"  L{u['layer']} {_keyed_who(u['kind'], u.get('expert'))} keyed α={a:+g} @{u.get('direction')} "
+                        f"#{u.get('key')}(鍵 κ に合う状態だけ方向を書く、LoRA で当てる{size})")
+            continue
         who = {"neuron": f"N{u['neuron']}", "random": f"random{u['seed']}", "head": f"H{u.get('head')}"}.get(
             u["kind"], f"dir:{u.get('direction')}")
         if u.get("mode") == "proj":                          # CHANGE-06
@@ -497,7 +511,7 @@ def stats_act(c: Common, holder: dict, corpus: Optional[Path] = _CORPUS, tokens:
 # --- steer / export / import / bake --------------------------------------------------------------------
 
 _RECIPE = typer.Option(None, "--recipe", help="レシピ YAML")
-_UNIT = typer.Option(None, "--unit", help="L:N:dose(例 14:8949:+1.0)、L:random:SEED:dose、gain は L:N:x2、方向は L:dir:NAME:dose、ヘッドは L:Hh:xk(例 21:H7:x0)、ヘッドの方向成分の射影は L:Hh:sS@NAME(例 33:H16:s6@evil)。複数可")
+_UNIT = typer.Option(None, "--unit", help="L:N:dose(例 14:8949:+1.0)、L:random:SEED:dose、gain は L:N:x2、方向は L:dir:NAME:dose、ヘッドは L:Hh:xk(例 21:H7:x0)、ヘッドの方向成分の射影は L:Hh:sS@NAME(例 33:H16:s6@evil)、鍵つきの書き込みは L:ffn:keyed:aα@NAME#KEY(例 19:ffn:keyed:a1@zundamon_endings#zundamon_endings、attention は L:attn:keyed:…)。複数可")
 _WORKERS = typer.Option(None, "--workers", help="auto か名前のカンマ区切り: gne worker に分けて投げ、終わるまで待つ(CHANGE-03 B)")
 _YES = typer.Option(False, "--yes", help="見積もりが 30 分を超えても走らせる")
 _BUDGET = typer.Option(None, "--budget", help="時間の予算(30m・2h・90s)。収まるように候補や窓を絞る")
@@ -687,31 +701,58 @@ def gain(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Option
          out: Optional[Path] = typer.Option(None, "--out", "-o", help="出力(既定 <root>/export/<レシピ名>.lora.gguf、--bake なら -gain.gguf)"),
          bake: bool = typer.Option(False, "--bake", help="LoRA ではなく、W_up を書き換えた GGUF を作る"),
          in_path: Optional[Path] = typer.Option(None, "--in", help="--bake の元の GGUF(既定 --model)"),
-         requant: str = typer.Option("auto", "--requant", help="--bake の書き方: auto(パッチで書ければスケールパッチ、書けなければ q8_0)/ patch / q8_0 / f16"),
+         requant: str = typer.Option("auto", "--requant", help="--bake の書き方: auto(パッチで書ければスケールパッチ、書けなければ q8_0。keyed を含むなら f16)/ patch / q8_0 / f16"),
+         key: Optional[str] = typer.Option(None, "--key", help="#KEY を省いた keyed のユニットの鍵(gne direction key で作ったもの)"),
+         direction: Optional[str] = typer.Option(None, "--direction", help="@NAME を省いた proj・keyed のユニットの方向"),
          strip_meta: bool = typer.Option(False, "--strip-meta", help="gne の記録(gne.* のメタデータ・レシピ・名前の印)を残さない(人に渡す版)")):
-    """gain ユニット(L:N:x2 など、出力を k 倍。ヘッドは L:Hh:xk)を LoRA アダプタ GGUF か書き換え GGUF に書き出す(§6.16)。"""
+    """gain ユニット(L:N:x2 など、出力を k 倍。ヘッドは L:Hh:xk)を LoRA アダプタ GGUF か書き換え GGUF に書き出す(§6.16)。
+    ヘッドの方向成分の射影(proj)と鍵つきの書き込み(keyed、CHANGE-07)も同じ LoRA・焼き込みに入る。"""
     if in_path and c.model and in_path.resolve() != c.model.resolve():
         raise GneError("BAD_ARGS", "--in と --model が違うファイルです")
     s = holder["session"] = c.session(in_path)
-    r = s.recipe(units=unit, path=recipe, scale=scale)
-    name = r.name or "gain"
-    out = out or s.store.export_dir() / (f"{name}-gain.gguf" if bake else f"{name}.lora.gguf")
+    r = s.recipe(units=unit, path=recipe, scale=scale, default_key=key, default_direction=direction)
+    out = out or s.default_export_path(r, bake=bake, kind="gain")
     d = s.gain(r, out, bake=bake, requant=requant, strip_meta=strip_meta)
     if bake:
-        text = f"{d['path']}({d['bytes'] / 1e6:.1f} MB)、書き換え: " + ", ".join(
-            f"{m['tensor']}({m['from']} → {m['to']})" for m in d["modified"])
+        text = f"{d['path']}({d['bytes'] / 1e6:.1f} MB)、書き換え: " + ", ".join(_mod_text(m) for m in d["modified"])
         if d.get("method") == "patch":
             text += f"\nスケールパッチ({d['patch_bytes'] / 1e3:.1f} KB、量子化はそのまま)。当てた操作は {d['path']}.patch.json"
+        text += "".join("\n" + ln for ln in _keyed_export_lines(d))
     else:
-        text = (f"{d['path']}({d['bytes'] / 1e6:.2f} MB、LoRA)\n"
-                + "\n".join(f"  L{L}: " + ", ".join(f"N{int(n)} ×{k:g}" for n, k in nk) for L, nk in (d.get("layers") or {}).items())
-                + "".join(f"\n  L{L}: " + ", ".join(f"H{int(h)} ×{k:g}" for h, k in hk) for L, hk in (d.get("heads") or {}).items())
-                + "".join(f"\n  L{L}: " + ", ".join(f"H{int(h)} s{sv:g}@{dn}" for h, sv, dn in x["heads"])
-                          + f"(方向成分の射影、階数 {x['rank']}{'' if x['folded'] else '、方向が混ざっているので 1 に畳めない'})"
-                          for L, x in (d.get("proj_layers") or {}).items())
-                + "".join(f"\n  クエリ操作: {p}" for p in (d.get("query_loras") or []))
+        rows = ([f"  L{L}: " + ", ".join(f"N{int(n)} ×{k:g}" for n, k in nk) for L, nk in (d.get("layers") or {}).items()]
+                + [f"  L{L}: " + ", ".join(f"H{int(h)} ×{k:g}" for h, k in hk) for L, hk in (d.get("heads") or {}).items()]
+                + [f"  L{L}: " + ", ".join(f"H{int(h)} s{sv:g}@{dn}" for h, sv, dn in x["heads"])
+                   + f"(方向成分の射影、階数 {x['rank']}{'' if x['folded'] else '、方向が混ざっているので 1 に畳めない'})"
+                   for L, x in (d.get("proj_layers") or {}).items()]
+                + _keyed_export_lines(d)
+                + [f"  クエリ操作: {p}" for p in (d.get("query_loras") or [])])
+        text = (f"{d['path']}({d['bytes'] / 1e6:.2f} MB、LoRA)" + "".join("\n" + r for r in rows)
                 + "\n使い方: llama-cli -m <model> --lora " + d["path"])
     return d, text, 0
+
+
+def _mod_text(m) -> str:
+    """焼き込みで書き換えたテンソル 1 つ(分割の焼き込みは名前だけ)。keyed・proj は量子化し直しで失った分も出す。"""
+    if isinstance(m, str):
+        return m
+    s = f"{m['tensor']}({m.get('from', m.get('type', '?'))} → {m.get('to', '?')}"
+    if m.get("requant_error") is not None:
+        s += f"、丸めで失った分は編集の {m['requant_error'] * 100:.1f}%"
+    return s + ")"
+
+
+def _keyed_export_lines(d: dict, *, requant_line: bool = True) -> list[str]:
+    """gain・headproj export の結果の keyed の行(CHANGE-07): 層ごとの書き込み先と階数(= その層の鍵の数)・鍵・方向と、
+    焼き込みなら量子化し直しで失った分の最大(requant_line)。"""
+    lines = []
+    for L, x in (d.get("keyed_layers") or {}).items():
+        tens = ", ".join(f"{n} 階数 {r}" for n, r in x["tensors"].items())
+        lines.append(f"  L{L}: 鍵つきの書き込み {tens}(鍵 {', '.join(x['keys'])}、方向 {', '.join(x['directions'])})")
+    err = d.get("requant_error_max")
+    if requant_line and d.get("keyed_layers") and err is not None:
+        lines.append(f"  量子化し直しで失った分は編集の大きさの最大 {err * 100:.1f}%"
+                     + ("(半分を超えています。--requant f16 か LoRA で配ってください)" if err > 0.5 else ""))
+    return lines
 
 
 def _doses(text: str) -> list[float]:
@@ -747,6 +788,17 @@ def eval_cmd(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Op
              direction_metrics: bool = typer.Option(True, "--direction-metrics/--no-direction-metrics",
                                                     help="方向を使うレシピで、方向の指標(点数の下がり方・ずれ・判定の一致率)も測る"),
              dir_max_examples: int = typer.Option(64, "--dir-max-examples", help="方向の指標で読む質問の数(A・B それぞれ。0 = 全部)"),
+             keyed: bool = typer.Option(True, "--keyed/--no-keyed",
+                                        help="keyed のユニットを持つレシピで、選択性(側 A・側 B の残差の変化)・方式の比較・擬似鍵も測る"),
+             keyed_contrast: Optional[str] = typer.Option(None, "--keyed-contrast",
+                                                          help="keyed: 鍵を作った対照集合(configs/contrast/ の名前かパス)。"
+                                                               "省くと方向を作った対照集合が鍵と同じならそれ"),
+             keyed_examples: int = typer.Option(8, "--keyed-examples", help="keyed: 会話の組ごとに読む数(0 = 全部)"),
+             keyed_pseudo: int = typer.Option(8, "--keyed-pseudo", help="keyed: 選択性を比べる擬似鍵の本数(鍵の擬似鍵の本数まで)"),
+             keyed_subset: Optional[str] = typer.Option(None, "--keyed-subset",
+                                                        help="keyed: 読む例 even / odd / all(既定は鍵の作成と反対側)"),
+             keyed_match: bool = typer.Option(True, "--keyed-match/--no-keyed-match",
+                                              help="keyed: 方式の比較で add・gain・proj の大きさを keyed の側 A にそろえる(省くと速い)"),
              yes: bool = _YES):
     """副作用チェック: 倍率ごとに能力(exact / format)・ppl・言語の混入・性格の変化量を測り、配布可の倍率を示す(§6.14)。"""
     s = holder["session"] = c.session()
@@ -797,7 +849,9 @@ def eval_cmd(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Op
     _gate(s, "eval", {"doses": _doses(doses), "suite": suite, "when": when, "random_controls": random_controls}, yes, None)
     d = s.eval(r, doses=_doses(doses), suite=suite, when=when, judge_model=judge_model, judge_target=judge_target,
                name=name, random_controls=random_controls, reactivity=reactivity, head_controls=head_controls,
-               control_pool=control_pool, direction_metrics=direction_metrics, dir_max_examples=dir_max_examples or None)
+               control_pool=control_pool, direction_metrics=direction_metrics, dir_max_examples=dir_max_examples or None,
+               keyed_contrast=keyed_contrast, keyed_metrics=keyed, keyed_examples=keyed_examples or None,
+               keyed_match=keyed_match, keyed_pseudo=keyed_pseudo, keyed_subset=keyed_subset)
     th = d["suite"]["thresholds"]
     nc = d.get("random_controls") or 0
     head = f"{'倍率':>5} {'能力':>6} {'低下pt':>6} {'ppl':>8} {'悪化%':>7} {'混入':>6} {'新語':>5} {'d4':>5} {'打切':>4}"
@@ -812,6 +866,11 @@ def eval_cmd(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Op
     if dmx:                                              # CHANGE-06 F.1: 方向の点数と直交成分のずれ
         head += f" │ {'下がり':>7} {'A直交':>7} {'B直交':>7}" + (f" {'一致率':>6}" if dmx.get("behavior") else "") \
             + (f" {'null':>5}" if nc else "")
+    kd = d.get("keyed")                                  # CHANGE-07 E: 結果の keyed(方式の比較・擬似鍵、または skipped)
+    ksel = any((row.get("keyed") or {}).get("selectivity") is not None for row in d["rows"])
+    knull = ksel and any((row.get("keyed") or {}).get("null_pct") is not None for row in d["rows"])
+    if ksel:                                             # 行の keyed: 目的の層の選択性(擬似鍵の対照があれば null)
+        head += f" │ {'選択性':>7}" + (f" {'null':>5}" if knull else "")
     lines = [head]
     for row in d["rows"]:
         pm = row["persona"]
@@ -840,6 +899,12 @@ def eval_cmd(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Op
             if nc:
                 npct = row.get("rate_null_pct") if row.get("rate_null_pct") is not None else row.get("dir_null_pct")
                 line += f" {_f(None if npct is None else npct * 100, '4.0f')}%"
+        if ksel:
+            kr = row.get("keyed") or {}
+            line += f" │ {_f(kr.get('selectivity'), '+.3g'):>7}"
+            if knull:
+                kn = kr.get("null_pct")
+                line += f" {kn * 100:>4.0f}%" if kn is not None else f" {'—':>5}"
         lines.append(line + ("  配布可" if row["shippable"] else "  " + "・".join(k for k, ok in row["ok"].items() if not ok) + " ×"))
     ok = [r_["dose"] for r_ in d["rows"] if r_["shippable"] and r_["dose"] > 0]
     verdict = (f"配布可の最大倍率: {max(ok):g}" if ok else "配布可の倍率はありません(0 を除く)")
@@ -858,7 +923,17 @@ def eval_cmd(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Op
     if dmx:
         text += (f"\n方向 {dmx['direction']}(L{dmx['layers'][-1]}): 下がり = A 側の点数の下がり方、A直交・B直交 = 残差の差の直交成分 ÷ 残差"
                  + ("、一致率 = A 側の判定(validate.match)" if dmx.get("behavior") else ""))
+    if kd and "skipped" in kd:
+        text += f"\nkeyed の選択性は測っていません: {kd['skipped']}" + (f"\nヒント: {kd['hint']}" if kd.get("hint") else "")
+    elif kd:
+        text += "\n" + "\n".join(kd.get("text") or [])
+    if ksel:
+        kL = next(row["keyed"].get("layer") for row in d["rows"] if row.get("keyed"))
+        text += (f"\n行の選択性 = L{kL} の残差の r̂ 方向の変化の 側 A − 側 B(書く向きにそろえた値、レシピ全体を当てたもの)"
+                 + ("。null = 鍵を擬似鍵に替えた対照の何割より大きいか" if knull else ""))
     for n_ in d.get("notes") or []:
+        if kd and n_.startswith("keyed: "):              # keyed の注は上の keyed の表示に入っている
+            continue
         text += f"\n注意: {n_}"
     top = d["rows"][-1]["persona"]["top_words"][:8]
     if top:
@@ -1030,7 +1105,8 @@ def direction(c: Common, holder: dict,
               yes: bool = _YES):
     """対照集合から全層の方向 r_L(mean_A − mean_B)を作って保存し、--select auto で効果の大きい層を選ぶ(§6.17)。
     作った方向は L:dir:NAME:dose のユニットで足せる(gne steer / chat / eval / export-cvec)。
-    gne direction score は、方向の分離度(層ごとの cohen_d)と介入の効き目を生成なしで測る(CHANGE-06 B)。"""
+    gne direction score は、方向の分離度(層ごとの cohen_d)と介入の効き目を生成なしで測る(CHANGE-06 B)。
+    gne direction key / key-check / keys / key-verify は鍵つきの書き込み(keyed、CHANGE-07)の鍵を作る・確かめる。"""
     if contrast is None:
         raise GneError("BAD_ARGS", "--contrast が要ります", "方向を作る: gne direction --contrast <対照集合>、"
                                                           "測る: gne direction score --name <方向> --contrast <対照集合>")
@@ -1722,6 +1798,205 @@ def direction_score(c: Common, holder: dict,
     return d, "\n".join(lines), 0
 
 
+# --- CHANGE-07: 鍵つきの書き込み(keyed write)--------------------------------------------------------------
+
+_KEY_POS = ("側 A の位置: response / assistant / last / last:K / before:<正規表現>(推論時と同じ文脈の返事で、一致する文字を"
+            "書く直前。側 A の作り方 (b))。既定は対照集合の positions、無ければ response")
+_KEY_POS_B = "側 B の位置(既定: before:<re> なら not-before:<re>、それ以外は側 A と同じ)"
+_KEY_REPLIES_A = ("側 A の返事を読ませるファイル(YAML / JSON、質問と同じ長さのリストか {質問: 返事})。"
+                  "before:<re> のときは側 A・B が同じ返事なので 1 つだけ渡す")
+_KEY_REPLIES_B = "側 B の返事を読ませるファイル"
+_KEY_IV = "この介入を当てた状態で捕捉する(レシピ YAML・保存したレシピの名前、またはユニットの書き方。複数可)"
+_REPLY_KIND = {"given": "与えた", "generated": "生成"}
+
+
+def _iv_arg(iv: Optional[list[str]]):
+    """--iv → keyed_build.intervention に渡す形: レシピのパスか保存したレシピの名前 1 つ、またはユニットの書き方のリスト。"""
+    if not iv:
+        return None
+    if len(iv) == 1 and (Path(iv[0]).exists() or ":" not in iv[0]):
+        return iv[0]
+    return list(iv)
+
+
+def _floats(text: str, opt: str) -> list[float]:
+    try:
+        return [float(x) for x in text.split(",") if x.strip()]
+    except ValueError as e:
+        raise GneError("BAD_ARGS", f"{opt} {text!r} はカンマ区切りの数です(例 1,2)") from e
+
+
+def _fc(x, spec: str) -> str:
+    """表の列: 数を spec(例 '>8.3f')で書き、None は同じ幅の —。"""
+    return format("—", spec.split(".")[0]) if x is None else format(x, spec)
+
+
+def _target_who(target: str) -> str:
+    """鍵の書き込み先(ffn / attn / shared / expert:e)→ ユニットの記法の書き方(ffn / attn / S / Ee)。"""
+    if target.startswith("expert:"):
+        return f"E{target.split(':', 1)[1]}"
+    return _keyed_who(target)
+
+
+def _replies_text(replies: dict | None) -> str:
+    if not replies:
+        return ""
+    return "、返事 " + "・".join(f"{g} {_REPLY_KIND.get(v, 'なし')}" for g, v in replies.items())
+
+
+@gne_command(direction_app, "key", "direction key")
+def direction_key(c: Common, holder: dict,
+                  contrast: Path = typer.Option(..., "--contrast", help="対照集合 YAML(側 A・側 B、任意で dont_touch・positions・replies。例 configs/contrast/zundamon_endings.yaml)"),
+                  layers: str = typer.Option(..., "--layers", help="鍵を作る層(必須。例 8,14,20 / 10-16。Q の基底は層ごとに作るので全層は既定にしない。最終層と MTP の層は不可)"),
+                  name: Optional[str] = typer.Option(None, "--name", help="鍵の名前(既定は対照集合の name)。<root>/keys/<model_id>/<名前>.npz に保存"),
+                  positions: Optional[str] = typer.Option(None, "--positions", help=_KEY_POS),
+                  positions_b: Optional[str] = typer.Option(None, "--positions-b", help=_KEY_POS_B),
+                  skip: Optional[int] = typer.Option(None, "--skip", help="返事の先頭から落とすトークン数(既定は対照集合の skip、無ければ 0)"),
+                  max_tokens: int = typer.Option(96, "--max-tokens", help="返事を生成するときの長さ"),
+                  q_mode: str = typer.Option("examples", "--q-mode", help="側 B の基底 Q: examples(例ごとの平均、既定)/ means(群ごとの平均。よく効くが選択性は粗い)/ samples(トークンの活性。選択性は高いが重い)"),
+                  q_energy: float = typer.Option(0.99, "--q-energy", help="Q の打ち切り(特異値の二乗の累積の割合)"),
+                  q_max_rank: Optional[int] = typer.Option(None, "--q-max-rank", help="Q の階数の上限"),
+                  q_max_samples: int = typer.Option(4096, "--q-max-samples", help="--q-mode samples で使うトークンの上限(超えたら間引く)"),
+                  subset: str = typer.Option("even", "--subset", help="使う質問: even(既定。key-check は odd で確かめる)/ odd / all"),
+                  pseudo: int = typer.Option(16, "--pseudo", help="擬似鍵(例のラベルを釣り合わせて並べ替えた対照)の本数。並べ替えは --seed で決まる"),
+                  replies_a: Optional[Path] = typer.Option(None, "--replies-a", help=_KEY_REPLIES_A),
+                  replies_b: Optional[Path] = typer.Option(None, "--replies-b", help=_KEY_REPLIES_B),
+                  iv: Optional[list[str]] = typer.Option(None, "--iv", help=_KEY_IV),
+                  target: str = typer.Option("ffn", "--target", help="書き込み先: ffn(ffn_down の入力で鍵を作る)。attn / shared / expert:e は捕捉が対応してから")):
+    """keyed write の鍵 κ_L を作る(CHANGE-07)。側 A(書きたい状態)の活性の平均 μ_L を、側 B と dont_touch の活性が張る
+    空間 Q_L に直交させ、κ_Lᵀμ_L = 1 に正規化して保存する(方向とは別のファイル)。鍵は無介入で作る(--iv は重ねるときだけ)。
+    作ったら gne direction key-check で、作成に使っていない例(既定 subset odd)で分離を確かめる。"""
+    Ls = parse_layers(layers)
+    if not Ls:
+        raise GneError("BAD_ARGS", "--layers に層を指定してください(all は使えません)", "例 --layers 8,14,20")
+    s = holder["session"] = c.session()
+    d = s.direction_key(contrast, name=name, layers=Ls, positions=positions, positions_b=positions_b, skip=skip,
+                        max_tokens=max_tokens, q_mode=q_mode, q_energy=q_energy, q_max_rank=q_max_rank,
+                        q_max_samples=q_max_samples, subset=subset, pseudo=pseudo, replies_a=replies_a,
+                        replies_b=replies_b, iv=_iv_arg(iv), target=target, seed=c.seed, progress=s.progress)
+    d.pop("warnings", None)                        # 警告はエンベロープの warnings に入っている
+    n = d["counts"]
+    how = "推論時と同じ文脈の返事" if d["mode"] == "same" else "system・recipe の文脈"
+    lines = [f"{d['path']}(鍵 {d['name']}、書き込み先 {d['target']}、側 A は{how}(mode {d['mode']})、{d['seconds']:.1f} 秒)",
+             f"  位置: 側 A {d['positions']}・側 B {d['positions_b']}、skip {d['skip']}、subset {d['subset']}、"
+             f"q_mode {d['q_mode']}、擬似鍵 {d['n_pseudo']} 本",
+             f"  例: 側 A {n['a']} 例({n['rows_a']} 位置、位置のある例 {d['matched']['A']}/{d['matched']['of']})・"
+             f"側 B {n['b']} 例({n['rows_b']} 位置)" + (f"・dont_touch {n['dt']} 例({n['rows_dt']} 位置)" if n.get("dt") else "")
+             + _replies_text(d.get("replies")),
+             f"  {'層':>4} {'kn':>6} {'増幅率':>7} {'q_rank':>6} {'作成時AUC':>9}"]
+    for r in d["layers"]:
+        lines.append(f"  {r['layer']:>4} {r['kn']:>6.3f} {r['gain']:>7.2f} {r['q_rank']:>6} {_fc(r['build_auc'], '>9.3f')}"
+                     + ("  ← 弱い(kn < 0.05、側 B の漏れが大きくなりやすい)" if r["weak"] else ""))
+    lines.append("  kn = ‖k‖/‖μ‖(1 に近いほど側 A の平均が側 B の空間の外にある)、増幅率 = 1/kn")
+    for x in d["dropped"]:
+        lines.append(f"  L{x['layer']}: 外しました({x['error']})")
+    lines += [f"注: {t}" for t in d["notes"]]
+    if d.get("samples"):
+        lines.append(f"返事の例: {d['samples'][0][:120]!r}")
+    lines.append(f"次: gne direction key-check --key {d['name']} --contrast {contrast}(既定で subset odd = 作成に使っていない例)")
+    return d, "\n".join(lines), 0
+
+
+@gne_command(direction_app, "key-check", "direction key-check")
+def direction_key_check(c: Common, holder: dict,
+                        key: str = typer.Option(..., "--key", help="鍵の名前(NAME~j で擬似鍵 j)"),
+                        contrast: Optional[Path] = typer.Option(None, "--contrast", help="確かめる対照集合(作成と同じなら --subset odd が保留集合)。省くと鍵に保存した作成時の例で測る(甘い値)"),
+                        subset: str = typer.Option("odd", "--subset", help="使う質問: odd(既定)/ even / all。作成と重なると held_out: false"),
+                        layers: Optional[str] = typer.Option(None, "--layers", help="測る層(既定は鍵の全層)"),
+                        positions: Optional[str] = typer.Option(None, "--positions", help="側 A の位置(既定は鍵を作ったときの値)"),
+                        positions_b: Optional[str] = typer.Option(None, "--positions-b", help="側 B の位置(既定は鍵を作ったときの値)"),
+                        skip: Optional[int] = typer.Option(None, "--skip", help="返事の先頭から落とすトークン数(既定は鍵を作ったときの値)"),
+                        max_tokens: Optional[int] = typer.Option(None, "--max-tokens", help="返事を生成するときの長さ(既定は鍵を作ったときの値)"),
+                        replies_a: Optional[Path] = typer.Option(None, "--replies-a", help=_KEY_REPLIES_A),
+                        replies_b: Optional[Path] = typer.Option(None, "--replies-b", help=_KEY_REPLIES_B),
+                        iv: Optional[list[str]] = typer.Option(None, "--iv", help=_KEY_IV),
+                        strict: bool = typer.Option(False, "--strict", help="作成に使った例と重なっていたら測らずにエラー(BAD_ARGS)")):
+    """鍵の分離の確認(CHANGE-07 C、生成なしで済む位置なら生成なし)。各位置で ρ = κᵀx を測り、層ごとに側 A 対 側 B の
+    AUC(例単位とトークン単位)、選択性(例ごとの ρ の平均の差 A − B)と擬似鍵の p95、dont_touch の ρ の中央値を出す。
+    作成に使った例と重なると held_out: false(甘い値)。判定の目安: 保留集合で選択性が擬似鍵の p95 を超えること。"""
+    s = holder["session"] = c.session()
+    d = s.direction_key_check(key, contrast=contrast, subset=subset, layers=parse_layers(layers) if layers else None,
+                              positions=positions, positions_b=positions_b, skip=skip, max_tokens=max_tokens,
+                              replies_a=replies_a, replies_b=replies_b, iv=_iv_arg(iv), strict=strict,
+                              progress=s.progress)
+    d.pop("warnings", None)
+    src = f"対照集合 {d['contrast']}・subset {d['subset']}" if d["contrast"] else "鍵に保存した作成時の例"
+    lines = [f"鍵 {d['key']}(書き込み先 {d['target']}、{src}、mode {d['mode']}、位置 側 A {d['positions']}・"
+             f"側 B {d['positions_b']}、{d['seconds']:.1f} 秒)"]
+    ov = d["overlap"]
+    if d["held_out"]:
+        lines.append(f"保留集合: はい(作成に使っていない例 {ov['n_checked']} 個)")
+    else:
+        why = ([f"同じ対照集合で subset が重なる(作成 {ov.get('built_subset')}・確認 {ov.get('subset')})"] if ov.get("subset_overlap") else []) \
+            + ([f"作成と同じ (system, 質問) が {ov['hash_overlap']} 個"] if ov.get("hash_overlap") else [])
+        lines.append("保留集合: いいえ(" + "、".join(why or ["作成に使った例"]) + ")。AUC・選択性は甘い値です")
+    lines.append(f"  {'層':>4} {'AUC':>6} {'AUC(tok)':>8} {'選択性':>7} {'擬似p95':>7} {'擬似AUCp95':>10} {'B2分AUC':>7}  判定")
+    for r in d["layers"]:
+        pa = (r["pseudo_auc_token"] if r["auc_token"] is not None else r["pseudo_auc"])["p95"]
+        mark = {True: "○", False: "×"}.get(r["beats_pseudo"], "—")
+        line = (f"  {r['layer']:>4} {_fc(r['auc'], '>6.3f')} {_fc(r['auc_token'], '>8.3f')} {_fc(r['selectivity'], '>7.3f')} "
+                f"{_fc(r['pseudo_selectivity']['p95'], '>7.3f')} {_fc(pa, '>10.3f')} {_fc(r['b_split_auc'], '>7.3f')}  {mark}")
+        dt = "・".join(f"{g} {_f(v, '+.3f')}" for g, v in (r.get("dont_touch_median") or {}).items())
+        if dt:
+            line += f"  dont_touch の ρ 中央値 {dt}"
+        if r["layer"] == d["best_layer"]:
+            line += "  ← 最良"
+        lines.append(line)
+    lines.append("  判定 ○ = 選択性が擬似鍵の p95 を超え、AUC > 0.5。擬似AUCp95 はトークン単位の AUC があればトークン単位、"
+                 "B2分AUC は側 B を 2 つに分けた擬似差の鍵(参考値)")
+    ab = d["all_beat_pseudo"]
+    lines.append("全層で擬似鍵を超えた: " + {True: "はい", False: "いいえ"}.get(ab, "判定なし(擬似鍵か側 B が無い)"))
+    lines += [f"注: {t}" for t in d["notes"]]
+    if not d["held_out"]:
+        lines.append("次: 作成に使っていない例(--subset odd か別の対照集合)で測り直してください")
+    elif d["best_layer"] is not None and ab is not False:
+        lines.append(f"次: gne steer --unit {d['best_layer']}:{_target_who(d['target'])}:keyed:a1@<方向>#{d['key']} "
+                     "-p \"…\" --compare で生成を確かめる(α は raw、1 で観測した A − B の差をそのまま書く)")
+    return d, "\n".join(lines), 0
+
+
+@gne_command(direction_app, "keys", "direction keys")
+def direction_keys(c: Common, holder: dict):
+    """保存した鍵の一覧(<root>/keys/<model_id>/、CHANGE-07)。層・書き込み先・kn・作成の条件。"""
+    s = holder["session"] = c.session()
+    ks = s.keys()
+    lines = [f"鍵 {len(ks)} 個" + ("" if ks else "(gne direction key --contrast <対照集合> --layers <層> で作ります)")]
+    for k in ks:
+        if "error" in k:
+            lines.append(f"  {k['name']}: 読めません({k['error']})")
+            continue
+        kn = " ".join(f"L{L}:{v:.2f}" for L, v in k["kn"].items())
+        lines.append(f"  {k['name']}  {k['target']}  q_mode {k['q_mode']}  位置 {k['positions']}  subset {k['subset']}  "
+                     f"擬似鍵 {k['n_pseudo']}  kn {kn}")
+    return {"keys": ks}, "\n".join(lines), 0
+
+
+@gne_command(direction_app, "key-verify", "direction key-verify")
+def direction_key_verify(c: Common, holder: dict,
+                         layer: int = typer.Option(..., "--layer", help="層 L"),
+                         key: str = typer.Option(..., "--key", help="鍵の名前"),
+                         direction: str = typer.Option(..., "--direction", help="書く向きの方向の名前(先頭の - は α の符号に畳む)"),
+                         alphas: str = typer.Option("1,2", "--alphas", help="確かめる α(カンマ区切り)"),
+                         target: str = typer.Option("ffn", "--target", help="書き込み先: ffn / attn"),
+                         direction_layer: str = typer.Option("own", "--direction-layer", help="own(その層の方向)/ base(基準層の方向)"),
+                         text: Optional[list[str]] = typer.Option(None, "--text", help="流す文(既定は語尾の違う日本語と英語の 2 文)。複数可")):
+    """V30(CHANGE-07): keyed の LoRA が式どおり ΔW x = α (κᵀx) d を書くか。無介入で書き込み行列の入力 x と出力を捕捉し、
+    LoRA を当てた出力の差と比べる(|κᵀx| の大きいトークンで相対誤差の中央値 < 3%、鍵の作成に使った側 B の例で漏れ < 0.1)。"""
+    from .keyed import parse_target
+    kind, expert = parse_target(target)
+    s = holder["session"] = c.session()
+    d = s.check_keyed(layer, key=key, direction=direction, alphas=_floats(alphas, "--alphas"), kind=kind, expert=expert,
+                      direction_layer=direction_layer, texts=text or None)
+    lines = [f"L{layer} {d['tensor']}(鍵 {d['key']}、方向 {d['direction']}、‖d‖={d['d_norm']:.3g}、kn {d['kn']:.3f}"
+             + ("、post-norm の補正あり(一次近似)" if d.get("post_norm") else "") + ")"]
+    for r in d["rows"]:
+        lines.append(f"  α {r['alpha']:+g}: 相対誤差の中央値 {_f(r['rel_err_median'], '.2e')}(|κᵀx| の上位 {r['n_big']}/{r['n_tokens']} "
+                     f"トークン)、cos {_f(r['cos_median'], '.4f')}、側 B の漏れ {_f(r['leak_b'], '.3g')}  {'○' if r['ok'] else '×'}")
+    lines.append(f"V30 {'合格' if d['v30'] else '不合格'}(相対誤差 < 3%"
+                 + ("、側 B の漏れ < 0.1" if d["judged_leak"] else "、側 B の漏れは判定なし") + ")")
+    return d, "\n".join(lines), 0 if d["v30"] else 1
+
+
 @gne_command(heads_app, "causal", "heads causal")
 def heads_causal(c: Common, holder: dict,
                  name: str = typer.Option(..., "--name", help="方向の名前"),
@@ -1905,8 +2180,10 @@ def recipe_combine(recipes: list[Path] = typer.Argument(..., exists=True, help="
     from .steer import Recipe, combine_recipes
     r = combine_recipes([Recipe.load(p) for p in recipes], name=name or out.stem)
     r.save(out)
-    dirs = sorted({u.direction for u in r.units if u.mode == "proj" and u.direction})
-    print(f"{out}({len(r.units)} ユニット" + (f"、方向 {', '.join(dirs)}" if dirs else "") + ")")
+    dirs = sorted({u.direction for u in r.units if u.mode in ("proj", "keyed") and u.direction})
+    keys = sorted({u.key for u in r.units if u.mode == "keyed" and u.key})      # CHANGE-07
+    print(f"{out}({len(r.units)} ユニット" + (f"、方向 {', '.join(dirs)}" if dirs else "")
+          + (f"、鍵 {', '.join(keys)}" if keys else "") + ")")
 
 
 @gne_command(headproj_app, "ablate", "headproj export")
@@ -1940,28 +2217,29 @@ def headproj_ablate(c: Common, holder: dict,
 
 @gne_command(headproj_app, "export", "headproj export")
 def headproj_export(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Optional[list[str]] = _UNIT,
-                    out: Optional[Path] = typer.Option(None, "--out", "-o", help="出力(既定 <root>/export/<レシピ名>.lora.gguf、--bake なら -headproj.gguf)"),
+                    out: Optional[Path] = typer.Option(None, "--out", "-o", help="出力(既定 <root>/export/<レシピ名>.lora.gguf、--bake なら -headproj.gguf。keyed だけのレシピは <レシピ名>-keyed.lora.gguf / -keyed.gguf)"),
                     bake: bool = typer.Option(False, "--bake", help="LoRA ではなく、書き込み行列だけ量子化し直した GGUF を作る"),
                     in_path: Optional[Path] = typer.Option(None, "--in", help="--bake の元の GGUF(既定 --model)"),
-                    requant: str = typer.Option("q8_0", "--requant", help="--bake で書き換えたテンソルの型: q8_0 / f16 / keep(元が F32・F16・BF16 ならその型)"),
+                    requant: Optional[str] = typer.Option(None, "--requant", help="--bake で書き換えたテンソルの型: q8_0 / f16 / keep(元が F32・F16・BF16 ならその型)。既定は q8_0、keyed を含むなら f16(rank 1 の小さな編集が Q8_0 の刻みに埋もれないように)"),
+                    key: Optional[str] = typer.Option(None, "--key", help="#KEY を省いた keyed のユニットの鍵(gne direction key で作ったもの)"),
                     into: Optional[Path] = typer.Option(None, "--into", help="--bake: 焼き込む先の別の GGUF(同じ構造の量子化していない F16 / BF16 など)。方向はこのモデル(--model)のものを使う。GPU は使わない"),
                     via_f16: bool = typer.Option(False, "--via-f16", help="--bake: F16 で書いて llama-quantize で元の型に戻す"),
                     imatrix: Optional[Path] = typer.Option(None, "--imatrix"), llama_quantize: Optional[str] = typer.Option(None, "--llama-quantize"),
                     verify: bool = typer.Option(False, "--verify", help="--bake: 焼き込み版と LoRA 版を比べる(V26: 点数・KL・最尤トークン・ppl)"),
                     contrast: Optional[Path] = typer.Option(None, "--contrast", help="--verify の点数に使う対照集合(既定は方向を作った対照集合)"),
-                    direction: Optional[str] = typer.Option(None, "--direction", help="@NAME を省いた proj のユニットの方向"),
+                    direction: Optional[str] = typer.Option(None, "--direction", help="@NAME を省いた proj・keyed のユニットの方向"),
                     direction_layer: Optional[str] = typer.Option(None, "--direction-layer", help="own(ヘッドの層の方向)/ base(基準層の方向)"),
                     lora_f16: bool = typer.Option(False, "--lora-f16", help="LoRA を F16 で書く(大きさが半分。精度は十分)"),
                     strip_meta: bool = typer.Option(False, "--strip-meta", help="gne の記録(gne.* のメタデータ・レシピ・名前の印・横の .headproj.json)を残さない(人に渡す版)")):
     """proj のユニット(L:Hh:sS@NAME、レシピの mode: proj)を LoRA アダプタ GGUF か焼き込み GGUF に書き出す(CHANGE-06 E、gne gain の別名)。
     同じ層・同じ方向のヘッドは階数 1 の LoRA に畳む。スケールパッチ(CHANGE-05 D)では表せないので、焼き込みは書き換える
-    テンソルだけ量子化し直す。"""
+    テンソルだけ量子化し直す。鍵つきの書き込み(keyed、L:ffn:keyed:aα@NAME#KEY、CHANGE-07)も受ける(層・鍵ごとに階数 1。
+    配るなら LoRA が第一候補、焼き込みは既定で f16)。"""
     if in_path and c.model and in_path.resolve() != c.model.resolve():
         raise GneError("BAD_ARGS", "--in と --model が違うファイルです")
     s = holder["session"] = c.session(in_path)
-    r = s.recipe(units=unit, path=recipe, default_direction=direction, direction_layer=direction_layer)
-    nm = r.name or "headproj"
-    out = out or s.store.export_dir() / (f"{nm}-headproj.gguf" if bake else f"{nm}.lora.gguf")
+    r = s.recipe(units=unit, path=recipe, default_direction=direction, direction_layer=direction_layer, default_key=key)
+    out = out or s.default_export_path(r, bake=bake, kind="headproj")
     d = s.headproj_export(r, out, bake=bake, requant=requant, via_f16=via_f16, imatrix=str(imatrix) if imatrix else None,
                           llama_quantize=llama_quantize, verify=verify, contrast=contrast, strip_meta=strip_meta, into=into,
                           lora_f16=lora_f16)
@@ -1972,12 +2250,13 @@ def headproj_export(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, u
     for L, x in (d.get("proj_layers") or {}).items():
         lines.append(f"  L{L}: " + ", ".join(f"H{int(h)} s{sv:g}@{dn}" for h, sv, dn in x["heads"])
                      + f"(階数 {x['rank']}" + ("" if x["folded"] else "、方向が混ざっていて 1 に畳めない") + ")")
+    lines += _keyed_export_lines(d, requant_line=not (bake and d.get("parts")))
     if bake and d.get("parts"):                 # 分割 GGUF: 同じ型で書き戻した
         lines.append(f"書き換え: {len(d['modified'])} テンソルを" + ("元と同じ型で書き戻し" if d["requant"] == "keep" else f"{d['requant']} で書き直し")
                      + "(量子化し直しで失った分は編集の大きさの最大 "
                      f"{d['requant_error_max'] * 100:.1f}%)、分割 {len(d['parts'])} ファイル。記録 {d['sidecar']}")
     elif bake:
-        lines.append("書き換え: " + ", ".join(f"{m['tensor']}({m['from']} → {m['to']})" for m in d["modified"]))
+        lines.append("書き換え: " + ", ".join(_mod_text(m) for m in d["modified"]))
     else:
         lines.append("使い方: llama-cli -m <model> --lora " + d["path"])
     ok = True

@@ -227,13 +227,18 @@ def layer_summary(weights, heads: list[ProjHead], tens: dict[str, tuple[np.ndarr
 
 
 def merge_tensors(*parts: dict[str, tuple[np.ndarray, np.ndarray]]) -> dict[str, tuple[np.ndarray, np.ndarray]]:
-    """同じテンソルの LoRA を連結して 1 つにする(B₁A₁ + B₂A₂ = [B₁ B₂][A₁; A₂])。"""
+    """同じテンソルの LoRA を連結して 1 つにする(B₁A₁ + B₂A₂ = [B₁ B₂][A₁; A₂])。A (…, r, in) は軸 −2、B (…, out, r) は
+    軸 −1 で連結するので、専門家の 3 次元 A (E, r, in)・B (E, out, r)(CHANGE-07 の keyed)にも使える。"""
     out: dict[str, tuple[np.ndarray, np.ndarray]] = {}
     for d in parts:
         for name, (A, B) in d.items():
             if name in out:
                 A0, B0 = out[name]
-                out[name] = (np.concatenate([A0, A], axis=0), np.concatenate([B0, B], axis=1))
+                if A0.ndim != A.ndim or A0.shape[:-2] != A.shape[:-2] or A0.shape[-1] != A.shape[-1] \
+                        or B0.shape[:-1] != B.shape[:-1]:
+                    raise GneError("INTERNAL", f"{name}: 連結する LoRA の形が合いません(A {A0.shape} と {A.shape}、"
+                                               f"B {B0.shape} と {B.shape})")
+                out[name] = (np.concatenate([A0, A], axis=-2), np.concatenate([B0, B], axis=-1))
             else:
                 out[name] = (A, B)
     return out
@@ -259,21 +264,26 @@ def bake_proj_gguf(weights, recipe: Recipe, dst: str | Path, directions: DirSour
 
 
 def bake_proj_split(weights, recipe: Recipe, dst: str | Path, directions: DirSource, *, requant: str = "keep",
-                    warn: Callable[[str], None] | None = None) -> dict:
+                    warn: Callable[[str], None] | None = None,
+                    extra: dict[str, tuple[np.ndarray, np.ndarray]] | None = None,
+                    extra_meta: dict[str, object] | None = None) -> dict:
     """分割 GGUF への焼き込み。書き換える書き込み行列は元と同じ型で量子化し直して同じ場所に書き戻すので、
     ファイルの大きさもヘッダーも変わらない(gne.* のメタデータは入れられないので、記録は <1 番目>.headproj.json に残す)。
     書き換えのない分割ファイルはそのまま写す。dst は出力の 1 番目のファイル(-00001-of-0000N.gguf で終わらなければ付ける)。
     requant="keep" は元と同じ型でその場に書き戻す(大きさが変わらない。小さな編集は量子化の粗さに埋もれやすい)。
-    "f16" / "q8_0" は書き換えるテンソルだけその型にして、それを含む分割ファイルを書き直す(少し大きくなるが編集が残る)。"""
+    "f16" / "q8_0" は書き換えるテンソルだけその型にして、それを含む分割ファイルを書き直す(少し大きくなるが編集が残る)。
+    extra は proj のほかに足す LoRA(鍵つきの書き込み CHANGE-07 の ffn_down・attn_output・専門家の 3 次元など。同じテンソルの
+    proj とは連結する)、extra_meta はサイドカーに足す記録(例 {"keyed": …})。requant_error_max は
+    ‖量子化し直して戻した値 − 書きたい値‖ / ‖B @ A‖ の最大(0.5 を超えたら編集の半分以上が丸めに消えている)。"""
     import re
     import shutil
     from .gguf_fast import _SPLIT_RE
     from .quant import dequantize, quantize
     if recipe.gain_units:
-        raise GneError("BAD_RECIPE", "分割 GGUF への焼き込みは proj のユニットだけです(gain は LoRA で使ってください)")
+        raise GneError("BAD_RECIPE", "分割 GGUF への焼き込みは proj と keyed のユニットだけです(gain は LoRA で使ってください)")
     heads = proj_heads(recipe)
-    if not heads:
-        raise GneError("BAD_RECIPE", "proj のユニットがありません")
+    if not heads and not extra:
+        raise GneError("BAD_RECIPE", "proj(か keyed)のユニットがありません")
     parts = [Path(p) for p in weights.gguf.parts]
     dst = Path(dst)
     m = _SPLIT_RE.match(dst.name)
@@ -282,7 +292,8 @@ def bake_proj_split(weights, recipe: Recipe, dst: str | Path, directions: DirSou
     if any(o.resolve() == p.resolve() for o, p in zip(outs, parts)):
         raise GneError("BAD_ARGS", "出力が元のファイルと同じです")
     b = ProjBuilder(weights, directions, direction_layer=recipe.direction_layer)
-    tens = b.tensors(heads, warn)
+    ptens = b.tensors(heads, warn) if heads else {}
+    tens = merge_tensors(ptens, extra or {})
     if requant not in ("keep", "f16", "q8_0"):
         raise GneError("BAD_ARGS", "--requant は keep・f16・q8_0 です")
     from gguf import GGMLQuantizationType as _Q
@@ -297,14 +308,15 @@ def bake_proj_split(weights, recipe: Recipe, dst: str | Path, directions: DirSou
         t = weights.tensor(name)
         k = [p.resolve() for p in parts].index(Path(t._mm.filename).resolve())   # マウント先が別名のことがある(Modal の Volume)
         data = t.data
-        W = (data.astype(np.float32) if data.dtype != np.uint8 else dequantize(data, t.tensor_type)).reshape(B.shape[0], -1)
-        W2 = W + B.astype(np.float32) @ A.astype(np.float32)
+        shape = tuple(B.shape[:-1]) + (int(A.shape[-1]),)          # (out, in)、専門家は (E, out, in)
+        W = (data.astype(np.float32) if data.dtype != np.uint8 else dequantize(data, t.tensor_type)).reshape(shape)
+        dW = np.matmul(B.astype(np.float32), A.astype(np.float32))  # 専門家の 3 次元は専門家ごとの積
+        W2 = W + dW
         q = target or t.tensor_type
-        raw = quantize(W2, q)
+        raw = quantize(W2.reshape(-1, shape[-1]), q)
         if target is None and len(raw) != t.n_bytes:
             raise GneError("INTERNAL", f"{name}: 書き戻す大きさ {len(raw)} が元の {t.n_bytes} と違います")
-        back = dequantize(np.frombuffer(raw, np.uint8).reshape(W2.shape[0], -1), q).reshape(W2.shape)
-        dW = W2 - W
+        back = dequantize(np.frombuffer(raw, np.uint8).reshape(int(np.prod(shape[:-1])), -1), q).reshape(shape)
         err = float(np.linalg.norm(back - W2) / max(np.linalg.norm(dW), 1e-12))     # 量子化し直しで失った分 ÷ 編集の大きさ
         worst = max(worst, err)
         if target is None:
@@ -321,14 +333,14 @@ def bake_proj_split(weights, recipe: Recipe, dst: str | Path, directions: DirSou
                 rewrite_gguf(p, o, replace[k])
             else:
                 shutil.copyfile(p, o)
-    meta = proj_meta(heads, b)
+    meta = proj_meta(heads, b) if heads else None
     side = Path(str(outs[0]) + ".headproj.json")
-    side.write_text(json.dumps({"recipe": recipe.to_dict(), "headproj": meta, "modified": modified,
+    side.write_text(json.dumps({"recipe": recipe.to_dict(), "headproj": meta, **(extra_meta or {}), "modified": modified,
                                 "requant": "same type, in place" if target is None else requant},
                                ensure_ascii=False, indent=1), encoding="utf-8")
     return {"path": str(outs[0]), "parts": [str(o) for o in outs], "bytes": sum(o.stat().st_size for o in outs),
             "modified": [x["tensor"] for x in modified], "requant_error_max": worst, "sidecar": str(side),
-            **layer_summary(weights, heads, tens)}
+            **(layer_summary(weights, heads, ptens) if heads else {})}
 
 
 # --- ランダム対照(F.2)-------------------------------------------------------------------------------

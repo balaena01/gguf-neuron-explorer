@@ -60,6 +60,16 @@ direction で作った方向は "L:dir:NAME:dose"、attention ヘッドの gain 
      「方向で押したものを方向で測った」ことにしかならない。
    - ランダム対照(eval の random_controls、同数・同じ s のランダムなヘッド)と方式の比較(compare_methods)を通していないレシピは報告しない。
    - 目的の指標が数 % まで来たら強さを上げるのをやめ、残る例を担う別のヘッドを探す。
+10. 鍵つきの書き込み(keyed、CHANGE-07、"L:ffn:keyed:aα@DIR#KEY"、例 "19:ffn:keyed:a1@zundamon_endings#zundamon_endings")。
+   proj が「どの向きを」変えるかを選ぶのに対し、keyed は「どの状態で」書くかを選ぶ(書き込み行列に α d κᵀ を足し、活性が鍵 κ に
+   合う位置でだけ方向 d を書く。α は raw で、1 = 観測した A − B の差そのまま)。両者は重ねられる(同じ LoRA に入る)。
+   手順: direction(書く向き)→ direction_key(鍵。介入なしで作る。対照集合の positions を "before:<正規表現>" にすると、推論時と
+   同じ文脈のモデル自身の返事で、変えたい文字を書く直前の位置が側 A になる)→ direction_key_check(作成に使っていない例で。既定
+   subset="odd"。held_out が false の値は甘い。選択性が擬似鍵の p95 を超えない鍵は使わない)→ steer / eval → keyed_export
+   (配るなら LoRA、焼き込みは f16)。when は keyed に効かない。eval は keyed のレシピに選択性のブロック(行の keyed.selectivity、
+   結果の keyed の方式の比較と擬似鍵)を足す。鍵と方向を別の対照集合で作ったなど、鍵の対照集合を推定できないときは
+   eval(keyed_contrast=鍵を作った対照集合)で渡す(渡さないと keyed は skipped)。
+   例: ずんだもんの語尾 configs/contrast/zundamon_endings.yaml(direction(positions="response") → direction_key(layers=[…]) → direction_key_check)。
 """
 
 
@@ -215,7 +225,7 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
         既定は LoRA アダプタ GGUF(llama.cpp の --lora で使える、Qwen 系でも可)。bake=True なら W_up を書き換えた GGUF。"""
         def fn():
             r = session.recipe(path=session.recipe_path(name))
-            out = session.store.export_dir() / (f"{name}-gain.gguf" if bake else f"{name}.lora.gguf")
+            out = session.default_export_path(r, bake=bake, kind="gain", name=_recipe_stem(name))
             return session.gain(r, out, bake=bake)
         return await call(fn, gpu=False)
 
@@ -224,7 +234,9 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
                    when: str | None = None, random_controls: int = 0, reactivity: str | None = None,
                    head_controls: int = 0, compare_methods: bool = False, match_effect: float | None = None,
                    score_layer: int | None = None, alloc: str | None = None, n_heads: list[int] | None = None,
-                   control_pool: str = "before", direction_metrics: bool = True, dir_max_examples: int = 64) -> dict:
+                   control_pool: str = "before", direction_metrics: bool = True, dir_max_examples: int = 64,
+                   keyed_contrast: str | None = None, keyed_metrics: bool = True, keyed_examples: int = 8,
+                   keyed_match: bool = True, keyed_pseudo: int = 8, keyed_subset: str | None = None) -> dict:
         """副作用チェック(§6.14)をジョブとして投げる。recipe は保存したレシピの名前、units は単発指定(どちらか)。
         doses はレシピ全体の倍率(既定 [0, 0.25, 0.5, 0.75, 1]、0 が無介入)。倍率ごとに exact / format の正答率、ppl、
         言語の混入(簡体字・ハングルなど)、性格の変化量(無介入にない語の割合など)を測り、配布可(能力 −5pt 以内、
@@ -239,7 +251,13 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
         compare_methods=True は、proj のレシピと同じ方向で全層射影・ヘッドの方向成分・ヘッドの丸ごと倍率・ニューロンの消去を
         A 側の点数の水準(match_effect、省けばこのレシピ)をそろえて比べる(F.3)。alloc(heads_allocate の名前)と n_heads で、
         ヘッド数ごとの組を評価する(F.4、recipe・units は要らない)。方向の指標は direction_metrics=False で測らない。
-        dir_max_examples はその測定で読む質問の数(既定 64、A・B それぞれ等間隔に間引く。0 で全部)。"""
+        dir_max_examples はその測定で読む質問の数(既定 64、A・B それぞれ等間隔に間引く。0 で全部)。
+        keyed のユニットを持つレシピ(CHANGE-07)では、行の keyed(目的の層の側 A・側 B・dont_touch の残差の r̂ 方向の変化と
+        selectivity、random_controls があれば擬似鍵の対照の null_pct)と、結果の keyed(方式の比較 methods・compare、擬似鍵 pseudo、
+        text)が入る(生成なしの prefill だけ)。keyed_contrast は鍵を作った対照集合(名前かパス。方向を作った
+        対照集合と同じなら省ける。分からなければ keyed は skipped と hint)、keyed_examples は会話の組ごとに読む数(0 で全部)、
+        keyed_pseudo は擬似鍵の本数、keyed_subset は読む例(even / odd / all、既定は鍵の作成と反対側)、keyed_match=False で
+        大きさ合わせを省く、keyed_metrics=False で測らない。"""
         try:
             if alloc:
                 return jobs.start("eval", {"alloc": alloc, "n_heads": n_heads, "when": when,
@@ -258,6 +276,12 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
             if not compare_methods:
                 p["direction_metrics"] = bool(direction_metrics)
                 p["dir_max_examples"] = int(dir_max_examples) or None
+                p.update({"keyed_metrics": bool(keyed_metrics), "keyed_examples": int(keyed_examples) or None,
+                          "keyed_match": bool(keyed_match), "keyed_pseudo": int(keyed_pseudo)})
+                if keyed_contrast:
+                    p["keyed_contrast"] = str(_contrast_path(session, keyed_contrast, None, None, None, None))
+                if keyed_subset:
+                    p["keyed_subset"] = keyed_subset
             return jobs.start("eval", p).view()
         except Exception as e:  # noqa: BLE001
             return _err(e)
@@ -452,26 +476,116 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
             return _err(e)
 
     @srv.tool()
-    async def headproj_export(recipe: str, bake: bool = False, requant: str = "q8_0", verify: bool = True,
+    async def headproj_export(recipe: str, bake: bool = False, requant: str | None = None, verify: bool = True,
                               strip_meta: bool = False, into: str | None = None) -> dict:
-        """保存したレシピの proj のユニット(ヘッドの方向成分の射影、と gain)を書き出す(CHANGE-06 E)。既定は LoRA アダプタ
-        GGUF(同じ層・同じ方向は階数 1 に畳む。数百 KB)。bake=True なら書き込み行列だけ量子化し直した GGUF をジョブで作り、
+        """保存したレシピの proj のユニット(ヘッドの方向成分の射影、と gain・keyed)を書き出す(CHANGE-06 E)。既定は LoRA アダプタ
+        GGUF(同じ層・同じ方向は階数 1 に畳む。数百 KB)。bake=True なら書き込み行列だけ量子化し直した GGUF をジョブで作り
+        (requant の既定は q8_0、keyed を含むなら f16)、
         verify なら焼き込み版と LoRA 版を点数・最初のトークンの KL・最尤トークンの一致率・ppl で比べる(V26)。
         strip_meta=True なら gne の記録(gne.* のメタデータ・レシピ・名前の印・横の .headproj.json)を残さない(人に渡す版)。
         結果の local_path_keys は、メタデータに手元のパスらしい文字列が残っているキー。into は焼き込む先の別の GGUF
         (同じ構造の量子化していない F16 / BF16 など。方向はこのモデルのものを使う。requant="keep" で元の型のまま、verify はできない)。"""
-        try:
-            out = str(session.store.export_dir() / (f"{recipe}-headproj.gguf" if bake else f"{recipe}.lora.gguf"))
-            if bake:
-                p = {"recipe": recipe, "out": out, "bake": True, "requant": requant, "verify": verify and not into,
-                     "strip_meta": strip_meta}
+        return await _export(recipe, None, None, None, None, bake=bake, requant=requant, verify=verify,
+                             strip_meta=strip_meta, into=into)
+
+    async def _export(recipe, units, name, key, direction, *, bake, requant, verify, strip_meta, into,
+                      lora_f16: bool = False) -> dict:
+        """headproj_export・keyed_export の中身(jobs._headproj_export。ファイル名の既定は Session.default_export_path)。
+        焼き込みはジョブ、LoRA はその場で書く。"""
+        from .jobs import _headproj_export
+        p = {"recipe": recipe, "units": units, "name": name if name else (_recipe_stem(recipe) if recipe else None),
+             "key": key, "direction": direction}
+        p = {k: v for k, v in p.items() if v is not None}
+        if bake:
+            try:
+                q = {**p, "bake": True, "requant": requant, "verify": verify and not into, "strip_meta": strip_meta}
                 if into:
-                    p["into"] = into
-                return jobs.start("headproj_export", p).view()
+                    q["into"] = into
+                return jobs.start("headproj_export", q).view()
+            except Exception as e:  # noqa: BLE001
+                return _err(e)
+        return await call(lambda: _headproj_export(session, **p, strip_meta=strip_meta, lora_f16=lora_f16))
+
+    @srv.tool()
+    async def keyed_export(recipe: str | None = None, units: list[str] | None = None, name: str | None = None,
+                           key: str | None = None, direction: str | None = None, bake: bool = False,
+                           requant: str | None = None, verify: bool = False, strip_meta: bool = False,
+                           into: str | None = None, lora_f16: bool = False) -> dict:
+        """鍵つきの書き込み(keyed、CHANGE-07)を書き出す(headproj_export の keyed 向けの別名。proj・gain が混ざっていても同じ
+        ファイルに入る)。recipe は保存したレシピの名前、または units(例 ["19:ffn:keyed:a1@zundamon_endings#zundamon_endings"])と
+        name。key・direction は #KEY・@NAME を省いたユニットの鍵と方向。既定は LoRA アダプタ GGUF(層・鍵ごとに階数 1、llama.cpp の
+        --lora でそのまま当たる。配るならこれが第一候補。keyed だけなら <名前>-keyed.lora.gguf)。bake=True なら書き込み行列
+        (ffn_down など)だけ書き直した GGUF をジョブで作る(requant の既定は f16。q8_0 では rank 1 の小さな編集が丸めに消えやすい。
+        結果の requant_error_max が 0.5 を超えたら警告)。verify=True で焼き込み版と LoRA 版を比べる(V33)。"""
+        if bool(recipe) == bool(units):
+            return _err(GneError("BAD_ARGS", "recipe(保存したレシピの名前)か units のどちらかを渡してください"))
+        return await _export(recipe, units, name, key, direction, bake=bake, requant=requant, verify=verify,
+                             strip_meta=strip_meta, into=into, lora_f16=lora_f16)
+
+    @srv.tool()
+    async def direction_key(contrast: str, layers: list[int] | str, name: str | None = None, positions: str | None = None,
+                            positions_b: str | None = None, skip: int | None = None, max_tokens: int = 96,
+                            q_mode: str = "examples", q_energy: float = 0.99, q_max_rank: int | None = None,
+                            q_max_samples: int = 4096, subset: str = "even", pseudo: int = 16,
+                            replies_a: str | list[str] | None = None, replies_b: str | list[str] | None = None,
+                            iv: str | list[str] | None = None, target: str = "ffn", seed: int = 0) -> dict:
+        """鍵つきの書き込みの鍵 κ を作るジョブを投げる(CHANGE-07、job_status で結果)。対照集合(configs/contrast/ の名前かパス)の
+        側 A(書きたい状態)の活性の平均 μ を、側 B と dont_touch の活性が張る空間に直交させ、κᵀμ = 1 にして
+        <root>/keys/<model_id>/<name>.npz に保存する。layers は必須(例 [8, 14, 20])。positions(省くと対照集合の値)が
+        "before:<正規表現>" なら推論時と同じ文脈のモデル自身の返事で、一致する文字を書く直前を側 A、残りの位置を側 B にする。
+        replies_a / replies_b は返事を読ませるファイルかリスト(生成しない)。q_mode: examples(既定)/ means / samples。
+        subset は既定 even(direction_key_check は odd で確かめる)。iv はこの介入(レシピかユニット)を当てた状態で作る。
+        結果の層ごとの kn(1 に近いほど側 B と重ならない、0.05 未満は弱い)と build_auc(作成に使った例での値で甘い)。"""
+        from .jobs import _layers
+        try:
+            if not _layers(layers):
+                raise GneError("BAD_ARGS", "layers に鍵を作る層を指定してください(例 [8, 14, 20])")
+            p = {"contrast": str(_contrast_path(session, contrast, None, None, None, None)), "layers": layers, "name": name,
+                 "positions": positions, "positions_b": positions_b, "skip": skip, "max_tokens": max_tokens,
+                 "q_mode": q_mode, "q_energy": q_energy, "q_max_rank": q_max_rank, "q_max_samples": q_max_samples,
+                 "subset": subset, "pseudo": pseudo, "replies_a": replies_a, "replies_b": replies_b, "iv": iv,
+                 "target": target, "seed": seed}
+            return jobs.start("direction_key", {k: v for k, v in p.items() if v is not None}).view()
         except Exception as e:  # noqa: BLE001
             return _err(e)
-        return await call(lambda: session.headproj_export(session.recipe(path=session.recipe_path(recipe)), out,
-                                                          strip_meta=strip_meta))
+
+    @srv.tool()
+    async def direction_key_check(key: str, contrast: str | None = None, subset: str = "odd", layers: list[int] | str | None = None,
+                                  positions: str | None = None, positions_b: str | None = None, skip: int | None = None,
+                                  max_tokens: int | None = None, replies_a: str | list[str] | None = None,
+                                  replies_b: str | list[str] | None = None, iv: str | list[str] | None = None,
+                                  strict: bool = False) -> dict:
+        """鍵の分離の確認のジョブを投げる(CHANGE-07、job_status で結果)。対照集合(省くと鍵に保存した作成時の例で、甘い値)の
+        各位置で ρ = κᵀx を測り、層ごとに側 A 対 側 B の AUC(auc は例単位、auc_token はトークン単位)、選択性 selectivity
+        (例ごとの ρ の平均の差 A − B)と擬似鍵(ラベルを並べ替えた鍵)の p95、beats_pseudo(選択性が擬似鍵の p95 を超えた)、
+        dont_touch の ρ の中央値を返す。位置・skip・max_tokens の既定は鍵を作ったときの値。作成に使った例と重なると
+        held_out が false(strict なら BAD_ARGS)。判断は held_out が true の結果で、beats_pseudo の層だけを使う。"""
+        try:
+            p = {"key": key, "subset": subset, "layers": layers, "positions": positions, "positions_b": positions_b,
+                 "skip": skip, "max_tokens": max_tokens, "replies_a": replies_a, "replies_b": replies_b, "iv": iv,
+                 "strict": strict, "compact": True,
+                 "contrast": None if contrast is None else str(_contrast_path(session, contrast, None, None, None, None))}
+            return jobs.start("direction_key_check", {k: v for k, v in p.items() if v is not None}).view()
+        except Exception as e:  # noqa: BLE001
+            return _err(e)
+
+    @srv.tool()
+    async def direction_key_verify(layer: int, key: str, direction: str, alphas: list[float] | None = None,
+                                   target: str = "ffn", direction_layer: str = "own") -> dict:
+        """V30(CHANGE-07、数秒): keyed の LoRA が式どおり ΔW x = α (κᵀx) d を書くか。無介入で書き込み行列の入力 x と出力を
+        捕捉し、LoRA を当てた出力の差と比べる(rows の rel_err_median < 3%、鍵の作成に使った側 B の例で leak_b < 0.1、v30)。
+        target は ffn / attn、alphas の既定は [1, 2]。"""
+        def fn():
+            from .keyed import parse_target
+            kind, expert = parse_target(target)
+            return session.check_keyed(layer, key=key, direction=direction, alphas=tuple(alphas or (1.0, 2.0)),
+                                       kind=kind, expert=expert, direction_layer=direction_layer)
+        return await call(fn)
+
+    @srv.tool()
+    async def keys() -> dict:
+        """保存した鍵の一覧(CHANGE-07、<root>/keys/<model_id>/): 名前・書き込み先・層・層ごとの kn・作成の条件(位置・subset・q_mode)。"""
+        return await call(lambda: {"keys": session.keys()}, gpu=False)
 
     @srv.tool()
     async def expert(layer: int, expert: int) -> dict:
@@ -554,7 +668,7 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
 
     @srv.tool()
     async def job_start(kind: str, params: dict[str, Any] | None = None, workers: str | None = None) -> dict:
-        """長時間の処理を投げる。kind: stats_resid / stats_act / lens_logit / lens_steer / sweep / rank / reverse / eval / direction / ablate / heads_contrast / heads_causal / heads_allocate / head_pipeline / heads_candidates / heads_refine / headproj_export / fieldtest。
+        """長時間の処理を投げる。kind: stats_resid / stats_act / lens_logit / lens_steer / sweep / rank / reverse / eval / direction / ablate / heads_contrast / heads_causal / heads_allocate / head_pipeline / heads_candidates / heads_refine / headproj_export / fieldtest / direction_key / direction_key_check。
         params は gne.api の同名メソッドの引数(例 sweep: {"layer": 22, "neurons": "random:64", "design": "quick"})。
         見積もりが 30 分を超えるジョブは走らせずに NEEDS_CONFIRM と見積もりを返す。params に budget("30m" など)を入れると
         予算に収まるように絞る(lens_steer は方向に近いニューロンの上位、sweep は quick 設計で steer lens の上位、reverse は
@@ -602,6 +716,12 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
     for action in ("highlight", "note", "open"):
         _register_ui_tool(srv, action, ui_url)
     return srv
+
+
+def _recipe_stem(recipe: str) -> str:
+    """書き出しのファイル名に使うレシピの名前(YAML のパスならファイル名の stem)。"""
+    p = Path(str(recipe))
+    return p.stem if p.suffix in (".yaml", ".yml") else str(recipe)
 
 
 def _contrast_path(session, contrast, system_a, system_b, user_prompts, name) -> Path:

@@ -202,7 +202,7 @@ def write_lora_tensors(weights, tensors: dict[str, tuple[np.ndarray, np.ndarray]
     w.write_tensors_to_file()
     w.close()
     return {"path": str(path), "n_tensors": len(tensors), "bytes": Path(path).stat().st_size,
-            "rank": {n: int(np.asarray(B).shape[1]) for n, (_, B) in tensors.items()}}
+            "rank": {n: int(np.asarray(B).shape[-1]) for n, (_, B) in tensors.items()}}   # 専門家の 3 次元 (E, out, r) も最後の軸
 
 
 def write_ablation_lora(weights, rs: dict[str, np.ndarray], rows: dict[str, np.ndarray], path: str | Path, *,

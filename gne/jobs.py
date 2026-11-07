@@ -118,7 +118,8 @@ def _eval(s, recipe: str | None = None, units: list[str] | None = None, dose_uni
           compare_methods: bool = False, match_effect: float | None = None, score_layer: int | None = None,
           alloc: str | None = None, n_heads: list[int] | None = None, **p) -> dict:
     """eval(§6.14)。recipe は保存したレシピの名前、units は単発指定(どちらか)。compare_methods は方式の比較(CHANGE-06 F.3)、
-    alloc は heads allocate の組のヘッド数ごとの評価(F.4、recipe も units も要らない)。"""
+    alloc は heads allocate の組のヘッド数ごとの評価(F.4、recipe も units も要らない)。ほかの引数は Session.eval と同じ
+    (keyed のレシピの keyed_contrast・keyed_metrics・keyed_examples・keyed_match・keyed_pseudo・keyed_subset も、CHANGE-07 E)。"""
     if alloc:
         return s.eval_alloc_curve(alloc, n_heads=n_heads, suite=p.get("suite"), when=p.get("when"),
                                   random_controls=int(p.get("random_controls") or 0))
@@ -134,19 +135,21 @@ def _eval(s, recipe: str | None = None, units: list[str] | None = None, dose_uni
 
 def _headproj_export(s, recipe: str | None = None, out: str | None = None, *, units: list[str] | None = None,
                      name: str | None = None, direction_layer: str | None = None, file_stem: str | None = None,
-                     overwrite: bool = True, **p) -> dict:
-    """ヘッドの proj と gain(LoRA に入るユニット)を LoRA アダプタか焼き込み GGUF に書き出す。recipe(保存したレシピの名前か
-    パス)か units(UI のレシピのユニットの書き方)。out を省くと <root>/export/<名前>.lora.gguf(焼き込みは <名前>-headproj.gguf)。
-    file_stem を渡すとファイル名はそれ(LoRA は <file_stem>.lora.gguf、焼き込みは <file_stem>.gguf)。overwrite=False なら、
-    同じ名前のファイルがあれば書かずに FILE_EXISTS を返す(UI は確かめてから上書きする)。LoRA は小さいので、UI から落とせる
-    URL も返す。"""
+                     overwrite: bool = True, key: str | None = None, direction: str | None = None, **p) -> dict:
+    """ヘッドの proj・鍵つきの書き込み(keyed、CHANGE-07)と gain(LoRA に入るユニット)を LoRA アダプタか焼き込み GGUF に
+    書き出す。recipe(保存したレシピの名前かパス)か units(UI のレシピのユニットの書き方)。key・direction は #KEY・@NAME を
+    省いたユニットの鍵と方向。out を省くと Session.default_export_path(<root>/export/<名前>.lora.gguf、焼き込みは
+    <名前>-headproj.gguf、keyed だけなら <名前>-keyed.lora.gguf / -keyed.gguf)。file_stem を渡すとファイル名はそれ(LoRA は
+    <file_stem>.lora.gguf、焼き込みは <file_stem>.gguf)。overwrite=False なら、同じ名前のファイルがあれば書かずに
+    FILE_EXISTS を返す(UI は確かめてから上書きする)。LoRA は小さいので、UI から落とせる URL も返す。"""
     import re
     from pathlib import Path
     from .steer import GneError
     if units:
-        r = s.recipe(units=list(units), name=name or None, direction_layer=direction_layer)
+        r = s.recipe(units=list(units), name=name or None, direction_layer=direction_layer, default_key=key,
+                     default_direction=direction)
     elif recipe:
-        r = s.recipe(path=s.recipe_path(recipe), direction_layer=direction_layer)
+        r = s.recipe(path=s.recipe_path(recipe), direction_layer=direction_layer, default_key=key, default_direction=direction)
     else:
         raise GneError("BAD_ARGS", "recipe か units が要ります")
     nm = name or r.name or "headproj"
@@ -157,8 +160,12 @@ def _headproj_export(s, recipe: str | None = None, out: str | None = None, *, un
         file_stem = file_stem.strip().removesuffix(".gguf").removesuffix(".lora")
         if not re.fullmatch(r"[\w.\-]+", file_stem):
             raise GneError("BAD_ARGS", f"ファイル名 {file_stem!r} は英数字・_・-・. だけにしてください")
-    stem = file_stem or (f"{nm}-headproj" if bake else nm)
-    path = Path(out) if out else s.store.export_dir() / (f"{stem}.gguf" if bake else f"{stem}.lora.gguf")
+    if out:
+        path = Path(out)
+    elif file_stem:
+        path = s.store.export_dir() / (f"{file_stem}.gguf" if bake else f"{file_stem}.lora.gguf")
+    else:
+        path = s.default_export_path(r, bake=bake, kind="headproj", name=nm)
     if not overwrite and path.exists():
         raise GneError("FILE_EXISTS", f"{path.name} はもうあります", "上書きするか、別の名前にしてください")
     d = s.headproj_export(r, path, **p)
@@ -166,6 +173,38 @@ def _headproj_export(s, recipe: str | None = None, out: str | None = None, *, un
     if not bake and Path(d["path"]).parent.resolve() == s.store.export_dir().resolve():
         d["url"] = f"/api/export/file/{d['file']}"
     d["name"] = nm
+    return d
+
+
+def _layers(x) -> list[int] | None:
+    """層の指定(リスト・"8,14,20"・"10-16")→ 層のリスト。"""
+    if x is None or isinstance(x, (list, tuple)):
+        return None if x is None else [int(L) for L in x]
+    if isinstance(x, int):
+        return [x]
+    from .cli import parse_layers
+    return parse_layers(str(x))
+
+
+def _direction_key(s, contrast, layers=None, **p) -> dict:
+    """鍵つきの書き込みの鍵を作る(CHANGE-07、gne direction key)。contrast は対照集合のパス、layers は必須(リストか "8,14,20")。
+    ほかの引数は Session.direction_key(keyed_build.build_keys)と同じ。"""
+    Ls = _layers(layers)
+    if not Ls:
+        raise GneError("BAD_ARGS", "鍵の層(layers)を指定してください(例 [8, 14, 20] か \"8,14,20\")")
+    return s.direction_key(contrast, layers=Ls, progress=s.progress, **p)
+
+
+def _direction_key_check(s, key: str, layers=None, compact: bool = False, **p) -> dict:
+    """鍵の分離の確認(CHANGE-07、gne direction key-check)。compact なら例ごとの ρ(values)・ヒストグラム(hist)・
+    擬似鍵ごとの値を落とす(MCP 向け。UI はヒストグラムに使うので落とさない)。"""
+    d = s.direction_key_check(key, layers=_layers(layers), progress=s.progress, **p)
+    if compact:
+        for r in d["layers"]:
+            r.pop("values", None)
+            r.pop("hist", None)
+            for k in ("pseudo_auc", "pseudo_selectivity"):
+                r[k].pop("values", None)
     return d
 
 
@@ -197,6 +236,8 @@ def standard_kinds() -> dict[str, Callable[..., dict]]:
         "heads_refine": lambda s, name, **p: s.heads_refine(name, **p),                 # 残りの質問で追加のヘッドを探す
         "fieldtest": lambda s, **p: s.fieldtest(**p),                                   # 本番と同じ動かし方で、ファイルどうしを比べる
         "headproj_export": _headproj_export,
+        "direction_key": _direction_key,                                                # CHANGE-07: 鍵の作成
+        "direction_key_check": _direction_key_check,                                    # CHANGE-07: 鍵の分離の確認
     }
 
 

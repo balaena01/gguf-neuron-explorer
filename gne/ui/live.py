@@ -1,5 +1,6 @@
 """UI のライブ機能(別冊 U2): 3 列チャットの逐次生成、fires、reads you、レシピ、cvec の書き出し、ジョブ。
 CHANGE-04 G: HEAD パネルの注目のパターン(attention)と、fires の文章でのヘッドの注目(fires_heads)。
+CHANGE-07 G: レシピの keyed のユニット(鍵と α)。keyed は cvec に入らない(書き出しは headproj_export のジョブ)。
 
 GPU を使う処理は GpuArbiter を通す。ジョブ(sweep・lens など)はユニットの切れ目で GPU を譲るので、
 チャットや fires はジョブの実行中でも数秒以内に始まる(§8.1)。
@@ -365,18 +366,26 @@ class Live:
             out.append({"name": p.stem, "model_id": r.model_id, "dose_unit": r.dose_unit,
                         "units": [{"layer": u.layer, "neuron": u.neuron, "dose": u.dose, "kind": u.kind, "mode": u.mode,
                                    "k": u.k, "direction": u.direction, "head": u.head, "seek": getattr(u, "seek", None),
-                                   "expert": u.expert} for u in r.units],                  # expert: MoE(CHANGE-05)
+                                   "expert": u.expert,                                     # expert: MoE(CHANGE-05)
+                                   # keyed(CHANGE-07): 鍵と強さ α(Unit.k、YAML の alpha)。方向の先頭の - は α の符号に畳んである
+                                   **({"key": u.key, "alpha": u.k} if u.mode == "keyed" else {})} for u in r.units],
                         "ablate": r.ablate.to_dict() if r.ablate else None, "when": r.when, "sampling": r.sampling,
                         "this_model": r.model_id in (None, self.s.meta.model_id)})
         return out
 
-    def export(self, units: list[str], name: str, *, verify: bool = False) -> dict:
+    def export(self, units: list[str], name: str, *, verify: bool = False, keyed: int = 0) -> dict:
+        """control vector(add のユニットだけ)の書き出し。keyed は UI がレシピから外した鍵つきの書き込み(CHANGE-07)の数で、
+        cvec には入らない(入力の活性が鍵に合うときだけ書くので定数の足し算にならない)ことを警告に出す。keyed のレシピは
+        headproj_export のジョブ(LoRA・焼き込み)で書き出す。"""
         import re
         if not re.fullmatch(r"[\w.\-]+", name or ""):
             raise GneError("BAD_ARGS", f"名前 {name!r} は英数字・_・-・. だけにしてください")
         path = self.s.store.root / "export" / f"{name}.cvec.gguf"
         recipe = self.s.recipe(units=list(units), dose_unit="rel", name=name)        # GGUF の中のレシピにも名前を入れる
         r, warns = self._gpu(lambda: self.s.export_cvec(recipe, path, verify=verify))
+        if keyed:
+            warns = [f"鍵つきの書き込み(keyed、{int(keyed)} 個)は control vector に入らないので外しました(入力の活性が鍵に合うときだけ"
+                     "書くので、定数の足し算にならない)。レシピのタブの「LoRA・焼き込み」(headproj_export)で書き出してください", *warns]
         saved = (self.s.store.recipes_dir() / f"{name}.yaml").exists()
         return {**r, "file": f"{name}.cvec.gguf", "url": f"/api/export/file/{name}.cvec.gguf", "warnings": warns,
                 "recipe_saved": saved}

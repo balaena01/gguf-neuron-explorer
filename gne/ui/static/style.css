@@ -563,3 +563,45 @@ table.fi-tab.moe th:nth-child(1) { width: 52px; } table.fi-tab.moe th:nth-child(
 .ft-table tr.ft-worse td { background: #2a1616; }
 .ft-past tr[data-ft] { cursor: pointer; }
 .ft-past tr.on td { background: #15202c; }
+/* CHANGE-07 G: 鍵つきの書き込み(direction ビューの「鍵」、recipe タブの keyed の行)。ヒストグラムの色は変数にまとめる */
+:root { --kx-a: #e8b04a; --kx-b: #9fb3cf; --kx-d0: #6fcf8f; --kx-d1: #c38cf0; --kx-d2: #5ec8d8; --kx-ok: #6fcf8f; --kx-ng: #ff8a8a; }
+#dv-key { max-width: 1180px; }
+.kx-sec { border-top: 1px solid var(--line); margin-top: 10px; padding-top: 2px; }
+.kx-sec > h4 { color: #dfe6ee; font-weight: 500; }
+.kx-sec .pp-set input[type=number] { width: 5em; }
+.kx-res { margin: 6px 0; }
+.kx-add { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; margin: 4px 0; }
+.kx-ok { color: var(--kx-ok); }
+.kx-ng { color: var(--kx-ng); }
+.kx-held { margin: 4px 0; }
+.kx-sample { font-family: var(--sans); white-space: pre-wrap; margin: 2px 0 6px; }
+.kx-hists { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 8px 14px; margin: 4px 0 8px; max-width: 1180px; }
+.kx-fig { margin: 0; border: 1px solid var(--line); border-radius: 4px; padding: 4px 6px 2px; background: var(--panel); }
+svg.kx-hist { display: block; width: 100%; height: auto; }
+svg.kx-hist text { font: 10px var(--mono); fill: var(--muted); }
+svg.kx-hist text.tt { fill: var(--text); }
+svg.kx-hist line.grid { stroke: var(--line); }
+svg.kx-hist line.ref { stroke: var(--muted); stroke-dasharray: 3 3; }
+svg.kx-hist .bar.ga { fill: var(--kx-a); fill-opacity: 0.62; }
+svg.kx-hist .bar.gb { fill: var(--kx-b); fill-opacity: 0.5; }
+svg.kx-hist .line { fill: none; stroke-width: 1.6; }
+svg.kx-hist .line.gd0 { stroke: var(--kx-d0); }
+svg.kx-hist .line.gd1 { stroke: var(--kx-d1); }
+svg.kx-hist .line.gd2 { stroke: var(--kx-d2); }
+.kx-legend .kx-sw { display: inline-block; width: 14px; height: 8px; vertical-align: middle; margin-right: 6px; }
+.kx-sw.ga { background: var(--kx-a); } .kx-sw.gb { background: var(--kx-b); }
+.kx-sw.gd0, .kx-sw.gd1, .kx-sw.gd2 { height: 2px; }
+.kx-sw.gd0 { background: var(--kx-d0); } .kx-sw.gd1 { background: var(--kx-d1); } .kx-sw.gd2 { background: var(--kx-d2); }
+table.rc tr.rc-keyed td { border-left: 2px solid #2f5d4c; padding-left: 6px; }
+.rc-kx { display: flex; flex-wrap: wrap; gap: 3px 4px; align-items: center; margin-top: 3px; font-size: 11px; white-space: normal; }
+.rc-kx select, select.rc-kkind { max-width: 150px; font-size: 11px; }
+input.rc-kexp { width: 44px; }
+.badge.keyed { border-color: #2f5d4c; color: #8fd3b5; margin: 0 0 0 4px; }
+.badge.warn { border-color: #6b4b22; color: #e0a860; font-family: var(--sans); white-space: normal; }
+.rc-kadd { margin: 4px 0; }
+.rc-kadd summary { cursor: pointer; }
+.evx-kx-in { display: inline-flex; flex-wrap: wrap; gap: 8px; align-items: center; border-left: 2px solid #2f5d4c; padding-left: 8px; }
+.evx-kx { border-top: 1px solid var(--line); margin-top: 10px; padding-top: 2px; }
+.evx-kx-h { color: #dfe6ee; font-weight: 500; }
+.evx-kx span.ok, .kx-res span.ok { color: var(--kx-ok); }
+.evx-kx span.ng, .kx-res span.ng { color: var(--kx-ng); }

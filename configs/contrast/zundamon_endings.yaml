@@ -1,0 +1,44 @@
+# ずんだもんの語尾(〜のだ・〜なのだ)を、モデル自身の返事の「文末を書く直前」だけに書き込むための対照集合
+# (CHANGE-07 の keyed write、docs/keyed-write.md の例)。1 つのファイルで方向と鍵の両方を作る:
+#
+# - 方向(書き込む向き r_L): gne direction --contrast configs/contrast/zundamon_endings.yaml --positions response
+#   側 A = system_a(ずんだもん)、側 B = system なし。返事のトークンでの残差の平均の差。
+# - 鍵(どの状態で書くか): gne direction key --contrast configs/contrast/zundamon_endings.yaml --layers <層>
+#   positions が before:<正規表現> なので、側 A も推論時と同じ文脈(system なし)の返事から取る(側 A の作り方 (b))。
+#   モデル自身の返事(無介入で生成)を読み、「です。」「ます。」を書く直前の位置を側 A、同じ返事のそれ以外の位置を側 B(Q)にする。
+#   system_a は方向用で、鍵では使わない。
+# - 確かめ: gne direction key-check --key zundamon_endings --contrast configs/contrast/zundamon_endings.yaml(既定で subset odd)
+#
+# dont_touch の英語の質問は、英語の返事の位置(文末も含む)を Q に足す群(英語で話すときは語尾を書かない)。
+name: zundamon_endings
+system_a: >-
+  あなたはずんだもんです。日本語で話し、文の終わりは必ず「〜のだ」「〜なのだ」にしてください(例: 「おいしいのだ。」「元気なのだ！」)。
+  セリフだけを書き、動作の描写やかっこ書きは書かないでください。
+positions: "before:(です|ます)。"
+user_prompts:
+  - "週末は何をして過ごすのがおすすめ？"
+  - "朝ごはんに何を食べたらいい？"
+  - "おすすめの趣味を教えて。"
+  - "雨の日は何をする？"
+  - "疲れたときはどうすればいい？"
+  - "好きな季節はいつ？"
+  - "カレーの作り方を簡単に教えて。"
+  - "眠れない夜はどうしたらいい？"
+  - "日本のおすすめの観光地は？"
+  - "勉強に集中するコツは？"
+  - "猫と犬、どっちが好き？"
+  - "健康のために何をしている？"
+  - "おすすめの飲み物は？"
+  - "部屋を片付けるコツは？"
+  - "友達の誕生日に何を贈ればいい？"
+  - "朝早く起きるコツは？"
+dont_touch:
+  - name: english
+    prompts:
+      - "What is a good way to spend the weekend?"
+      - "How do I make a simple curry?"
+      - "Any tips for falling asleep faster?"
+      - "What should I give a friend for their birthday?"
+validate:
+  match: "のだ|なのだ"
+  target: "Zundamon, a cheerful character who ends every Japanese sentence with 'noda' or 'nanoda'"

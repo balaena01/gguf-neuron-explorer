@@ -213,9 +213,10 @@ class Session:
     def recipe(self, *, units: list[str] | None = None, path: str | Path | None = None,
                dose_unit: str | None = None, scale: float = 1.0, name: str | None = None,
                when: str | None = None, ablate: str | dict | None = None, default_direction: str | None = None,
-               direction_layer: str | None = None) -> Recipe:
+               direction_layer: str | None = None, default_key: str | None = None) -> Recipe:
         """ablate は方向の射影消去(§6.17)。"NAME[@層][:倍率]" か {direction, scale, layers, from_layer}。
-        ablate だけ(ユニットなし)のレシピも作れる。"""
+        ablate だけ(ユニットなし)のレシピも作れる。default_key は #KEY を省いた keyed のユニットの鍵(CHANGE-07)。
+        keyed のユニットは方向と鍵があるか・層が鍵にあるか・長さ・書ける層か(MTP・最終層は断る)をここで確かめる。"""
         from .steer import AblateSpec
         if units and path:
             raise GneError("BAD_ARGS", "--recipe か --unit のどちらか一方を指定してください")
@@ -237,6 +238,8 @@ class Session:
             r.ablate = AblateSpec.from_dict(ablate)
         if default_direction and not r.default_direction:      # CHANGE-06: @NAME を省いた proj のユニットの方向
             r.default_direction = default_direction
+        if default_key and not r.default_key:                  # CHANGE-07: #KEY を省いた keyed のユニットの鍵
+            r.default_key = default_key
         if direction_layer:
             r.direction_layer = direction_layer
         r.validate()
@@ -247,6 +250,8 @@ class Session:
         for u in r.units:
             if not 0 <= u.layer < self.meta.n_layer:
                 raise GneError("BAD_RECIPE", f"層 {u.layer} は範囲外です(0..{self.meta.n_layer - 1})")
+            if u.mode == "keyed":                                   # CHANGE-07: まとめて _check_keyed で確かめる
+                continue
             if u.kind == "neuron" and self.weights.is_moe(u.layer):
                 raise GneError("BAD_RECIPE", f"層 {u.layer} は MoE です。専門家のニューロンは {u.layer}:E<専門家>:N{u.neuron} の形で指定します",
                                "shared expert のニューロンなら L:S:Nn")
@@ -276,18 +281,73 @@ class Session:
                 self.direction_set(u.direction or r.default_direction)
             if u.layer <= 2:
                 self.warn(f"層 {u.layer}: 層 0〜2 は残差が小さく rel dose がそのまま通用しないことがあります(R9)")
+        if r.keyed_units:
+            self._check_keyed(r)
+        if r.when != "all":                                         # レビュー P3: LoRA は位置で切り替えられない
+            lora_kinds = [k for k, us in (("keyed", r.keyed_units), ("gain", r.gain_units), ("proj", r.proj_units)) if us]
+            if lora_kinds:
+                self.warn(f"when={r.when} は {'・'.join(lora_kinds)} には効きません(LoRA は生成の最初から最後まで当たります。"
+                          "位置で切り替えられるのは add の control vector だけです)")
         return r.scaled(scale) if scale != 1.0 else r
+
+    def _warn_once(self, msg: str) -> None:
+        if msg not in self.warnings:
+            self.warn(msg)
+
+    def _key_of(self, name: str):
+        """鍵の名前("NAME" か擬似鍵 "NAME~j")→ KeySet(<root>/keys/<model_id>/、CHANGE-07)。"""
+        from .keyed import load_key
+        return load_key(self, name)
+
+    def _check_keyed(self, r: Recipe) -> None:
+        """keyed のユニット(CHANGE-07)の確かめ: 方向と鍵があるか、層が鍵にあるか、鍵の書き込み先と長さ、書ける層か
+        (MTP・最終層は断る)、post-norm の一次近似(keyed_plan が警告)。重ね方の注意(レビュー P17): 同じ層の gain は
+        鍵の入力 x を変える、同じ方向の ablate は焼き込みの順によっては keyed を消す。"""
+        from .keyed import keyed_plan, keyed_units
+        ku = keyed_units(r)
+        keyed_plan(self.weights, r, self._key_of, self.direction_set, direction_layer=r.direction_layer, warn=self._warn_once)
+        same_input = {"ffn": ("neuron",), "attn": ("head",), "shared": ("shared",), "expert": ("expert_neuron",)}
+        for k in ku:
+            hit = [g.label() for g in r.gain_units if g.layer == k.layer and g.kind in same_input[k.kind]
+                   and (k.kind != "expert" or g.expert == k.expert)]
+            if hit:
+                self._warn_once(f"{k.spec()}: 同じ層の gain({', '.join(hit)})は鍵が読む入力 x を変えるので、κᵀμ = 1 からずれます"
+                                "(鍵は無介入で作ったもの)。重ねるなら、gain を当てた状態で key-check を測り直してください")
+        if r.ablate is not None:
+            same = sorted({k.direction for k in ku if k.direction == r.ablate.direction})
+            if same:
+                self._warn_once(f"keyed と ablate({r.ablate.label()})が同じ方向 {same[0]} を使っています。実行時は別のアダプタなので"
+                                "両方効きますが、keyed を焼き込んだ後に ablate を焼き込むと (I − r̂r̂ᵀ)(W + α r κᵀ) で keyed の"
+                                "書き込みが消えます(焼くなら ablate を先に)")
 
     def _as_recipe(self, recipe: Recipe | list[str]) -> Recipe:
         return recipe if isinstance(recipe, Recipe) else self.recipe(units=list(recipe))
 
     def vectors(self, recipe: Recipe) -> tuple[dict[int, np.ndarray], list[dict]]:
-        """add ユニットの control vector(層ごと)と、全ユニットの詳細。gain だけのレシピなら統計は要らない。"""
+        """add ユニットの control vector(層ごと)と、全ユニットの詳細。gain だけのレシピなら統計は要らない。
+        keyed(CHANGE-07)の行は dose_unit に関係なく、その層の ρ_L(あれば。無ければ計算はせずに注意だけ)と方向の r_L で
+        比べる大きさ α‖r_L‖/ρ_L を埋める。"""
+        keyed = bool(recipe.keyed_units)
         if not recipe.add_units:
-            return {}, unit_details(self.weights, None, recipe)
+            sv = self._keyed_stats(recipe) if keyed else None
+            return {}, unit_details(self.weights, sv, recipe, self.direction_vec if keyed else None)
         sv = self.stats_view(Recipe(recipe.add_units, recipe.model_id, recipe.dose_unit, recipe.name))
+        if keyed:
+            sv = self._keyed_stats(recipe, sv)
         return (recipe_vectors(self.weights, sv, recipe, self.direction_vec),
                 unit_details(self.weights, sv, recipe, self.direction_vec))
+
+    def _keyed_stats(self, recipe: Recipe, sv: StatsView | None = None) -> StatsView:
+        """keyed の行に要る ρ_L(残差ノルム統計)。α は raw なので書き込みには要らず、統計が無い層は計算せずに注意だけ出す。"""
+        if sv is None:
+            sv = StatsView(self.resid_stats())
+        elif sv.resid is None:                       # absmax の add と混ぜたとき: 活性統計の読み口はそのまま、ρ だけ足す
+            sv.resid = self.resid_stats()
+        miss = sorted({u.layer for u in recipe.keyed_units if sv.resid is None or u.layer not in sv.resid.layers})
+        if miss:
+            self._warn_once(f"keyed の層 {miss} の残差ノルム統計が無いので、比べる大きさ α‖r_L‖/ρ_L は出していません"
+                            "(gne stats resid で計算できます)")
+        return sv
 
     def direction_path(self, name: str) -> Path:
         """方向の名前 → ファイル。<root>/directions/ を先に、無ければ逆引きの <root>/reverse/ を探す。パスも可。"""
@@ -366,7 +426,8 @@ class Session:
 
     def lora_for(self, recipe: Recipe | None) -> list[tuple[str, float]] | None:
         """レシピの gain ユニット(§6.16)と ablate(§6.17)を当てる LoRA([(パス, 倍率)])。どちらも無ければ None。
-        作ったものは使い回す。ablate の LoRA は倍率 1 で作り、scale はアダプタの倍率で掛ける(eval の倍率列でも 1 ファイル)。"""
+        作ったものは使い回す。ablate の LoRA は倍率 1 で作り、scale はアダプタの倍率で掛ける(eval の倍率列でも 1 ファイル)。
+        keyed(CHANGE-07)も同じで、α/α_ref で作った LoRA を倍率 α_ref で当てる(全体を k 倍しても同じファイル)。"""
         if recipe is None:
             return None
         out = []
@@ -384,6 +445,9 @@ class Session:
             out.append((str(self.ablation_lora(recipe.ablate)), float(recipe.ablate.scale)))
         if recipe.proj_units and any(u.k for u in recipe.proj_units):     # CHANGE-06: ヘッドの方向成分の射影
             out.append((str(self.proj_lora(recipe)), 1.0))
+        if recipe.keyed_units and any(u.k for u in recipe.keyed_units):   # CHANGE-07: 鍵つきの書き込み
+            kpath, ref = self.keyed_lora(recipe)
+            out.append((str(kpath), float(ref)))
         for u in recipe.query_units:                     # CHANGE-04 E: ヘッドの条件付きクエリ操作(実験的)
             if u.k:
                 out.append((str(self.query_lora(u)), 1.0))
@@ -459,6 +523,28 @@ class Session:
             tmp.replace(path)
         return path
 
+    def keyed_lora(self, recipe: Recipe) -> tuple[Path, float]:
+        """レシピの keyed のユニット → 実行時の LoRA(<root>/keys/<model_id>/lora/keyed-<鍵>.lora.gguf に作って使い回す)と
+        アダプタの倍率 α_ref(= max|α|)。B は α/α_ref で書くので、全体の強さだけを変えても同じファイル。キャッシュ鍵は
+        層・書き込み先・α の比・鍵の中身の sha・書く向き d の生のバイト(方向の中身・post-norm の補正・scale)・direction_layer で
+        決まる(鍵や方向を作り直したら別のパス。Engine は同じパスの LoRA を 1 回しか読まないため、レビュー P15)。
+        .part に書いてから置き換える。"""
+        from .keyed import export_keyed_lora, keyed_cache_key, keyed_lora_path, keyed_plan
+        kr = recipe.like([u for u in recipe.keyed_units if u.k])
+        if not kr.units:
+            raise GneError("BAD_RECIPE", "keyed のユニットがありません(α が 0 でないもの。例 --unit 19:ffn:keyed:a1@NAME#KEY)")
+        rows = keyed_plan(self.weights, kr, self._key_of, self.direction_set, direction_layer=kr.direction_layer,
+                          warn=self._warn_once)
+        h, ref = keyed_cache_key(self.weights, kr, self._key_of, self.direction_set, direction_layer=kr.direction_layer,
+                                 rows=rows)
+        path = keyed_lora_path(self, h)
+        if not path.exists():
+            tmp = path.with_suffix(".part")
+            export_keyed_lora(self.weights, kr, tmp, self._key_of, self.direction_set, alpha_ref=ref,
+                              direction_layer=kr.direction_layer)
+            tmp.replace(path)
+        return path, ref
+
     def query_lora(self, u) -> Path:
         """query のユニット → attn_q の rank-1 LoRA(<root>/heads/<model_id>/ に作って使い回す)。u・v の計算に対照集合の捕捉が要る。"""
         from .heads import query_vectors, write_query_lora
@@ -517,39 +603,54 @@ class Session:
              via_f16: bool = False, imatrix: str | None = None, llama_quantize: str | None = None,
              strip_meta: bool = False, into: str | Path | None = None, lora_f16: bool = False) -> dict:
         """gain ユニットを LoRA アダプタ GGUF(既定)か、W_up(ヘッドは W_O)を書き換えた GGUF(bake)に書き出す(§6.16、CHANGE-04 D)。
+        ヘッドの方向成分の射影(proj、CHANGE-06)と鍵つきの書き込み(keyed、CHANGE-07)も同じ LoRA / 焼き込みに入れる
+        (同じテンソルは A・B を連結。記録は gne.headproj と gne.keyed)。keyed を焼き込むときは requant の既定(auto)を f16 にする
+        (rank 1 の小さな編集が Q8_0 の刻みに埋もれやすい、レビュー P13)。量子化し直しで編集の半分以上が消えたら警告する。
         strip_meta なら gne の記録(gne.* のメタデータ・レシピ・名前の印・横の .headproj.json)を残さない(人に渡す版)。
         書いたあと、メタデータに手元のパスらしい文字列が残っていないかも確かめる(local_path_keys)。
         into を渡すと、そのモデル(同じ構造の別の型、例えば量子化していない F16 / BF16)の重みに書く。方向はこのモデルで作った
-        ものを使い、書き換える行列は焼き込む先のものから作る。GPU は使わない。"""
+        ものを使い、書き換える行列は焼き込む先のものから作る(keyed の ΔW = α d κᵀ は W に依らないので、このモデルで作る)。
+        GPU は使わない。"""
         from .gain import bake_gain_gguf, export_gain_lora
+        from .headproj import merge_tensors
         recipe = self._as_recipe(recipe)
         W = self.weights if into is None else self._target_weights(into)
         if recipe.add_units:
             self.warn("add のユニットは gain の書き出しに入りません(gne export-cvec で control vector に書き出せます)")
         routes = [u for u in recipe.units if u.mode == "route"]
-        if not recipe.gain_units and not recipe.query_units and not routes and not recipe.proj_units:
+        if not recipe.gain_units and not recipe.query_units and not routes and not recipe.proj_units and not recipe.keyed_units:
             raise GneError("BAD_RECIPE", "gain のユニットがありません(例 --unit 14:8949:x2、ヘッドは 21:H7:x0、"
-                                         "方向成分の射影は 33:H16:s6@NAME)")
+                                         "方向成分の射影は 33:H16:s6@NAME、鍵つきの書き込みは 19:ffn:keyed:a1@NAME#KEY)")
         if not bake and (routes or any(u.kind == "expert" for u in recipe.gain_units)):
             raise GneError("BAD_RECIPE", "専門家全体の gain と route は LoRA にできません(全ランクになる)",
                            "--bake でスケールパッチを当てた GGUF にしてください(CHANGE-05 §D)")
         rep: dict = {"path": None, "bytes": 0}
-        extra, extra_meta, summary = {}, None, {}
+        ptens, extra_meta, summary, extra_kv, kb = {}, None, {}, {}, None
         if recipe.proj_units:                            # CHANGE-06: ヘッドの方向成分の射影も同じ LoRA / 焼き込みに入れる
             from .headproj import ProjBuilder, layer_summary, proj_heads, proj_meta
             heads = proj_heads(recipe)
             b = ProjBuilder(W, self.direction_set, direction_layer=recipe.direction_layer)
-            extra = b.tensors(heads, self.warn)
+            ptens = b.tensors(heads, self.warn)
             extra_meta = proj_meta(heads, b)
-            summary = layer_summary(W, heads, extra)
+            summary = layer_summary(W, heads, ptens)
             if bake and requant == "patch":
                 raise GneError("UNSUPPORTED_QUANT", "方向成分の射影はスケールパッチでは書けません(列方向で、単純な倍率ではない)",
                                "--requant q8_0 / f16、または gne headproj export --bake --via-f16")
+        if recipe.keyed_units:                           # CHANGE-07: 鍵つきの書き込みも同じ LoRA / 焼き込みに入れる
+            if bake and requant == "patch":
+                raise GneError("UNSUPPORTED_QUANT", "鍵つきの書き込み(keyed)はスケールパッチでは書けません(rank 1 の足し算で、単純な倍率ではない)",
+                               "--requant f16(既定)/ q8_0 / keep、または LoRA(--bake なし)で配ってください")
+            kb = self._keyed_bundle(recipe, W)
+            extra_kv["gne.keyed"] = json.dumps(kb["meta"], ensure_ascii=False)
+            summary = {**summary, "keyed_layers": kb["layers"], "keyed_rank": kb["rank"]}
+            if bake and requant == "auto":
+                requant = "f16"
+        extra = merge_tensors(ptens, kb["tensors"] if kb else {})
         if via_f16 and not bake:
             raise GneError("BAD_ARGS", "--via-f16 は --bake と一緒に使います")
         if strip_meta and (recipe.query_units or (bake and requant in ("patch", "auto") and not extra and not via_f16
                                                   and (routes or any(u.kind == "expert" for u in recipe.gain_units)))):
-            raise GneError("BAD_ARGS", "gne の記録を残さない書き出しは、ヘッドの proj・gain とニューロンの gain だけです"
+            raise GneError("BAD_ARGS", "gne の記録を残さない書き出しは、ヘッドの proj・keyed・gain とニューロンの gain だけです"
                                        "(クエリ操作の LoRA と、専門家全体のスケールパッチは未対応)")
         imatrix_auto = False
         if bake and via_f16 and not imatrix:             # 渡されなければ、モデルの隣の <モデル名>.imatrix.gguf などを使う
@@ -562,15 +663,23 @@ class Session:
                 from .ablate import requant_via_f16
                 rep = requant_via_f16(W, lambda mid: bake_gain_gguf(W, recipe, mid, requant="f16",
                                                                               extra=extra, extra_meta=extra_meta,
-                                                                              via_f16=True, strip_meta=strip_meta),
+                                                                              extra_kv=extra_kv, via_f16=True,
+                                                                              strip_meta=strip_meta),
                                       out, llama_quantize=llama_quantize, imatrix=imatrix, neutral_imatrix=strip_meta)
                 rep["modified"] = [{**m, "to": m["from"]} for m in rep["modified"]]
             elif bake:
                 rep = bake_gain_gguf(W, recipe, out, requant=requant, extra=extra, extra_meta=extra_meta,
-                                     strip_meta=strip_meta)
+                                     extra_kv=extra_kv, strip_meta=strip_meta)
             else:
-                rep = export_gain_lora(W, recipe, out, extra=extra, extra_meta=extra_meta, strip_meta=strip_meta, f16=lora_f16)
+                rep = export_gain_lora(W, recipe, out, extra=extra, extra_meta=extra_meta, extra_kv=extra_kv,
+                                       strip_meta=strip_meta, f16=lora_f16)
+                if ptens:                                # proj だけの階数(keyed と同じテンソルに連結しても proj の分)
+                    rep["proj_rank"] = {n.split(".")[1]: int(B.shape[-1]) for n, (_, B) in ptens.items()}
+                else:
+                    rep.pop("proj_rank", None)
         rep.update(summary)
+        if kb is not None and bake:
+            self._warn_requant(rep)
         if into is not None:
             rep["into"] = Path(W.path).name if strip_meta else str(W.path)
         if bake and via_f16:
@@ -587,7 +696,8 @@ class Session:
                           + "(imatrix を使うと llama-quantize が、それを作った文章のパスを quantize.imatrix.dataset に書くことがある)")
         elif bake and extra:                             # CHANGE-06 E.2: 書き換えたテンソルと元の型のサイドカー
             side = Path(str(rep["path"]) + ".headproj.json")
-            side.write_text(json.dumps({"recipe": recipe.to_dict(), "headproj": extra_meta, "modified": rep.get("modified"),
+            side.write_text(json.dumps({"recipe": recipe.to_dict(), "headproj": extra_meta,
+                                        **({"keyed": kb["meta"]} if kb is not None else {}), "modified": rep.get("modified"),
                                         "requant": "via-f16" if via_f16 else requant}, ensure_ascii=False, indent=1),
                             encoding="utf-8")
             rep["sidecar"] = str(side)
@@ -605,6 +715,25 @@ class Session:
                 rep["path"], rep["bytes"] = q[0], Path(q[0]).stat().st_size
         return {"kind": "bake" if bake else "lora", "recipe": recipe.to_dict(), **rep}
 
+    def _keyed_bundle(self, recipe: Recipe, W=None) -> dict:
+        """書き出し用の keyed の LoRA(α そのまま、倍率 1)と記録。W(焼き込む先)は構造が同じことだけ確かめる
+        (ΔW = α d κᵀ は W に依らないので、行列はこのモデルで作る)。"""
+        from .keyed import keyed_bundle
+        kb = keyed_bundle(self.weights, recipe, self._key_of, self.direction_set, direction_layer=recipe.direction_layer,
+                          warn=self._warn_once)
+        if W is not None and W is not self.weights:
+            miss = [n for n in kb["tensors"] if not W.has_tensor(n)]
+            if miss:
+                raise GneError("BAD_ARGS", f"焼き込む先に {miss[0]} がありません(構造の違うモデル)")
+        return kb
+
+    def _warn_requant(self, rep: dict, limit: float = 0.5) -> None:
+        """量子化し直しで失った分 ÷ 編集の大きさ(requant_error_max)が limit を超えたら警告(keyed、レビュー P13)。"""
+        err = rep.get("requant_error_max")
+        if err is not None and err > limit:
+            self.warn(f"量子化し直しで書き込み行列の編集の {err * 100:.0f}% 相当が丸めに消えています(requant_error_max={err:.2f})。"
+                      "--requant f16 にするか、LoRA で配ってください")
+
     def _warn_when(self, recipe: Recipe, what: str) -> None:
         if recipe.ablate is not None:
             self.warn(f"ablate({recipe.ablate.label()})は {what} では表せないので外しました(§6.17)。"
@@ -615,6 +744,10 @@ class Session:
         if recipe.proj_units:
             self.warn(f"ヘッドの方向成分の射影(proj、{len(recipe.proj_units)} 個)は {what} では表せないので外しました"
                       "(control vector は足し算だけ、CHANGE-06)。gne headproj export(か gne gain)で LoRA に書き出してください")
+        if recipe.keyed_units:
+            self.warn(f"鍵つきの書き込み(keyed、{len(recipe.keyed_units)} 個)は {what} では表せないので外しました"
+                      "(入力の活性が鍵に合うときだけ書くので、定数の足し算にならない、CHANGE-07)。"
+                      "gne headproj export(か gne gain)で LoRA に書き出してください")
         if recipe.when != "all":
             self.warn(f"レシピの when={recipe.when} は {what} では表せないので、全位置(all)として書き出しました(§6.15)。"
                       "位置別のまま使うなら gne steer / chat か gne serve --openai を使ってください")
@@ -628,7 +761,7 @@ class Session:
                            "gne gain / gne headproj export で LoRA アダプタにしてください")
         self._warn_when(recipe, "control vector")
         if not recipe.add_units:
-            raise GneError("BAD_RECIPE", "add のユニットがありません(gain・proj だけのレシピは control vector になりません)",
+            raise GneError("BAD_RECIPE", "add のユニットがありません(gain・proj・keyed だけのレシピは control vector になりません)",
                            "gne gain / gne headproj export で LoRA アダプタか書き換え GGUF に書き出してください")
         moe_add = [u.label() for u in recipe.add_units if u.kind in ("expert_neuron", "shared")]
         if moe_add:                                           # CHANGE-05 §C・V22
@@ -1112,13 +1245,17 @@ class Session:
         return {"layer": L, "neuron": n, "name": name or None}
 
     def recipe_save(self, name: str, units: list[str] | Recipe, *, dose_unit: str = "rel",
-                    ablate: str | dict | None = None, when: str | None = None, sampling: dict | None = None) -> dict:
-        """sampling はこのレシピを試すときのサンプリング(seed は持たない)。"""
+                    ablate: str | dict | None = None, when: str | None = None, sampling: dict | None = None,
+                    default_direction: str | None = None, direction_layer: str | None = None,
+                    default_key: str | None = None) -> dict:
+        """sampling はこのレシピを試すときのサンプリング(seed は持たない)。default_direction・direction_layer・default_key は
+        @方向・#鍵を省いた proj・keyed のユニットの既定(CHANGE-06・07)。"""
         from .steer import sampling_values
         if not re.fullmatch(r"[\w.\-]+", name or ""):
             raise GneError("BAD_ARGS", f"レシピ名 {name!r} は英数字・_・-・. だけにしてください")
         r = units if isinstance(units, Recipe) else self.recipe(units=list(units), dose_unit=dose_unit, name=name,
-                                                               ablate=ablate, when=when)
+                                                               ablate=ablate, when=when, default_direction=default_direction,
+                                                               direction_layer=direction_layer, default_key=default_key)
         if sampling:
             r.sampling = sampling_values(sampling, seed=False)
         r.name = name
@@ -1319,24 +1456,47 @@ class Session:
              when: str | None = None, judge_model: str | Path | None = None, judge_target: str | None = None,
              name: str | None = None, random_controls: int = 0, reactivity: str | Path | None = None,
              head_controls: int = 0, control_pool: str = "before", direction_metrics: bool = True,
-             dir_max_examples: int | None = 64) -> dict:
+             dir_max_examples: int | None = 64, keyed_contrast: str | Path | None = None, keyed_metrics: bool = True,
+             keyed_examples: int | None = 8, keyed_match: bool = True, keyed_pseudo: int = 8,
+             keyed_subset: str | None = None) -> dict:
         """レシピの倍率ごとの副作用(能力・ppl・言語混入)と性格の変化量を測り、<root>/evals/<model_id>/<name>.json に保存する。
         random_controls > 0 なら各倍率で同じ大きさのランダムな対照レシピも測る(行の ctrl・ctrl_novelty_p95 など)。
         reactivity(対照集合の YAML)で反応性(トリガーあり/なしの差)も測り、head_controls 本のランダムなヘッドと比べる。
         方向を使うレシピ(proj など)では方向の指標(点数の下がり方・ずれ・判定の一致率)も測る。direction_metrics=False で
-        測らない。dir_max_examples はその測定で読む質問の数(A・B それぞれ、一致率の返事も。多ければ等間隔に間引く)。"""
+        測らない。dir_max_examples はその測定で読む質問の数(A・B それぞれ、一致率の返事も。多ければ等間隔に間引く)。
+        keyed のユニットを持つレシピ(CHANGE-07 E)では選択性も測る(行の keyed と結果の keyed、evalx.evaluate)。
+        keyed_contrast は鍵を作った対照集合(configs/contrast/ の名前かパス。省くと方向を作った対照集合が鍵と同じならそれ、
+        どちらも無ければ結果の keyed は skipped)、keyed_examples は会話の組ごとに読む数(None か 0 で全部)、keyed_pseudo は
+        擬似鍵の本数、keyed_subset は読む例(even / odd / all、省くと鍵の作成と反対側)、keyed_match=False で方式の比較の
+        大きさ合わせを省く、keyed_metrics=False で測らない。"""
         from .evalx import Judge, evaluate
         recipe = self._as_recipe(recipe)
         if not recipe.units and recipe.ablate is None:
             raise GneError("BAD_RECIPE", "ユニットがありません")
         if (judge_model is None) != (judge_target is None):
             raise GneError("BAD_ARGS", "--judge-model と --judge-target は両方指定してください")
+        keyed_subset = keyed_subset or None
+        if keyed_subset is not None and keyed_subset not in ("even", "odd", "all"):
+            raise GneError("BAD_ARGS", f"keyed_subset は even / odd / all です({keyed_subset!r})")
+        keyed_examples = None if keyed_examples is None else int(keyed_examples)
+        keyed_pseudo = int(keyed_pseudo)
+        if (keyed_examples or 0) < 0 or keyed_pseudo < 0:
+            raise GneError("BAD_ARGS", "keyed_examples と keyed_pseudo は 0 以上にしてください")
+        keyed_contrast = keyed_contrast or None
+        if keyed_contrast is not None and not recipe.keyed_units:
+            self.warn("keyed のユニットが無いレシピなので keyed_contrast は使いません")
+            keyed_contrast = None
+        elif keyed_contrast is not None and keyed_metrics:     # 名前も受ける。無ければ長い eval の前に止める
+            keyed_contrast = self._contrast_file(keyed_contrast)
         judge = Judge(judge_model, judge_target) if judge_model else None
         try:
             d = evaluate(self, recipe, doses=doses, suite=suite, when=when, judge=judge,
                          random_controls=random_controls, reactivity=reactivity, head_controls=head_controls,
                          control_pool=control_pool, direction_metrics=direction_metrics,
-                         dir_max_examples=dir_max_examples, progress=self.progress)
+                         dir_max_examples=dir_max_examples, keyed_contrast=keyed_contrast,
+                         keyed_metrics=bool(keyed_metrics), keyed_examples=keyed_examples or None,
+                         keyed_match=bool(keyed_match), keyed_pseudo=keyed_pseudo, keyed_subset=keyed_subset,
+                         progress=self.progress)
             d.pop("_baseline", None)
         finally:
             if judge is not None:
@@ -2094,6 +2254,7 @@ round_01.scores.txt に「番号 P C」を 1 行ずつ書く(例: 17 3 4)。全�
         (validate.prompts があればそれ)で、結果の held_out が False になる。with_recipe は全部の候補(無介入の base も)に
         重ねるレシピ(ニューロンの種火など)。rubric は採点基準の文章かファイル(省くと目標の振る舞いから作る)。"""
         import random
+        from dataclasses import replace
 
         import yaml
 
@@ -2189,8 +2350,12 @@ round_01.scores.txt に「番号 P C」を 1 行ずつ書く(例: 17 3 4)。全�
         for c in cands:
             r = None if c["recipe"] is None else Recipe.load(c["recipe"]).scaled(c["scale"])
             if wr is not None:                    # 重ねるレシピ + 候補のヘッド(方向の既定は候補のもの)
-                r = wr.like(list(wr.units) + (list(r.units) if r is not None else []),
-                            **({"default_direction": r.default_direction, "direction_layer": r.direction_layer} if r is not None else {}))
+                # 重ねるレシピの keyed(CHANGE-07)は、方向と鍵の既定を先にユニットへ書き込む(候補の既定で上書きされないように)
+                w_units = [replace(u, direction=u.direction or wr.default_direction, key=u.key or wr.default_key)
+                           if u.mode == "keyed" else u for u in wr.units]
+                r = wr.like(w_units + (list(r.units) if r is not None else []),
+                            **({"default_direction": r.default_direction, "direction_layer": r.direction_layer,
+                                "default_key": r.default_key or wr.default_key} if r is not None else {}))
             vecs = self.vectors(r)[0] if r is not None and r.add_units else None
             lora = self.lora_for(r) if r is not None else None
             for side in "AB":
@@ -2347,23 +2512,32 @@ round_01.scores.txt に「番号 P C」を 1 行ずつ書く(例: 17 3 4)。全�
         out["path"] = str(p)
         return out
 
-    def headproj_export(self, recipe: Recipe | list[str], out: str | Path, *, bake: bool = False, requant: str = "q8_0",
+    def headproj_export(self, recipe: Recipe | list[str], out: str | Path, *, bake: bool = False, requant: str | None = None,
                         via_f16: bool = False, imatrix: str | None = None, llama_quantize: str | None = None,
                         verify: bool = False, contrast: str | Path | None = None, strip_meta: bool = False,
                         into: str | Path | None = None, lora_f16: bool = False) -> dict:
         """CHANGE-06 E: proj のユニット(と gain)を LoRA(既定)か、書き込み行列だけ量子化し直した GGUF に書き出す
-        (gne gain と同じ経路)。verify なら焼き込み版と LoRA 版を V26 の 4 項目で比べる。"""
+        (gne gain と同じ経路)。鍵つきの書き込み(keyed、CHANGE-07)だけのレシピと、proj・keyed(・gain)を混ぜたレシピも受ける。
+        requant を省くと q8_0、keyed を含むなら f16(rank 1 の小さな編集が量子化の刻みに埋もれないように、レビュー P13)。
+        verify なら焼き込み版と LoRA 版を V26 の 4 項目で比べる(keyed だけなら keyed の方向で測る)。"""
         recipe = self._as_recipe(recipe)
-        if not recipe.proj_units and not recipe.gain_units:
-            raise GneError("BAD_RECIPE", "proj のユニットがありません(例 --unit 33:H16:s6@NAME)")
+        if not recipe.proj_units and not recipe.gain_units and not recipe.keyed_units:
+            raise GneError("BAD_RECIPE", "proj のユニットがありません(例 --unit 33:H16:s6@NAME、鍵つきの書き込みは 19:ffn:keyed:a1@NAME#KEY)")
+        if requant is None:
+            requant = "f16" if recipe.keyed_units else "q8_0"
         if into is not None and verify and Path(into).resolve() != Path(self.weights.path).resolve():
             raise GneError("BAD_ARGS", "別のモデルに焼き込むときは、LoRA 版との比較(verify)はできません",
                            "焼き込む先のモデルを読み直して eval で確かめてください")
         if bake and into is None and self.weights.gguf.is_split:     # 分割のままでは、同じ型で書き戻す(大きさを変えない)
             from .headproj import bake_proj_split
             rq = "f16" if requant == "f16" else "q8_0" if requant == "q8_0" else "keep"
-            d = bake_proj_split(self.weights, recipe, out, self.direction_set, requant=rq, warn=self.warn)
+            kb = self._keyed_bundle(recipe) if recipe.keyed_units else None
+            d = bake_proj_split(self.weights, recipe, out, self.direction_set, requant=rq, warn=self.warn,
+                                extra=kb["tensors"] if kb else None, extra_meta={"keyed": kb["meta"]} if kb else None)
             d.update(kind="bake", requant=rq, recipe=recipe.to_dict())
+            if kb is not None:
+                d.update(keyed_layers=kb["layers"], keyed_rank=kb["rank"])
+                self._warn_requant(d)
         else:
             d = self.gain(recipe, out, bake=bake, requant="q8_0" if via_f16 else requant, via_f16=via_f16,
                           imatrix=imatrix, llama_quantize=llama_quantize, strip_meta=strip_meta, into=into, lora_f16=lora_f16)
@@ -2373,6 +2547,40 @@ round_01.scores.txt に「番号 P C」を 1 行ずつ書く(例: 17 3 4)。全�
             d["verify"] = self.check_proj_bake(recipe, Path(d["path"]), contrast=contrast)
         return d
 
+    # --- 鍵つきの書き込み(CHANGE-07)--------------------------------------------------------------------
+
+    def direction_key(self, contrast: str | Path, **kw) -> dict:
+        """対照集合から keyed の鍵を作る(gne direction key)。中身は gne/keyed_build.py の build_keys。"""
+        from .keyed_build import build_keys
+        return build_keys(self, contrast, **kw)
+
+    def direction_key_check(self, key: str, **kw) -> dict:
+        """鍵の確かめ(gne direction key-check: 層ごとの AUC・ρ の分布・擬似鍵との比較・保留集合)。中身は keyed_build.key_check。"""
+        from .keyed_build import key_check
+        return key_check(self, key, **kw)
+
+    def keys(self) -> list[dict]:
+        """<root>/keys/<model_id>/ の鍵の一覧と要約(層・書き込み先・kn・作成の条件、パスなし)。読めないファイルは error だけ。"""
+        from .keyed import list_keys
+        return list_keys(self)
+
+    def check_keyed(self, L: int, *, key: str, direction: str, **kw) -> dict:
+        """V30: keyed の LoRA の出力の差 = α (κᵀx) d(|κᵀx| の大きいトークンで相対誤差の中央値 < 3%)、鍵の作成に使った
+        側 B の例では |Δ̄| / (|α|·‖d‖) < 0.1。keyed.check_keyed。"""
+        from .keyed import check_keyed
+        return check_keyed(self, L, key=key, direction=direction, **kw)
+
+    def default_export_path(self, recipe: Recipe, *, bake: bool = False, kind: str = "headproj",
+                            name: str | None = None) -> Path:
+        """書き出しの既定のファイル名(<root>/export/)。LoRA は <名前>.lora.gguf、焼き込みは <名前>-<kind>.gguf
+        (kind は headproj か gain)。keyed だけのレシピは <名前>-keyed.lora.gguf / <名前>-keyed.gguf(CHANGE-07)。"""
+        nm = name or recipe.name or kind
+        keyed_only = bool(recipe.keyed_units) and all(u.mode == "keyed" for u in recipe.units)
+        if keyed_only:
+            stem = f"{nm}-keyed"
+            return self.store.export_dir() / (f"{stem}.gguf" if bake else f"{stem}.lora.gguf")
+        return self.store.export_dir() / (f"{nm}-{kind}.gguf" if bake else f"{nm}.lora.gguf")
+
     def check_head_proj(self, L: int, h: int, direction: str, *, ss=(1.0, 2.0, 6.0)) -> dict:
         """V24・V25(射影の正しさ・直交成分が変わらないこと)。"""
         from .headproj import check_head_proj
@@ -2381,12 +2589,15 @@ round_01.scores.txt に「番号 P C」を 1 行ずつ書く(例: 17 3 4)。全�
     def check_proj_bake(self, recipe: Recipe, baked: Path, *, contrast: str | Path | None = None,
                         suite: str | Path | None = None) -> dict:
         """V26: 焼き込み版と LoRA 版で (a) A・B の点数、(b) 最初のトークンの分布の KL、(c) 最尤トークンの一致率、
-        (d) perplexity を比べる。LoRA 版を測ってからモデルを閉じ、焼き込み版を読む(大きいモデルでも 1 つずつ)。"""
+        (d) perplexity を比べる。LoRA 版を測ってからモデルを閉じ、焼き込み版を読む(大きいモデルでも 1 つずつ)。
+        点数の方向は proj の方向、proj が無ければ keyed の方向(V33、CHANGE-07)。"""
         from .direction import Scorer, base_layer_of, last_logprobs
         from .evalx import _ppl, load_suite
         from .headproj import proj_heads
+        from .keyed import keyed_units
         heads = proj_heads(recipe)
-        dname = heads[0].direction if heads else recipe.default_direction
+        ku = keyed_units(recipe) if recipe.keyed_units else []
+        dname = heads[0].direction if heads else ku[0].direction if ku else recipe.default_direction
         ds, cs, _ = self._direction_contrast(dname, contrast)
         b = base_layer_of(ds)
         Ls = sorted({x for x in (b, max(L for L in ds.raw if L <= self.meta.n_layer - 2)) if x is not None})
@@ -2510,7 +2721,15 @@ def vector_key_of(path: Path) -> str:
 
 
 def _unit_spec(u: dict) -> str:
-    """to_dict() のユニット → L:N:+dose / L:N:xk / L:Hh:xk(query は L:Hh:query:方向:×scale、表示用)。"""
+    """to_dict() のユニット → L:N:+dose / L:N:xk / L:Hh:xk(query は L:Hh:query:方向:×scale、表示用)。
+    keyed(CHANGE-07)は L:ffn|attn|S|Ee:keyed:aα[@方向][#鍵]。"""
+    if u.get("mode") == "keyed":
+        kind = u.get("kind")
+        who = {"ffn": "ffn", "attn": "attn", "shared": "S"}.get(kind, f"E{u.get('expert')}")
+        a = u.get("k") if u.get("k") is not None else u.get("alpha")
+        return (f"{u['layer']}:{who}:keyed:" + ("a?" if a is None else f"a{a:g}")
+                + (f"@{u['direction']}" if u.get("direction") else "")
+                + (f"#{u['key']}" if u.get("key") else ""))
     if u.get("mode") == "query":
         return f"{u['layer']}:H{u['head']}:query:{u.get('direction')}:x{u['k']:g}"
     if u.get("mode") == "proj":                                  # CHANGE-06

@@ -3,6 +3,8 @@
 // 反応性(CHANGE-04 F)を測った eval では、トリガーあり・なし・差の列(ヘッドの対照があればその p95 と null)と線を足す。
 // CHANGE-06 G: 方向を使うレシピの eval では方向の指標の列(A 側の点数の下がり方・直交成分のずれ・判定の一致率、対照があれば null)。
 // 方式の比較(eval --compare-methods)は方式ごとの表、ヘッド数の曲線(eval --alloc)は x = ヘッド数の小さな折れ線 3 つと表。
+// CHANGE-07 G: keyed のユニットを持つレシピの eval では、行に keyed の選択性(側 A − 側 B の r̂ 方向の変化)の列と、結果の keyed
+// (方式の比較: keyed・同じ α の add・側 A をそろえた add / gain / proj の側 B・dont_touch の乱れ、比、擬似鍵の選択性)の表。
 import { getJSON } from "./api.js";
 import { t } from "./i18n.js";
 import { FieldtestPanel } from "./fieldtest.js";
@@ -67,6 +69,14 @@ export class EvalView {
           <label class="muted" title="${t("レシピのヘッドを同じ k のランダムなヘッドに替えた対照で反応性も測る本数(反応性があるときだけ)")}">${t("ヘッドの対照")} <input id="evx-hc-n" type="number" min="0" max="64" value="0" style="width:4em"></label>
           <label class="muted" title="${t("方向を使うレシピ(ヘッドの proj など)で、方向の指標(点数の下がり方・ずれ・判定の一致率)も測る。外すと能力・ppl・混入・性格の変化量だけで早く終わる")}"><input type="checkbox" id="evx-dm" checked> ${t("方向の指標")}</label>
           <label class="muted" title="${t("方向の指標で読む質問の数(A・B それぞれ。一致率の返事もこの数まで)。多い対照集合は等間隔に間引く。0 で全部")}">${t("問")} <input id="evx-dm-n" type="number" min="0" max="4096" value="64" style="width:4.5em"></label>
+          <span id="evx-kx" class="evx-kx-in hidden">
+            <label class="muted" title="${t("keyed のユニットがあるとき、鍵の対照集合の保留した例で選択性(側 A を動かし、側 B・dont_touch を動かさないか)と、add・gain・proj との比較、擬似鍵との比較を測る(prefill だけ)")}"><input type="checkbox" id="evx-km" checked> ${t("keyed の選択性")}</label>
+            <label class="muted" title="${t("鍵の対照集合。自動 = 方向を作った対照集合が鍵と同じものならそれ(違えば測らずに理由を出す)")}">${t("鍵の対照集合")} <select id="evx-kc"><option value="">${t("自動")}</option></select></label>
+            <label class="muted" title="${t("会話の組ごとに読む例の数")}">${t("例")} <input id="evx-ke" type="number" min="1" max="4096" value="8" style="width:4.5em"></label>
+            <label class="muted" title="${t("比べる擬似鍵の本数(0 で比べない)")}">${t("擬似鍵")} <input id="evx-kp" type="number" min="0" max="256" value="8" style="width:4em"></label>
+            <label class="muted" title="${t("読む質問。自動 = 鍵の作成と反対側(even ↔ odd)")}">subset <select id="evx-ks"><option value="">${t("自動")}</option><option>odd</option><option>even</option><option>all</option></select></label>
+            <label class="muted" title="${t("add・gain・proj の強さを探して、側 A の変化を keyed にそろえる(外すと同じ α の add とだけ比べて早く終わる)")}"><input type="checkbox" id="evx-kmatch" checked> ${t("大きさ合わせ")}</label>
+          </span>
           <button id="evx-go">${t("今のレシピで eval")}</button></span></div>
       <p class="muted note evx-help">${t("倍率はレシピ全体に掛ける係数(0 = 無介入)。能力 = exact と format の正答率、ppl は参照テキスト、混入は日本語の回答に出た簡体字・ハングルなどの割合。4B で数分。")}</p>
       <div id="evx-body"></div>
@@ -83,6 +93,19 @@ export class EvalView {
     const r = this.recipe;
     this.$("#evx-rc").textContent = r && r.units.length ? t("レシピ {name}({n} ユニット)", { name: r.name || "—", n: r.units.length }) : t("レシピが空です");
     this.$("#evx-go").disabled = !(r && r.units.length);
+    const hasKeyed = !!(r && r.keyed && r.keyed().length);            // CHANGE-07: keyed の選択性の欄はレシピに keyed があるときだけ
+    this.$("#evx-kx").classList.toggle("hidden", !hasKeyed);
+    if (hasKeyed && !this.contrastsLoaded) {
+      this.contrastsLoaded = true;
+      getJSON("/api/contrasts").then((cs) => {
+        const sel = this.$("#evx-kc");
+        for (const c of Array.isArray(cs) ? cs : []) {
+          const o = document.createElement("option");
+          o.value = c.path; o.textContent = c.label;
+          sel.appendChild(o);
+        }
+      }).catch(() => { this.contrastsLoaded = false; });
+    }
     try { this.list = await getJSON("/api/evals"); } catch { this.list = []; }
     const pick = this.$("#evx-pick");
     const tag = (k) => ({ "compare-methods": ` · ${t("方式の比較")}`, nheads: ` · ${t("ヘッド数の曲線")}`, "compare-ablation": ` · ${t("消去の比較")}`,
@@ -119,6 +142,17 @@ export class EvalView {
       const dmn = Math.max(0, Math.floor(+this.$("#evx-dm-n").value || 0));
       if (dmn !== 64) p.dir_max_examples = dmn || null;                 // 0 = 全部の質問
     }
+    if (this.recipe.keyed && this.recipe.keyed().length) {          // CHANGE-07 E: keyed の選択性
+      p.keyed_metrics = this.$("#evx-km").checked;
+      if (p.keyed_metrics) {
+        const kc = this.$("#evx-kc").value, ks = this.$("#evx-ks").value;
+        if (kc) p.keyed_contrast = kc;
+        if (ks) p.keyed_subset = ks;
+        p.keyed_examples = Math.max(1, Math.floor(+this.$("#evx-ke").value || 8));
+        p.keyed_pseudo = Math.max(0, Math.floor(+this.$("#evx-kp").value || 0));
+        p.keyed_match = this.$("#evx-kmatch").checked;
+      }
+    }
     if (this.recipe.name) p.name = this.recipe.name;
     this.onRun(p);
   }
@@ -144,6 +178,8 @@ export class EvalView {
     const pm = (x) => `${x >= 0 ? "+" : "−"}${fmt(Math.abs(x), 2)}`;
     const units = d.recipe.units.map((u) => (u.mode === "query" ? `L${u.layer} H${u.head} query ${u.direction}→${String(u.seek || "").split("/").pop().replace(/\.ya?ml$/, "")} ×${fmt(u.k, 2)}`
       : u.mode === "proj" ? `L${u.layer} H${u.head} s${+(+u.k).toFixed(3)} @${u.direction || d.recipe.default_direction || "?"}`
+      : u.mode === "keyed" ? `L${u.layer} ${u.kind === "shared" ? "S" : u.kind === "expert" ? `E${u.expert}` : u.kind} keyed a${+(+u.k).toFixed(3)} @${
+        u.direction || d.recipe.default_direction || "?"} #${u.key || d.recipe.default_key || "?"}`                    // CHANGE-07
       : u.mode === "gain" ? `L${u.layer} ${who(u)} ×${fmt(u.k, 2)}`
       : u.mode === "route" ? `L${u.layer} ${who(u)} route ${pm(u.delta ?? u.dose)}`
       : `L${u.layer} ${who(u)} ${pm(u.dose)}`));
@@ -167,6 +203,12 @@ export class EvalView {
       dm && dm.behavior ? `<th title="${t("対照集合の検証プロンプトで性格の判定(validate.match)に当たった割合")}">${t("一致率")}</th><th title="${t("判定の一致率の減少(無介入 − 介入)")}">${t("一致減")}</th>` : ""}${
       rc ? `<th title="${t("A 側の下がり方が対照(同数・同じ s のランダムなヘッド)の何割より大きいか")}">${t("下がり null")}</th><th title="${t("B 側の直交成分のずれが対照の何割より大きいか(大きいほど他を壊している)")}">B⊥ null</th>${
         dm && dm.behavior ? `<th title="${t("一致率の減少が対照の何割より大きいか")}">${t("一致 null")}</th>` : ""}` : ""}` : "";
+    // keyed の選択性(CHANGE-07 E): 目的の層での側 A − 側 B の r̂ 方向の変化。擬似鍵の対照があればその p95 と null
+    const hasK = d.rows.some((r) => r.keyed), kctrl = hasK && d.rows.some((r) => r.keyed && r.keyed.null_pct !== undefined);
+    const kCells = (r) => (hasK ? `<td>${r.keyed ? fmt(r.keyed.selectivity, 2) : "—"}</td><td>${r.keyed ? fmt(r.keyed.b_norm, 2) : "—"}</td>${
+      kctrl ? (r.keyed && r.keyed.null_pct !== undefined ? `<td class="muted">${fmt(r.keyed.ctrl_p95, 2)}</td>${nullTd(r.keyed.null_pct)}` : "<td></td><td></td>") : ""}` : "");
+    const kHead = hasK ? `<th title="${t("keyed の選択性: 目的の層で、書く向きにそろえた側 A − 側 B の r̂ 方向の変化(大きいほど側 A だけを動かす)")}">${t("keyed 選択性")}</th><th title="${t("側 B(触りたくない位置)の残差の変化の大きさ ‖Δ‖")}">B ‖Δ‖</th>${
+      kctrl ? `<th title="${t("鍵を擬似鍵に替えた対照の選択性の 95% 点")}">${t("擬似p95")}</th><th title="${t("選択性が擬似鍵の対照の何割より大きいか(0.95 未満は鍵が状態を選んでいるとは言えない)")}">null</th>` : ""}` : "";
     const notes = [...(d.notes || [])];
     const ok = d.rows.filter((r) => r.shippable && r.dose > 0).map((r) => r.dose);
     const rows = d.rows.map((r) => `<tr class="${r.dose === this.dose ? "on" : ""}" data-dose="${r.dose}">
@@ -175,7 +217,7 @@ export class EvalView {
         <td>${pct(r.mix_zh + r.mix_other, 2)}</td><td>${fmt(r.persona.novelty, 2)}</td><td>${fmt(r.persona.distinct4, 2)}</td>
         <td>${pct(r.persona.capped, 0)}</td>${d.judge ? `<td>${fmt(r.judge, 2)}</td>` : ""}${d.random_controls ? (r.ctrl
           ? `<td class="muted">${fmt(r.ctrl_novelty_p95, 2)}</td><td class="${r.novelty_null_pct >= 0.95 ? "ok" : "ng"}">${fmt(r.novelty_null_pct, 2)}</td><td class="muted">${fmt(r.ctrl_capability_drop_p50, 1)}</td><td class="muted">${fmt(r.ctrl_ppl_worse_p50, 1)}%</td>`
-          : "<td></td><td></td><td></td><td></td>") : ""}${rxCells(r)}${dirCells(r)}
+          : "<td></td><td></td><td></td><td></td>") : ""}${rxCells(r)}${dirCells(r)}${kCells(r)}
         <td class="${r.shippable ? "ok" : "ng"}">${r.shippable ? t("配布可") : Object.entries(r.ok).filter(([, v]) => !v).map(([k]) => ({ capability: t("能力"), ppl: "ppl", mix: t("混入") }[k])).join("・") + " ×"}</td></tr>`).join("");
     body.innerHTML = `
       <p class="note mono">${esc(units.join(" · "))} <span class="muted">· when=${esc(d.when)} · ${t("{n} タスク", { n: d.suite.n_tasks })} · ${fmt(d.seconds, 0)} s${d.random_controls ? ` · ${t("対照 {n} 本", { n: d.random_controls })}` : ""}${
@@ -189,13 +231,58 @@ export class EvalView {
       <canvas id="evx-canvas"></canvas>
       <div class="evx-scroll"><table class="evx mono"><thead><tr><th>${t("倍率")}</th><th>${t("能力")}</th><th>${t("低下pt")}</th><th>ppl</th><th>${t("悪化")}</th><th>${t("混入")}</th>
         <th title="${t("無介入の出力に無い語の割合(プロンプトごとの平均)")}">${t("新語")}</th><th title="distinct-4">d4</th><th title="${t("max_tokens で打ち切られた割合")}">${t("打切")}</th>${d.judge ? "<th>judge</th>" : ""}${d.random_controls ? `<th title="${t("同じ大きさのランダムな向きの対照レシピの新語の 95% 点")}">${t("対照p95")}</th><th title="${t("新語が対照の何割より多いか(0.95 未満は対照と区別できない)")}">null</th><th title="${t("対照の能力の低下(中央値、pt)")}">${t("対照低下")}</th><th title="${t("対照の ppl の悪化(中央値)")}">${t("対照悪化")}</th>` : ""}${rx ? `<th title="${t("トリガーありのプロンプトで性格の判定(validate.match)に当たった割合")}">${t("あり")}</th><th title="${t("トリガーなしのプロンプトで判定に当たった割合")}">${t("なし")}</th><th title="${t("反応性 = あり − なし({n} 対)", { n: rx.n_pairs })}">${t("反応性")}</th>${
-          hc ? `<th title="${t("レシピのヘッドを同じ k のランダムなヘッドに替えた対照の反応性の 95% 点")}">${t("対照p95")}</th><th title="${t("反応性が対照の何割より大きいか(0.95 未満は対照と区別できない)")}">null</th>` : ""}` : ""}${dirHead}<th></th></tr></thead>
+          hc ? `<th title="${t("レシピのヘッドを同じ k のランダムなヘッドに替えた対照の反応性の 95% 点")}">${t("対照p95")}</th><th title="${t("反応性が対照の何割より大きいか(0.95 未満は対照と区別できない)")}">null</th>` : ""}` : ""}${dirHead}${kHead}<th></th></tr></thead>
         <tbody>${rows}</tbody></table></div>
+      ${d.keyed ? this.keyedBlock(d.keyed) : ""}
       <div id="evx-sample"></div>`;
     for (const tr of body.querySelectorAll("tr[data-dose]")) tr.addEventListener("click", () => { this.dose = +tr.dataset.dose; this.render(); });
+    for (const b of body.querySelectorAll("[data-krc]")) b.addEventListener("click", () => this.onLoadRecipe(d.keyed.methods[+b.dataset.krc].recipe));
     this.cv = body.querySelector("#evx-canvas");
     this.draw();
     this.sample();
+  }
+
+  // --- keyed の選択性(CHANGE-07 E、結果の keyed): 方式の比較・比・擬似鍵・注 -----------------------------------------
+  keyedBlock(k) {
+    const head = `<h4 class="note evx-kx-h">${t("keyed の選択性(方式の比較と擬似鍵)")}</h4>`;
+    if (k.skipped) {
+      return `<section class="evx-kx">${head}<p class="note pp-warn">${t("測っていません: {r}", { r: esc(k.skipped) })}</p>${
+        k.hint ? `<p class="muted note">${esc(k.hint)}</p>` : ""}</section>`;
+    }
+    const label = (m) => ({ keyed: t("keyed(このレシピ)"), add_same_alpha: t("add(同じ α)"), add: t("add(側 A をそろえた)"), gain: "gain", proj: "proj" }[m] || m);
+    const sg = (x) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : `${x >= 0 ? "+" : "−"}${fmt(Math.abs(x), 3)}`);
+    const c = k.counts || {}, ca = c.A || {}, cb = c.B || {};
+    const dts = Object.keys(c).filter((g) => g.startsWith("dt:"));
+    const ms = k.methods || [];
+    const rows = ms.map((m, i) => (m.excluded
+      ? `<tr class="rnd"><td class="l">${esc(label(m.method))}</td><td class="desc">${esc(m.desc || "")}</td><td class="excl" colspan="9">${t("除外")}: ${esc(m.excluded)}</td></tr>`
+      : `<tr class="${m.method === "keyed" ? "best" : ""}"><td class="l">${esc(label(m.method))}</td><td class="desc">${esc(m.desc || "")}</td>
+          <td>${fmt(m.beta, 3)}</td><td>${m.matched === true ? `<span class="ok">○</span>` : m.matched === false ? `<span class="ng" title="${t("側 A を ±10% でそろえられなかった(B/A で比べる)")}">×</span>` : "—"}</td>
+          <td>${sg(m.a_par)}</td><td>${sg(m.b_par)}</td><td>${fmt(m.b_norm, 3)}</td><td>${fmt(m.dt_norm, 3)}</td><td>${sg(m.selectivity)}</td><td>${fmt(m.b_over_a, 3)}</td>
+          <td>${m.recipe && (m.method === "keyed" || m.method === "proj") ? `<button class="small" data-krc="${i}" title="${t("この方式のレシピを recipe タブに読み込む")}">${t("レシピに")}</button>` : ""}</td></tr>`)).join("");
+    const cmp = k.compare || {};
+    const ratio = (o) => Object.entries(o || {}).map(([m, v]) => `${esc(label(m))} ${fmt(v, 2)}`).join(" · ");
+    const p = k.pseudo;
+    const verdict = (b) => (b === true ? `<span class="ok">○</span> ${t("超える")}` : b === false ? `<span class="ng">×</span> ${t("超えない")}` : t("判定なし"));
+    return `<section class="evx-kx">${head}
+      <p class="note mono">${t("鍵 {k} · 方向 {d} · L{L} の残差", { k: esc(k.key), d: esc(k.direction), L: k.objective_layer })} · ${t("対照集合 {c}", { c: esc(k.contrast || "—") })} (subset ${esc(k.subset || "—")}, ${
+        k.held_out ? t("保留") : `<span class="ng">${t("作成と重なる")}</span>`}) · ${t("側 A")} <span class="muted">${esc(k.positions || "")}</span> ${t("{e} 例 {p} 位置", { e: ca.examples ?? 0, p: ca.positions ?? 0 })} / ${
+        t("側 B")} <span class="muted">${esc(k.positions_b || "")}</span> ${t("{e} 例 {p} 位置", { e: cb.examples ?? 0, p: cb.positions ?? 0 })}${
+        dts.map((g) => ` / ${esc(g.slice(3))} ${t("{e} 例 {p} 位置", { e: c[g].examples, p: c[g].positions })}`).join("")}${
+        k.cost ? `<span class="muted"> · prefill ${k.cost.prefills} · ${fmt(k.cost.seconds, 0)} s</span>` : ""}</p>
+      <p class="muted note">${t("同じ方向を方式ごとに当て、目的の層の残差の変化を位置の群ごとに比べる。A の r̂ = 側 A(変えたい位置)の r̂ 方向の変化、B の ‖Δ‖・dt の ‖Δ‖ = 側 B・dont_touch(触りたくない位置)の変化の大きさ、選択性 = 書く向きにそろえた A − B の r̂ 方向の変化、B/A = 側 A を 1 押すあたりの側 B の乱れ(小さいほど選択的)。β = 側 A の変化を keyed にそろえた強さ(○ = ±10% でそろった)。")}</p>
+      <div class="evx-scroll"><table class="evx mono evx-kx-tab"><thead><tr><th class="l">${t("方式")}</th><th class="l">${t("説明")}</th><th>β</th><th title="${t("側 A の変化を keyed に ±10% でそろえられたか")}">${t("そろった")}</th>
+        <th title="${t("側 A の r̂ 方向の変化(par)")}">${t("A の r̂")}</th><th title="${t("側 B の r̂ 方向の変化(par)")}">${t("B の r̂")}</th><th title="${t("側 B の残差の変化の大きさ")}">${t("B の ‖Δ‖")}</th>
+        <th title="${t("dont_touch の群の残差の変化の大きさ(群の平均)")}">${t("dt の ‖Δ‖")}</th><th>${t("選択性")}</th><th title="${t("側 B の ‖Δ‖ ÷ |側 A の r̂ の変化|")}">B/A</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
+      ${ratio(cmp.b_norm_ratio) ? `<p class="note">${t("側 B の ‖Δ‖ の比(keyed ÷ 対照、同じ α の add と側 A をそろえた対照)")}: <span class="mono">${ratio(cmp.b_norm_ratio)}</span></p>` : ""}
+      ${ratio(cmp.dt_norm_ratio) ? `<p class="note">${t("dont_touch の ‖Δ‖ の比(keyed ÷ 対照)")}: <span class="mono">${ratio(cmp.dt_norm_ratio)}</span></p>` : ""}
+      ${ratio(cmp.b_over_a_ratio) ? `<p class="note">${t("側 A を 1 押すあたりの側 B の ‖Δ‖ の比(keyed ÷ 対照)")}: <span class="mono">${ratio(cmp.b_over_a_ratio)}</span></p>` : ""}
+      ${cmp.keyed_smaller === true ? `<p class="note"><span class="ok">○</span> ${t("keyed の側 B の乱れは、比べたどの対照より小さい")}</p>`
+        : cmp.keyed_smaller === false ? `<p class="note"><span class="ng">×</span> ${t("keyed の側 B の乱れが対照より小さくない方式があります(keyed の利点が見えません)")}</p>` : ""}
+      ${p ? `<p class="note">${t("擬似鍵 {n} 本の選択性: p50 {a} · p95 {b} → 本物 {r}", { n: p.n, a: sg(p.p50), b: sg(p.p95), r: sg(p.real) })} ${verdict(p.beats)}${
+        p.null_pct !== undefined && p.null_pct !== null ? ` <span class="muted">(null ${fmt(p.null_pct, 2)})</span>` : ""}</p>` : ""}
+      ${(k.notes || []).length ? `<ul class="evx-notes">${k.notes.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : ""}
+      ${(k.warnings || []).length ? `<ul class="evx-notes">${k.warnings.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : ""}</section>`;
   }
 
   sample() {

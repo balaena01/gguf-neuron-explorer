@@ -173,7 +173,7 @@ class StatsActOut(Envelope):
 class UnitModel(_Strict):
     layer: int
     neuron: int | None
-    kind: Literal["neuron", "random", "direction", "head"]
+    kind: Literal["neuron", "random", "direction", "head", "expert_neuron", "expert", "shared", "ffn", "attn"]   # MoE は CHANGE-05、ffn・attn は CHANGE-07
     seed: int | None
     dose: float
     norm: float
@@ -181,12 +181,16 @@ class UnitModel(_Strict):
     rho: float | None
     add: float | None
     down_norm: float | None
-    mode: Literal["add", "gain", "query", "route", "proj"] = "add"     # §6.16、query は CHANGE-04 E、route は CHANGE-05、proj は CHANGE-06
+    mode: Literal["add", "gain", "query", "route", "proj", "keyed"] = "add"     # §6.16、query は CHANGE-04 E、route は CHANGE-05、proj は CHANGE-06、keyed は CHANGE-07
     k: float | None = None
     direction: str | None = None              # §6.17 方向のユニット
     diff_rel: float | None = None             # ‖平均差‖ / ρ_L
     head: int | None = None                   # CHANGE-04 attention ヘッドの gain
     seek: str | None = None                   # CHANGE-04 E query の対照集合
+    expert: int | None = None                 # CHANGE-05 専門家の番号
+    semantics: str | None = None              # CHANGE-05 MoE の add は "direction"(書き込み方向の押し)
+    key: str | None = None                    # CHANGE-07 keyed の鍵(擬似鍵は NAME~j)
+    alpha: float | None = None                # CHANGE-07 keyed の強さ α(raw、k と同じ値)
 
 
 class RecipeModel(_Strict):
@@ -197,8 +201,9 @@ class RecipeModel(_Strict):
     units: list[dict[str, Any]]
     ablate: dict[str, Any] | None = None      # §6.17
     sampling: dict[str, float] | None = None  # 試すときのサンプリング(seed なし)
-    default_direction: str | None = None      # CHANGE-06: proj のユニットの方向の既定
+    default_direction: str | None = None      # CHANGE-06: proj・keyed のユニットの方向の既定
     direction_layer: Literal["own", "base"] = "own"
+    default_key: str | None = None            # CHANGE-07: keyed のユニットの鍵の既定
 
 
 class Generation(_Strict):
@@ -278,7 +283,7 @@ class GainOut(Envelope):                        # §6.16 gne gain
     bytes: int
     layers: dict[str, list[list[float]]] | None = None     # lora: 層 → [[ニューロン, k]]
     rank: dict[str, int] | None = None
-    modified: list[dict[str, str]] | None = None           # bake: 書き換えたテンソルと型
+    modified: list[dict[str, Any]] | list[str] | None = None   # bake: 書き換えたテンソルと型(proj・keyed は requant_error も。分割の焼き込みは名前だけ)
     n_tensors: int | None = None
     heads: dict[str, list[list[float]]] | None = None      # CHANGE-04 lora: 層 → [[ヘッド, k]]
     head_rank: dict[str, int] | None = None
@@ -295,6 +300,15 @@ class GainOut(Envelope):                        # §6.16 gne gain
     llama_quantize: str | None = None
     intermediate_bytes: int | None = None
     verify: dict[str, Any] | None = None                   # CHANGE-06 V26(headproj export --bake --verify)
+    parts: list[str] | None = None                         # CHANGE-06 分割 GGUF への焼き込みの出力ファイル
+    requant_error_max: float | None = None                 # 量子化し直しで失った分 ÷ 編集の大きさ(テンソルの中の最大)
+    strip_meta: bool | None = None                         # gne の記録を残さない版
+    local_path_keys: list[str] | None = None               # メタデータに残った手元のパスらしい文字列のキー
+    into: str | None = None                                # 焼き込む先の別の GGUF
+    imatrix: str | None = None                             # --via-f16 で使った imatrix
+    imatrix_auto: bool | None = None
+    keyed_layers: dict[str, dict[str, Any]] | None = None  # CHANGE-07: 層 → {tensors: {テンソル: 階数}, keys, directions, rank}
+    keyed_rank: dict[str, int] | None = None               # CHANGE-07: テンソル → keyed の階数(= その層の鍵の数)
 
 
 class EvalRow(_Strict):                         # §6.14 gne eval の 1 倍率
@@ -332,6 +346,7 @@ class EvalRow(_Strict):                         # §6.14 gne eval の 1 倍率
     dir_null_pct: float | None = None           # CHANGE-06 F.2: 同数・同じ s のランダムなヘッドに対する null_pct
     drift_orth_b_null_pct: float | None = None
     rate_null_pct: float | None = None
+    keyed: dict[str, Any] | None = None         # CHANGE-07 E.1: 目的の層の側 A・側 B・dont_touch の r̂ 方向の変化と選択性
     notes: list[str] | None = None              # V29: 対照を超えていないときの明示
 
 
@@ -351,6 +366,7 @@ class EvalOut(Envelope):
     reactivity: dict[str, Any] | None = None    # CHANGE-04 F: 反応性に使った対照集合
     control_pool: str | None = None             # CHANGE-06 F.2: proj の対照のヘッドの母集団
     direction_metrics: dict[str, Any] | None = None   # CHANGE-06 F.1
+    keyed: dict[str, Any] | None = None         # CHANGE-07 E: 方式の比較・擬似鍵・text(測れなければ skipped・hint)
     notes: list[str] | None = None
 
 
@@ -1102,6 +1118,116 @@ class HeadprojCheckOut(Envelope):               # CHANGE-06 V24・V25(gne headpr
     ok: bool
 
 
+# --- CHANGE-07: 鍵つきの書き込み(keyed write)------------------------------------------------------------
+
+class DirectionKeyLayer(_Strict):               # gne direction key の 1 層
+    layer: int
+    kn: float                                   # ‖k‖/‖μ‖(k = (I − QQᵀ)μ)
+    gain: float                                 # 増幅率 ‖μ‖/‖k‖
+    q_rank: int
+    q_rows: int                                 # Q を作った行の数
+    weak: bool                                  # kn < 0.05
+    kappa_mu: float                             # κᵀμ(1 になる)
+    build_auc: float | None                     # 作成に使った例での AUC(甘い値)
+    rms_a: float | None = None                  # post-norm の層: 発火位置での書き込みの rms の平均
+
+
+class DirectionKeyOut(Envelope):                # CHANGE-07 B(gne direction key)
+    name: str
+    path: str
+    target: str                                 # ffn / attn / shared / expert:e
+    mode: Literal["same", "system"]             # same = 推論時と同じ文脈の返事(before:<re>)、system = system・recipe の文脈
+    positions: str
+    positions_b: str
+    skip: int
+    max_tokens: int
+    subset: str
+    q_mode: Literal["means", "examples", "samples"]
+    contrast: str
+    contrast_sha: str
+    layers: list[DirectionKeyLayer]
+    dropped: list[dict[str, Any]]               # 鍵にならずに外した層 {layer, error}
+    counts: dict[str, int]
+    n_pseudo: int
+    replies: dict[str, str | None]              # 群 → given / generated(返事を使わない位置なら None)
+    dont_touch: list[dict[str, Any]]
+    iv: dict[str, Any] | None                   # 当てた介入(レシピ)
+    matched: dict[str, int]                     # 側 A の位置があった例の数 {A, of}
+    samples: list[str]
+    notes: list[str]
+    sha: str
+    seconds: float
+
+
+class KeyCheckLayer(_Strict):                   # gne direction key-check の 1 層
+    layer: int
+    auc: float | None                           # 例単位(例ごとの ρ の平均)
+    auc_token: float | None                     # トークン単位
+    selectivity: float | None                   # 例ごとの ρ の平均の差 A − B
+    pseudo_auc: dict[str, Any]                  # 擬似鍵の AUC {n, p50, p95, values}
+    pseudo_auc_token: dict[str, Any]
+    pseudo_selectivity: dict[str, Any]
+    beats_pseudo: bool | None                   # 選択性 > 擬似鍵の p95(かつ AUC > 0.5)
+    beats_pseudo_auc: bool | None
+    b_split_auc: float | None                   # 側 B を 2 分した擬似差の鍵の AUC(参考値)
+    rho: dict[str, Any]                         # 群ごとの ρ の要約
+    dont_touch_median: dict[str, float | None]
+    values: dict[str, list[float]]              # 群 → 例ごとの ρ
+    hist: dict[str, Any] | None                 # UI のヒストグラム {edges, 群: 数}
+    kn: float | None = None
+    gain: float | None = None
+
+
+class DirectionKeyCheckOut(Envelope):           # CHANGE-07 C(gne direction key-check)
+    key: str
+    sha: str
+    target: str
+    contrast: str | None                        # None = 鍵に保存した作成時の例で測った
+    contrast_sha: str | None
+    subset: str | None
+    mode: str
+    positions: str
+    positions_b: str | None
+    skip: int
+    max_tokens: int
+    held_out: bool
+    overlap: dict[str, Any]
+    built_on: dict[str, Any]
+    layers: list[KeyCheckLayer]
+    best_layer: int | None
+    all_beat_pseudo: bool | None
+    n_pseudo: int
+    counts: dict[str, Any]
+    replies: dict[str, str | None] | None
+    iv: dict[str, Any] | None
+    notes: list[str]
+    seconds: float
+
+
+class DirectionKeysOut(Envelope):               # CHANGE-07(gne direction keys)
+    keys: list[dict[str, Any]]                  # KeySet.summary(読めないファイルは {name, error})
+
+
+class DirectionKeyVerifyOut(Envelope):          # CHANGE-07 V30(gne direction key-verify)
+    layer: int
+    kind: str
+    expert: int | None
+    tensor: str
+    key: str
+    direction: str
+    direction_layer: str
+    in_name: str
+    out_name: str
+    d_norm: float
+    direction_norm: float | None
+    post_norm: bool | None
+    kn: float
+    leak_b_key_examples: float | None
+    rows: list[dict[str, Any]]
+    v30: bool
+    judged_leak: bool
+
+
 COMMAND_SCHEMAS: dict[str, type[Envelope]] = {
     "chat": ChatOut, "neuron": NeuronOut,
     "sweep": SweepOut, "rank": RankOut,
@@ -1118,4 +1244,6 @@ COMMAND_SCHEMAS: dict[str, type[Envelope]] = {
     "headproj export": GainOut, "headproj check": HeadprojCheckOut, "heads pipeline": HeadsPipelineOut,
     "heads candidates": HeadsCandidatesOut,
     "heads refine": HeadsRefineOut, "fieldtest": FieldtestOut,
+    "direction key": DirectionKeyOut, "direction key-check": DirectionKeyCheckOut, "direction keys": DirectionKeysOut,
+    "direction key-verify": DirectionKeyVerifyOut,
 }

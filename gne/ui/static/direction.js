@@ -5,10 +5,12 @@
 // cohen_d が最大の層が記録される(gne direction score と同じ)。基準層があれば測り直しても上書きしない。
 // 上の切り替えで「JSON から方向とヘッドを作る」(pipeline.js、head_pipeline のジョブ)と「強さの候補」(candidates.js、
 // heads_candidates のジョブの結果と名前を伏せた採点)に替わる。方向が 1 つも無ければ「JSON から作る」を開く。
+// 「鍵(keyed)」(keys.js、CHANGE-07 G)は鍵つきの書き込みの鍵の作成(direction_key)と key-check(direction_key_check)。
 import { getJSON, postJSON } from "./api.js";
 import { t } from "./i18n.js";
 import { esc, qText } from "./panels.js";
 import { CandidatesPanel } from "./candidates.js";
+import { KeyPanel } from "./keys.js";
 import { PipelinePanel } from "./pipeline.js";
 
 const C = { text: "#aeb9c8", muted: "#6b7686", grid: "#1a212b", amber: "#e8b04a", b: "#9fb3cf", base: "#f2f5f8", best: "#6fcf8f",
@@ -17,7 +19,7 @@ const L0 = 52, R0 = 52, T0 = 16, B0 = 30, LH = 250, HH = 170;
 const fmt = (x, d = 2) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : (+x).toFixed(d));
 
 export class DirectionView {
-  constructor(root, { onChanged, pipeline, candidates } = {}) {
+  constructor(root, { onChanged, pipeline, candidates, keyed } = {}) {
     this.root = root;
     this.onChanged = onChanged || (() => {});   // 基準層を記録・上書きした → /api/model を取り直す
     this.mode = null;                  // "dir"(方向を見る)か "pipe"(JSON から作る)。null は未選択(方向が無ければ pipe)
@@ -28,7 +30,7 @@ export class DirectionView {
     this.sel = null;                   // 分布を見る層
     this.hoverL = null;
     this.busy = false;
-    root.innerHTML = `<div class="dv-mode"><span class="seg" id="dv-mode"><button data-m="dir">${t("方向を見る")}</button><button data-m="pipe">${t("JSON から方向とヘッドを作る")}</button><button data-m="cand">${t("強さの候補")}</button></span></div>
+    root.innerHTML = `<div class="dv-mode"><span class="seg" id="dv-mode"><button data-m="dir">${t("方向を見る")}</button><button data-m="pipe">${t("JSON から方向とヘッドを作る")}</button><button data-m="cand">${t("強さの候補")}</button><button data-m="key" title="${t("鍵つきの書き込み(keyed)の鍵を対照集合から作り、作成に使っていない例で状態を分けているかを確かめる")}">${t("鍵(keyed)")}</button></span></div>
       <div id="dv-dir"><div class="dv-tools">
         <label class="muted">${t("方向")} <select id="dv-pick"></select></label>
         <button id="dv-run" title="${t("対照集合の A / B のプロンプトを流して、全層の点数を測り直す(モデルを使う。GPU を待つことがあります)")}">${t("測り直す")}</button>
@@ -46,11 +48,13 @@ export class DirectionView {
       <canvas id="dv-hist"></canvas>
       <div id="dv-ex"></div></div>
       <div id="dv-pipe" class="hidden"></div>
-      <div id="dv-cand" class="hidden"></div>`;
+      <div id="dv-cand" class="hidden"></div>
+      <div id="dv-key" class="hidden"></div>`;
     this.$ = (s) => root.querySelector(s);
     this.pipe = new PipelinePanel(this.$("#dv-pipe"), { ...(pipeline || {}), onShowDirection: (name) => this.showDirection(name),
                                                         onOpenCandidates: (name) => this.openCandidates(name) });
     this.cand = new CandidatesPanel(this.$("#dv-cand"), candidates || {});
+    this.key = new KeyPanel(this.$("#dv-key"), keyed || {});
     for (const b of root.querySelectorAll("#dv-mode button")) b.addEventListener("click", () => this.setMode(b.dataset.m));
     this.cv = this.$("#dv-line");
     this.hv = this.$("#dv-hist");
@@ -68,6 +72,7 @@ export class DirectionView {
     this._modeUI(m);
     if (m === "pipe") this.pipe.refreshList();
     else if (m === "cand") this.cand.refreshList();
+    else if (m === "key") this.key.refresh();
     else if (this.name && this.meta && this.meta.name === this.name && !this.scores.has(this.name) && this.meta.contrast_ok) this.measure();
   }
 
@@ -77,6 +82,7 @@ export class DirectionView {
     this.$("#dv-dir").classList.toggle("hidden", m !== "dir");
     this.$("#dv-pipe").classList.toggle("hidden", m !== "pipe");
     this.$("#dv-cand").classList.toggle("hidden", m !== "cand");
+    this.$("#dv-key").classList.toggle("hidden", m !== "key");
     if (m === "dir") this.draw();
   }
 
@@ -88,6 +94,7 @@ export class DirectionView {
 
   // app.js の onJobFinished から: 一括(head_pipeline)と候補(heads_candidates)
   async jobEnded(j) {
+    if (j.kind === "direction_key" || j.kind === "direction_key_check") return this.key.jobEnded(j);   // CHANGE-07: 鍵
     if (j.kind === "head_pipeline" || j.kind === "heads_refine") return this.pipe.jobEnded(j);
     if (j.kind !== "heads_candidates") return;
     const mine = j.id === this.pipe.candJobId;
@@ -108,6 +115,7 @@ export class DirectionView {
     if (this.mode === null) this.setMode(this.list.length ? "dir" : "pipe");
     else if (this.mode === "pipe") this.pipe.refreshList();
     else if (this.mode === "cand") this.cand.refreshList();
+    else if (this.mode === "key") this.key.refresh();
     const pick = this.$("#dv-pick");
     pick.innerHTML = this.list.length ? this.list.map((x) => `<option value="${esc(x.name)}">${esc(x.name)}</option>`).join("")
       : `<option value="">${t("(なし)")}</option>`;
