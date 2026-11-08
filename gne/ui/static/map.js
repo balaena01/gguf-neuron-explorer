@@ -10,7 +10,7 @@ import { GEOM, cellYZ, coarseLayout, layerX, sharedCell, sharedYZ, sheetSpec, sh
 
 export const COLORS = {
   idle: [16, 20, 27],          // データ無し: 非常に暗い青灰(明るさは画面上の点の密度で割り戻す)
-  swept: [30, 37, 48],         // データあり・床以下: 暗い青灰(正面ビューの 1.6 倍でも琥珀の最も暗い点より暗い)
+  swept: [30, 37, 48],         // データあり・基準値以下: 暗い青灰(正面ビューの 1.6 倍でも琥珀の最も暗い点より暗い)
   spine: 0x2a3442,
   slabAttn: 0x9fb3cf,          // attention の板: 明るい青灰
   slabLin: 0x3a4656,           // 線形注意・回帰の板: 暗い青灰
@@ -27,7 +27,7 @@ export const COLORS = {
 
 // 点は、インスタンス描画の小さな四角形(ビルボード)で描く。点スプライト(gl_PointSize)は D3D 系で
 // 重い代替処理になる・大きさに上限がある GPU があるので使わない(verification.md F33)。
-// aColor.a は「目立たせる度合い」: 0 = 明るさを画面上の点の密度で割り戻す(データ無し・床以下)、
+// aColor.a は「目立たせる度合い」: 0 = 明るさを画面上の点の密度で割り戻す(データ無し・基準値以下)、
 // 1 = 割り戻さない(データのある点が遠くでも消えないように)。
 const VERT = /* glsl */ `
 attribute vec3 iPos;

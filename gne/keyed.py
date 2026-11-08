@@ -22,7 +22,11 @@
 | expert:e | blk.L.ffn_down_exps.weight の専門家 e | 専門家 e が選ばれたときの活性(n_ff_exp) |
 
 expert:e の LoRA は 3 次元(lora_a numpy (n_expert, r, in)、lora_b (n_expert, out, r)、専門家 e 以外のスライスは 0)。
-llama.cpp の build_lora_mm_id は選ばれた専門家の番号で A・B を選ぶ(verification.md §17 の 4)。
+llama.cpp の build_lora_mm_id は ggml_mul_mat_id(B, ggml_mul_mat_id(A, x, ids), ids) で、選ばれた専門家の番号で A・B の
+スライスを選ぶ(src/llama-graph.cpp。llama-adapter.cpp の形の確かめは ne[0]・ne[1] だけで、3 次元の A・B を受ける)。
+実行時の LoRA は ffn_down_exps(3 次元)にも ffn_down_shexp(build_ffn の build_lora_mm)にも当たる: granitemoe(CPU)と
+qwen2moe(CUDA)で、ffn_moe_down / ffn_shexp の差が α (κᵀx) d と相対誤差 1e-7 で合い、ほかの専門家の枠の差は 0
+(check_keyed の V30)。焼き込みは gain.bake_gain_gguf がスラブごとに書く(gain._expert_bake)。
 
 補正(レビュー P6・P7):
 - post-FFN norm(Gemma・LFM3 など): 残差に入るのは γ ⊙ y / rms(y)。鍵は補正しない生の x で作り、書く向きを
@@ -31,7 +35,10 @@ llama.cpp の build_lora_mm_id は選ばれた専門家の番号で A・B を選
 - 書き込み行列の .scale(BitNet・NVFP4 の scale2): llama.cpp のグラフで LoRA の出力にも s が掛かる道(build_ffn の
   down_s、GLM4 系の wo_s)だけ B を s で割る。build_lora_mm(w, x, w_s) の道(bitnet の ffn_down、ふつうの wo)は
   W x に s を掛けてから LoRA を足すので割らない(llama.cpp の src/llama-graph.cpp と src/models/bitnet.cpp を読んで確かめた)。
-- 専門家の出力に掛かるルーターの重み・shared expert のゲート: 鍵に gate_a(発火位置でのゲートの平均)があれば B を割る。
+- 専門家の出力に掛かるルーターの重み・shared expert のゲート: 鍵に gate_a(発火位置でのゲートの平均)があれば B を割る
+  (書く大きさは α·(その位置の重み / gate_a)。重みはトークンごとに違うので、平均の位置で α になる)。
+- 枝の出力を残差に足す前の倍率(granite 系の residual_scale): LoRA の差分にも掛かるので B を割る(residual_scale)。
+- post-norm のある MoE(shared・expert)、ffn_down_shexp.scale・ffn_down_exps.scale は確かめていないので ARCH_UNSUPPORTED。
 
 鍵の作成(活性の捕捉)と確認は gne/keyed_build.py。
 """
@@ -147,20 +154,20 @@ def make_key(mu: np.ndarray, Q: np.ndarray, *, warn: Warn = None, label: str = "
     nm = float(np.linalg.norm(mu))
     tag = f"{label}: " if label else ""
     if nm == 0:
-        raise GneError("BAD_KEY", f"{tag}側 A の活性の平均 μ が 0 です")
+        raise GneError("BAD_KEY", f"{tag}書き込みたい位置の活性の平均 μ が 0 です")
     k = mu - Q @ (Q.T @ mu) if Q.shape[1] else mu.copy()
     nk = float(np.linalg.norm(k))
     kn = nk / nm
     den = float(mu @ k)
     if kn < KN_MIN or den <= 0:
-        raise GneError("BAD_KEY", f"{tag}μ のうち側 B の部分空間に直交する成分がほぼありません(kn={kn:.2e}、Q の階数 {Q.shape[1]}"
+        raise GneError("BAD_KEY", f"{tag}μ のうち書き込みたくない位置の部分空間に直交する成分がほぼありません(kn={kn:.2e}、Q の階数 {Q.shape[1]}"
                                   f" / 次元 {mu.size})",
-                       "側 B の標本の数が次元に近いか超えています。q_mode を examples / means にするか、q_energy・q_max_rank を"
+                       "書き込みたくない位置の標本の数が次元に近いか超えています。q_mode を examples / means にするか、q_energy・q_max_rank を"
                        "下げてください")
     kappa = k / den
     weak = kn < KN_WARN
     if weak and warn is not None:
-        warn(f"{tag}kn={kn:.3f} が小さい鍵です(側 B の漏れが最大 {1 / kn:.1f} 倍になります。保留集合の key-check で確かめてください)")
+        warn(f"{tag}kn={kn:.3f} が小さい鍵です(書き込みたくない位置への漏れが最大 {1 / kn:.1f} 倍になります。保留集合の key-check で確かめてください)")
     return kappa, {"kn": kn, "gain": 1.0 / kn, "q_rank": int(Q.shape[1]), "weak": bool(weak)}
 
 
@@ -232,12 +239,12 @@ def writer_tensor_name(weights, L: int, kind: str, expert: int | None = None) ->
                            f"shared expert なら {L}:S:keyed:…、専門家 e なら {L}:Ee:keyed:… を使ってください")
         name = f"blk.{L}.ffn_down.weight"
         if not weights.has_tensor(name):
-            raise GneError("ARCH_UNSUPPORTED", f"{name} がありません(この層の FFN の書き込み行列が見つかりません)")
+            raise GneError("ARCH_UNSUPPORTED", f"{name} がありません(この層の FFN の、残差に書き込む重み行列が見つかりません)")
         return name
     if kind == "attn":
         li = weights.arch.layers[L]
         if li.head_writer is None:
-            raise GneError("ARCH_UNSUPPORTED", f"層 {L}({li.mixer})にはヘッドの書き込み行列(attn_output / ssm_out)がありません")
+            raise GneError("ARCH_UNSUPPORTED", f"層 {L}({li.mixer})にはヘッドの出力を残差に書き込む重み行列(attn_output / ssm_out)がありません")
         return f"blk.{L}.{li.head_writer}.weight"
     if kind == "shared":
         name = f"blk.{L}.ffn_down_shexp.weight"
@@ -514,9 +521,9 @@ class KeySet:
         """擬似鍵 j の版(配列は共有)。"""
         n = self.n_pseudo
         if n == 0:
-            raise GneError("BAD_KEY", f"鍵 {self.name} には擬似鍵がありません", "鍵を作るときに pseudo を 1 以上にしてください")
+            raise GneError("BAD_KEY", f"鍵 {self.name} には比較用の鍵がありません", "鍵を作るときに pseudo(比較用の鍵の本数)を 1 以上にしてください")
         if not 0 <= int(j) < n:
-            raise GneError("BAD_KEY", f"鍵 {self.name} の擬似鍵 {j} は範囲外です(0..{n - 1})")
+            raise GneError("BAD_KEY", f"鍵 {self.name} の比較用の鍵 {j} は範囲外です(0..{n - 1})")
         out = dataclasses.replace(self, ctrl=int(j))
         out.__dict__["_sha"] = self.base_sha
         return out
@@ -530,7 +537,7 @@ class KeySet:
             return self.kappa[L]
         C = self.kappa_ctrl.get(L)
         if C is None or not 0 <= int(j) < C.shape[0]:
-            raise GneError("BAD_KEY", f"鍵 {self.name} の層 {L} に擬似鍵 {j} がありません")
+            raise GneError("BAD_KEY", f"鍵 {self.name} の層 {L} に比較用の鍵 {j} がありません")
         return C[int(j)]
 
     # --- 中身のハッシュ ---
@@ -674,7 +681,9 @@ class KeySet:
                 "q_rank": {str(L): v for L, v in sorted(self.q_rank.items())}, "q_mode": self.q_mode,
                 "positions": self.positions, "skip": self.skip, "max_tokens": self.max_tokens, "subset": self.subset,
                 "contrast_sha": self.contrast_sha, "n_pseudo": self.n_pseudo, "post_norm": bool(self.rms_a),
-                "counts": dict(self.counts), "sha": self.sha}
+                "counts": dict(self.counts), "sha": self.sha,
+                # dont_touch の質問の返事の冒頭を Q に入れたか {on, positions, groups, rows}(None = 入れる前の版で作った鍵)
+                "dont_touch_start": self.info.get("dont_touch_start")}
 
 
 _CACHE: OrderedDict[str, tuple[tuple[int, int], KeySet]] = OrderedDict()     # 解決したパス → ((更新時刻, 大きさ), 鍵)
@@ -877,7 +886,7 @@ def keyed_plan(weights, units, key_of: KeySource, dir_of: DirSource, *, directio
         if gamma is not None:
             note("post-norm の arch です。keyed の書き込みは d = rms̄_A·(r ⊘ γ) の一次近似です(rms の変化を無視)")
         if ks.kn.get(u.layer, 1.0) < KN_WARN:
-            note(f"L{u.layer}: 鍵 {ks.spec} の kn={ks.kn[u.layer]:.3f} が小さいです(側 B の漏れが最大 {ks.gain[u.layer]:.1f} 倍)")
+            note(f"L{u.layer}: 鍵 {ks.spec} の kn={ks.kn[u.layer]:.3f} が小さいです(書き込みたくない位置への漏れが最大 {ks.gain[u.layer]:.1f} 倍)")
         info.update({"kn": float(ks.kn[u.layer]), "gain": float(ks.gain[u.layer]),
                      "q_rank": ks.q_rank.get(u.layer)})
         rows.append({"unit": u, "tensor": name, "key": ks, "kappa": kappa, "d": d, "info": info})
@@ -1231,10 +1240,14 @@ def check_keyed(session, L: int, *, key: str, direction: str, alphas=(1.0, 2.0),
     out = {"layer": L, "kind": kind, "expert": expert, "tensor": tensor, "key": ks.spec, "direction": dname,
            "direction_layer": direction_layer, "in_name": x_name, "out_name": y_name, "d_norm": dn,
            "direction_norm": info.get("direction_norm"), "post_norm": info.get("post_norm"), "kn": float(ks.kn[L]),
-           "gate": info.get("gate"), "res_scale": info.get("res_scale"),
            "leak_b_key_examples": ex_leak, "rows": rows, "v30": all(r["ok"] for r in rows),
            "judged_leak": any(r["leak_b"] is not None for r in rows)}
+    # 補正があるときだけ出す(ffn・attn の結果の形は変えない)
+    if info.get("gate") is not None:
+        out["gate"] = info["gate"]
+    if info.get("res_scale", 1.0) != 1.0:
+        out["res_scale"] = info["res_scale"]
     if kind == "expert" and not any(r["n_tokens"] for r in rows):
         out["note"] = (f"専門家 {expert} は texts で一度も選ばれなかったので測れません。専門家 {expert} が選ばれる文"
-                       "(鍵の側 A の会話など)を texts に渡してください")
+                       "(鍵の書き込みたい側の会話など)を texts に渡してください")
     return out

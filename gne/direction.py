@@ -505,9 +505,9 @@ def response_directions(session, cs: ContrastSet, *, max_tokens: int = 96, with_
     return ContrastResult(dirs, act, "mean_diff", "response", cnt, scale, act_std)
 
 
-# --- 速い物差し(CHANGE-06 B、`gne direction score`)------------------------------------------------------
+# --- 速い指標(CHANGE-06 B、`gne direction score`)------------------------------------------------------
 #
-# 点数 = 測定位置での残差 l_out-L と、その層の方向の単位ベクトル r̂_L の内積(例ごとに位置の平均)。対照集合の A 側
+# 射影の値 = 測定位置での残差 l_out-L と、その層の方向の単位ベクトル r̂_L の内積(例ごとに位置の平均)。対照集合の A 側
 # (system_a + プロンプト)と B 側(system_b + プロンプト)を、返事を生成せずに生成プロンプトの最後まで読ませるだけで測る。
 # 介入(レシピの LoRA・control vector)を当てたときの、残差の差の方向成分・直交成分(drift_par / drift_orth、残差の大きさで
 # 割ったもの)も出す。強さの探索(heads causal・heads allocate)はすべてこれで回し、生成は確定候補の評価だけに使う。
@@ -544,7 +544,7 @@ def set_base_layer(path: str | Path, L: int, *, positions: str | None = None) ->
 
 
 def score_layers_default(session, ds: DirectionSet, base: int) -> list[int]:
-    """因果の物差しの既定の層: 基準層と、後段の 2 層(基準層と最後の層の中間、最後の層)。"""
+    """因果スクリーニングで射影の値を測る層の既定: 基準層と、後段の 2 層(基準層と最後の層の中間、最後の層)。"""
     top = max(L for L in ds.raw if L <= session.meta.n_layer - 2)
     mid = base + (top - base) // 2
     return sorted({base, mid, top})
@@ -695,8 +695,8 @@ def cohen_d(a: np.ndarray, b: np.ndarray) -> float | None:
 def score(session, ds: DirectionSet, cs: ContrastSet, *, layers=None, positions: str = "last", units=None, lora=None,
           side: str = "both", subset: str = "all", record_base: bool | None = None, progress: Progress | None = None,
           max_examples: int | None = None) -> dict:
-    """速い物差し(CHANGE-06 B)。層ごとに A 側・B 側の点数の mean / sd / cohen_d、例ごとの点数、基準層の方向とのコサイン。
-    units(レシピかユニットの書き方のリスト)か lora([(パス, 倍率)])を渡すと、その介入を当てた状態でも測り、点数の変化と
+    """速い指標(CHANGE-06 B)。層ごとに A 側・B 側の射影の値の mean / sd / cohen_d、例ごとの射影の値、基準層の方向とのコサイン。
+    units(レシピかユニットの書き方のリスト)か lora([(パス, 倍率)])を渡すと、その介入を当てた状態でも測り、射影の値の変化と
     残差の差の方向成分・直交成分(drift_par / drift_orth)を出す。介入が無く layers を省いたときは、cohen_d が最大の層を
     基準層(base_layer)として方向セットに記録する。記録するのは基準層がまだ無いときだけ(record_base=True で上書き、
     False で記録しない)。"""

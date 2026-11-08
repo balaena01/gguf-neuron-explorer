@@ -55,21 +55,25 @@ direction で作った方向は "L:dir:NAME:dose"、attention ヘッドの gain 
    配る前の確かめは fieldtest(焼き込んだファイルと元のファイルを、本番と同じ動かし方で比べる。eval では見えない長い作業の崩れとツール呼び出しを見る)。
    - 方向を使う介入は、まず direction_score で基準層と分離度(cohen_d)を確認してから進める。
    - heads_causal の ablate と marginal は順位が違う。最初の候補出しは ablate、配り直しは marginal(heads_allocate が使う)。
-   - 候補と強さの案は生成なしの物差し(direction_score・heads_causal・heads_allocate)で作る。点数は押した量で、振る舞いそのものではないので、止める強さは少数の問題を生成して確かめる。
-   - 報告には外から見える指標(eval の rate = 対照集合の validate.match の一致率、能力・ppl)を主にする。方向の射影値だけでは
+   - 候補と強さの案は生成なしの指標(direction_score・heads_causal・heads_allocate)で作る。方向への射影の値は押した量で、振る舞いそのものではないので、止める強さは少数の問題を生成して確かめる。
+   - 報告には外から見える指標(eval の rate = 対照集合の validate.match の一致率、能力・ppl)を主にする。方向への射影の値だけでは
      「方向で押したものを方向で測った」ことにしかならない。
    - ランダム対照(eval の random_controls、同数・同じ s のランダムなヘッド)と方式の比較(compare_methods)を通していないレシピは報告しない。
    - 目的の指標が数 % まで来たら強さを上げるのをやめ、残る例を担う別のヘッドを探す。
 10. 鍵つきの書き込み(keyed、CHANGE-07、"L:ffn:keyed:aα@DIR#KEY"、例 "19:ffn:keyed:a1@zundamon_endings#zundamon_endings")。
-   proj が「どの向きを」変えるかを選ぶのに対し、keyed は「どの状態で」書くかを選ぶ(書き込み行列に α d κᵀ を足し、活性が鍵 κ に
-   合う位置でだけ方向 d を書く。α は raw で、1 = 観測した A − B の差そのまま)。両者は重ねられる(同じ LoRA に入る)。
+   proj が「どの向きを」変えるかを選ぶのに対し、keyed は「どの状態で」書くかを選ぶ(残差に書き込む重み行列に α d κᵀ を足し、
+   活性に鍵 κ が反応する位置でだけ方向 d を書く。α は raw で、1 = 観測した A − B の差そのまま)。両者は重ねられる(同じ LoRA に入る)。
    手順: direction(書く向き)→ direction_key(鍵。介入なしで作る。対照集合の positions を "before:<正規表現>" にすると、推論時と
-   同じ文脈のモデル自身の返事で、変えたい文字を書く直前の位置が側 A になる)→ direction_key_check(作成に使っていない例で。既定
-   subset="odd"。held_out が false の値は甘い。選択性が擬似鍵の p95 を超えない鍵は使わない)→ steer / eval → keyed_export
-   (配るなら LoRA、焼き込みは f16)。when は keyed に効かない。eval は keyed のレシピに選択性のブロック(行の keyed.selectivity、
-   結果の keyed の方式の比較と擬似鍵)を足す。鍵と方向を別の対照集合で作ったなど、鍵の対照集合を推定できないときは
+   同じ文脈のモデル自身の返事で、変えたい文字を書く直前の位置が書き込みたい位置になる)→ direction_key_check(作成に使って
+   いない例で。既定 subset="odd"。held_out が false の値は甘い。key-check の選択性が比較用の鍵(ラベルをシャッフルして同じ
+   手順で作った鍵)の p95 を超えない鍵は使わない)→ steer / eval → keyed_export(配るなら LoRA。焼き込みの既定は、元が
+   Q8_0 のテンソルは Q8_0 のまま、それ以外は f16)。when は keyed に効かない。eval は keyed のレシピに eval の選択性の
+   ブロック(行の keyed.selectivity、結果の keyed の方式の比較と比較用の鍵)を足す。鍵と方向を別の対照集合で作ったなど、鍵の対照集合を推定できないときは
    eval(keyed_contrast=鍵を作った対照集合)で渡す(渡さないと keyed は skipped)。
    例: ずんだもんの語尾 configs/contrast/zundamon_endings.yaml(direction(positions="response") → direction_key(layers=[…]) → direction_key_check)。
+   MoE の層は direction_key(target="shared")で shared expert に、target="expert:e" で専門家 e に書く(ユニットは L:S / L:Ee:keyed:…)。
+   専門家は direction_key_experts で書き込みたい位置でよく選ばれる(rate_a が大きく rate_b が小さい)ものを選ぶ。焼き込みは
+   既定(auto)と requant="keep" なら、元が Q8_0 の専門家のテンソルは元の型のまま(f16 だとテンソル全体が F16 になって大きくなる)。
 """
 
 
@@ -245,18 +249,18 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
         novelty_null_pct(新語が対照の何割より多いか)、ctrl_capability_drop_p50・ctrl_ppl_worse_p50(大きさだけで起きる悪化)。
         reactivity(対照集合の名前かパス。reactivity の対と validate.match が要る)を渡すと、行の reactivity に
         トリガーあり/なしの一致率とその差を入れる。head_controls 本のランダムなヘッド(同じ k)と比べた null_pct も。
-        方向を使うレシピ(proj・方向のユニット・ablate)の行には、点数の下がり方 dir_drop_a・残差の差の直交成分 drift_orth_a /
+        方向を使うレシピ(proj・方向のユニット・ablate)の行には、射影の値の下がり方 dir_drop_a・残差の差の直交成分 drift_orth_a /
         drift_orth_b・判定の一致率 rate が入る(CHANGE-06 F.1)。proj の random_controls は同数・同じ s のランダムなヘッド
         (control_pool: before / same-layers)で、dir_null_pct・rate_null_pct・drift_orth_b_null_pct を出す。
         compare_methods=True は、proj のレシピと同じ方向で全層射影・ヘッドの方向成分・ヘッドの丸ごと倍率・ニューロンの消去を
-        A 側の点数の水準(match_effect、省けばこのレシピ)をそろえて比べる(F.3)。alloc(heads_allocate の名前)と n_heads で、
+        A 側の射影の値の水準(match_effect、省けばこのレシピ)をそろえて比べる(F.3)。alloc(heads_allocate の名前)と n_heads で、
         ヘッド数ごとの組を評価する(F.4、recipe・units は要らない)。方向の指標は direction_metrics=False で測らない。
         dir_max_examples はその測定で読む質問の数(既定 64、A・B それぞれ等間隔に間引く。0 で全部)。
-        keyed のユニットを持つレシピ(CHANGE-07)では、行の keyed(目的の層の側 A・側 B・dont_touch の残差の r̂ 方向の変化と
-        selectivity、random_controls があれば擬似鍵の対照の null_pct)と、結果の keyed(方式の比較 methods・compare、擬似鍵 pseudo、
-        text)が入る(生成なしの prefill だけ)。keyed_contrast は鍵を作った対照集合(名前かパス。方向を作った
+        keyed のユニットを持つレシピ(CHANGE-07)では、行の keyed(目的の層の書き込みたい位置・書き込みたくない位置・dont_touch の残差の
+        r̂ 方向の変化と eval の選択性 selectivity、random_controls があれば比較用の鍵の対照の null_pct)と、結果の keyed(方式の比較
+        methods・compare、比較用の鍵 pseudo、text)が入る(生成なしの prefill だけ)。keyed_contrast は鍵を作った対照集合(名前かパス。方向を作った
         対照集合と同じなら省ける。分からなければ keyed は skipped と hint)、keyed_examples は会話の組ごとに読む数(0 で全部)、
-        keyed_pseudo は擬似鍵の本数、keyed_subset は読む例(even / odd / all、既定は鍵の作成と反対側)、keyed_match=False で
+        keyed_pseudo は比較用の鍵の本数、keyed_subset は読む例(even / odd / all、既定は鍵の作成と反対側)、keyed_match=False で
         大きさ合わせを省く、keyed_metrics=False で測らない。"""
         try:
             if alloc:
@@ -329,7 +333,7 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
         """ヘッドの対照分析をジョブとして投げる(job_status で結果)。対照集合(configs/contrast/ の名前かパス)の会話を
         ペルソナあり(system_a)と中立(system_b)で流し、ヘッドごとに trigger_mass(トリガー語への注目の割合の差、
         対照集合の triggers が要る)・pattern_shift(注目の分布の JS)・out_shift(出力の差)・dir_cos(出力差が方向 r_L に
-        書く cos、direction か同じ名前の方向があるとき)を測り、中立どうしの差を床にして z で順位づける。"""
+        書く cos、direction か同じ名前の方向があるとき)を測り、中立どうしの差の p95 を基準値にして z で順位づける。"""
         from .cli import parse_layers
         try:
             params = {"contrast": str(_contrast_path(session, contrast, None, None, None, name)), "name": name,
@@ -341,10 +345,10 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
     @srv.tool()
     async def direction_score(name: str, contrast: str | None = None, layers: list[int] | None = None,
                               units: list[str] | None = None, positions: str = "last", side: str = "both") -> dict:
-        """速い物差し(CHANGE-06 B、生成なしなので数秒)。対照集合(省けば方向を作ったもの)の A 側・B 側をプロンプトの最後まで
+        """速い指標(CHANGE-06 B、生成なしなので数秒)。対照集合(省けば方向を作ったもの)の A 側・B 側をプロンプトの最後まで
         読ませ、層ごとに 残差 · r̂_L の mean / sd / cohen_d と、基準層(cohen_d 最大。介入なし・layers 省略のとき記録する)、
         基準層の方向とのコサイン(方向が層でどれだけ回るか)を返す。units("33:H16:s6@NAME" など)を渡すと、その介入での
-        点数の下がり方 drop と、残差の差の方向成分・直交成分 drift(par / orth、A・B それぞれ)。
+        射影の値の下がり方 drop と、残差の差の方向成分・直交成分 drift(par / orth、A・B それぞれ)。
         方向を使う介入は、まずこれで基準層と分離度を確認してから進める。"""
         def fn():
             d = session.direction_score(name, contrast=contrast, layers=layers, units=units, positions=positions, side=side)
@@ -358,7 +362,7 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
                            candidates: str | None = None, score_layers: list[int] | None = None,
                            base_units: list[str] | None = None, delta_s: float = 3.0, hard: int = 16,
                            b_side_max: float | None = None, top_layers: int = 4) -> dict:
-        """因果スクリーニングをジョブで投げる(CHANGE-06 C、job_status で結果。生成なし)。方向 name の点数(score_layers、
+        """因果スクリーニングをジョブで投げる(CHANGE-06 C、job_status で結果。生成なし)。方向 name への射影の値(score_layers、
         既定は基準層と後段 2 層)が、ヘッドを止めたとき(mode="ablate")どれだけ下がるか。layers="auto" は層単位で全ヘッドを
         止めて下がる top_layers 層を選び、その層のヘッドを 1 個ずつ測る。candidates は all / contrib:N / "L:Hh,…"。
         mode="marginal" は base_units(いまの組 "L:Hh:sS")から s を delta_s 上げたときの、効きにくい例 hard 件での
@@ -379,11 +383,11 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
                              n_heads: list[int] | None = None, score_layer: int | None = None, hard: int = 16,
                              b_side_max: float | None = None, method: str = "proportional", s_max: float | None = None) -> dict:
         """効率ベースの強さ配分をジョブで投げる(CHANGE-06 D、job_status で結果。生成なし)。heads_causal の結果(candidates、
-        既定は方向の名前)から、効きにくい例(A 側で点数が高く残る hard 件)を選び、効率 eta を測り、n_heads(既定 [6, 5, 4])の
-        各ヘッド数で s ∝ eta に配って、効きにくい例の点数の平均が target になるよう二分探索する。比較表(ヘッド数・各ヘッドの s・
-        最大の s・残る件数・A 側の最大点数・B 側の直交成分のずれ)と recommended(残る件数と B 側のずれが同程度なら最少の
+        既定は方向の名前)から、効きにくい例(A 側で射影の値が高く残る hard 件)を選び、効率 eta を測り、n_heads(既定 [6, 5, 4])の
+        各ヘッド数で s ∝ eta に配って、効きにくい例の射影の値の平均が target になるよう二分探索する。比較表(ヘッド数・各ヘッドの s・
+        最大の s・残る件数・A 側の射影の値の最大・B 側の直交成分のずれ)と recommended(残る件数と B 側のずれが同程度なら最少の
         ヘッド数)、各組のレシピのパスを返す。method="greedy" は比を固定せず、いちばん効くヘッドを 1 本ずつ上げる(s_max の既定はなし、
-        止まるのは目標か B 側のずれ)。行の stop が止まった理由、capped が上限に当たったヘッド。目標はスコアの目標なので、組は振る舞いで確かめる。"""
+        止まるのは目標か B 側のずれ)。行の stop が止まった理由、capped が上限に当たったヘッド。目標は射影の値の目標なので、組は振る舞いで確かめる。"""
         try:
             params = {"direction": name, "target": target, "candidates": candidates, "score_layer": score_layer,
                       "hard": hard, "b_side_max": b_side_max, "method": method, "s_max": s_max,
@@ -479,9 +483,13 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
     async def headproj_export(recipe: str, bake: bool = False, requant: str | None = None, verify: bool = True,
                               strip_meta: bool = False, into: str | None = None) -> dict:
         """保存したレシピの proj のユニット(ヘッドの方向成分の射影、と gain・keyed)を書き出す(CHANGE-06 E)。既定は LoRA アダプタ
-        GGUF(同じ層・同じ方向は階数 1 に畳む。数百 KB)。bake=True なら書き込み行列だけ量子化し直した GGUF をジョブで作り
-        (requant の既定は q8_0、keyed を含むなら f16)、
-        verify なら焼き込み版と LoRA 版を点数・最初のトークンの KL・最尤トークンの一致率・ppl で比べる(V26)。
+        GGUF(同じ層・同じ方向は階数 1 に畳む。数百 KB)。bake=True なら残差に書き込む重み行列だけ量子化し直した GGUF をジョブで作り
+        (requant の既定は q8_0。keyed を含むなら auto: 元が Q8_0 のテンソルは Q8_0 のまま、それ以外は f16。Q8_0 のまま
+        では編集の 1 割以上が丸めに消えるテンソルだけ f16。"q8_0" / "f16" / "keep" も選べる)、
+        verify なら焼き込み版と LoRA 版を方向への射影の値・最初のトークンの KL・最尤トークンの一致率・ppl で比べる(V26)。射影の値は
+        層・側ごとに例ごとの差の最大(max_abs_diff)を合格の線(threshold)と比べる。線は許容誤差(射影の値の標準偏差の 1 割、resolution)で、
+        最後の層(last_layer)だけ許容誤差 + 計算方法の違いだけで出る誤差(noise.max_abs_diff = 書き込みがほぼ 0 の LoRA と
+        LoRA なしの射影の値の差の最大。Q8_0 では LoRA を当てるだけで最後の層の射影の値が動くため)。
         strip_meta=True なら gne の記録(gne.* のメタデータ・レシピ・名前の印・横の .headproj.json)を残さない(人に渡す版)。
         結果の local_path_keys は、メタデータに手元のパスらしい文字列が残っているキー。into は焼き込む先の別の GGUF
         (同じ構造の量子化していない F16 / BF16 など。方向はこのモデルのものを使う。requant="keep" で元の型のまま、verify はできない)。"""
@@ -514,9 +522,14 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
         """鍵つきの書き込み(keyed、CHANGE-07)を書き出す(headproj_export の keyed 向けの別名。proj・gain が混ざっていても同じ
         ファイルに入る)。recipe は保存したレシピの名前、または units(例 ["19:ffn:keyed:a1@zundamon_endings#zundamon_endings"])と
         name。key・direction は #KEY・@NAME を省いたユニットの鍵と方向。既定は LoRA アダプタ GGUF(層・鍵ごとに階数 1、llama.cpp の
-        --lora でそのまま当たる。配るならこれが第一候補。keyed だけなら <名前>-keyed.lora.gguf)。bake=True なら書き込み行列
-        (ffn_down など)だけ書き直した GGUF をジョブで作る(requant の既定は f16。q8_0 では rank 1 の小さな編集が丸めに消えやすい。
-        結果の requant_error_max が 0.5 を超えたら警告)。verify=True で焼き込み版と LoRA 版を比べる(V33)。"""
+        --lora でそのまま当たる。配るならこれが第一候補。keyed だけなら <名前>-keyed.lora.gguf)。bake=True なら残差に書き込む
+        重み行列(ffn_down など)だけ書き直した GGUF をジョブで作る(requant の既定は auto: テンソルごとに、元が Q8_0 なら Q8_0 のまま
+        (f16 にすると計算方法が変わり、LoRA 版とかえってずれた)、それ以外(K-quant・IQ・F16 など)は f16。Q8_0 のままでは
+        rank 1 の小さな編集の 1 割以上が丸めに消えるテンソルだけ f16(記録の fallback)。結果の edit_kept_min(残った編集の割合)が
+        0.9 を下回ったら警告。requant_error_max は編集と無関係な丸めのゆらぎも数えるので、小さな編集では大きく出る)。MoE の専門家のテンソル(ffn_down_exps、expert:e)も同じ規則で、
+        Q8_0 のままなら編集しない専門家はバイトのまま、f16 だとテンソル全体が F16 になる(結果の expert_bytes_added が増えた大きさ)。
+        verify=True で焼き込み版と LoRA 版を比べる(V33。判定は headproj_export の verify と同じで、最後の層の射影の値の合格の線
+        threshold は許容誤差 + 計算方法の違いだけで出る誤差 noise.max_abs_diff)。"""
         if bool(recipe) == bool(units):
             return _err(GneError("BAD_ARGS", "recipe(保存したレシピの名前)か units のどちらかを渡してください"))
         return await _export(recipe, units, name, key, direction, bake=bake, requant=requant, verify=verify,
@@ -528,14 +541,25 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
                             q_mode: str = "examples", q_energy: float = 0.99, q_max_rank: int | None = None,
                             q_max_samples: int = 4096, subset: str = "even", pseudo: int = 16,
                             replies_a: str | list[str] | None = None, replies_b: str | list[str] | None = None,
-                            iv: str | list[str] | None = None, target: str = "ffn", seed: int = 0) -> dict:
+                            iv: str | list[str] | None = None, target: str = "ffn", seed: int = 0,
+                            dont_touch_start: bool | None = None) -> dict:
         """鍵つきの書き込みの鍵 κ を作るジョブを投げる(CHANGE-07、job_status で結果)。対照集合(configs/contrast/ の名前かパス)の
-        側 A(書きたい状態)の活性の平均 μ を、側 B と dont_touch の活性が張る空間に直交させ、κᵀμ = 1 にして
+        書き込みたい位置の活性の平均 μ を、書き込みたくない位置と dont_touch の活性が張る空間に直交させ、κᵀμ = 1 にして
         <root>/keys/<model_id>/<name>.npz に保存する。layers は必須(例 [8, 14, 20])。positions(省くと対照集合の値)が
-        "before:<正規表現>" なら推論時と同じ文脈のモデル自身の返事で、一致する文字を書く直前を側 A、残りの位置を側 B にする。
+        "before:<正規表現>" なら推論時と同じ文脈のモデル自身の返事で、一致する文字を書く直前を書き込みたい位置、残りの位置を書き込みたくない位置にする。
         replies_a / replies_b は返事を読ませるファイルかリスト(生成しない)。q_mode: examples(既定)/ means / samples。
         subset は既定 even(direction_key_check は odd で確かめる)。iv はこの介入(レシピかユニット)を当てた状態で作る。
-        結果の層ごとの kn(1 に近いほど側 B と重ならない、0.05 未満は弱い)と build_auc(作成に使った例での値で甘い)。"""
+        target は書き込み先: ffn(既定、dense の ffn_down の入力)/ attn(attn_output・ssm_out の入力 = ヘッド出力の連結)/
+        shared(MoE の層の shared expert の ffn_down_shexp の入力)/ expert:e(ffn_down_exps の専門家 e の入力。専門家 e が
+        選ばれた位置だけで作るので、書き込みたい位置でよく選ばれる専門家を選ぶ)。ユニットは L:ffn / L:attn / L:S / L:Ee:keyed:…。
+        dont_touch の各群の質問の、返事を書き始める直前の位置も Q に入る(既定。dont_touch_start=False か
+        対照集合の dont_touch_start: false で切る。入れた行の数は結果の dont_touch_start。書き込みたくない側の、返事を書き始める直前の位置は入れない)。
+        結果の層ごとの kn(1 に近いほど書き込みたくない位置と重ならない、0.05 未満は弱い)と build_auc(作成に使った例での値で甘い)。
+        warnings を必ず見る: 書き込みたい位置を含む例が 2 未満か、書き込みたい位置が 8 未満(専門家の鍵は層ごとの行)なら少ない。
+        "before:<正規表現>" で書き込みたい位置の 25% 以上(μ に占める重み、結果の reply_start.share)が返事の冒頭(最初の
+        3 トークンを決める位置)にあると、鍵がどの返事の冒頭にも反応しやすい。dont_touch の群があれば、その質問の、返事を
+        書き始める直前の位置が Q に入っているので注(notes)になり、無ければ
+        警告になる(ふつうの質問を dont_touch に足して作り直す)。"""
         from .jobs import _layers
         try:
             if not _layers(layers):
@@ -544,7 +568,7 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
                  "positions": positions, "positions_b": positions_b, "skip": skip, "max_tokens": max_tokens,
                  "q_mode": q_mode, "q_energy": q_energy, "q_max_rank": q_max_rank, "q_max_samples": q_max_samples,
                  "subset": subset, "pseudo": pseudo, "replies_a": replies_a, "replies_b": replies_b, "iv": iv,
-                 "target": target, "seed": seed}
+                 "target": target, "seed": seed, "dont_touch_start": dont_touch_start}
             return jobs.start("direction_key", {k: v for k, v in p.items() if v is not None}).view()
         except Exception as e:  # noqa: BLE001
             return _err(e)
@@ -556,10 +580,16 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
                                   replies_b: str | list[str] | None = None, iv: str | list[str] | None = None,
                                   strict: bool = False) -> dict:
         """鍵の分離の確認のジョブを投げる(CHANGE-07、job_status で結果)。対照集合(省くと鍵に保存した作成時の例で、甘い値)の
-        各位置で ρ = κᵀx を測り、層ごとに側 A 対 側 B の AUC(auc は例単位、auc_token はトークン単位)、選択性 selectivity
-        (例ごとの ρ の平均の差 A − B)と擬似鍵(ラベルを並べ替えた鍵)の p95、beats_pseudo(選択性が擬似鍵の p95 を超えた)、
+        各位置で鍵の反応の強さ ρ = κᵀx を測り、層ごとに書き込みたい位置 対 書き込みたくない位置の AUC(auc は例単位、
+        auc_token はトークン単位)、key-check の選択性 selectivity(例ごとの ρ の平均の、書き込みたい位置 − 書き込みたくない
+        位置)と比較用の鍵(ラベルをシャッフルして同じ手順で作った鍵)の p95、beats_pseudo(選択性が比較用の鍵の p95 を超えた)、
         dont_touch の ρ の中央値を返す。位置・skip・max_tokens の既定は鍵を作ったときの値。作成に使った例と重なると
-        held_out が false(strict なら BAD_ARGS)。判断は held_out が true の結果で、beats_pseudo の層だけを使う。"""
+        held_out が false(strict なら BAD_ARGS)。判断は held_out が true の結果で、beats_pseudo の層だけを使う。
+        層ごとの start_rho は書き込みたくない位置と dont_touch の、返事の冒頭(位置 0 = 返事を書き始める直前の位置、1・2 = 返事の
+        最初の 2 トークンを読んだ位置)での ρ の中央値。dont_touch の ρ の中央値は返事の全位置の中央値なので、返事の冒頭の
+        1 位置で反応しても見えない。中央値が 0.4 以上なら warnings に出る(dont_touch なら書き込みたくない場面への漏れ。
+        ふつうの質問を dont_touch に足して鍵を作り直す。dont_touch の質問の、返事を書き始める直前の位置は鍵の作成で自動で Q に入る)。保留集合の書き込みたい位置を含む例が
+        2 未満か、書き込みたい位置が 8 未満でも warnings に出る(選択性が揺れる)。"""
         try:
             p = {"key": key, "subset": subset, "layers": layers, "positions": positions, "positions_b": positions_b,
                  "skip": skip, "max_tokens": max_tokens, "replies_a": replies_a, "replies_b": replies_b, "iv": iv,
@@ -572,15 +602,41 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
     @srv.tool()
     async def direction_key_verify(layer: int, key: str, direction: str, alphas: list[float] | None = None,
                                    target: str = "ffn", direction_layer: str = "own") -> dict:
-        """V30(CHANGE-07、数秒): keyed の LoRA が式どおり ΔW x = α (κᵀx) d を書くか。無介入で書き込み行列の入力 x と出力を
-        捕捉し、LoRA を当てた出力の差と比べる(rows の rel_err_median < 3%、鍵の作成に使った側 B の例で leak_b < 0.1、v30)。
-        target は ffn / attn、alphas の既定は [1, 2]。"""
+        """V30(CHANGE-07、数秒): keyed の LoRA が式どおり ΔW x = α (κᵀx) d を書くか。無介入で重み行列の入力 x と出力を
+        捕捉し、LoRA を当てた出力の差と比べる(rows の rel_err_median < 3%、鍵の作成に使った書き込みたくない側の例で leak_b < 0.1、v30)。
+        target は鍵の書き込み先と同じ ffn / attn / shared / expert:e(例 "expert:31")、alphas の既定は [1, 2]。shared は
+        ゲートの前、expert:e はルーターの重みの前の出力を、専門家 e が選ばれた枠で測る。expert:e の rows には other_max
+        (ほかの専門家の枠の差、0 のはず)と selection_changed(選ばれる専門家が変わったトークンの数、0 のはず)も入る。
+        MoE では結果に gate(鍵の gate_a)・res_scale(granite 系の residual_scale)も出る。"""
         def fn():
             from .keyed import parse_target
             kind, expert = parse_target(target)
             return session.check_keyed(layer, key=key, direction=direction, alphas=tuple(alphas or (1.0, 2.0)),
                                        kind=kind, expert=expert, direction_layer=direction_layer)
         return await call(fn)
+
+    @srv.tool()
+    async def direction_key_experts(contrast: str, layers: list[int] | str, positions: str | None = None,
+                                    positions_b: str | None = None, skip: int | None = None, max_tokens: int = 96,
+                                    subset: str = "even", replies_a: str | list[str] | None = None,
+                                    replies_b: str | list[str] | None = None, iv: str | list[str] | None = None,
+                                    top: int = 8) -> dict:
+        """expert:e の鍵の専門家を選ぶ材料のジョブを投げる(CHANGE-07 MoE、job_status で結果)。鍵と同じ対照集合(configs/contrast/
+        の名前かパス)・位置・返事で、書き込みたい位置・書き込みたくない位置で各専門家が選ばれた割合を層ごとに返す: layers[].top[] の expert・
+        rate_a・rate_b(例ごとの選ばれた割合の平均)・diff・lift(rate_a / rate_b)・weight_a(選ばれたときのルーターの重みの平均
+        = 鍵の gate_a の見込み)・rows_a(書き込みたい位置で選ばれる行の数の見込み)・rate_dt(dont_touch の群)。rate_a の大きい順に top 個。
+        専門家の鍵は書き込みたい位置で専門家 e が選ばれた行だけでできるので、rate_a が大きく rate_b が小さい専門家を direction_key の
+        target="expert:e" に選ぶ。layers は必須(MoE の層、例 [6, 12, 18])。ほかの引数は direction_key と同じ。"""
+        from .jobs import _layers
+        try:
+            if not _layers(layers):
+                raise GneError("BAD_ARGS", "layers に調べる MoE の層を指定してください(例 [6, 12, 18])")
+            p = {"contrast": str(_contrast_path(session, contrast, None, None, None, None)), "layers": layers,
+                 "positions": positions, "positions_b": positions_b, "skip": skip, "max_tokens": max_tokens,
+                 "subset": subset, "replies_a": replies_a, "replies_b": replies_b, "iv": iv, "top": top}
+            return jobs.start("direction_key_experts", {k: v for k, v in p.items() if v is not None}).view()
+        except Exception as e:  # noqa: BLE001
+            return _err(e)
 
     @srv.tool()
     async def keys() -> dict:
@@ -598,7 +654,7 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
                                layers: str | None = None, max_tokens: int = 48) -> dict:
         """専門家の対照分析をジョブとして投げる(job_status で結果)。対照集合の同じ返事をペルソナあり(system_a)と中立(system_b)で
         読ませ、MoE の層の専門家ごとに usage_shift(選ばれた割合の差)・weight_shift(実効の重みの差)・contrib_cos(寄与の差と
-        その層の状態の向きの cos)・contrib_norm を測り、中立どうしを床にして z で順位づける。数秒〜数十秒。"""
+        その層の状態の向きの cos)・contrib_norm を測り、中立どうしの差の p95 を基準値にして z で順位づける。数秒〜数十秒。"""
         from .cli import parse_layers
         try:
             params = {"contrast": str(_contrast_path(session, contrast, None, None, None, name)), "name": name,
@@ -668,7 +724,7 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
 
     @srv.tool()
     async def job_start(kind: str, params: dict[str, Any] | None = None, workers: str | None = None) -> dict:
-        """長時間の処理を投げる。kind: stats_resid / stats_act / lens_logit / lens_steer / sweep / rank / reverse / eval / direction / ablate / heads_contrast / heads_causal / heads_allocate / head_pipeline / heads_candidates / heads_refine / headproj_export / fieldtest / direction_key / direction_key_check。
+        """長時間の処理を投げる。kind: stats_resid / stats_act / lens_logit / lens_steer / sweep / rank / reverse / eval / direction / ablate / heads_contrast / heads_causal / heads_allocate / head_pipeline / heads_candidates / heads_refine / headproj_export / fieldtest / direction_key / direction_key_check / direction_key_experts。
         params は gne.api の同名メソッドの引数(例 sweep: {"layer": 22, "neurons": "random:64", "design": "quick"})。
         見積もりが 30 分を超えるジョブは走らせずに NEEDS_CONFIRM と見積もりを返す。params に budget("30m" など)を入れると
         予算に収まるように絞る(lens_steer は方向に近いニューロンの上位、sweep は quick 設計で steer lens の上位、reverse は

@@ -174,16 +174,22 @@ class FastGGUF:
         return self.values.get(key, default)
 
 
-def rewrite_gguf(src: str | Path, dst: str | Path, replace: dict[str, tuple[GGMLQuantizationType, bytes]]) -> None:
+def _is_bytes(raw) -> bool:
+    return isinstance(raw, (bytes, bytearray, memoryview))
+
+
+def rewrite_gguf(src: str | Path, dst: str | Path, replace: dict[str, tuple[GGMLQuantizationType, object]]) -> None:
     """1 つの GGUF ファイル(分割の 1 つでもよい)を、指定したテンソルだけ型とバイト列を差し替えて書き直す。メタデータの
-    バイト列はそのまま写す(分割の 2 番目以降は split.* だけを持つので、gguf-py の書き出しだと余計なキーが入る)。"""
+    バイト列はそのまま写す(分割の 2 番目以降は split.* だけを持つので、gguf-py の書き出しだと余計なキーが入る)。
+    差し替えはバイト列か、書くときに作るもの(nbytes と tofile(f) を持つ。専門家の 3 次元テンソルをスラブごとに書く
+    gain._SlabStream。テンソル全体をメモリに持たない)。"""
     g = FastGGUF(src, _part=True)
     buf = memoryview(g._mm)
     align = g.alignment
     plan, off = [], 0
     for t in g.tensors:
         q, raw = replace.get(t.name, (t.tensor_type, None))
-        size = len(raw) if raw is not None else t.n_bytes
+        size = t.n_bytes if raw is None else len(raw) if _is_bytes(raw) else int(raw.nbytes)
         off += -off % align
         plan.append((t, q, raw, off))
         off += size
@@ -200,4 +206,12 @@ def rewrite_gguf(src: str | Path, dst: str | Path, replace: dict[str, tuple[GGML
         base = f.tell()
         for t, _, raw, toff in plan:
             f.write(b"\0" * (base + toff - f.tell()))
-            f.write(raw if raw is not None else bytes(buf[t.data_offset:t.data_offset + t.n_bytes]))
+            if raw is None:                       # 写すだけのテンソルは bytes に写さずに書く(大きなテンソルでメモリを食わない)
+                f.write(buf[t.data_offset:t.data_offset + t.n_bytes])
+            elif _is_bytes(raw):
+                f.write(raw)
+            else:
+                start = f.tell()
+                raw.tofile(f)
+                if f.tell() - start != int(raw.nbytes):
+                    raise ValueError(f"{t.name}: 書いた大きさ {f.tell() - start} が {int(raw.nbytes)} と違います")

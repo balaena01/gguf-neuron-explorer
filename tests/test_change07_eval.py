@@ -305,7 +305,7 @@ def test_keyed_contrast_required(session, zun, tmp_path):
         KeyedMetrics(session, r)
     assert ei.value.code == "BAD_ARGS" and "keyed_contrast" in (ei.value.hint or "")
     km = KeyedMetrics(session, r, contrast=other, max_examples=2, pseudo=4, match=False)
-    assert km.n_pseudo == 0 and any("擬似鍵が無い" in n for n in km.notes)
+    assert km.n_pseudo == 0 and any("比較用の鍵が無い" in n for n in km.notes)
     km.prepare()
     blk = km.block()
     assert [m["method"] for m in blk["methods"]] == ["keyed", "add_same_alpha"] and blk["pseudo"] is None

@@ -33,10 +33,10 @@ class LayerInfo:
     n_ff_shexp: int            # shared expert の n_ff(無ければ 0)
     has_post_ffn_norm: bool
     # CHANGE-04 ヘッド: attention は n_head(Q 側)・n_head_kv、linear_attention は n_head = V ヘッド数(ssm.time_step_rank)・
-    # n_head_kv = K ヘッド数(ssm.group_count)。head_dim は 1 ヘッドの出力の幅(書き込み行列の入力 / n_head)
+    # n_head_kv = K ヘッド数(ssm.group_count)。head_dim は 1 ヘッドの出力の幅(残差に書き込む重み行列の入力 / n_head)
     head_dim: int = 0
     head_writer: str | None = None   # ヘッドの出力を残差に書く行列(attn_output / ssm_out)
-    head_out: tuple[str, ...] = ()   # 書き込み行列に入る直前のテンソル名の候補(捕捉で見えた最初のもの)
+    head_out: tuple[str, ...] = ()   # 残差に書き込む重み行列に入る直前のテンソル名の候補(捕捉で見えた最初のもの)
     # CHANGE-05 MoE: ルーターのバイアス(exp_probs_b、選択にだけ効く)、選び方、選んだ重みを正規化するか(メタデータに無ければ None)
     has_router_bias: bool = False
     routing: str = ""                # softmax_topk / sigmoid_topk / group_topk(MoE の層だけ)

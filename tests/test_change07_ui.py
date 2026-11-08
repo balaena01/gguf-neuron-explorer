@@ -95,7 +95,7 @@ def api(tmp_path_factory):
 
 @pytest.fixture(scope="module")
 def built(api):
-    """鍵 zundamon_endings(作り方 (b): 与えた返事の「です。」「ます。」を書く直前、L8・L14、擬似鍵 8 本)をジョブで作る。"""
+    """鍵 zundamon_endings(作り方 (b): 与えた返事の「です。」「ます。」を書く直前、L8・L14、比較用の鍵 8 本)をジョブで作る。"""
     c, _ = api
     return _run_job(c, "direction_key", {"contrast": str(ZUNDAMON), "layers": "8,14", "replies_a": REPLIES, "max_tokens": 24,
                                          "pseudo": 8})
@@ -285,7 +285,10 @@ def test_key_panel_and_recipe_in_browser(ui_server, browser):
     pg.wait_for_function("window.gne.directionView && window.gne.directionView.mode", timeout=60000)
     pg.click("#dv-mode button[data-m=key]")
     pg.wait_for_function("document.querySelector('#kx-contrast option') && window.gne.directionView.key.loaded", timeout=30000)
-    assert pg.evaluate("document.querySelector('#kx-contrast').value").endswith(f"{NAME}.yaml")     # before:<re> の対照集合が既定
+    # before:<re> の対照集合(一覧で最初のもの)が既定。before:<re> のものは複数あるので、この先で使う NAME を選び直す
+    assert pg.evaluate("document.querySelector('#kx-contrast').selectedOptions[0].textContent").endswith(" · before")
+    zpath = pg.evaluate(f"[...document.querySelectorAll('#kx-contrast option')].map(o => o.value).find(v => v.endsWith('{NAME}.yaml'))")
+    pg.select_option("#kx-contrast", zpath)
     assert "before" in pg.evaluate("document.querySelector('#kx-cinfo').textContent") or "(b)" in pg.evaluate(
         "document.querySelector('#kx-cinfo').textContent")
     assert "まだありません" in pg.evaluate("document.querySelector('#kx-keys').textContent")
@@ -340,12 +343,12 @@ def test_key_panel_and_recipe_in_browser(ui_server, browser):
     saved = yaml.safe_load((s.store.recipes_dir() / "zk_web_r.yaml").read_text(encoding="utf-8"))
     assert saved["default_key"] == "zk_web" and saved["default_direction"] == NAME
     assert {"layer": 8, "kind": "ffn", "mode": "keyed", "alpha": 0.5} in saved["units"]
-    # LoRA・焼き込みの欄: keyed だけなら既定の名前は -keyed、焼き込みの型の既定は F16
+    # LoRA・焼き込みの欄: keyed だけなら既定の名前は -keyed、焼き込みの型の既定は auto(Q8_0 は元のまま、ほかは F16)
     pg.click("#rc-lora")
     pg.wait_for_selector(".rc-lx", timeout=5000)
     assert pg.evaluate("document.querySelector('#lx-file').placeholder") == "zk_web_r-keyed"
     pg.check("input[name=lx-kind][value=bake]")
-    assert pg.evaluate("document.querySelector('#lx-requant').value") == "f16"
+    assert pg.evaluate("document.querySelector('#lx-requant').value") == "auto"
     _shot(pg, "keyed_recipe.png")
     # 読み直し: 下書きを消し、保存したレシピを読む
     pg.evaluate("window.gne.recipe.clear()")
@@ -430,20 +433,20 @@ KEYED_BLOCK = {
          "b_norm": 31.7, "dt_norm": 32.0, "selectivity": 5.1, "b_over_a": 1.05},
         {"method": "add", "desc": "全体を β 倍", "beta": 0.9, "matched": True, "a_par": 27.4, "b_par": 22.0, "b_norm": 28.5, "dt_norm": 29.0,
          "selectivity": 5.4, "b_over_a": 1.04},
-        {"method": "gain", "desc": "ニューロンの gain", "excluded": "β = 0〜8 で側 A の par が keyed に近づきません"},
+        {"method": "gain", "desc": "ニューロンの gain", "excluded": "β = 0〜8 で書き込みたい位置の par が keyed に近づきません"},
         {"method": "proj", "desc": "ヘッドの射影", "beta": 93.0, "matched": False, "a_par": 20.0, "b_par": 8.0, "b_norm": 52.7,
          "dt_norm": 40.0, "selectivity": 12.0, "b_over_a": 2.6}],
     "compare": {"b_norm_ratio": {"add_same_alpha": 0.23, "add": 0.26}, "dt_norm_ratio": {"add": 0.15},
                 "b_over_a_ratio": {"add_same_alpha": 0.25, "add": 0.25, "proj": 0.1}, "keyed_smaller": True},
     "pseudo": {"n": 8, "p50": 10.0, "p95": 19.7, "real": 26.3, "beats": True, "null_pct": 1.0},
-    "notes": ["proj: 側 A の par を keyed に ±10% でそろえられませんでした"], "warnings": [], "cost": {"prefills": 218, "seconds": 28.0}}
+    "notes": ["proj: 書き込みたい位置の par を keyed に ±10% でそろえられませんでした"], "warnings": [], "cost": {"prefills": 218, "seconds": 28.0}}
 
 
 @pytest.mark.model
 def test_eval_keyed_params_and_block_in_browser(ui_server, browser):
     """eval ビュー: レシピに keyed があると keyed の選択性の欄が出て、ジョブの params に keyed_contrast・keyed_examples・
-    keyed_pseudo・keyed_subset・keyed_match・keyed_metrics が載る。結果の keyed は方式の表(除外の理由・そろったか)・比・擬似鍵・注、
-    行の表に keyed の選択性の列。測っていない(skipped)ときは理由とヒント。英語の文言もある。"""
+    keyed_pseudo・keyed_subset・keyed_match・keyed_metrics が載る。結果の keyed は方式の表(除外の理由・そろったか)・比・比較用の鍵・注、
+    行の表に eval の選択性の列。測っていない(skipped)ときは理由とヒント。英語の文言もある。"""
     url = ui_server["url"]
     for lang in ("ja", "en"):
         pg, errors = _open(browser, url, lang)
@@ -495,7 +498,7 @@ def test_eval_keyed_params_and_block_in_browser(ui_server, browser):
         assert "0.23" in txt and "26.300" in txt and "19.700" in txt and "β = 0〜8" in txt
         assert ("超える" if lang == "ja" else "beats") in txt and ("保留" if lang == "ja" else "held out") in txt
         head = pg.evaluate("[...document.querySelectorAll('#evx-body table.evx:not(.evx-kx-tab) thead th')].map(th => th.textContent)")
-        assert ("keyed 選択性" if lang == "ja" else "keyed sel.") in head
+        assert ("eval の選択性" if lang == "ja" else "eval selectivity") in head
         cell = pg.evaluate("[...document.querySelectorAll('#evx-body tr[data-dose]')][1].textContent")
         assert "26.30" in cell
         if lang == "ja":

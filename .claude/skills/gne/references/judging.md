@@ -4,7 +4,7 @@
 
 ## 流れ
 
-1. `examples/persona_neurons/common.py` の `judge_file(out_dir, tag, items)` が、返事をシャッフルして番号を振り、`round_<tag>.txt`(採点する人が読む)と `round_<tag>.key.json`(どの候補かの鍵)を書く。`tune.py --judge file` と、自前の比べっこ(`generate` → `judge_file`)の両方で使う。
+1. `examples/persona_neurons/common.py` の `judge_file(out_dir, tag, items)` が、返事をシャッフルして番号を振り、`round_<tag>.txt`(採点する人が読む)と `round_<tag>.key.json`(どの返事がどの候補かの対応表)を書く。`tune.py --judge file` と、自前の比較(`generate` → `judge_file`)の両方で使う。
 2. 採点基準は `write_rubric` が `RUBRIC.md` に書く(目標の性格、P と C の 1〜5 の意味、繰り返しの扱い)。性格に固有の決まりは、最初の回が出る前に RUBRIC.md の末尾に足す。
 3. 採点役のサブエージェントを 1 つ立て、`round_<tag>.scores.txt` に「番号 性格 自然さ」を 1 行ずつ書かせる。全部の番号がそろうと、待っているスクリプトが次に進む。
 4. 1 つの探索の間は同じ採点役を使い続ける(SendMessage で次の回を頼む)。基準がぶれない。文脈が長くなりすぎたら、新しい探索で新しい採点役にする。

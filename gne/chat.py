@@ -43,7 +43,7 @@ def _with_dose(recipe: Recipe, dose: float | None, sign: float) -> Recipe:
     # query(ヘッドの条件付きクエリ操作)は − の列では外す(scale 0)
     # route(専門家のルーターのバイアス、CHANGE-05)は − の列で delta の符号を反転する
     # proj(ヘッドの方向成分の射影、CHANGE-06)は − の列で s の符号を反転する(方向成分を強める)
-    # keyed(鍵つきの書き込み、CHANGE-07)は − の列で α の符号を反転する(鍵が合う状態でその方向を打ち消す)。α は raw なので dose はそろえない
+    # keyed(鍵つきの書き込み、CHANGE-07)は − の列で α の符号を反転する(鍵が反応する状態でその方向を打ち消す)。α は raw なので dose はそろえない
     units = [replace(u, k=None if u.k is None else u.k * sign)
              if u.mode == "keyed" else
              Unit(u.layer, u.neuron, 0.0, u.kind, u.seed, "gain", u.k if sign > 0 else 2 - u.k, head=u.head, expert=u.expert)

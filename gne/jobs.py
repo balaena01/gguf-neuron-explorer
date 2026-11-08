@@ -197,7 +197,7 @@ def _direction_key(s, contrast, layers=None, **p) -> dict:
 
 def _direction_key_check(s, key: str, layers=None, compact: bool = False, **p) -> dict:
     """鍵の分離の確認(CHANGE-07、gne direction key-check)。compact なら例ごとの ρ(values)・ヒストグラム(hist)・
-    擬似鍵ごとの値を落とす(MCP 向け。UI はヒストグラムに使うので落とさない)。"""
+    比較用の鍵ごとの値を落とす(MCP 向け。UI はヒストグラムに使うので落とさない)。"""
     d = s.direction_key_check(key, layers=_layers(layers), progress=s.progress, **p)
     if compact:
         for r in d["layers"]:
@@ -206,6 +206,15 @@ def _direction_key_check(s, key: str, layers=None, compact: bool = False, **p) -
             for k in ("pseudo_auc", "pseudo_selectivity"):
                 r[k].pop("values", None)
     return d
+
+
+def _direction_key_experts(s, contrast, layers=None, **p) -> dict:
+    """expert:e の鍵の専門家を選ぶ材料(CHANGE-07 MoE、gne direction key-experts): 書き込みたい位置・書き込みたくない位置で各専門家が
+    選ばれた割合と重み。contrast は対照集合のパス、layers は必須(リストか "6,12,18")。ほかの引数は keyed_build.expert_usage と同じ。"""
+    Ls = _layers(layers)
+    if not Ls:
+        raise GneError("BAD_ARGS", "調べる MoE の層(layers)を指定してください(例 [6, 12, 18] か \"6,12,18\")")
+    return s.direction_key_experts(contrast, layers=Ls, progress=s.progress, **p)
 
 
 def standard_kinds() -> dict[str, Callable[..., dict]]:
@@ -238,6 +247,7 @@ def standard_kinds() -> dict[str, Callable[..., dict]]:
         "headproj_export": _headproj_export,
         "direction_key": _direction_key,                                                # CHANGE-07: 鍵の作成
         "direction_key_check": _direction_key_check,                                    # CHANGE-07: 鍵の分離の確認
+        "direction_key_experts": _direction_key_experts,                                # CHANGE-07 MoE: 専門家の選ばれ方
     }
 
 

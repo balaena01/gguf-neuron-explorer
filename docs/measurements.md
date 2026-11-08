@@ -317,14 +317,15 @@ Qwen3.5-4B Q8_0、`gne direction --select auto --mode add`(12 プロンプト、
 | `heads causal --mode marginal`(ヘッド 1 個、効きにくい例 8 件) | 0.35 秒 | 0.76 秒 | 約 5.5 秒 | |
 | `heads allocate`(1 組、二分探索込み) | 0.43 秒 | 2.6 秒 | 約 30 秒 | 全体(最初の組・効きにくい例・効率)は 3.3 秒 / 11 秒 |
 | LoRA 書き出し / 焼き込み(Q8_0) | 0.02 秒 / 4.2 秒 | 0.13 秒 / 10 秒 | | 焼き込みは書き換えない全テンソルの写しが大半 |
+| 焼き込み + `--verify`(V26、L16 の 2 ヘッド、2026-11-08) | 全体 8.9 秒 | | 全体 43.7 秒 | 最後の層の、計算方法の違いだけで出る誤差の測定(書き込みがほぼ 0 の LoRA と LoRA なしでの、方向への射影の値)が GPU 0.4〜0.5 秒、CPU 4.8〜5.2 秒 |
 | `eval --compare-methods`(4 方式、既定のタスク集) | 18 秒 | | 98 秒(ミニのタスク集) | 二分探索と、方式ごとの eval(無介入の測定は 1 回) |
 | `eval --random-controls 4`(倍率 1、既定のタスク集) | 30 秒 | | | |
 
-生成を伴わない工程(物差し・因果・配分)は 1 条件が 1 秒未満(4B、GPU)で、調整のループの大半を占める部分が速い。27B はまだ測っていない(GPU を別の処理が使っていた)。変更指示の目安(27B で 1 条件が十数秒を超えたら例数と測定位置を削る)は、4B の 0.49 秒からの外挿では十分に下回る見込み。
+生成を伴わない工程(方向への射影の値の測定・因果・配分)は 1 条件が 1 秒未満(4B、GPU)で、調整のループの大半を占める部分が速い。27B はまだ測っていない(GPU を別の処理が使っていた)。変更指示の目安(27B で 1 条件が十数秒を超えたら例数と測定位置を削る)は、4B の 0.49 秒からの外挿では十分に下回る見込み。
 
 V28(ablate と marginal の順位の不一致): 同じ 6 ヘッド(0.6B、L8・L12・L16 の直接の寄与の上位)で、ablate の causal と marginal の効率 η(L16 H8・H1 を s = 2 にした組から s を 3 上げる)の順位相関は Spearman +0.71。1 位が入れ替わった(ablate は L16 H8、η は L16 H13)。`gne heads causal --mode marginal` の出力の `spearman_ablate_marginal` に毎回出る。詳細は `docs/verification.md` §20.4。
 
-Qwen3.5-4B(GPU、attention と線形注意が混ざる)で CLI の手順を通した: `direction` 3 秒、`direction score` 2.4 秒(基準層 L20、cohen_d 12.7)、`heads causal`(層単位 31 層 → 上位 4 層 L0・L11・L15・L16 の全ヘッド、物差し L20・L25・L30)74 秒、`heads causal --mode marginal`(31 ヘッド)20 秒、`heads allocate --n-heads 4,3,2` 40 秒(推したのは L15 H8 s4.2・L15 H2 s2.8 の 2 個)。この 31 ヘッドでの ablate と marginal の順位相関は Spearman −0.14 で、0.6B(+0.71)よりさらに一致しなかった。
+Qwen3.5-4B(GPU、attention と線形注意が混ざる)で CLI の手順を通した: `direction` 3 秒、`direction score` 2.4 秒(基準層 L20、cohen_d 12.7)、`heads causal`(層単位 31 層 → 上位 4 層 L0・L11・L15・L16 の全ヘッド、射影の値を測る層 L20・L25・L30)74 秒、`heads causal --mode marginal`(31 ヘッド)20 秒、`heads allocate --n-heads 4,3,2` 40 秒(推したのは L15 H8 s4.2・L15 H2 s2.8 の 2 個)。この 31 ヘッドでの ablate と marginal の順位相関は Spearman −0.14 で、0.6B(+0.71)よりさらに一致しなかった。
 
 4B の 2 ヘッドの組の `eval --doses 0,1 --random-controls 8`(既定のタスク集)は 115 秒、`eval --compare-methods`(4 方式、8 段の粗い探索 + 二分探索)は 48〜69 秒。結果は `docs/verification.md` §20.9。
 
@@ -337,3 +338,38 @@ Qwen3.5-4B(GPU、attention と線形注意が混ざる)で CLI の手順を通�
 27B の IQ2_XS(8.8 GB)で、長い作業 24 問(3072 トークン)、ツール呼び出し 40 問(1536 トークン)、質問集 204 問(1536 トークン)、perplexity を、同時 4 本で測った。2 ファイルで 72 分(1 ファイル 28 分と 44 分)。返事が長くなるぶんだけ時間も延びる。
 
 `--bench gsm8k,mmlu_pro`(250 問・300 問、4096 トークンまで)は同じモデルで 2 ファイル 181 分(1 ファイル 90 分)。平均は GSM8K 330 トークン、MMLU-Pro 1300 トークン、合わせて約 75 トークン/秒。データの取得は初回だけで、MMLU-Pro は間隔を空けて約 4.5 分。
+
+## CHANGE-07: keyed write(2026-11-07〜08、同じ環境)
+
+鍵は作り方 (b)(「です。」「ます。」を書く直前が、鍵に反応してほしい「書き込みたい位置」)、比較用の鍵(ラベルをシャッフルして同じ手順で作った鍵)16 本、鍵の作成は subset even、key-check は subset odd。granite は `configs/contrast/zundamon_endings.yaml` に返事を与えて測った(生成なし)。Qwen3-0.6B Q8_0 は同じ対照集合で、返事を無介入で生成した(作成・確認とも、8 問 + dont_touch 2 問の返事を 96 トークンまで)。時間は結果の `seconds`(モデルの読み込みを除く)、「全体」はコマンド全体の実時間。
+
+| 工程 | granite-3.1-1b-a400m(CPU、専門家の鍵) | Qwen3-0.6B(GPU) | Qwen3-0.6B(CPU) | 備考 |
+|---|---|---|---|---|
+| `direction --positions response`(書く向き、16 問) | | 全体 6.3 秒 | | A・B の返事を作る |
+| `direction key`(3 層) | 5.5 秒 | 2.2 秒(全体 2.7 秒) | 11.4 秒(全体 11.8 秒) | 返事の生成と比較用の鍵 16 本を含む。attn の鍵も同じ(GPU 2.1 秒、CPU 11.4 秒) |
+| `direction key-check`(3 層) | 6 秒 | 2.2 秒(全体 2.6 秒) | 12.3 秒(全体 12.8 秒) | 比較用の鍵 16 本の ρ(鍵の反応の強さ)も同じ捕捉で測る |
+| `direction key-verify`(V30、α = 1・2) | 3.6 秒 | 全体 1.4 秒 | 全体 1.6 秒 | 実行時の LoRA の書き出しを含む |
+| `headproj export`(LoRA、3 層) | | 全体 0.37 秒 | 全体 0.36 秒 | 重みを読まずに書ける(52 KB) |
+| `headproj export --bake`(F16 / keep) | | 全体 4.8 秒 / 4.7 秒 | 同じ | 焼き込みは GPU を使わない。書き換えない全テンソルの写しが大半 |
+| `headproj export --bake --verify`(V33) | | 全体 10.6 秒 | 全体 52 秒 | LoRA 版と焼き込み版を 1 つずつ読んで比べる。2026-11-08 から、最後の層の計算方法の違いだけで出る誤差の測定(書き込みがほぼ 0 の LoRA と LoRA なしでの射影の値)で GPU 0.6 秒、CPU 9.8〜9.9 秒増えた(焼き込み 4.1〜4.3 秒の後の確かめが GPU 5.9〜6.1 秒、CPU 54〜56 秒。3 層 α = 4 と 1 層 α = 0.25) |
+| `eval --doses 0,1 --random-controls 8`(keyed の選択性・方式の比較・比較用の鍵 8 本) | | 全体 54 秒 | 全体 9 分 35 秒 | 比べる方式の強さを keyed にそろえる探索は 1 方式あたり最大 6 回の測定(GPU では 3〜5 回でそろった。CPU では gain・proj が 6 回でそろわなかった) |
+| `pytest tests/test_change07_moe.py`(15 件) | 48 秒 | | | |
+| `pytest tests/test_change07*.py`(135 件通過・3 件 skip) | | | 9 分 37 秒 | `GNE_TEST_MOE` を渡したとき。焼き込みの既定と警告のテストを足した後は 146 件通過・2 件 skip で 9 分 54 秒(`GNE_TEST_HYBRID_MODEL` も渡した)。dont_touch の返事を書き始める直前の位置と V33 の判定のテストを足した後は 148 件通過・2 件 skip で 10 分 23 秒 |
+
+Qwen3.5-0.8B BF16(CPU、線形注意と attention の 2 層、返事を与えた)の鍵の作成は 4.7 秒。
+
+Qwen3.5-4B Q8_0(GPU、2026-11-08、L11・L18・L23 の 3 層、返事は無介入で生成)。値は `docs/keyed-write.md` §15 と同じ。
+
+| 工程 | 語尾(`zundamon_endings`、8 問 + dont_touch 2 問) | ツンデレ(`tsundere_thanks`、16 問 + dont_touch 6 問) |
+|---|---|---|
+| `direction key`(3 層、比較用の鍵 16 本) | 6.9 秒 | 9〜11 秒 |
+| `direction key-check`(3 層) | 6.8 秒 | 9.3 秒 |
+| `direction key-verify`(V30、α = 1・2) | 3.1 秒 | |
+| `eval --doses 0,1 --random-controls 8`(keyed の選択性・方式の比較・比較用の鍵 8 本、1 本) | 2 分 24 秒〜2 分 32 秒 | 3 分 34 秒 |
+| 生成の測定(18 問 × 160 トークン、greedy、まとめて生成、1 条件) | 6〜13 秒(0.6B は 1〜3 秒) | |
+
+4B の焼き込みは測っていない(ディスクを守るため、焼き込みは小さいモデルだけで行う)。
+
+焼き込みの大きさ(専門家のテンソル 1 本): granite の `ffn_down_exps` 1 層は F16 で 17.8 MB → 33.6 MB(`expert_bytes_added` 15,728,640 バイト)、keep(Q8_0)なら変わらない。3 つに分割した GGUF でも同じ。Qwen1.5-MoE は F16 で 119 MB → 346 MB(1 層 +227 MB)、keep(Q5_0)なら変わらない。値の意味は `docs/verification.md` §21.4。
+
+生成を伴わない工程(返事を与えた鍵の作成・key-check・V30)は 0.6B で 1 回が数秒で、調整のループを回せる。変更指示の目安(27B で鍵の作成が数分を超えたら層数・例数を削る)は、27B ではまだ測っていない。

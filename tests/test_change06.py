@@ -360,6 +360,16 @@ def test_v26_bake_matches_lora(session, tmp_path):
     v = d["verify"]
     assert v["pass"] and v["top1_match"] >= 0.9 and all(g < 0.5 for g in v["top1_mismatch_gaps"]), v
     assert all(x["ok"] for x in v["scores"].values()) and abs(v["ppl_diff_pct"]) < 0.5
+    # 最後の層だけ、合格の線 = 許容誤差 + 書き込みがほぼ 0 の LoRA と LoRA なしの点数の差(計算方法の違いだけで出る誤差)
+    from gne.schemas import BakeVerify
+    BakeVerify.model_validate(v)
+    last, nz = v["last_layer"], v["noise"]
+    if last is not None:
+        assert nz["layer"] == last and nz["lora_scale"] == 1e-6 and nz["max_abs_diff"] >= 0
+        assert v["scores"][f"{last}A"]["threshold"] == pytest.approx(v["scores"][f"{last}A"]["resolution"] + nz["max_abs_diff"])
+    for k, x in v["scores"].items():
+        if int(k[:-1]) != last:
+            assert x["threshold"] == x["resolution"] and "noise" not in x
     f = session.headproj_export(r, tmp_path / "v26f.gguf", bake=True, requant="f16", verify=True)["verify"]
     assert f["pass"] and f["kl_first_token"] <= v["kl_first_token"] + 1e-6, f      # F16 なら Q8_0 より近い
 

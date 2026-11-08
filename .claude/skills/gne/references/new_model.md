@@ -11,7 +11,7 @@
 ## llama.cpp が arch に対応していないとき
 
 - gne は llama-cpp-python の上で動く。同梱の llama.cpp が古いと、新しい arch(例: lfm3)を読めない。
-- llama-cpp-python を、vendor の llama.cpp を新しい版にして作り直す(`CMAKE_ARGS="-DGGML_CUDA=on" pip install -e .`)。
+- llama-cpp-python を、同梱の llama.cpp(vendor)を新しい版にして作り直す(`CMAKE_ARGS="-DGGML_CUDA=on" pip install -e .`)。
 - C の API の構造体が変わっていると、Python のバインディング(`llama_cpp/llama_cpp.py`)が合わずに落ちる。`include/llama.h` を見比べて、ctypes の構造体にフィールドを足す。LFM3 では次の 2 つ。
   - `llama_context_params`: `type_v` の後に `moe_cache_size`(`c_size_t`)
   - `llama_perf_context_data`: 末尾に `n_reallocs_same`・`n_reallocs_diff`(`c_int32`)
@@ -25,7 +25,7 @@
 ## 小さいモデル(〜2B)の注意
 
 - 温度を下げる(LFM3 は 0.3、min_p 0.05、presence 0.5)。レシピの `sampling` と、`tune.py --sampling`・`common.generate(sampling=...)` に渡す。
-- モデル自身は採点役にならない。採点は Claude に任せ、ふるいは採点なしの物差しで行う(SKILL.md §4.3)。
+- モデル自身は採点役にならない。採点は Claude に任せ、ふるいは採点なしの指標で行う(SKILL.md §4.3)。
 - rel dose の崩れ始めが低い。0.5 でも崩れることがある。
 
 ## 音声も出すモデル(LFM3-Omni など)
@@ -38,5 +38,5 @@
 
 - 手順は `docs/qwen4exp.md`。実物は最小 66 GB なので、手元では `tests/tools/make_tiny_qwen4exp.py` の小さい乱数のモデルで動作を確かめる。
 - 使えないもの: `add` と方向(`direction`)の足し算、`export-cvec`。グラフが control vector を読まないので、gne は止める。`gain`・射影(`proj`)・ablate の LoRA は動く。
-- 残差は 4 本の流れ。`l_out-L` は流れの平均で読む。
+- 残差ストリームが 4 本ある。`l_out-L` は 4 本の平均で読む。
 - 分割 GGUF は 1 番目のファイルを渡す。焼き込み(bake)はできないので、LoRA を使うか `llama-gguf-split --merge` で 1 つにする。

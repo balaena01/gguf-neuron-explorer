@@ -603,5 +603,7 @@ input.rc-kexp { width: 44px; }
 .evx-kx-in { display: inline-flex; flex-wrap: wrap; gap: 8px; align-items: center; border-left: 2px solid #2f5d4c; padding-left: 8px; }
 .evx-kx { border-top: 1px solid var(--line); margin-top: 10px; padding-top: 2px; }
 .evx-kx-h { color: #dfe6ee; font-weight: 500; }
+/* keyed の表の見出しは言葉が長いので折り返す(書き込みたい位置・比較用の鍵の p95 など) */
+table.evx-kx-tab th, table.kx-check th, table.evx th.wrap { white-space: normal; max-width: 8em; vertical-align: bottom; }
 .evx-kx span.ok, .kx-res span.ok { color: var(--kx-ok); }
 .evx-kx span.ng, .kx-res span.ng { color: var(--kx-ng); }

@@ -34,7 +34,7 @@ heads_app = typer.Typer(no_args_is_help=True, help="attention ヘッド(対照�
 app.add_typer(heads_app, name="heads")
 experts_app = typer.Typer(no_args_is_help=True, help="MoE の専門家(対照分析・調書、CHANGE-05)")
 app.add_typer(experts_app, name="experts")
-# gne direction(方向を作る)は、サブコマンドが無ければ従来どおり動くグループ。gne direction score は速い物差し(CHANGE-06 B)
+# gne direction(方向を作る)は、サブコマンドが無ければ従来どおり動くグループ。gne direction score は速い指標(CHANGE-06 B)
 direction_app = typer.Typer(no_args_is_help=False, invoke_without_command=True)
 app.add_typer(direction_app, name="direction")
 from .modal_cli import modal_app  # noqa: E402
@@ -270,10 +270,10 @@ def _units_text(units: list[dict]) -> str:
             a = u.get("alpha", u.get("k"))
             size = ""
             if u.get("norm"):
-                size = f"、鍵が合った位置で |α|‖r_L‖={u['norm']:.2f}" + (
-                    f"(ρ の {u['rel_push']:.2f} 倍)" if u.get("rel_push") is not None else "")
+                size = f"、鍵が反応する位置で |α|‖r_L‖={u['norm']:.2f}" + (
+                    f"(残差ノルム ρ_L の {u['rel_push']:.2f} 倍)" if u.get("rel_push") is not None else "")
             rows.append(f"  L{u['layer']} {_keyed_who(u['kind'], u.get('expert'))} keyed α={a:+g} @{u.get('direction')} "
-                        f"#{u.get('key')}(鍵 κ に合う状態だけ方向を書く、LoRA で当てる{size})")
+                        f"#{u.get('key')}(鍵 κ が反応する状態だけ方向を書く、LoRA で当てる{size})")
             continue
         who = {"neuron": f"N{u['neuron']}", "random": f"random{u['seed']}", "head": f"H{u.get('head')}"}.get(
             u["kind"], f"dir:{u.get('direction')}")
@@ -701,7 +701,7 @@ def gain(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Option
          out: Optional[Path] = typer.Option(None, "--out", "-o", help="出力(既定 <root>/export/<レシピ名>.lora.gguf、--bake なら -gain.gguf)"),
          bake: bool = typer.Option(False, "--bake", help="LoRA ではなく、W_up を書き換えた GGUF を作る"),
          in_path: Optional[Path] = typer.Option(None, "--in", help="--bake の元の GGUF(既定 --model)"),
-         requant: str = typer.Option("auto", "--requant", help="--bake の書き方: auto(パッチで書ければスケールパッチ、書けなければ q8_0。keyed を含むなら f16)/ patch / q8_0 / f16"),
+         requant: str = typer.Option("auto", "--requant", help="--bake の書き方: auto(パッチで書ければスケールパッチ、書けなければ q8_0。keyed を含むならテンソルごとに、元が Q8_0 なら Q8_0 のまま、それ以外は f16。Q8_0 のままでは編集の 1 割以上が丸めに消えるテンソルだけ f16)/ patch / q8_0 / f16 / keep(元が F32・F16・BF16 ならその型。専門家のテンソル ffn_down_exps は元の型を保ち、編集しない専門家はバイトのまま。K-quant・IQ の専門家は q8_0)"),
          key: Optional[str] = typer.Option(None, "--key", help="#KEY を省いた keyed のユニットの鍵(gne direction key で作ったもの)"),
          direction: Optional[str] = typer.Option(None, "--direction", help="@NAME を省いた proj・keyed のユニットの方向"),
          strip_meta: bool = typer.Option(False, "--strip-meta", help="gne の記録(gne.* のメタデータ・レシピ・名前の印)を残さない(人に渡す版)")):
@@ -736,8 +736,17 @@ def _mod_text(m) -> str:
     if isinstance(m, str):
         return m
     s = f"{m['tensor']}({m.get('from', m.get('type', '?'))} → {m.get('to', '?')}"
+    if m.get("experts") is not None:            # 専門家の 3 次元テンソル(keyed の expert:e、CHANGE-07)
+        s += "、専門家 " + ",".join(f"E{e}" for e in m["experts"])
+        s += "、ほかの専門家は" + ("バイトのまま" if m.get("untouched") == "raw" else f"変換({m.get('untouched')})")
+        if m.get("bytes_to") is not None and int(m["bytes_to"]) != int(m.get("bytes_from", m["bytes_to"])):
+            s += f"、{int(m['bytes_from']) / 1e6:.1f} → {int(m['bytes_to']) / 1e6:.1f} MB"
     if m.get("requant_error") is not None:
         s += f"、丸めで失った分は編集の {m['requant_error'] * 100:.1f}%"
+    if m.get("edit_kept") is not None:
+        s += f"、残った編集 {m['edit_kept'] * 100:.1f}%"
+    if m.get("fallback"):
+        s += "、Q8_0 では編集が埋もれるので F16"
     return s + ")"
 
 
@@ -748,10 +757,12 @@ def _keyed_export_lines(d: dict, *, requant_line: bool = True) -> list[str]:
     for L, x in (d.get("keyed_layers") or {}).items():
         tens = ", ".join(f"{n} 階数 {r}" for n, r in x["tensors"].items())
         lines.append(f"  L{L}: 鍵つきの書き込み {tens}(鍵 {', '.join(x['keys'])}、方向 {', '.join(x['directions'])})")
-    err = d.get("requant_error_max")
+    err, kept = d.get("requant_error_max"), d.get("edit_kept_min")
     if requant_line and d.get("keyed_layers") and err is not None:
+        bad = (kept < 0.9) if kept is not None else err > 0.5     # 残った編集の割合で見る(無ければ丸めのずれ)
         lines.append(f"  量子化し直しで失った分は編集の大きさの最大 {err * 100:.1f}%"
-                     + ("(半分を超えています。--requant f16 か LoRA で配ってください)" if err > 0.5 else ""))
+                     + (f"、残った編集は最小 {kept * 100:.1f}%" if kept is not None else "")
+                     + ("(編集が丸めに埋もれています。--requant f16 か auto、または LoRA で配ってください)" if bad else ""))
     return lines
 
 
@@ -779,26 +790,27 @@ def eval_cmd(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Op
              random_controls: int = typer.Option(0, "--random-controls", help="各倍率で同じ大きさのランダムな対照レシピ N 本も測る(0 = なし)"),
              reactivity: Optional[Path] = typer.Option(None, "--reactivity", help="反応性も測る対照集合 YAML(reactivity の対と validate.match)"),
              head_controls: int = typer.Option(0, "--head-controls", help="--reactivity: ヘッドを同じ k のランダムなヘッドに替えた対照の本数"),
-             control_pool: str = typer.Option("before", "--control-pool", help="proj の対照のヘッドの母集団: before(物差しの層より前の全ヘッド)/ same-layers(同じ層、厳しい対照)"),
+             control_pool: str = typer.Option("before", "--control-pool", help="proj の対照のヘッドの母集団: before(射影の値を測る層より前の全ヘッド)/ same-layers(同じ層、厳しい対照)"),
              compare_methods: bool = typer.Option(False, "--compare-methods", help="proj のレシピと同じ方向で、全層射影・ヘッドの方向成分・ヘッドの丸ごと倍率・ニューロンの消去を、効果をそろえて比べる(CHANGE-06 F.3)"),
-             match_effect: Optional[float] = typer.Option(None, "--match-effect", help="--compare-methods: そろえる A 側の点数(省くとこのレシピの水準)"),
-             score_layer: Optional[int] = typer.Option(None, "--score-layer", help="--compare-methods: 物差しの層"),
+             match_effect: Optional[float] = typer.Option(None, "--match-effect", help="--compare-methods: そろえる A 側の射影の値(省くとこのレシピの水準)"),
+             score_layer: Optional[int] = typer.Option(None, "--score-layer", help="--compare-methods: 射影の値を測る層"),
              alloc: Optional[str] = typer.Option(None, "--alloc", help="gne heads allocate の結果(名前かパス)の組を、ヘッド数ごとに評価する(CHANGE-06 F.4)"),
              n_heads: Optional[str] = typer.Option(None, "--n-heads", help="--alloc: 評価するヘッド数(例 6,5,4,3)"),
              direction_metrics: bool = typer.Option(True, "--direction-metrics/--no-direction-metrics",
-                                                    help="方向を使うレシピで、方向の指標(点数の下がり方・ずれ・判定の一致率)も測る"),
+                                                    help="方向を使うレシピで、方向の指標(射影の値の下がり方・ずれ・判定の一致率)も測る"),
              dir_max_examples: int = typer.Option(64, "--dir-max-examples", help="方向の指標で読む質問の数(A・B それぞれ。0 = 全部)"),
              keyed: bool = typer.Option(True, "--keyed/--no-keyed",
-                                        help="keyed のユニットを持つレシピで、選択性(側 A・側 B の残差の変化)・方式の比較・擬似鍵も測る"),
+                                        help="keyed のユニットを持つレシピで、eval の選択性(書き込みたい位置・書き込みたくない位置の残差の変化)・方式の比較・"
+                                             "比較用の鍵(ラベルをシャッフルして同じ手順で作った鍵)との比較も測る"),
              keyed_contrast: Optional[str] = typer.Option(None, "--keyed-contrast",
                                                           help="keyed: 鍵を作った対照集合(configs/contrast/ の名前かパス)。"
                                                                "省くと方向を作った対照集合が鍵と同じならそれ"),
              keyed_examples: int = typer.Option(8, "--keyed-examples", help="keyed: 会話の組ごとに読む数(0 = 全部)"),
-             keyed_pseudo: int = typer.Option(8, "--keyed-pseudo", help="keyed: 選択性を比べる擬似鍵の本数(鍵の擬似鍵の本数まで)"),
+             keyed_pseudo: int = typer.Option(8, "--keyed-pseudo", help="keyed: eval の選択性を比べる比較用の鍵の本数(鍵のファイルにある比較用の鍵の本数まで)"),
              keyed_subset: Optional[str] = typer.Option(None, "--keyed-subset",
                                                         help="keyed: 読む例 even / odd / all(既定は鍵の作成と反対側)"),
              keyed_match: bool = typer.Option(True, "--keyed-match/--no-keyed-match",
-                                              help="keyed: 方式の比較で add・gain・proj の大きさを keyed の側 A にそろえる(省くと速い)"),
+                                              help="keyed: 方式の比較で add・gain・proj の大きさを、書き込みたい位置で keyed にそろえる(省くと速い)"),
              yes: bool = _YES):
     """副作用チェック: 倍率ごとに能力(exact / format)・ppl・言語の混入・性格の変化量を測り、配布可の倍率を示す(§6.14)。"""
     s = holder["session"] = c.session()
@@ -834,9 +846,9 @@ def eval_cmd(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Op
     if compare_methods:                                  # CHANGE-06 F.3
         d = s.eval_compare_methods(r, match_effect=match_effect, score_layer=score_layer, top_neurons=top_neurons,
                                    suite=suite, when=when, name=name)
-        lines = [f"方式の比較 {d['name']}(方向 {d['direction']}、L{d['score_layer']} の A 側の点数を {d['target']:.2f} にそろえた。"
+        lines = [f"方式の比較 {d['name']}(方向 {d['direction']}、L{d['score_layer']} の A 側の射影の値を {d['target']:.2f} にそろえた。"
                  f"無介入 A {d['base_score_a']:.2f} / B {d['base_score_b']:.2f}、{d['seconds']:.0f} 秒)→ {d['path']}",
-                 f"  {'方式':<10} {'α':>6} {'A点数':>7} {'B直交':>7} {'能力低下':>8} {'ppl悪化':>8} {'混入':>6} {'一致率':>6}"]
+                 f"  {'方式':<10} {'α':>6} {'A射影':>7} {'B直交':>7} {'能力低下':>8} {'ppl悪化':>8} {'混入':>6} {'一致率':>6}"]
         for r_ in d["rows"]:
             if r_.get("excluded"):
                 lines.append(f"  {r_['method']:<10} 除外: {r_['excluded']}")
@@ -844,9 +856,12 @@ def eval_cmd(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Op
             lines.append(f"  {r_['method']:<10} {r_['alpha']:>6.3f} {r_['score_a']:>7.2f} {r_['drift_orth_b']:>7.4f} "
                          f"{r_['capability_drop_pt']:>7.1f}pt {r_['ppl_worse_pct']:>+7.1f}% {r_['mix_increase'] * 100:>+5.2f}% "
                          f"{_f(r_['rate'], '6.2f')}" + ("  配布可" if r_["shippable"] else ""))
-        lines.append("同じ A 側の点数の水準で比べた副作用。報告には判定の一致率(外から見える指標)を主にする")
+        lines.append("同じ A 側の射影の値の水準で比べた副作用(A射影 = A 側の射影の値)。報告には判定の一致率(外から見える指標)を主にする")
         return d, "\n".join(lines), 0
-    _gate(s, "eval", {"doses": _doses(doses), "suite": suite, "when": when, "random_controls": random_controls}, yes, None)
+    _gate(s, "eval", {"doses": _doses(doses), "suite": suite, "when": when, "random_controls": random_controls,
+                      "recipe": r, "keyed_metrics": keyed, "keyed_contrast": keyed_contrast,      # keyed の選択性の分も見積もる
+                      "keyed_examples": keyed_examples or None, "keyed_pseudo": keyed_pseudo, "keyed_match": keyed_match,
+                      "keyed_subset": keyed_subset}, yes, None)
     d = s.eval(r, doses=_doses(doses), suite=suite, when=when, judge_model=judge_model, judge_target=judge_target,
                name=name, random_controls=random_controls, reactivity=reactivity, head_controls=head_controls,
                control_pool=control_pool, direction_metrics=direction_metrics, dir_max_examples=dir_max_examples or None,
@@ -863,13 +878,13 @@ def eval_cmd(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Op
     if rcd:
         head += f" │ {'あり':>5} {'なし':>5} {'反応性':>6}" + (f" {'対照p95':>7} {'null':>5}" if rcd["head_controls"] else "")
     dmx = d.get("direction_metrics")
-    if dmx:                                              # CHANGE-06 F.1: 方向の点数と直交成分のずれ
+    if dmx:                                              # CHANGE-06 F.1: 方向への射影の値と直交成分のずれ
         head += f" │ {'下がり':>7} {'A直交':>7} {'B直交':>7}" + (f" {'一致率':>6}" if dmx.get("behavior") else "") \
             + (f" {'null':>5}" if nc else "")
-    kd = d.get("keyed")                                  # CHANGE-07 E: 結果の keyed(方式の比較・擬似鍵、または skipped)
+    kd = d.get("keyed")                                  # CHANGE-07 E: 結果の keyed(方式の比較・比較用の鍵、または skipped)
     ksel = any((row.get("keyed") or {}).get("selectivity") is not None for row in d["rows"])
     knull = ksel and any((row.get("keyed") or {}).get("null_pct") is not None for row in d["rows"])
-    if ksel:                                             # 行の keyed: 目的の層の選択性(擬似鍵の対照があれば null)
+    if ksel:                                             # 行の keyed: 目的の層の eval の選択性(比較用の鍵の対照があれば null)
         head += f" │ {'選択性':>7}" + (f" {'null':>5}" if knull else "")
     lines = [head]
     for row in d["rows"]:
@@ -921,16 +936,17 @@ def eval_cmd(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Op
                  + (f"対照は同じ k のランダムなヘッド {rcd['head_controls']} 本" if rcd["head_controls"] else "")
                  + ("" if rcd["head_controls"] or not head_controls else "ヘッドの無いレシピなのでヘッドの対照は作れません"))
     if dmx:
-        text += (f"\n方向 {dmx['direction']}(L{dmx['layers'][-1]}): 下がり = A 側の点数の下がり方、A直交・B直交 = 残差の差の直交成分 ÷ 残差"
+        text += (f"\n方向 {dmx['direction']}(L{dmx['layers'][-1]}): 下がり = A 側の射影の値の下がり方、A直交・B直交 = 残差の差の直交成分 ÷ 残差"
                  + ("、一致率 = A 側の判定(validate.match)" if dmx.get("behavior") else ""))
     if kd and "skipped" in kd:
-        text += f"\nkeyed の選択性は測っていません: {kd['skipped']}" + (f"\nヒント: {kd['hint']}" if kd.get("hint") else "")
+        text += f"\nkeyed の eval の選択性は測っていません: {kd['skipped']}" + (f"\nヒント: {kd['hint']}" if kd.get("hint") else "")
     elif kd:
         text += "\n" + "\n".join(kd.get("text") or [])
     if ksel:
         kL = next(row["keyed"].get("layer") for row in d["rows"] if row.get("keyed"))
-        text += (f"\n行の選択性 = L{kL} の残差の r̂ 方向の変化の 側 A − 側 B(書く向きにそろえた値、レシピ全体を当てたもの)"
-                 + ("。null = 鍵を擬似鍵に替えた対照の何割より大きいか" if knull else ""))
+        text += (f"\n行の選択性 = L{kL} の eval の選択性(残差の r̂ 方向の変化の、書き込みたい位置 − 書き込みたくない位置。"
+                 "書く向きにそろえた値で、レシピ全体を当てたもの。key-check の選択性とは別の量)"
+                 + ("。null = 鍵を比較用の鍵に替えた対照の何割より大きいか" if knull else ""))
     for n_ in d.get("notes") or []:
         if kd and n_.startswith("keyed: "):              # keyed の注は上の keyed の表示に入っている
             continue
@@ -1106,7 +1122,7 @@ def direction(c: Common, holder: dict,
     """対照集合から全層の方向 r_L(mean_A − mean_B)を作って保存し、--select auto で効果の大きい層を選ぶ(§6.17)。
     作った方向は L:dir:NAME:dose のユニットで足せる(gne steer / chat / eval / export-cvec)。
     gne direction score は、方向の分離度(層ごとの cohen_d)と介入の効き目を生成なしで測る(CHANGE-06 B)。
-    gne direction key / key-check / keys / key-verify は鍵つきの書き込み(keyed、CHANGE-07)の鍵を作る・確かめる。"""
+    gne direction key / key-check / keys / key-verify / key-experts は鍵つきの書き込み(keyed、CHANGE-07)の鍵を作る・確かめる(key-experts は MoE の expert:e の鍵の専門家を選ぶ材料)。"""
     if contrast is None:
         raise GneError("BAD_ARGS", "--contrast が要ります", "方向を作る: gne direction --contrast <対照集合>、"
                                                           "測る: gne direction score --name <方向> --contrast <対照集合>")
@@ -1451,13 +1467,13 @@ def heads_contrast(c: Common, holder: dict,
                    contrast: Path = typer.Option(..., "--contrast", help="対照集合 YAML(triggers があれば trigger_mass も測る)"),
                    name: Optional[str] = typer.Option(None, "--name", help="保存名(既定は対照集合の name)"),
                    direction: Optional[str] = typer.Option(None, "--direction", help="dir_cos に使う方向(既定は対照集合と同じ名前の方向)"),
-                   system_b2: Optional[str] = typer.Option(None, "--system-b2", help="床に使う別の中立の system(既定は同じくらいの長さの中立の文)"),
+                   system_b2: Optional[str] = typer.Option(None, "--system-b2", help="基準値に使う別の中立の system(既定は同じくらいの長さの中立の文)"),
                    layers: str = typer.Option("all", "--layers", help="all / 10-16 / 1,5,9-12"),
                    max_tokens: int = typer.Option(48, "--max-tokens", help="比べる返事の長さ(system_a で greedy に作る)"),
                    sort: str = typer.Option("z", "--sort", help="表の並び: z / trigger_mass / pattern_shift / out_shift / dir_cos(保存は z の順)"),
                    show: int = typer.Option(20, "--show")):
     """同じ会話をペルソナあり(system_a)と中立(system_b)で流し、ヘッドごとに注目と出力の差を測って順位づける。
-    雑音の床は中立どうし(system_b と system_b2)の差。"""
+    基準値は中立どうし(system_b と system_b2)の差の p95。"""
     from .heads import METRICS
     if sort not in ("z", *METRICS):
         raise GneError("BAD_ARGS", f"--sort は z / {' / '.join(METRICS)} のどれかです")
@@ -1471,7 +1487,7 @@ def heads_contrast(c: Common, holder: dict,
         rows = sorted((x for x in load_candidates(s, d["name"]) if x[sort] is not None), key=lambda x: -x[sort])
     lines = [f"{d['path']}({d['n_heads']} ヘッド、{d['n_prompts']} プロンプト(トリガーあり {d['n_with_triggers']})、"
              f"方向 {d['direction'] or 'なし'}、{d['seconds']:.0f} 秒)",
-             "床(中立どうしの p95): " + "、".join(f"{k} {v:.3f}" for k, v in fl.items()),
+             "基準値(中立どうしの差の p95): " + "、".join(f"{k} {v:.3f}" for k, v in fl.items()),
              f"  {'順':>3} {'住所':>9} {'種類':>6} {'trigger':>8} {'pattern':>8} {'out':>6} {'dir_cos':>8} {'z':>6} {'null':>5}"]
     for i, x in enumerate(rows[:show], 1):
         lines.append(f"  {i:>3} {('L' + str(x['layer']) + ' H' + str(x['head'])):>9} {x['kind']:>6} "
@@ -1488,13 +1504,13 @@ def experts_contrast(c: Common, holder: dict,
                      contrast: Path = typer.Option(..., "--contrast", help="対照集合 YAML"),
                      name: Optional[str] = typer.Option(None, "--name", help="保存名(既定は対照集合の name)"),
                      direction: Optional[str] = typer.Option(None, "--direction", help="contrib_cos に使う方向(既定は対照集合と同じ名前の方向、無ければ l_out の差)"),
-                     system_b2: Optional[str] = typer.Option(None, "--system-b2", help="床に使う別の中立の system"),
+                     system_b2: Optional[str] = typer.Option(None, "--system-b2", help="基準値に使う別の中立の system"),
                      layers: str = typer.Option("all", "--layers", help="all / 10-16 / 1,5,9-12(MoE の層だけ測る)"),
                      max_tokens: int = typer.Option(48, "--max-tokens", help="比べる返事の長さ(system_a で greedy に作る)"),
                      sort: str = typer.Option("z", "--sort", help="表の並び: z / usage_shift / weight_shift / contrib_cos / contrib_norm"),
                      show: int = typer.Option(20, "--show")):
     """同じ返事をペルソナあり(system_a)と中立(system_b)で読ませ、MoE の層の専門家ごとに選ばれ方と寄与の差を測って順位づける。
-    雑音の床は中立どうし(system_b と system_b2)の差。"""
+    基準値は中立どうし(system_b と system_b2)の差の p95。"""
     from .experts import METRICS, load_expert_candidates
     if sort not in ("z", *METRICS):
         raise GneError("BAD_ARGS", f"--sort は z / {' / '.join(METRICS)} のどれかです")
@@ -1504,7 +1520,7 @@ def experts_contrast(c: Common, holder: dict,
     rows = d["top"] if sort == "z" else sorted(load_expert_candidates(s, d["name"]),
                                                key=lambda x: -(abs(x[sort]) if sort != "contrib_norm" else x[sort]))
     lines = [f"{d['path']}({d['n_experts']} 専門家、{d['n_prompts']} プロンプト、方向 {d['direction'] or 'l_out の差'}、{d['seconds']:.0f} 秒)",
-             "床(中立どうしの p95): " + "、".join(f"{k} {v:.3f}" for k, v in d["floors"].items()),
+             "基準値(中立どうしの差の p95): " + "、".join(f"{k} {v:.3f}" for k, v in d["floors"].items()),
              f"  {'順':>3} {'住所':>8} {'選択率 A→B':>12} {'usage':>7} {'weight':>7} {'cos':>6} {'norm':>6} {'z':>5} {'null':>5}"]
     for i, x in enumerate(rows[:show], 1):
         lines.append(f"  {i:>3} {('L' + str(x['layer']) + ' E' + str(x['expert'])):>8} {x['rate_a']:5.2f}→{x['rate_b']:<5.2f} "
@@ -1773,8 +1789,8 @@ def direction_score(c: Common, holder: dict,
                     subset: str = typer.Option("all", "--subset", help="all / even(測定用)/ odd(確認用)"),
                     set_base: Optional[int] = typer.Option(None, "--set-base", help="基準層を手で決めて記録する"),
                     record: Optional[bool] = typer.Option(None, "--record/--no-record", help="cohen_d が最大の層を基準層として記録する(既定はまだ記録が無いときだけ)")):
-    """速い物差し(CHANGE-06 B): 生成せず、対照集合の A 側・B 側をプロンプトの最後まで読ませて、層ごとに 残差 · r̂_L を測る。
-    --unit / --recipe を渡すと、その介入での点数の変化と、残差の差の方向成分・直交成分(drift_par / drift_orth)も出す。"""
+    """速い指標(CHANGE-06 B): 生成せず、対照集合の A 側・B 側をプロンプトの最後まで読ませて、層ごとに方向への射影の値
+    (残差 · r̂_L)を測る。--unit / --recipe を渡すと、その介入での射影の値の変化と、残差の差の方向成分・直交成分(drift_par / drift_orth)も出す。"""
     s = holder["session"] = c.session()
     d = s.direction_score(name, contrast=contrast, layers=_ints(layers), positions=positions, units=unit,
                           recipe=recipe, side=side, subset=subset, set_base=set_base, record_base=record)
@@ -1800,12 +1816,12 @@ def direction_score(c: Common, holder: dict,
 
 # --- CHANGE-07: 鍵つきの書き込み(keyed write)--------------------------------------------------------------
 
-_KEY_POS = ("側 A の位置: response / assistant / last / last:K / before:<正規表現>(推論時と同じ文脈の返事で、一致する文字を"
-            "書く直前。側 A の作り方 (b))。既定は対照集合の positions、無ければ response")
-_KEY_POS_B = "側 B の位置(既定: before:<re> なら not-before:<re>、それ以外は側 A と同じ)"
-_KEY_REPLIES_A = ("側 A の返事を読ませるファイル(YAML / JSON、質問と同じ長さのリストか {質問: 返事})。"
-                  "before:<re> のときは側 A・B が同じ返事なので 1 つだけ渡す")
-_KEY_REPLIES_B = "側 B の返事を読ませるファイル"
+_KEY_POS = ("書き込みたい位置: response / assistant / last / last:K / before:<正規表現>(推論時と同じ文脈の返事で、一致する文字を"
+            "書く直前。書き込みたい位置の取り方 (b))。既定は対照集合の positions、無ければ response")
+_KEY_POS_B = "書き込みたくない位置(既定: before:<re> なら not-before:<re>、それ以外は書き込みたい位置と同じ指定)"
+_KEY_REPLIES_A = ("書き込みたい側の返事を読ませるファイル(YAML / JSON、質問と同じ長さのリストか {質問: 返事})。"
+                  "before:<re> のときは書き込みたい位置と書き込みたくない位置が同じ返事にあるので 1 つだけ渡す")
+_KEY_REPLIES_B = "書き込みたくない側の返事を読ませるファイル"
 _KEY_IV = "この介入を当てた状態で捕捉する(レシピ YAML・保存したレシピの名前、またはユニットの書き方。複数可)"
 _REPLY_KIND = {"given": "与えた", "generated": "生成"}
 
@@ -1846,25 +1862,27 @@ def _replies_text(replies: dict | None) -> str:
 
 @gne_command(direction_app, "key", "direction key")
 def direction_key(c: Common, holder: dict,
-                  contrast: Path = typer.Option(..., "--contrast", help="対照集合 YAML(側 A・側 B、任意で dont_touch・positions・replies。例 configs/contrast/zundamon_endings.yaml)"),
+                  contrast: Path = typer.Option(..., "--contrast", help="対照集合 YAML(system_a・system_b と質問、任意で dont_touch・positions・replies。例 configs/contrast/zundamon_endings.yaml)"),
                   layers: str = typer.Option(..., "--layers", help="鍵を作る層(必須。例 8,14,20 / 10-16。Q の基底は層ごとに作るので全層は既定にしない。最終層と MTP の層は不可)"),
                   name: Optional[str] = typer.Option(None, "--name", help="鍵の名前(既定は対照集合の name)。<root>/keys/<model_id>/<名前>.npz に保存"),
                   positions: Optional[str] = typer.Option(None, "--positions", help=_KEY_POS),
                   positions_b: Optional[str] = typer.Option(None, "--positions-b", help=_KEY_POS_B),
                   skip: Optional[int] = typer.Option(None, "--skip", help="返事の先頭から落とすトークン数(既定は対照集合の skip、無ければ 0)"),
                   max_tokens: int = typer.Option(96, "--max-tokens", help="返事を生成するときの長さ"),
-                  q_mode: str = typer.Option("examples", "--q-mode", help="側 B の基底 Q: examples(例ごとの平均、既定)/ means(群ごとの平均。よく効くが選択性は粗い)/ samples(トークンの活性。選択性は高いが重い)"),
+                  q_mode: str = typer.Option("examples", "--q-mode", help="Q(書き込みたくない位置と dont_touch の活性が張る部分空間の基底)を張る行: examples(例ごとの平均、既定)/ means(群ごとの平均。よく効くが選択性は粗い)/ samples(トークンの活性。選択性は高いが重い)"),
                   q_energy: float = typer.Option(0.99, "--q-energy", help="Q の打ち切り(特異値の二乗の累積の割合)"),
                   q_max_rank: Optional[int] = typer.Option(None, "--q-max-rank", help="Q の階数の上限"),
                   q_max_samples: int = typer.Option(4096, "--q-max-samples", help="--q-mode samples で使うトークンの上限(超えたら間引く)"),
                   subset: str = typer.Option("even", "--subset", help="使う質問: even(既定。key-check は odd で確かめる)/ odd / all"),
-                  pseudo: int = typer.Option(16, "--pseudo", help="擬似鍵(例のラベルを釣り合わせて並べ替えた対照)の本数。並べ替えは --seed で決まる"),
+                  pseudo: int = typer.Option(16, "--pseudo", help="比較用の鍵(書き込みたい側・書き込みたくない側のラベルを例ごとにシャッフルして、同じ手順で作った鍵)の本数。"
+                                                                "シャッフルは --seed で決まる"),
                   replies_a: Optional[Path] = typer.Option(None, "--replies-a", help=_KEY_REPLIES_A),
                   replies_b: Optional[Path] = typer.Option(None, "--replies-b", help=_KEY_REPLIES_B),
                   iv: Optional[list[str]] = typer.Option(None, "--iv", help=_KEY_IV),
-                  target: str = typer.Option("ffn", "--target", help="書き込み先: ffn(ffn_down の入力で鍵を作る)。attn / shared / expert:e は捕捉が対応してから")):
-    """keyed write の鍵 κ_L を作る(CHANGE-07)。側 A(書きたい状態)の活性の平均 μ_L を、側 B と dont_touch の活性が張る
-    空間 Q_L に直交させ、κ_Lᵀμ_L = 1 に正規化して保存する(方向とは別のファイル)。鍵は無介入で作る(--iv は重ねるときだけ)。
+                  target: str = typer.Option("ffn", "--target", help="書き込み先: ffn(dense の ffn_down の入力)/ attn(attn_output・ssm_out の入力 = ヘッド出力の連結)/ shared(MoE の層の shared expert の ffn_down_shexp の入力)/ expert:e(ffn_down_exps の専門家 e の入力。専門家 e が選ばれた位置だけで作る)"),
+                  dont_touch_start: Optional[bool] = typer.Option(None, "--dont-touch-start/--no-dont-touch-start", help="dont_touch の各群の質問の、返事を書き始める直前の位置も Q に入れる(既定は対照集合の dont_touch_start、無ければ入れる)。書き込みたくない側の質問のこの位置は入れない")):
+    """keyed write の鍵 κ_L を作る(CHANGE-07)。書き込みたい位置の活性の平均 μ_L を、書き込みたくない位置と dont_touch の
+    活性が張る空間 Q_L に直交させ、κ_Lᵀμ_L = 1 に正規化して保存する(方向とは別のファイル)。鍵は無介入で作る(--iv は重ねるときだけ)。
     作ったら gne direction key-check で、作成に使っていない例(既定 subset odd)で分離を確かめる。"""
     Ls = parse_layers(layers)
     if not Ls:
@@ -1873,21 +1891,39 @@ def direction_key(c: Common, holder: dict,
     d = s.direction_key(contrast, name=name, layers=Ls, positions=positions, positions_b=positions_b, skip=skip,
                         max_tokens=max_tokens, q_mode=q_mode, q_energy=q_energy, q_max_rank=q_max_rank,
                         q_max_samples=q_max_samples, subset=subset, pseudo=pseudo, replies_a=replies_a,
-                        replies_b=replies_b, iv=_iv_arg(iv), target=target, seed=c.seed, progress=s.progress)
+                        replies_b=replies_b, iv=_iv_arg(iv), target=target, seed=c.seed, dont_touch_start=dont_touch_start,
+                        progress=s.progress)
     d.pop("warnings", None)                        # 警告はエンベロープの warnings に入っている
     n = d["counts"]
+    moe = any("rows_a" in r for r in d["layers"])            # 書き込み先 shared・expert:e の鍵(層ごとの行の数を出す)
     how = "推論時と同じ文脈の返事" if d["mode"] == "same" else "system・recipe の文脈"
-    lines = [f"{d['path']}(鍵 {d['name']}、書き込み先 {d['target']}、側 A は{how}(mode {d['mode']})、{d['seconds']:.1f} 秒)",
-             f"  位置: 側 A {d['positions']}・側 B {d['positions_b']}、skip {d['skip']}、subset {d['subset']}、"
-             f"q_mode {d['q_mode']}、擬似鍵 {d['n_pseudo']} 本",
-             f"  例: 側 A {n['a']} 例({n['rows_a']} 位置、位置のある例 {d['matched']['A']}/{d['matched']['of']})・"
-             f"側 B {n['b']} 例({n['rows_b']} 位置)" + (f"・dont_touch {n['dt']} 例({n['rows_dt']} 位置)" if n.get("dt") else "")
-             + _replies_text(d.get("replies")),
-             f"  {'層':>4} {'kn':>6} {'増幅率':>7} {'q_rank':>6} {'作成時AUC':>9}"]
+    lines = [f"{d['path']}(鍵 {d['name']}、書き込み先 {d['target']}、書き込みたい位置は{how}(mode {d['mode']})、{d['seconds']:.1f} 秒)",
+             f"  位置: 書き込みたい位置 {d['positions']}・書き込みたくない位置 {d['positions_b']}、skip {d['skip']}、subset {d['subset']}、"
+             f"q_mode {d['q_mode']}、比較用の鍵 {d['n_pseudo']} 本",
+             f"  例: 書き込みたい側 {n['a']} 例({n['rows_a']} 位置、書き込みたい位置のある例 {d['matched']['A']}/{d['matched']['of']})・"
+             f"書き込みたくない側 {n['b']} 例({n['rows_b']} 位置)" + (f"・dont_touch {n['dt']} 例({n['rows_dt']} 位置)" if n.get("dt") else "")
+             + _replies_text(d.get("replies"))]
+    ds_ = d.get("dont_touch_start")
+    if ds_ and ds_.get("on") and ds_.get("groups"):          # dont_touch の質問の、返事を書き始める直前の位置を Q に入れた行
+        lines.append(f"  dont_touch の質問の、返事を書き始める直前の位置: {ds_['rows']} 行を Q に入れました("
+                     + "・".join(f"{g} {r}" for g, r in ds_["groups"].items()) + ")")
+    elif ds_ and not ds_.get("on") and d.get("dont_touch"):
+        lines.append("  dont_touch の質問の、返事を書き始める直前の位置: Q に入れていません(--no-dont-touch-start か、対照集合の dont_touch_start: false)")
+    rs = d.get("reply_start")
+    if rs:                                                   # mode same: 書き込みたい位置のうち返事の冒頭にあるもの
+        lines.append(f"  返事の冒頭: 書き込みたい位置の {rs['rows']} / {rs['rows_a']} が返事の最初の {rs['k']} トークンを決める位置"
+                     + (f"(L{rs['layer']})" if rs.get("layer") is not None else "")
+                     + f"、μ に占める重み {rs['share'] * 100:.0f}%"
+                     + (f"(返事を書き始める直前の位置を Q に入れた dont_touch: {', '.join(rs['dont_touch_starts'])})" if rs["dont_touch_starts"] else ""))
+    lines += [f"  {'層':>4} {'kn':>6} {'増幅率':>7} {'q_rank':>6} {'作成時AUC':>9}"
+             + (f" {'rows_a':>6} {'rows_b':>6} {'gate_a':>7}" if moe else "")]
     for r in d["layers"]:
         lines.append(f"  {r['layer']:>4} {r['kn']:>6.3f} {r['gain']:>7.2f} {r['q_rank']:>6} {_fc(r['build_auc'], '>9.3f')}"
-                     + ("  ← 弱い(kn < 0.05、側 B の漏れが大きくなりやすい)" if r["weak"] else ""))
-    lines.append("  kn = ‖k‖/‖μ‖(1 に近いほど側 A の平均が側 B の空間の外にある)、増幅率 = 1/kn")
+                     + (f" {r['rows_a']:>6} {r['rows_b']:>6} {_fc(r.get('gate_a'), '>7.3f')}" if moe else "")
+                     + ("  ← 弱い(kn < 0.05、書き込みたくない位置に漏れやすい)" if r["weak"] else ""))
+    lines.append("  kn = ‖k‖/‖μ‖(1 に近いほど、書き込みたい位置の平均が書き込みたくない位置の部分空間の外にある)、増幅率 = 1/kn"
+                 + ("。rows_a・rows_b = この層で書き込み先の行があった書き込みたい位置・書き込みたくない位置の数(専門家は"
+                    "選ばれた位置だけ)、gate_a = 書き込みたい位置でのゲート・ルーターの重みの平均(LoRA の B をこれで割る)" if moe else ""))
     for x in d["dropped"]:
         lines.append(f"  L{x['layer']}: 外しました({x['error']})")
     lines += [f"注: {t}" for t in d["notes"]]
@@ -1897,23 +1933,34 @@ def direction_key(c: Common, holder: dict,
     return d, "\n".join(lines), 0
 
 
+def _start_rho_text(sr: dict | None) -> str:
+    """key-check の層の start_rho を 1 行に: 群ごとの、返事の冒頭の位置 0(返事を書き始める直前の位置)での ρ の中央値。"""
+    if not sr:
+        return ""
+    items = ([("書き込みたくない側", sr["B"])] if sr.get("B") else []) + list((sr.get("dont_touch") or {}).items())
+    out = [f"{g} {_f(v['median'][0], '+.2f')}" for g, v in items if v.get("median") and v["median"][0] is not None]
+    return "・".join(out)
+
+
 @gne_command(direction_app, "key-check", "direction key-check")
 def direction_key_check(c: Common, holder: dict,
-                        key: str = typer.Option(..., "--key", help="鍵の名前(NAME~j で擬似鍵 j)"),
+                        key: str = typer.Option(..., "--key", help="鍵の名前(NAME~j で比較用の鍵 j)"),
                         contrast: Optional[Path] = typer.Option(None, "--contrast", help="確かめる対照集合(作成と同じなら --subset odd が保留集合)。省くと鍵に保存した作成時の例で測る(甘い値)"),
                         subset: str = typer.Option("odd", "--subset", help="使う質問: odd(既定)/ even / all。作成と重なると held_out: false"),
                         layers: Optional[str] = typer.Option(None, "--layers", help="測る層(既定は鍵の全層)"),
-                        positions: Optional[str] = typer.Option(None, "--positions", help="側 A の位置(既定は鍵を作ったときの値)"),
-                        positions_b: Optional[str] = typer.Option(None, "--positions-b", help="側 B の位置(既定は鍵を作ったときの値)"),
+                        positions: Optional[str] = typer.Option(None, "--positions", help="書き込みたい位置(既定は鍵を作ったときの値)"),
+                        positions_b: Optional[str] = typer.Option(None, "--positions-b", help="書き込みたくない位置(既定は鍵を作ったときの値)"),
                         skip: Optional[int] = typer.Option(None, "--skip", help="返事の先頭から落とすトークン数(既定は鍵を作ったときの値)"),
                         max_tokens: Optional[int] = typer.Option(None, "--max-tokens", help="返事を生成するときの長さ(既定は鍵を作ったときの値)"),
                         replies_a: Optional[Path] = typer.Option(None, "--replies-a", help=_KEY_REPLIES_A),
                         replies_b: Optional[Path] = typer.Option(None, "--replies-b", help=_KEY_REPLIES_B),
                         iv: Optional[list[str]] = typer.Option(None, "--iv", help=_KEY_IV),
                         strict: bool = typer.Option(False, "--strict", help="作成に使った例と重なっていたら測らずにエラー(BAD_ARGS)")):
-    """鍵の分離の確認(CHANGE-07 C、生成なしで済む位置なら生成なし)。各位置で ρ = κᵀx を測り、層ごとに側 A 対 側 B の
-    AUC(例単位とトークン単位)、選択性(例ごとの ρ の平均の差 A − B)と擬似鍵の p95、dont_touch の ρ の中央値を出す。
-    作成に使った例と重なると held_out: false(甘い値)。判定の目安: 保留集合で選択性が擬似鍵の p95 を超えること。"""
+    """鍵の分離の確認(CHANGE-07 C、生成なしで済む位置なら生成なし)。各位置で鍵の反応の強さ ρ = κᵀx を測り、層ごとに
+    書き込みたい位置 対 書き込みたくない位置の AUC(例単位とトークン単位)、key-check の選択性(例ごとの ρ の平均の、
+    書き込みたい位置 − 書き込みたくない位置)と比較用の鍵(ラベルをシャッフルして同じ手順で作った鍵)の p95、
+    dont_touch の ρ の中央値を出す。作成に使った例と重なると held_out: false(甘い値)。判定の目安: 保留集合で選択性が
+    比較用の鍵の p95 を超えること。"""
     s = holder["session"] = c.session()
     d = s.direction_key_check(key, contrast=contrast, subset=subset, layers=parse_layers(layers) if layers else None,
                               positions=positions, positions_b=positions_b, skip=skip, max_tokens=max_tokens,
@@ -1921,8 +1968,8 @@ def direction_key_check(c: Common, holder: dict,
                               progress=s.progress)
     d.pop("warnings", None)
     src = f"対照集合 {d['contrast']}・subset {d['subset']}" if d["contrast"] else "鍵に保存した作成時の例"
-    lines = [f"鍵 {d['key']}(書き込み先 {d['target']}、{src}、mode {d['mode']}、位置 側 A {d['positions']}・"
-             f"側 B {d['positions_b']}、{d['seconds']:.1f} 秒)"]
+    lines = [f"鍵 {d['key']}(書き込み先 {d['target']}、{src}、mode {d['mode']}、書き込みたい位置 {d['positions']}・"
+             f"書き込みたくない位置 {d['positions_b']}、{d['seconds']:.1f} 秒)"]
     ov = d["overlap"]
     if d["held_out"]:
         lines.append(f"保留集合: はい(作成に使っていない例 {ov['n_checked']} 個)")
@@ -1930,7 +1977,7 @@ def direction_key_check(c: Common, holder: dict,
         why = ([f"同じ対照集合で subset が重なる(作成 {ov.get('built_subset')}・確認 {ov.get('subset')})"] if ov.get("subset_overlap") else []) \
             + ([f"作成と同じ (system, 質問) が {ov['hash_overlap']} 個"] if ov.get("hash_overlap") else [])
         lines.append("保留集合: いいえ(" + "、".join(why or ["作成に使った例"]) + ")。AUC・選択性は甘い値です")
-    lines.append(f"  {'層':>4} {'AUC':>6} {'AUC(tok)':>8} {'選択性':>7} {'擬似p95':>7} {'擬似AUCp95':>10} {'B2分AUC':>7}  判定")
+    lines.append(f"  {'層':>4} {'AUC':>6} {'AUC(tok)':>8} {'選択性':>7} {'比較用p95':>7} {'比較用AUCp95':>10} {'2分割AUC':>7}  判定")
     for r in d["layers"]:
         pa = (r["pseudo_auc_token"] if r["auc_token"] is not None else r["pseudo_auc"])["p95"]
         mark = {True: "○", False: "×"}.get(r["beats_pseudo"], "—")
@@ -1939,13 +1986,19 @@ def direction_key_check(c: Common, holder: dict,
         dt = "・".join(f"{g} {_f(v, '+.3f')}" for g, v in (r.get("dont_touch_median") or {}).items())
         if dt:
             line += f"  dont_touch の ρ 中央値 {dt}"
+        st = _start_rho_text(r.get("start_rho"))
+        if st:
+            line += f"  返事の冒頭の ρ {st}"
         if r["layer"] == d["best_layer"]:
             line += "  ← 最良"
         lines.append(line)
-    lines.append("  判定 ○ = 選択性が擬似鍵の p95 を超え、AUC > 0.5。擬似AUCp95 はトークン単位の AUC があればトークン単位、"
-                 "B2分AUC は側 B を 2 つに分けた擬似差の鍵(参考値)")
+    lines.append("  選択性 = key-check の選択性(例ごとの鍵の反応の強さ ρ の平均の、書き込みたい位置 − 書き込みたくない位置)。"
+                 "比較用p95・比較用AUCp95 = 比較用の鍵の選択性・AUC の p95(AUC はトークン単位の AUC があればトークン単位)。"
+                 "判定 ○ = 選択性が比較用の鍵の p95 を超え、AUC > 0.5。2分割AUC = 書き込みたくない位置を 2 つに分けて作った鍵の"
+                 "AUC(参考値)。返事の冒頭の ρ = 書き込みたくない側・dont_touch の、返事を書き始める直前の位置での ρ の中央値"
+                 "(0.4 以上で警告)")
     ab = d["all_beat_pseudo"]
-    lines.append("全層で擬似鍵を超えた: " + {True: "はい", False: "いいえ"}.get(ab, "判定なし(擬似鍵か側 B が無い)"))
+    lines.append("全層で比較用の鍵を超えた: " + {True: "はい", False: "いいえ"}.get(ab, "判定なし(比較用の鍵か書き込みたくない位置が無い)"))
     lines += [f"注: {t}" for t in d["notes"]]
     if not d["held_out"]:
         lines.append("次: 作成に使っていない例(--subset odd か別の対照集合)で測り直してください")
@@ -1967,8 +2020,54 @@ def direction_keys(c: Common, holder: dict):
             continue
         kn = " ".join(f"L{L}:{v:.2f}" for L, v in k["kn"].items())
         lines.append(f"  {k['name']}  {k['target']}  q_mode {k['q_mode']}  位置 {k['positions']}  subset {k['subset']}  "
-                     f"擬似鍵 {k['n_pseudo']}  kn {kn}")
+                     f"比較用の鍵 {k['n_pseudo']}  kn {kn}")
     return {"keys": ks}, "\n".join(lines), 0
+
+
+@gne_command(direction_app, "key-experts", "direction key-experts")
+def direction_key_experts(c: Common, holder: dict,
+                          contrast: Path = typer.Option(..., "--contrast", help="対照集合 YAML(鍵を作るときと同じもの。例 configs/contrast/zundamon_endings.yaml)"),
+                          layers: str = typer.Option(..., "--layers", help="調べる MoE の層(必須。例 6,12,18 / 10-16)"),
+                          positions: Optional[str] = typer.Option(None, "--positions", help=_KEY_POS),
+                          positions_b: Optional[str] = typer.Option(None, "--positions-b", help=_KEY_POS_B),
+                          skip: Optional[int] = typer.Option(None, "--skip", help="返事の先頭から落とすトークン数(既定は対照集合の skip、無ければ 0)"),
+                          max_tokens: int = typer.Option(96, "--max-tokens", help="返事を生成するときの長さ"),
+                          subset: str = typer.Option("even", "--subset", help="使う質問: even(既定。鍵の作成と同じ)/ odd / all"),
+                          replies_a: Optional[Path] = typer.Option(None, "--replies-a", help=_KEY_REPLIES_A),
+                          replies_b: Optional[Path] = typer.Option(None, "--replies-b", help=_KEY_REPLIES_B),
+                          iv: Optional[list[str]] = typer.Option(None, "--iv", help=_KEY_IV),
+                          top: int = typer.Option(8, "--top", help="層ごとに出す専門家の数(書き込みたい位置で選ばれた割合の大きい順)")):
+    """expert:e の鍵(gne direction key --target expert:e)の専門家を選ぶ材料(CHANGE-07 MoE)。鍵と同じ対照集合・位置・返事で、
+    書き込みたい位置・書き込みたくない位置で各専門家が選ばれた割合(rate_a・rate_b、例ごとの割合の平均)と、選ばれたときの
+    ルーターの重みの平均(weight_a、鍵の gate_a の見込み)を層ごとに出す。専門家の鍵は書き込みたい位置で専門家 e が選ばれた
+    行だけでできるので、rate_a の
+    大きい専門家ほど行が多く(rows_a)、鍵が例の本文を拾いにくい。MoE でない層は BAD_RECIPE。"""
+    Ls = parse_layers(layers)
+    if not Ls:
+        raise GneError("BAD_ARGS", "--layers に層を指定してください(all は使えません)", "例 --layers 6,12,18")
+    s = holder["session"] = c.session()
+    d = s.direction_key_experts(contrast, layers=Ls, positions=positions, positions_b=positions_b, skip=skip,
+                                max_tokens=max_tokens, subset=subset, replies_a=replies_a, replies_b=replies_b,
+                                iv=_iv_arg(iv), top=top, progress=s.progress)
+    lines = [f"専門家の選ばれ方(対照集合 {d['contrast']}、mode {d['mode']}、書き込みたい位置 {d['positions']}・"
+             f"書き込みたくない位置 {d['positions_b']}、"
+             f"subset {d['subset']}{_replies_text(d.get('replies'))}、{d['seconds']:.1f} 秒)"]
+    for lay in d["layers"]:
+        lines.append(f"  L{lay['layer']}({lay['n_expert']} 専門家から {lay['n_used']}、書き込みたい位置 {lay['positions_a']} 個・"
+                     f"書き込みたくない位置 {lay['positions_b']} 個、どれも同じだけ選ばれるなら {lay['base_rate']:.2f})")
+        lines.append(f"    {'専門家':>6} {'rate_a':>6} {'rate_b':>6} {'差':>6} {'lift':>6} {'重み':>6} {'rows_a見込み':>9}")
+        for r in lay["top"]:
+            dt = "・".join(f"{g} {v:.2f}" for g, v in (r.get("rate_dt") or {}).items())
+            lines.append(f"    {'E' + str(r['expert']):>6} {r['rate_a']:>6.2f} {r['rate_b']:>6.2f} {r['diff']:>+6.2f} "
+                         f"{_fc(r['lift'], '>6.2f')} {_fc(r['weight_a'], '>6.3f')} {r['rows_a']:>9.1f}"
+                         + (f"  dont_touch {dt}" if dt else ""))
+    lines += [f"注: {t}" for t in d["notes"]]
+    best = [(lay["layer"], lay["top"][0]["expert"]) for lay in d["layers"] if lay["top"]]
+    if best:
+        L, e = best[0]
+        lines.append(f"次: gne direction key --contrast {contrast} --layers {L} --target expert:{e}(rate_a が大きく rate_b が"
+                     "小さい専門家ほど、書き込みたい位置の行が多く鍵が状態を拾いやすい)")
+    return d, "\n".join(lines), 0
 
 
 @gne_command(direction_app, "key-verify", "direction key-verify")
@@ -1977,23 +2076,33 @@ def direction_key_verify(c: Common, holder: dict,
                          key: str = typer.Option(..., "--key", help="鍵の名前"),
                          direction: str = typer.Option(..., "--direction", help="書く向きの方向の名前(先頭の - は α の符号に畳む)"),
                          alphas: str = typer.Option("1,2", "--alphas", help="確かめる α(カンマ区切り)"),
-                         target: str = typer.Option("ffn", "--target", help="書き込み先: ffn / attn"),
+                         target: str = typer.Option("ffn", "--target", help="書き込み先(鍵の書き込み先と同じ): ffn / attn / shared(MoE の層の shared expert の ffn_down_shexp)/ expert:e(ffn_down_exps の専門家 e。例 expert:31)"),
                          direction_layer: str = typer.Option("own", "--direction-layer", help="own(その層の方向)/ base(基準層の方向)"),
-                         text: Optional[list[str]] = typer.Option(None, "--text", help="流す文(既定は語尾の違う日本語と英語の 2 文)。複数可")):
-    """V30(CHANGE-07): keyed の LoRA が式どおり ΔW x = α (κᵀx) d を書くか。無介入で書き込み行列の入力 x と出力を捕捉し、
-    LoRA を当てた出力の差と比べる(|κᵀx| の大きいトークンで相対誤差の中央値 < 3%、鍵の作成に使った側 B の例で漏れ < 0.1)。"""
+                         text: Optional[list[str]] = typer.Option(None, "--text", help="流す文(既定は語尾の違う日本語と英語の 2 文)。複数可。expert:e では専門家 e が選ばれる文(鍵の書き込みたい位置を含む文など)を渡す")):
+    """V30(CHANGE-07): keyed の LoRA が式どおり ΔW x = α (κᵀx) d を書くか。無介入で重み行列の入力 x と出力を捕捉し、
+    LoRA を当てた出力の差と比べる(|κᵀx| の大きいトークンで相対誤差の中央値 < 3%、鍵の作成に使った書き込みたくない側の例で
+    漏れ < 0.1)。
+    shared はゲートを掛ける前の ffn_shexp、expert:e はルーターの重みを掛ける前の ffn_moe_down の、専門家 e が選ばれた枠で測り、
+    ほかの専門家の枠の差(0 のはず)と、LoRA で選ばれる専門家が変わったトークンの数(0 のはず)も確かめる。"""
     from .keyed import parse_target
     kind, expert = parse_target(target)
     s = holder["session"] = c.session()
     d = s.check_keyed(layer, key=key, direction=direction, alphas=_floats(alphas, "--alphas"), kind=kind, expert=expert,
                       direction_layer=direction_layer, texts=text or None)
     lines = [f"L{layer} {d['tensor']}(鍵 {d['key']}、方向 {d['direction']}、‖d‖={d['d_norm']:.3g}、kn {d['kn']:.3f}"
-             + ("、post-norm の補正あり(一次近似)" if d.get("post_norm") else "") + ")"]
+             + ("、post-norm の補正あり(一次近似)" if d.get("post_norm") else "")
+             + (f"、gate_a {d['gate']:.3g} で B を割った" if d.get("gate") is not None else "")
+             + (f"、residual_scale {d['res_scale']:g} で B を割った" if d.get("res_scale") is not None else "") + ")"]
     for r in d["rows"]:
         lines.append(f"  α {r['alpha']:+g}: 相対誤差の中央値 {_f(r['rel_err_median'], '.2e')}(|κᵀx| の上位 {r['n_big']}/{r['n_tokens']} "
-                     f"トークン)、cos {_f(r['cos_median'], '.4f')}、側 B の漏れ {_f(r['leak_b'], '.3g')}  {'○' if r['ok'] else '×'}")
+                     f"{'枠' if kind == 'expert' else 'トークン'})、cos {_f(r['cos_median'], '.4f')}、書き込みたくない側への漏れ {_f(r['leak_b'], '.3g')}"
+                     + (f"、ほかの専門家の枠の差 {r['other_max']:.2g}、選ばれ方の変化 {r['selection_changed']} トークン"
+                        if "other_max" in r else "") + f"  {'○' if r['ok'] else '×'}")
+    if d.get("note"):
+        lines.append(f"注: {d['note']}")
     lines.append(f"V30 {'合格' if d['v30'] else '不合格'}(相対誤差 < 3%"
-                 + ("、側 B の漏れ < 0.1" if d["judged_leak"] else "、側 B の漏れは判定なし") + ")")
+                 + ("、書き込みたくない側への漏れ < 0.1" if d["judged_leak"] else "、書き込みたくない側への漏れは判定なし")
+                 + ("、ほかの専門家の枠の差 < 1e-3、選ばれ方の変化 0" if kind == "expert" else "") + ")")
     return d, "\n".join(lines), 0 if d["v30"] else 1
 
 
@@ -2004,14 +2113,14 @@ def heads_causal(c: Common, holder: dict,
                  mode: str = typer.Option("ablate", "--mode", help="ablate(出力を 0 にして下がり方を測る、最初の候補出し)/ marginal(いまの組から s を上げたときの効率 η、配り直し用)。両者の順位は一致しない"),
                  layers: str = typer.Option("auto", "--layers", help="auto(層単位で止めて、下がる層を --top-layers 個)/ all / 10-16 / 1,5,9-12"),
                  candidates: Optional[str] = typer.Option(None, "--candidates", help="all / contrib:N(直接の寄与の上位 N)/ L:Hh,…(明示)"),
-                 score_layers: Optional[str] = typer.Option(None, "--score-layers", help="物差しの層(既定は基準層と後段 2 層)"),
+                 score_layers: Optional[str] = typer.Option(None, "--score-layers", help="射影の値を測る層(既定は基準層と後段 2 層)"),
                  primary: Optional[int] = typer.Option(None, "--primary", help="causal / contrib / ratio を出す層(既定は基準層)"),
                  base_recipe: Optional[Path] = typer.Option(None, "--base-recipe", help="marginal: いまの組のレシピ"),
                  base_unit: Optional[list[str]] = typer.Option(None, "--base-unit", help="marginal: いまの組(L:Hh:sS@NAME、複数可)"),
                  delta_s: float = typer.Option(3.0, "--delta-s", help="marginal: s を上げる量"),
                  hard: int = typer.Option(16, "--hard", help="marginal: 効きにくい例の数"),
                  hard_subset: Optional[str] = typer.Option(None, "--hard-subset", help="marginal: 保存した効きにくい例(名前かパス)"),
-                 b_side_max: Optional[float] = typer.Option(None, "--b-side-max", help="B 側の点数の変化の絶対値がこれを超えるヘッドに除外の印"),
+                 b_side_max: Optional[float] = typer.Option(None, "--b-side-max", help="B 側の射影の値の変化の絶対値がこれを超えるヘッドに除外の印"),
                  top_layers: int = typer.Option(4, "--top-layers", help="--layers auto で 1 個ずつ測る層の数"),
                  positions: str = typer.Option("last", "--positions"), subset: str = typer.Option("all", "--subset"),
                  b_examples: int = typer.Option(16, "--b-examples", help="B 側への影響を測る例の数(0 で全部)"),
@@ -2020,10 +2129,10 @@ def heads_causal(c: Common, holder: dict,
                  sort: str = typer.Option("auto", "--sort", help="表の並び: auto(ablate は causal_max、marginal は eta)/ causal / contrib / ratio / eta"),
                  show: int = typer.Option(30, "--show"),
                  max_examples: Optional[int] = typer.Option(None, "--max-examples", help="止めて測る質問の数(等間隔に間引く。既定は全部)"),
-                 include_score_layers: bool = typer.Option(False, "--include-score-layers", help="物差しの層とそれより後のヘッドも候補にする(既定は外す。測る量を直接動かすだけで、振る舞いは変わりにくい)")):
-    """因果スクリーニング(CHANGE-06 C): ヘッドを止めた(ablate)/ 強めた(marginal)ときの、生成なしの点数の下がり方。
+                 include_score_layers: bool = typer.Option(False, "--include-score-layers", help="射影の値を測る層とそれより後のヘッドも候補にする(既定は外す。測る量を直接動かすだけで、振る舞いは変わりにくい)")):
+    """因果スクリーニング(CHANGE-06 C): ヘッドを止めた(ablate)/ 強めた(marginal)ときの、生成なしの射影の値の下がり方。
     各行に直接の寄与 contrib(r̂ᵀW[:, blk]·x の平均)と causal / contrib の比を並べる(1 より大きければ間接の経路、
-    小さければ補い合い。物差しの層より後ろのヘッドは contrib が 0 なので causal_max で見る)。
+    小さければ補い合い。射影の値を測る層より後ろのヘッドは contrib が 0 なので causal_max で見る)。
     ablate と marginal は順位が入れ替わる: 最初の候補出しは ablate、配り直しは marginal。"""
     s = holder["session"] = c.session()
     d = s.heads_causal(name, contrast=contrast, mode=mode, layers=layers, candidates=candidates,
@@ -2032,9 +2141,9 @@ def heads_causal(c: Common, holder: dict,
                        positions=positions, subset=subset, b_examples=b_examples, name=out_name,
                        direction_layer=direction_layer, max_examples=max_examples, include_score_layers=include_score_layers)
     P = d["primary"]
-    lines = [f"{d['path']}({d['n_rows']} ヘッド、mode={mode}、物差し L{','.join(map(str, d['score_layers']))}(主 L{P})、"
+    lines = [f"{d['path']}({d['n_rows']} ヘッド、mode={mode}、測る層 L{','.join(map(str, d['score_layers']))}(主 L{P})、"
              f"{d['seconds']:.0f} 秒)",
-             "無介入の点数: " + "、".join(f"L{L} A {x['A']:.2f} / B {x['B']:.2f}" for L, x in d["base_scores"].items())]
+             "無介入の射影の値: " + "、".join(f"L{L} A {x['A']:.2f} / B {x['B']:.2f}" for L, x in d["base_scores"].items())]
     if d.get("layers"):
         lines.append("層単位(全ヘッドを止めたときの下がり方): " + " ".join(
             f"L{r['layer']}:{r['causal_max']:+.2f}" for r in sorted(d["layers"], key=lambda r: -r["causal_max"])[:12]))
@@ -2052,7 +2161,7 @@ def heads_causal(c: Common, holder: dict,
                      + ("  除外" if r.get("excluded") else "") + ("  (組)" if r.get("in_base") else ""))
     if mode == "marginal" and d.get("spearman_ablate_marginal") is not None:
         lines.append(f"ablate と marginal の順位相関(Spearman、{d['n_compared']} ヘッド): {d['spearman_ablate_marginal']:+.2f}")
-    lines.append("次: gne heads allocate --name " + d["direction"] + " --target <A 側の点数の目標>")
+    lines.append("次: gne heads allocate --name " + d["direction"] + " --target <A 側の射影の値の目標>")
     return d, "\n".join(lines), 0
 
 
@@ -2065,7 +2174,7 @@ def _allocate_note(r: dict, d: dict) -> list[str]:
         return [f"      L{c['layer']} H{c['head']} が上限 s={c['s']:g} に当たりました。比を保つ配分なので、他のヘッドも一緒に止まっています。"
                 "--method greedy か --s-max を試せます(上限を上げるだけだと、目標が遠いときに壊れる強さまで上がります)"]
     why = {"drift": f"B 側の直交成分のずれが {d.get('drift_max')} を超えるので、その手前で止めました",
-           "no_gain": "どのヘッドを上げても点数が下がらないので止めました", "s_max": "全部のヘッドが s の上限に当たりました",
+           "no_gain": "どのヘッドを上げても射影の値が下がらないので止めました", "s_max": "全部のヘッドが s の上限に当たりました",
            "steps": "上げる回数の上限に達しました"}
     return [f"      {why[stop]}"] if stop in why else []
 
@@ -2102,23 +2211,23 @@ def heads_allocate(c: Common, holder: dict,
                    name: str = typer.Option(..., "--name", help="方向の名前"),
                    contrast: Optional[Path] = typer.Option(None, "--contrast", help="対照集合(既定は方向を作った対照集合)"),
                    candidates: Optional[str] = typer.Option(None, "--candidates", help="heads causal の結果(名前か .causal.jsonl。既定は方向の名前)"),
-                   target: float = typer.Option(..., "--target", help="効きにくい例の点数の平均の目標(例 −3。B 側の平均あたりが出発点)"),
-                   score_layer: Optional[int] = typer.Option(None, "--score-layer", help="物差しの層(既定は heads causal の最も後ろの層)"),
+                   target: float = typer.Option(..., "--target", help="効きにくい例の射影の値の平均の目標(例 −3。B 側の平均あたりが出発点)"),
+                   score_layer: Optional[int] = typer.Option(None, "--score-layer", help="射影の値を測る層(既定は heads causal の最も後ろの層)"),
                    n_heads: str = typer.Option("6,5,4", "--n-heads", help="作る組のヘッド数"),
                    hard: int = typer.Option(16, "--hard", help="効きにくい例の数"),
                    hard_subset: Optional[str] = typer.Option(None, "--hard-subset", help="保存した効きにくい例(名前かパス)"),
                    proportional_to: str = typer.Option("eta", "--proportional-to", help="eta(効率)/ causal(止めたときの効き目)"),
                    from_zero: bool = typer.Option(True, "--from-zero/--add", help="0 から配り直す / いまの s に足す"),
-                   b_side_max: Optional[float] = typer.Option(None, "--b-side-max", help="B 側の点数を動かすヘッドを除く閾値"),
+                   b_side_max: Optional[float] = typer.Option(None, "--b-side-max", help="B 側の射影の値を動かすヘッドを除く閾値"),
                    base_recipe: Optional[Path] = typer.Option(None, "--base-recipe", help="いまの組(無ければ ablate の上位から作る)"),
                    delta_s: float = typer.Option(3.0, "--delta-s"), pool: int = typer.Option(30, "--pool", help="効率を測る候補(いまの組 + 効き目の上位 N)"),
                    s_max: Optional[float] = typer.Option(None, "--s-max", help="s の上限(既定 proportional は 30、greedy はなし)"),
                    method: str = typer.Option("proportional", "--method", help="proportional(s ∝ η で全体を上げる)/ greedy(いちばん効くヘッドを 1 本ずつ上げる)"),
-                   remain_threshold: float = typer.Option(0.0, "--remain-threshold", help="「残る」とみなす点数"),
+                   remain_threshold: float = typer.Option(0.0, "--remain-threshold", help="「残る」とみなす射影の値"),
                    direction_layer: str = typer.Option("own", "--direction-layer"),
                    out_name: Optional[str] = typer.Option(None, "--out-name", help="保存名(既定は方向の名前)"),
                    candidate_layers: Optional[str] = typer.Option(None, "--candidate-layers", help="候補のヘッドをこの層に絞る(例 3-44)"),
-                   include_score_layers: bool = typer.Option(False, "--include-score-layers", help="物差しの層とそれより後のヘッドも候補にする(既定は外す。測る量を直接動かすだけで、振る舞いは変わりにくい)")):
+                   include_score_layers: bool = typer.Option(False, "--include-score-layers", help="射影の値を測る層とそれより後のヘッドも候補にする(既定は外す。測る量を直接動かすだけで、振る舞いは変わりにくい)")):
     """効率ベースの強さ配分(CHANGE-06 D): 効きにくい例を選び、効率 η を測って s ∝ η で配り、全体の大きさを二分探索して、
     ヘッド数を変えた組の比較表を出す。残る件数と B 側のずれが同程度なら、ヘッド数が最小の組を推す。"""
     s = holder["session"] = c.session()
@@ -2193,7 +2302,7 @@ def headproj_ablate(c: Common, holder: dict,
                     per_layer: bool = typer.Option(False, "--per-layer", help="層ごとに、その層で測った r_L を消す(既定は基準層の r)"),
                     scale: float = typer.Option(1.0, "--scale", help="消す割合(1 で全部)"),
                     out: Optional[Path] = typer.Option(None, "--out", "-o", help="出力(既定 <root>/export/<方向>-heads-ablate.lora.gguf)"),
-                    bake: bool = typer.Option(False, "--bake", help="LoRA ではなく、書き込み行列を書き換えた GGUF を作る(分割のままでも可)")):
+                    bake: bool = typer.Option(False, "--bake", help="LoRA ではなく、残差に書き込む重み行列を書き換えた GGUF を作る(分割のままでも可)")):
     """attention の書き込みだけから方向を消す(abliteration の attention 部分)。指定した層の全ヘッドに proj(s=--scale)を当てる
     レシピと同じで、LoRA は層ごとに 1 本。MLP が MoE で gne ablate の LoRA が使えないモデルでも使える。"""
     from .steer import Recipe, Unit
@@ -2218,15 +2327,15 @@ def headproj_ablate(c: Common, holder: dict,
 @gne_command(headproj_app, "export", "headproj export")
 def headproj_export(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Optional[list[str]] = _UNIT,
                     out: Optional[Path] = typer.Option(None, "--out", "-o", help="出力(既定 <root>/export/<レシピ名>.lora.gguf、--bake なら -headproj.gguf。keyed だけのレシピは <レシピ名>-keyed.lora.gguf / -keyed.gguf)"),
-                    bake: bool = typer.Option(False, "--bake", help="LoRA ではなく、書き込み行列だけ量子化し直した GGUF を作る"),
+                    bake: bool = typer.Option(False, "--bake", help="LoRA ではなく、書き換えた重み行列(残差に書き込むもの)だけ量子化し直した GGUF を作る"),
                     in_path: Optional[Path] = typer.Option(None, "--in", help="--bake の元の GGUF(既定 --model)"),
-                    requant: Optional[str] = typer.Option(None, "--requant", help="--bake で書き換えたテンソルの型: q8_0 / f16 / keep(元が F32・F16・BF16 ならその型)。既定は q8_0、keyed を含むなら f16(rank 1 の小さな編集が Q8_0 の刻みに埋もれないように)"),
+                    requant: Optional[str] = typer.Option(None, "--requant", help="--bake で書き換えたテンソルの型: auto / q8_0 / f16 / keep(元が F32・F16・BF16 ならその型。専門家のテンソル ffn_down_exps(keyed の expert:e)は元の型を保ち、編集しない専門家はバイトのまま。K-quant・IQ の専門家は q8_0、分割 GGUF なら元の型)。既定は q8_0、keyed を含むなら auto: テンソルごとに、元が Q8_0 なら Q8_0 のまま(F16 にすると計算方法が変わり、LoRA 版とかえってずれた)、それ以外(K-quant・IQ・F16 など)は f16。Q8_0 のままでは rank 1 の小さな編集の 1 割以上が丸めに消えるテンソル(結果の edit_kept < 0.9)だけ f16 にする。専門家のテンソルも同じ規則(f16 にすると全体が F16 になって大きくなる)"),
                     key: Optional[str] = typer.Option(None, "--key", help="#KEY を省いた keyed のユニットの鍵(gne direction key で作ったもの)"),
                     into: Optional[Path] = typer.Option(None, "--into", help="--bake: 焼き込む先の別の GGUF(同じ構造の量子化していない F16 / BF16 など)。方向はこのモデル(--model)のものを使う。GPU は使わない"),
                     via_f16: bool = typer.Option(False, "--via-f16", help="--bake: F16 で書いて llama-quantize で元の型に戻す"),
                     imatrix: Optional[Path] = typer.Option(None, "--imatrix"), llama_quantize: Optional[str] = typer.Option(None, "--llama-quantize"),
-                    verify: bool = typer.Option(False, "--verify", help="--bake: 焼き込み版と LoRA 版を比べる(V26: 点数・KL・最尤トークン・ppl)"),
-                    contrast: Optional[Path] = typer.Option(None, "--contrast", help="--verify の点数に使う対照集合(既定は方向を作った対照集合)"),
+                    verify: bool = typer.Option(False, "--verify", help="--bake: 焼き込み版と LoRA 版を比べる(V26・V33: 方向への射影の値・KL・最尤トークン・ppl。最後の層の射影の値の合格の線には、書き込みがほぼ 0 の LoRA と LoRA なしの差 = 計算方法の違いだけで出る誤差を足す)"),
+                    contrast: Optional[Path] = typer.Option(None, "--contrast", help="--verify の射影の値に使う対照集合(既定は方向を作った対照集合)"),
                     direction: Optional[str] = typer.Option(None, "--direction", help="@NAME を省いた proj・keyed のユニットの方向"),
                     direction_layer: Optional[str] = typer.Option(None, "--direction-layer", help="own(ヘッドの層の方向)/ base(基準層の方向)"),
                     lora_f16: bool = typer.Option(False, "--lora-f16", help="LoRA を F16 で書く(大きさが半分。精度は十分)"),
@@ -2234,7 +2343,7 @@ def headproj_export(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, u
     """proj のユニット(L:Hh:sS@NAME、レシピの mode: proj)を LoRA アダプタ GGUF か焼き込み GGUF に書き出す(CHANGE-06 E、gne gain の別名)。
     同じ層・同じ方向のヘッドは階数 1 の LoRA に畳む。スケールパッチ(CHANGE-05 D)では表せないので、焼き込みは書き換える
     テンソルだけ量子化し直す。鍵つきの書き込み(keyed、L:ffn:keyed:aα@NAME#KEY、CHANGE-07)も受ける(層・鍵ごとに階数 1。
-    配るなら LoRA が第一候補、焼き込みは既定で f16)。"""
+    配るなら LoRA が第一候補。焼き込みの既定は auto: 元が Q8_0 のテンソルは Q8_0 のまま、それ以外は f16)。"""
     if in_path and c.model and in_path.resolve() != c.model.resolve():
         raise GneError("BAD_ARGS", "--in と --model が違うファイルです")
     s = holder["session"] = c.session(in_path)
@@ -2252,9 +2361,14 @@ def headproj_export(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, u
                      + f"(階数 {x['rank']}" + ("" if x["folded"] else "、方向が混ざっていて 1 に畳めない") + ")")
     lines += _keyed_export_lines(d, requant_line=not (bake and d.get("parts")))
     if bake and d.get("parts"):                 # 分割 GGUF: 同じ型で書き戻した
-        lines.append(f"書き換え: {len(d['modified'])} テンソルを" + ("元と同じ型で書き戻し" if d["requant"] == "keep" else f"{d['requant']} で書き直し")
+        how = {"keep": "元と同じ型で書き戻し", "auto": "auto で書き戻し(Q8_0 は元の型のまま、それ以外は F16"
+               + (f"。{len(d['fallback'])} テンソルは編集が埋もれるので F16" if d.get("fallback") else "") + ")"}
+        lines.append(f"書き換え: {len(d['modified'])} テンソルを" + how.get(d["requant"], f"{d['requant']} で書き直し")
                      + "(量子化し直しで失った分は編集の大きさの最大 "
                      f"{d['requant_error_max'] * 100:.1f}%)、分割 {len(d['parts'])} ファイル。記録 {d['sidecar']}")
+        if d.get("expert_bytes_added"):
+            lines.append(f"  専門家のテンソルで {d['expert_bytes_added'] / 1e6:.1f} MB 大きくなりました(編集しない専門家も変換。"
+                         "--requant keep なら元の型のまま)")
     elif bake:
         lines.append("書き換え: " + ", ".join(_mod_text(m) for m in d["modified"]))
     else:
@@ -2262,10 +2376,18 @@ def headproj_export(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, u
     ok = True
     v = d.get("verify")
     if v:
-        lines.append(f"V26: 点数 {'一致' if all(x['ok'] for x in v['scores'].values()) else '不一致'}、"
+        lines.append(f"{'V33' if r.keyed_units and not r.proj_units else 'V26'}: 射影の値 {'一致' if all(x['ok'] for x in v['scores'].values()) else '不一致'}、"
                      f"最初のトークンの KL {v['kl_first_token']:.2e}、最尤トークンの一致 {v['top1_match'] * 100:.0f}%、"
                      f"ppl の差 {_f(v['ppl_diff_pct'], '+.3f')}%({'合格' if v['pass'] else '不合格'})"
                      + (f"。分かれた例の差 {', '.join(f'{g:.3f}' for g in v['top1_mismatch_gaps'])} nats" if v["top1_mismatch_gaps"] else ""))
+        lines.append("  射影の値の差の最大 / 合格の線: " + "、".join(
+            f"L{k[:-1]} {k[-1]} {x['max_abs_diff']:.3g} / {x.get('threshold', x['resolution']):.3g}{'' if x['ok'] else ' ×'}"
+            for k, x in v["scores"].items()))
+        nz = v.get("noise")
+        if nz:
+            lines.append(f"  最後の層 L{nz['layer']} の合格の線 = 許容誤差(射影の値の標準偏差の 1 割)+ 計算方法の違いだけで出る誤差 "
+                         f"{nz['max_abs_diff']:.3g}(書き込みがほぼ 0 の LoRA(倍率 {nz['lora_scale']:g})と LoRA なしの射影の値の差の"
+                         f"最大、{nz['seconds']:.1f} 秒)")
         ok = v["pass"]
     return d, "\n".join(lines), 0 if ok else 1
 
@@ -2274,7 +2396,7 @@ def headproj_export(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, u
 def headproj_check(c: Common, holder: dict, layer: int = typer.Option(..., "--layer"), head: int = typer.Option(..., "--head"),
                    direction: str = typer.Option(..., "--direction", help="方向の名前"),
                    ss: str = typer.Option("1,2,6", "--s", help="確かめる s")):
-    """V24・V25: proj の LoRA で、書き込み行列の出力の差が numpy の計算(方向成分を s 倍ぶん引く)と合い、直交成分が変わらないか。"""
+    """V24・V25: proj の LoRA で、ヘッドが残差に書き込む重み行列の出力の差が numpy の計算(方向成分を s 倍ぶん引く)と合い、直交成分が変わらないか。"""
     s = holder["session"] = c.session()
     d = s.check_head_proj(layer, head, direction, ss=[float(x) for x in ss.split(",")])
     lines = [f"L{layer} H{head}({d['out_tensor']}、方向 {direction} の L{d['direction_from']}、ヘッドの書き込みと方向の |cos| の中央値 "
@@ -2290,16 +2412,16 @@ def headproj_check(c: Common, holder: dict, layer: int = typer.Option(..., "--la
 @gne_command(heads_app, "pipeline", "heads pipeline")
 def heads_pipeline(c: Common, holder: dict,
                    spec: Path = typer.Option(..., "--spec", help="対照集合の JSON か YAML(name・user_prompts か側ごとの prompts_a / prompts_b・system_a / system_b か recipe_a / recipe_b、任意で pipeline の設定)"),
-                   target: Optional[str] = typer.Option(None, "--target", help="効きにくい例の点数の目標: 数、B(B 側の平均まで消す)、mid(既定、A と B の真ん中)"),
+                   target: Optional[str] = typer.Option(None, "--target", help="効きにくい例の射影の値の目標: 数、B(B 側の平均まで消す)、mid(既定、A と B の真ん中)"),
                    n_heads: Optional[str] = typer.Option(None, "--n-heads", help="比べる組のヘッド数(既定 6,5,4)"),
                    max_examples: Optional[int] = typer.Option(None, "--max-examples", help="止めて測る段階で使う質問の数(既定 64、等間隔に間引く)"),
                    positions: Optional[str] = typer.Option(None, "--positions", help="方向を作る位置: last(既定)/ response など"),
                    top_layers: Optional[int] = typer.Option(None, "--top-layers"), hard: Optional[int] = typer.Option(None, "--hard"),
-                   include_score_layers: bool = typer.Option(False, "--include-score-layers", help="物差しの層とそれより後のヘッドも候補にする(既定は外す。測る量を直接動かすだけで、振る舞いは変わりにくい)"),
+                   include_score_layers: bool = typer.Option(False, "--include-score-layers", help="射影の値を測る層とそれより後のヘッドも候補にする(既定は外す。測る量を直接動かすだけで、振る舞いは変わりにくい)"),
                    fresh: bool = typer.Option(False, "--fresh", help="作り済みの方向と因果の結果を使い回さず、最初から作り直す"),
                    yes: bool = _YES):
     """対照集合から、方向づくり → 基準層 → 因果スクリーニング(層ごと → ヘッド 1 個ずつ止める)→ 強さの配分(効き目に比例した
-    最初の組を二分探索 → 点数が残りやすい質問で効率を測って 0 から配り直す → ヘッド数を変えた組の比較)を 1 回で回す。"""
+    最初の組を二分探索 → 射影の値が残りやすい質問で効率を測って 0 から配り直す → ヘッド数を変えた組の比較)を 1 回で回す。"""
     s = holder["session"] = c.session()
     over = {"target": target, "n_heads": _ints(n_heads), "max_examples": max_examples, "positions": positions,
             "top_layers": top_layers, "hard": hard, "resume": False if fresh else None,
@@ -2312,7 +2434,7 @@ def heads_pipeline(c: Common, holder: dict,
              + ")",
              f"1. 方向 {d['name']}({d['direction']['positions']}、{d['direction']['seconds']:.0f} 秒)",
              f"2. 基準層 L{sc['base_layer']}(cohen_d 最大、止めて測る段階は {sc['n'].get('A')} 問)",
-             f"3. 因果: 物差し L{','.join(map(str, ca['score_layers']))}、{ca['n_rows']} ヘッド、上位 " +
+             f"3. 因果: 測る層 L{','.join(map(str, ca['score_layers']))}、{ca['n_rows']} ヘッド、上位 " +
              " ".join(f"L{r['layer']}H{r['head']}({r['causal_max']:+.2f}{'、壊すだけなので除外' if r.get('excluded') else ''})" for r in ca["top"][:6])
              + f"({ca['seconds']:.0f} 秒)"
              + "".join(f"\n   層 L{r['layer']} は止めると中立の入力も大きく崩れる(ずれ {r['drift_orth_b']:.2f})ので選ばなかった"
@@ -2431,8 +2553,8 @@ def heads_refine(c: Common, holder: dict,
     d = s.heads_refine(name, n_heads=n_heads, new_heads=nh, out_name=out_name, resume=not fresh)
     rm, cb, pp = d["remaining"], d["combined"], d["pipeline"]
     lines = [f"{d['path']}({d['seconds']:.0f} 秒)",
-             f"1. {d['n_heads']} ヘッドの組 " + " ".join(d["base_units"]) + f" で、L{d['score_layer']} の点数が {d['threshold']:.2f} を超える"
-             f" A 側の質問: {rm['n']}/{rm['n_a']} 問" + (f"(少ないので点数の高い順に {rm['used']} 問で方向を作った)" if rm["padded"] else ""),
+             f"1. {d['n_heads']} ヘッドの組 " + " ".join(d["base_units"]) + f" で、L{d['score_layer']} の射影の値が {d['threshold']:.2f} を超える"
+             f" A 側の質問: {rm['n']}/{rm['n_a']} 問" + (f"(少ないので射影の値の高い順に {rm['used']} 問で方向を作った)" if rm["padded"] else ""),
              f"2. 残りの質問で一括 → 方向 {pp['direction']}" + (f"(作り済みの{'・'.join({'direction': '方向', 'causal': '因果'}[x] for x in pp['reused'])}を使い回した)" if pp["reused"] else "")]
     for r in pp["table"]:
         if r.get("skipped"):

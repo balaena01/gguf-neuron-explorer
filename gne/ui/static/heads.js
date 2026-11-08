@@ -3,12 +3,12 @@
 //   チャットの形でペルソナ(system)あり/なしを比べると、共通の末尾(ユーザーの発話と返事の始まり)で差を出す
 //   (system の部分は 1 列にまとめる。gne heads contrast の pattern_shift と同じまとめ方)。
 //   トリガー(部分文字列、"re:" で正規表現)の列に印を付け、トリガー区間への注目を表にする。
-// Contrast: 保存済みのヘッドの対照分析(gne heads contrast)ごとの指標・順位と床、上位のヘッド、対照集合の会話を Pattern で見るリンク。
+// Contrast: 保存済みのヘッドの対照分析(gne heads contrast)ごとの指標・順位と基準値(中立どうしの差の p95)、上位のヘッド、対照集合の会話を Pattern で見るリンク。
 // Details: W_O の列ブロックの logit lens(主成分 2 本の上位・下位の語)、当てたことのある gain、大きさ。
 // Listen: system + ユーザーの発話 + 返事を流し、返事のトークンが選んだヘッド(複数可、例 14:H0-3)で文脈のどのトークンに
 //   注目しているか(注目)と、各トークンの方向への寄与(注目 × ゲート × OV、gne heads listen)を文章の上に色で出す。
 // Causal(CHANGE-06 G): 保存済みの因果スクリーニング(gne heads causal)での、このヘッドの行(止めたときの下がり方・直接の寄与・
-//   ratio・効率 η・B 側への影響、物差しの層ごと)と、選んだスクリーニングの上位のヘッドの表(並べ替え・表示する物差しの層)、
+//   ratio・効率 η・B 側への影響、射影の値を測る層ごと)と、選んだスクリーニングの上位のヘッドの表(並べ替え・表示する測る層)、
 //   強さの配分(gne heads allocate)の組。見出しの「射影 s1」でこのヘッドの方向成分の射影(L:Hh:s1@方向)をレシピに足す。
 import { getJSON, postJSON } from "./api.js";
 import { t } from "./i18n.js";
@@ -19,7 +19,7 @@ const sgn = (x, d = 3) => (x === null || x === undefined || !Number.isFinite(+x)
 const pct = (x) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : `${(x * 100).toFixed(1)}%`);
 const AMBER = [255, 196, 84], PLUS = [242, 210, 75], MINUS = [201, 79, 167], MASKED = [10, 12, 16];
 const kindLabel = (k) => (k === "attn" ? "attention" : t("線形注意"));
-// gne heads contrast の指標(heads.py の METRICS)。signed は符号つき(床と比べるのは絶対値)
+// gne heads contrast の指標(heads.py の METRICS)。signed は符号つき(基準値と比べるのは絶対値)
 const METRICS = [
   ["trigger_mass", () => t("トリガーへの注目"), () => t("返事の各位置から、共通部分(ユーザーの発話 + 返事)への注目のうちトリガー区間が占める割合の平均。ペルソナあり − なし"), true],
   ["pattern_shift", () => t("注目のずれ"), () => t("返事の各行の注目の分布の JS ダイバージェンス(bit)の平均。system の部分は 1 つにまとめる"), false],
@@ -97,7 +97,7 @@ export class HeadPanel {
     this.causalList = causalList || (() => []);    // 保存済みの因果スクリーニングの一覧(/api/model の causal)
     this.causalSums = new Map();                   // 名前 → /api/causal/<name>(Causal タブ)
     this._czPending = new Set();
-    this.cz = { name: null, sort: "causal_max", layer: null };   // Causal タブの選択(スクリーニング・並べ替え・物差しの層)
+    this.cz = { name: null, sort: "causal_max", layer: null };   // Causal タブの選択(スクリーニング・並べ替え・射影の値を測る層)
     this.lis = { heads: "", system: "", user: "", reply: "", dir: "", mode: "contrib", maxTokens: 64 };   // Listen の入力
     this.lres = null;                  // Listen の結果
     this.tab = "pattern";
@@ -403,8 +403,8 @@ export class HeadPanel {
       return `<div class="h-con">
         <h4><b class="mono">${esc(c.name)}</b> <span class="mono">#${c.rank}/${c.n_ranked} · z ${fmt(c.z, 2)} · null ${fmt(c.null_pct, 2)}</span>
           <button class="small" data-ov="${esc(c.name)}" title="${t("地図の板の上辺のヘッドをこの対照分析の z で色付けする")}">${t("地図で見る")}</button></h4>
-        <table class="kv h-met"><tr><th>${t("指標")}</th><th>${t("値")}</th><th title="${t("中立どうし(system を別の中立の文に替えただけ)で測った同じ指標の、全ヘッドの 95% 点")}">${t("床(対照 p95)")}</th><th></th></tr>${mrows}</table>
-        <p class="muted note">${t("琥珀 = 床を超えた指標。z = 測れた指標ごとの対照に対する z の平均、null = 対照のヘッドの何割より大きいか。")}${c.direction ? ` ${t("方向 {d}", { d: esc(c.direction) })}` : ""}</p>
+        <table class="kv h-met"><tr><th>${t("指標")}</th><th>${t("値")}</th><th title="${t("中立どうし(system を別の中立の文に替えただけ)で測った同じ指標の、全ヘッドの 95% 点")}">${t("基準値(中立どうしの差の p95)")}</th><th></th></tr>${mrows}</table>
+        <p class="muted note">${t("琥珀 = 基準値を超えた指標。z = 測れた指標ごとの対照に対する z の平均、null = 対照のヘッドの何割より大きいか。")}${c.direction ? ` ${t("方向 {d}", { d: esc(c.direction) })}` : ""}</p>
         ${samples.length ? `<h4>${t("トリガーのある会話(Pattern で、このヘッドの注目をペルソナあり/なしで見る)")}</h4>${samples.slice(0, 8).map((s, i) =>
           `<div class="h-sample"><button class="small" data-pat="${esc(c.name)}" data-i="${i}">${t("Pattern で見る")}</button> <span class="note">${esc(s.prompt)}</span> <span class="muted mono">${s.triggers.map((x) => esc(tokText(x, 16))).join(" · ")}</span></div>`).join("")}` : ""}
         ${top ? `<h4>${t("この対照分析の上位")}</h4><table class="rank mono h-top"><tr><th>#</th><th>${t("ヘッド")}</th><th>kind</th><th>z</th><th>null</th></tr>${top}</table>` : sm === undefined ? `<p class="muted">${t("読み込み中…")}</p>` : ""}
@@ -453,9 +453,9 @@ export class HeadPanel {
     const modes = info.modes || (sm ? sm.modes : []) || [];
     const ov = `${modes.includes("ablate") ? `<button class="small" data-czov="causal" title="${t("地図の板の上辺のヘッドを、止めたときの下がり方(causal_max)で色付けする")}">${t("地図: 効き")}</button>` : ""}${
       modes.includes("marginal") ? `<button class="small" data-czov="eta" title="${t("地図の板の上辺のヘッドを、効率 η で色付けする")}">${t("地図: 効率 η")}</button>` : ""}`;
-    const head = sm ? `<p class="muted note mono">${t("方向 {d}", { d: esc(sm.direction || "—") })} · ${t("物差しの層")} ${SL.map((L) => (L === P ? `<b>L${L}</b>` : `L${L}`)).join(" ")} · A ${sm.n_a ?? "—"} / B ${sm.n_b ?? "—"}${
+    const head = sm ? `<p class="muted note mono">${t("方向 {d}", { d: esc(sm.direction || "—") })} · ${t("射影の値を測る層")} ${SL.map((L) => (L === P ? `<b>L${L}</b>` : `L${L}`)).join(" ")} · A ${sm.n_a ?? "—"} / B ${sm.n_b ?? "—"}${
       sm.spearman_ablate_marginal !== null && sm.spearman_ablate_marginal !== undefined ? ` · ${t("順位相関(ablate・marginal)")} ${fmt(sm.spearman_ablate_marginal, 2)}` : ""} · ${esc((sm.updated || "").replace("T", " "))}</p>` : "";
-    const layerSel = SL.length > 1 ? `<label class="muted" title="${t("表に出す下がり方・寄与・η の物差しの層(太字 = 主の層)")}">${t("物差しの層")} <select id="cz-layer">${
+    const layerSel = SL.length > 1 ? `<label class="muted" title="${t("表に出す下がり方・寄与・η を測る層(太字 = 主の層)")}">${t("射影の値を測る層")} <select id="cz-layer">${
       SL.map((L) => `<option value="${L}"${L === at ? " selected" : ""}>L${L}${L === P ? " *" : ""}</option>`).join("")}</select></label>` : "";
     el.innerHTML = `<div class="list-tools cz-tools">${sel}${ov}${layerSel}</div>${head}
       ${this.causalMine(mine.find((c) => c.name === cz.name), at, P)}
@@ -477,7 +477,7 @@ export class HeadPanel {
     }
   }
 
-  // このヘッドの行(ablate と marginal)。at = 表示する物差しの層、P = 主の層
+  // このヘッドの行(ablate と marginal)。at = 表示する測る層、P = 主の層
   causalMine(c, at, P) {
     const d = this.d;
     if (!c) return `<p class="muted note">${t("L{L} H{h} はこのスクリーニングで測っていません(層単位のスクリーニングで選ばれた層のヘッドだけを測ります)。", { L: d.layer, h: d.head })}</p>`;
@@ -487,7 +487,7 @@ export class HeadPanel {
       const m = r.mode || "ablate", rk = (c.rank || {})[m];
       const contrib = (r.contrib_by_layer || {})[k], drop = (r.score_drop || {})[k];
       const ratio = Number.isFinite(drop) && Number.isFinite(contrib) && Math.abs(contrib) > 1e-9 ? drop / contrib : null;
-      const b = `<tr><td>${t("B 側の点数の変化")}</td><td class="mono">${sgn(r.b_side_delta, 3)}</td><td>${t("B 側の直交成分のずれ")}</td><td class="mono">${fmt(r.drift_orth_b, 3)}</td></tr>`;
+      const b = `<tr><td>${t("B 側の射影の値の変化")}</td><td class="mono">${sgn(r.b_side_delta, 3)}</td><td>${t("B 側の直交成分のずれ")}</td><td class="mono">${fmt(r.drift_orth_b, 3)}</td></tr>`;
       if (m === "marginal") {
         out.push(`<div class="h-con"><h4><b>${t("効率(marginal)")}</b> <span class="mono">${rk ? `#${rk.rank}/${rk.n}` : ""} · η ${fmt((r.eta_by_layer || {})[k] ?? r.eta, 3)}</span>${
           r.in_base ? ` <span class="badge">${t("いまの組")}</span>` : ""}${r.excluded ? ` <span class="badge minus" title="${t("B 側の変化が上限を超えたので配分から外した")}">${t("除外")}</span>` : ""}</h4>
@@ -495,13 +495,13 @@ export class HeadPanel {
           <tr><td>${t("下がり方")}</td><td class="mono" colspan="3">${drops(r)}</td></tr>${b}</table></div>`);
       } else {
         out.push(`<div class="h-con"><h4><b>${t("止める(ablate)")}</b> <span class="mono">${rk ? `#${rk.rank}/${rk.n}` : ""} · causal_max ${fmt(r.causal_max, 2)}</span></h4>
-          <table class="kv h-met"><tr><td title="${t("出力を 0 にしたときの A 側の点数の下がり方")}">causal(L${esc(k)})</td><td class="mono">${sgn(drop, 3)}</td>
-            <td title="${t("無介入でこのヘッドが物差しの層の方向に直接書く量(A 側の平均)")}">${t("直接の寄与")}(L${esc(k)})</td><td class="mono">${sgn(contrib, 3)}</td></tr>
+          <table class="kv h-met"><tr><td title="${t("出力を 0 にしたときの A 側の射影の値の下がり方")}">causal(L${esc(k)})</td><td class="mono">${sgn(drop, 3)}</td>
+            <td title="${t("無介入でこのヘッドが、射影の値を測る層の方向に直接書く量(A 側の平均)")}">${t("直接の寄与")}(L${esc(k)})</td><td class="mono">${sgn(contrib, 3)}</td></tr>
           <tr><td title="${t("causal ÷ 直接の寄与。1 より大きい = 後段のユニットを通る間接の経路、1 より小さい = 補い合い")}">ratio</td><td class="mono">${fmt(ratio, 2)}</td><td>causal_max</td><td class="mono">${fmt(r.causal_max, 3)}</td></tr>
           <tr><td>${t("下がり方")}</td><td class="mono" colspan="3">${drops(r)}</td></tr>${b}</table></div>`);
       }
     }
-    out.push(`<p class="muted note">${t("下がり方 = 介入の前 − 後の A 側の点数(正 = このヘッドが A 側の向きに押していた)。ratio > 1 は間接の経路、< 1 は補い合い。η = いまの組から s を Δs 上げたときの、効きにくい例での下がり方 ÷ Δs。")}</p>`);
+    out.push(`<p class="muted note">${t("下がり方 = 介入の前 − 後の A 側の射影の値(正 = このヘッドが A 側の向きに押していた)。ratio > 1 は間接の経路、< 1 は補い合い。η = いまの組から s を Δs 上げたときの、効きにくい例での下がり方 ÷ Δs。")}</p>`);
     return out.join("");
   }
 
@@ -533,9 +533,9 @@ export class HeadPanel {
     const lrows = lr.map((r) => `<tr><td>L${r.layer}</td><td>${r.kind === "attn" ? "attn" : "linear"}</td><td>${r.n_heads ?? "—"}</td><td>${fmt(r.causal_max, 2)}</td>
       <td>${fmt((r.score_drop || {})[k], 2)}</td><td>${fmt(r.b_side_delta, 2)}</td><td>${fmt(r.drift_orth_b, 3)}</td></tr>`).join("");
     return `<h4>${t("このスクリーニングの上位({n} ヘッド)", { n: by.size })}</h4>
-      <div class="cz-scroll"><table class="rank mono h-top cz-top"><tr><th>#</th><th>${t("ヘッド")}</th>${th("causal_max", "causal_max", t("止めたときの下がり方の、物差しの層での最大"))}${
-        th("causal", `causal L${esc(k)}`, t("止めたときの下がり方(表示中の物差しの層)"))}${th("contrib", `contrib L${esc(k)}`, t("直接の寄与(表示中の物差しの層)"))}${
-        th("ratio", "ratio", t("causal ÷ 直接の寄与(表示中の物差しの層)"))}${th("eta", `η L${esc(k)}`, t("効率 η(marginal、表示中の物差しの層)。* = いまの組のヘッド"))}<th title="${t("B 側の点数の変化")}">B Δ</th><th title="${t("B 側の直交成分のずれ")}">B ⊥</th></tr>${body}</table></div>
+      <div class="cz-scroll"><table class="rank mono h-top cz-top"><tr><th>#</th><th>${t("ヘッド")}</th>${th("causal_max", "causal_max", t("止めたときの下がり方の、射影の値を測る層での最大"))}${
+        th("causal", `causal L${esc(k)}`, t("止めたときの下がり方(表示中の測る層)"))}${th("contrib", `contrib L${esc(k)}`, t("直接の寄与(表示中の測る層)"))}${
+        th("ratio", "ratio", t("causal ÷ 直接の寄与(表示中の測る層)"))}${th("eta", `η L${esc(k)}`, t("効率 η(marginal、表示中の測る層)。* = いまの組のヘッド"))}<th title="${t("B 側の射影の値の変化")}">B Δ</th><th title="${t("B 側の直交成分のずれ")}">B ⊥</th></tr>${body}</table></div>
       <p class="muted note">${t("見出しをクリックで並べ替え、行をクリックでそのヘッドを開く。灰色 = 配分から外したヘッド。")}</p>
       ${lrows ? `<details><summary class="muted note">${t("層単位のスクリーニング({n} 層、層のヘッドを全部止めたとき)", { n: lr.length })}</summary>
         <table class="kv mono cz-layers"><tr><th>${t("層")}</th><th>kind</th><th>${t("ヘッド")}</th><th>causal_max</th><th>L${esc(k)}</th><th>B Δ</th><th>B ⊥</th></tr>${lrows}</table></details>` : ""}
@@ -549,8 +549,8 @@ export class HeadPanel {
     const rows = al.table.filter((r) => !r.skipped).map((r) => `<tr class="${r.recommended ? "on" : ""}"><td>${r.n_heads}${r.recommended ? ` <span class="badge">${t("推奨")}</span>` : ""}</td>
       <td>${fmt(r.s_max, 2)}</td><td>${r.remain ?? "—"}</td><td>${fmt(r.a_max, 2)}</td><td>${fmt(r.b_drift_orth, 3)}</td><td>${fmt(r.b_side_delta, 2)}</td>
       <td class="w">${esc((r.units || []).join(" "))}</td><td><button class="small" data-alloc="${r.n_heads}" title="${t("この組(proj のユニット)で今のレシピを置き換える")}">${t("レシピに読み込む")}</button></td></tr>`).join("");
-    return `<h4>${t("強さの配分(gne heads allocate、L{L} の点数を {v} まで)", { L: al.score_layer ?? "—", v: fmt(al.target, 2) })}</h4>
-      <div class="cz-scroll"><table class="kv mono cz-alloc"><tr><th>${t("ヘッド数")}</th><th>s max</th><th title="${t("目標に届かず残った例の数")}">${t("残り")}</th><th title="${t("A 側の点数の最大")}">A max</th><th title="${t("B 側の直交成分のずれ")}">B ⊥</th><th title="${t("B 側の点数の変化")}">B Δ</th><th>${t("ユニット")}</th><th></th></tr>${rows}</table></div>`;
+    return `<h4>${t("強さの配分(gne heads allocate、L{L} の射影の値を {v} まで)", { L: al.score_layer ?? "—", v: fmt(al.target, 2) })}</h4>
+      <div class="cz-scroll"><table class="kv mono cz-alloc"><tr><th>${t("ヘッド数")}</th><th>s max</th><th title="${t("目標に届かず残った例の数")}">${t("残り")}</th><th title="${t("A 側の射影の値の最大")}">A max</th><th title="${t("B 側の直交成分のずれ")}">B ⊥</th><th title="${t("B 側の射影の値の変化")}">B Δ</th><th>${t("ユニット")}</th><th></th></tr>${rows}</table></div>`;
   }
 
   // --- Listen --------------------------------------------------------------------------------------

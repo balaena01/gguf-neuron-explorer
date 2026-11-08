@@ -375,7 +375,7 @@ class Live:
 
     def export(self, units: list[str], name: str, *, verify: bool = False, keyed: int = 0) -> dict:
         """control vector(add のユニットだけ)の書き出し。keyed は UI がレシピから外した鍵つきの書き込み(CHANGE-07)の数で、
-        cvec には入らない(入力の活性が鍵に合うときだけ書くので定数の足し算にならない)ことを警告に出す。keyed のレシピは
+        cvec には入らない(入力の活性に鍵が反応するときだけ書くので定数の足し算にならない)ことを警告に出す。keyed のレシピは
         headproj_export のジョブ(LoRA・焼き込み)で書き出す。"""
         import re
         if not re.fullmatch(r"[\w.\-]+", name or ""):
@@ -384,7 +384,7 @@ class Live:
         recipe = self.s.recipe(units=list(units), dose_unit="rel", name=name)        # GGUF の中のレシピにも名前を入れる
         r, warns = self._gpu(lambda: self.s.export_cvec(recipe, path, verify=verify))
         if keyed:
-            warns = [f"鍵つきの書き込み(keyed、{int(keyed)} 個)は control vector に入らないので外しました(入力の活性が鍵に合うときだけ"
+            warns = [f"鍵つきの書き込み(keyed、{int(keyed)} 個)は control vector に入らないので外しました(入力の活性に鍵が反応するときだけ"
                      "書くので、定数の足し算にならない)。レシピのタブの「LoRA・焼き込み」(headproj_export)で書き出してください", *warns]
         saved = (self.s.store.recipes_dir() / f"{name}.yaml").exists()
         return {**r, "file": f"{name}.cvec.gguf", "url": f"/api/export/file/{name}.cvec.gguf", "warnings": warns,

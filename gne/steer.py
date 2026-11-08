@@ -45,13 +45,13 @@ class Unit:
     dose: float
     kind: Literal["neuron", "random", "direction", "head", "expert_neuron", "expert", "shared", "ffn", "attn"] = "neuron"
     seed: int | None = None          # random 用
-    mode: Literal["add", "gain", "query", "route", "proj", "keyed"] = "add"   # §6.16: add = 活性に定数を足す(dose)、gain = 出力を k 倍、query = ヘッドの条件付きクエリ操作、route = 専門家のルーターバイアスに dose を足す(CHANGE-05)、proj = ヘッドの書き込みの方向成分だけを s 倍ぶん引く(CHANGE-06)、keyed = 入力活性が鍵に合うときだけ方向を α 倍で書き込む(CHANGE-07)
+    mode: Literal["add", "gain", "query", "route", "proj", "keyed"] = "add"   # §6.16: add = 活性に定数を足す(dose)、gain = 出力を k 倍、query = ヘッドの条件付きクエリ操作、route = 専門家のルーターバイアスに dose を足す(CHANGE-05)、proj = ヘッドの書き込みの方向成分だけを s 倍ぶん引く(CHANGE-06)、keyed = 入力活性に鍵が反応するときだけ方向を α 倍で書き込む(CHANGE-07)
     k: float | None = None           # gain の倍率(0 で消去、負で反転)。proj では強さ s(YAML は s)、keyed では α(YAML は alpha)
     direction: str | None = None     # direction 用: gne direction(§6.17)で作った方向の名前。その層の r_L を足す
     head: int | None = None          # head 用(CHANGE-04): attention ヘッドの番号。gain(W_O の列ブロックを k 倍)か query
     seek: str | None = None          # query 用(CHANGE-04 E、実験的): 探しに行く語(triggers)を持つ対照集合。k が scale
     expert: int | None = None        # MoE(CHANGE-05): expert_neuron = 専門家 e のニューロン、expert = 専門家 e 全体。shared は shared expert のニューロン
-    key: str | None = None           # keyed 用(CHANGE-07): gne direction key で作った鍵の名前。擬似鍵(ランダム対照)は NAME~j
+    key: str | None = None           # keyed 用(CHANGE-07): gne direction key で作った鍵の名前。比較用の鍵(ランダム対照)は NAME~j
 
     def label(self) -> str:
         who = {"neuron": f"N{self.neuron}", "random": f"random{self.seed}", "direction": f"dir:{self.direction}",
@@ -271,7 +271,7 @@ class Recipe:
         if self.default_direction is not None and not re.fullmatch(r"[\w.\-]+", str(self.default_direction)):
             raise GneError("BAD_RECIPE", f"default_direction の名前 {self.default_direction!r} が不正です")
         if self.default_key is not None and not _KEY_NAME_RE.fullmatch(str(self.default_key)):
-            raise GneError("BAD_RECIPE", f"default_key の名前 {self.default_key!r} が不正です(英数字・._- と、擬似鍵は NAME~j)")
+            raise GneError("BAD_RECIPE", f"default_key の名前 {self.default_key!r} が不正です(英数字・._- と、比較用の鍵は NAME~j)")
         for u in self.units:
             if u.mode not in ("add", "gain", "query", "route", "proj", "keyed"):
                 raise GneError("BAD_RECIPE", f"{u}: mode は add / gain / query / route / proj / keyed です")
@@ -350,7 +350,7 @@ class Recipe:
         if not kname:
             raise GneError("BAD_RECIPE", f"{u.label()}: keyed には鍵が要ります(ユニットの key かレシピの default_key。gne direction key で作る)")
         if not _KEY_NAME_RE.fullmatch(str(kname)):
-            raise GneError("BAD_RECIPE", f"{u.label()}: 鍵の名前 {kname!r} が不正です(英数字・._- と、擬似鍵は NAME~j。"
+            raise GneError("BAD_RECIPE", f"{u.label()}: 鍵の名前 {kname!r} が不正です(英数字・._- と、比較用の鍵は NAME~j。"
                                          "符号は付けられないので、打ち消すなら alpha を負に)")
 
 
@@ -366,7 +366,7 @@ _MOE_RE = re.compile(r"^(\d+):(?:E(\d+)|(S)):(?:N(\d+):(x?)|(x)|(route):)([+-]?[
 # CHANGE-07: 鍵つきの書き込み。L:ffn:keyed:aα[@[-]DIR][#KEY]、L:attn:keyed:...、L:S:keyed:...、L:Ee:keyed:...
 _KEYED_RE = re.compile(r"^(\d+):(ffn|attn|S|E(\d+)):keyed:a([+-]?[\d.]+(?:e[+-]?\d+)?)"
                        r"(?:@([\w.\-]+))?(?:#([\w.\-]+(?:~\d+)?))?$", re.I)
-_KEY_NAME_RE = re.compile(r"[\w.][\w.\-]*(?:~\d+)?")      # 鍵の名前。擬似鍵(ランダム対照)は NAME~j。先頭の - は不可(符号は alpha に)
+_KEY_NAME_RE = re.compile(r"[\w.][\w.\-]*(?:~\d+)?")      # 鍵の名前。比較用の鍵(ランダム対照)は NAME~j。先頭の - は不可(符号は alpha に)
 
 
 def fold_sign(name: str | None, alpha: float | None) -> tuple[str | None, float | None]:
@@ -391,7 +391,7 @@ def parse_unit(spec: str) -> Unit:
     ヘッドの方向成分の射影(CHANGE-06)は "L:Hh:sS@NAME"(例 33:H16:s15.4@tsundere_r)。@NAME を省くとレシピの default_direction。
     鍵つきの書き込み(CHANGE-07)は "L:ffn:keyed:aα@DIR#KEY"(例 19:ffn:keyed:a1.25@zundamon_r#zundamon_k)。
     書き込み先は ffn(ffn_down)・attn(attn_output)・S(shared expert)・Ee(専門家 e)。@DIR / #KEY を省くとレシピの
-    default_direction / default_key。@-DIR は α の符号に畳む(打ち消し)。KEY は擬似鍵 NAME~j も可。"""
+    default_direction / default_key。@-DIR は α の符号に畳む(打ち消し)。KEY は比較用の鍵 NAME~j も可。"""
     mk = _KEYED_RE.match(spec.strip())
     if mk:
         L, where, e, av, dname, key = mk.groups()
@@ -402,7 +402,7 @@ def parse_unit(spec: str) -> Unit:
     if ":keyed" in spec.lower():
         raise GneError("BAD_UNIT", f"keyed のユニット {spec!r} を読めません",
                        "L:ffn:keyed:aα@方向#鍵(例 19:ffn:keyed:a1.25@zundamon_r#zundamon_k)。書き込み先は ffn / attn / S / Ee、"
-                       "@方向・#鍵は省くとレシピの既定、@-方向で打ち消し、擬似鍵は #NAME~j")
+                       "@方向・#鍵は省くとレシピの既定、@-方向で打ち消し、比較用の鍵は #NAME~j")
     mp = _PROJ_RE.match(spec.strip())
     if mp:
         L, h, sv, dname = mp.groups()
@@ -545,7 +545,7 @@ def recipe_vectors(weights, stats, recipe: Recipe, dirs: DirLoader | None = None
 def unit_details(weights, stats, recipe: Recipe, dirs: DirLoader | None = None) -> list[dict]:
     """各ユニットの大きさ。rel_push = ‖v‖ / ρ_L、add = 活性 a_n に足した相当量(符号つき)。
     方向のユニットは diff_rel = ‖平均差‖ / ρ_L(rel dose がこの値なら平均差と同じ大きさ)も返す。
-    keyed(CHANGE-07)は方向・鍵・α と、鍵が合った状態で足す大きさ norm = |α|·‖r_L‖・rel_push = |α|·‖r_L‖ / ρ_L・
+    keyed(CHANGE-07)は方向・鍵・α と、鍵が反応した位置(ρ = 1)で足す大きさ norm = |α|·‖r_L‖・rel_push = |α|·‖r_L‖ / ρ_L・
     diff_rel = ‖r_L‖ / ρ_L(d_L は方向セットの生の平均差 r_L、その層のもの)。方向の読み込み先か ρ_L が無ければ None。"""
     rows = []
     for u in recipe.units:

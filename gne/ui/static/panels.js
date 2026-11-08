@@ -110,7 +110,7 @@ export class RankList {
       th.classList.toggle("on", th.dataset.k === key);
     }
     this.root.querySelector("#rank-empty").innerHTML =
-      t("{a} / {b} ニューロン · 対照 {c}(床 = 対照の最大 mass {f})", { a: rows.filter((u) => u.kind === "neuron").length, b: r.n_neurons, c: r.n_controls, f: fmt(r.floor, 1) });
+      t("{a} / {b} ニューロン · 対照 {c}(基準値 = 対照の最大 mass {f})", { a: rows.filter((u) => u.kind === "neuron").length, b: r.n_neurons, c: r.n_controls, f: fmt(r.floor, 1) });
     this.root.querySelector("tbody").innerHTML = rows.map((u) => {
       const rnd = u.kind === "random";
       const above = !rnd && r.floor !== null && u.mass > r.floor;

@@ -6,7 +6,7 @@
 // CHANGE-05 G: MoE の専門家(EXPERT パネル、jump の L12 E37)、overlay expert_usage・experts:<name>、fires で選ばれた専門家のタイルの枠、
 // MoE のニューロン(通し番号 = 専門家 × 幅 + n)を NEURON パネルで開き、レシピに L:Ee:Nn で足す。
 // CHANGE-06 G: overlay causal:<name>・eta:<name>(因果スクリーニング)、HEAD パネルの Causal、レシピのヘッドの射影(L:Hh:sS@NAME)、
-// direction ビュー(方向の速い物差し: 層ごとの cohen_d・基準層・A/B の点数の分布)。
+// direction ビュー(方向の速い指標: 層ごとの cohen_d・基準層・A/B の射影の値の分布)。
 import { LayerCache, getBin, getJSON, loadVocab } from "./api.js";
 import { AgentLink } from "./agent.js";
 import { LANG, setLang, t, translateDOM } from "./i18n.js";
@@ -870,7 +870,7 @@ async function setView(v) {
   xv.classList.toggle("hidden", v !== "eval");
   wv.classList.toggle("hidden", v !== "writers");
   dv.classList.toggle("hidden", v !== "direction");
-  if (v === "direction") {                                                 // 方向の速い物差し(CHANGE-06 G)
+  if (v === "direction") {                                                 // 方向の速い指標(CHANGE-06 G)
     if (!state.model) { dv.innerHTML = `<p class="muted" style="padding:16px">${t("合成の構造には direction ビューのデータがありません")}</p>`; return; }
     if (!directionView) {
       directionView = new DirectionView(dv, {

@@ -3,7 +3,7 @@
 flash attention を切った probe ctx(Engine.attn_probe_ctx)で prefill し、cb_eval で層ごとに次を回収する。
 - pattern: `kq_soft_max-L`(softmax 後の注目の重み)。ggml ne = [n_kv, n_tokens, n_head, n_stream] → numpy
   (n_head, T, T)(1 シーケンス・空のキャッシュから prefill するので、キャッシュの位置 = トークンの位置)。attention の層だけ。
-- head_out: 書き込み行列(W_O / ssm_out)に入る直前のテンソル(`attn_gated` / `kqv_out` / `final_output`)。
+- head_out: 残差に書き込む重み行列(W_O / ssm_out)に入る直前のテンソル(`attn_gated` / `kqv_out` / `final_output`)。
   ggml ne = [n_head·head_dim, n_tokens] → numpy (T, n_head, head_dim)。ヘッド h は列 [h·head_dim, (h+1)·head_dim)。
 - qkv(任意): `Qcur-L` / `Kcur-L` / `Vcur-L`。(T, n_head(_kv), head_dim)。同じ名前が投影の直後と RoPE の後の 2 つに付く
   arch があり、捕捉は先に来た方を採るので、どちらになるかは arch で違う(Qwen3 は 3 つとも投影の直後、Qwen3.5 は Qcur が
@@ -226,7 +226,7 @@ def capture_attention(session, convs: Sequence[list[dict] | str | list[int]], *,
 # --- 検証(CHANGE-04 I: V15・V16) ---------------------------------------------------------------------
 
 def writer_out_name(session, names: set[str], L: int) -> str | None:
-    """層 L の書き込み行列の出力のテンソル名。qwen35 は attn_output / linear_attn_out、名前の無い arch は ffn_inp
+    """層 L の、残差に書き込む重み行列の出力のテンソル名。qwen35 は attn_output / linear_attn_out、名前の無い arch は ffn_inp
     (= 層の入力 + attention の出力。層の入力は層 L の介入で変わらないので、差は attention の出力の差)。"""
     # 線形注意の層の attn_output-L は delta net の中間([head_v_dim, n_head, T])なので、linear_attn_out を先に見る
     order = (("linear_attn_out", "ffn_inp") if session.weights.arch.layers[L].mixer == "linear_attention"
@@ -267,7 +267,7 @@ def check_capture(session, text: str = "The quick brown fox jumps over the lazy 
 
 def check_head_gain(session, L: int, h: int, *, ks: Sequence[float] = (0.0, 2.0, -1.0), text: str | None = None,
                     bake_dir=None) -> dict:
-    """V15: ヘッド h の gain(k 倍)の LoRA を当てると、書き込み行列の出力の差が (k−1)·W_O[:, blk] @ head_out[:, h]
+    """V15: ヘッド h の gain(k 倍)の LoRA を当てると、重み行列の出力の差が (k−1)·W_O[:, blk] @ head_out[:, h]
     (無介入の per-head 出力から numpy で計算)と合う(相対誤差の中央値 < 3%)。層 L の他のヘッドと、L より前の層の
     per-head 出力は変わらない。bake_dir を渡すと、列ブロックを書き換えた GGUF でも同じことを確かめる(重い)。"""
     from .gain import export_gain_lora
@@ -279,7 +279,7 @@ def check_head_gain(session, L: int, h: int, *, ks: Sequence[float] = (0.0, 2.0,
     names = _names(e, probe, ctx, e.tokenize(text, add_special=True, parse_special=False)[:16])
     out_name = writer_out_name(session, names, L)
     if out_name is None:
-        raise GneError("ARCH_UNSUPPORTED", f"層 {L} の書き込み行列の出力が捕捉できません")
+        raise GneError("ARCH_UNSUPPORTED", f"層 {L} の、残差に書き込む重み行列の出力が捕捉できません")
     Ls = [x for x in range(L + 1) if w.arch.layers[x].head_dim]
     base = capture_attention(session, [text], layers=Ls, want_pattern=False, extra=[out_name])[0]
     Wb = w.head_write_matrix(L, h)                                   # (n_embd, head_dim)

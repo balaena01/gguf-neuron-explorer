@@ -468,7 +468,7 @@ export class RecipePanel {
       <tr data-i="${i}" class="rc-keyed"><td class="id"><span class="mono">L${u.layer}</span>
         <select class="rc-kkind" data-kkind="${i}" title="${t("書き込み先: ffn = ffn_down、attn = attn_output、S = shared expert、E = 専門家 e(鍵を作った書き込み先と同じにする)")}">${kinds}</select>${
           u.kind === "expert" ? `<input type="number" class="num rc-kexp" data-kexp="${i}" min="0" value="${u.expert ?? 0}" title="${t("専門家の番号")}">` : ""}
-        <span class="badge keyed" title="${t("鍵つきの書き込み: 入力の活性が鍵に合うときだけ方向を書く(LoRA)")}">keyed</span>
+        <span class="badge keyed" title="${t("鍵つきの書き込み: 入力の活性に鍵が反応するときだけ方向を書く(LoRA)")}">keyed</span>
         <button class="small rm" data-rm="${i}" title="${t("外す")}">×</button>
         <div class="rc-kx"><span class="mono">@</span><select data-kdir="${i}" title="${t("書き込む方向(gne direction の方向セットの r_L)")}">${opts(dirs, u.direction, r.defaultDirection)}</select>
           <span class="mono">#</span><select data-kkey="${i}" title="${t("鍵(direction ビューの「鍵」か gne direction key で作ったもの)")}">${opts(keys.map((k) => k.name), u.key, r.defaultKey)}</select>
@@ -486,7 +486,7 @@ export class RecipePanel {
     return `<div class="rc-ablate rc-kdef" title="${t("@方向・#鍵を「既定」にした keyed の行が使う方向と鍵(保存するとレシピの default_direction・default_key)")}"><span class="muted">${t("keyed の既定")}</span>
         <span class="mono">@</span><select id="rc-kdd">${opt(dirs, r.defaultDirection)}</select>
         <span class="mono">#</span><select id="rc-kdk">${opt(keys, r.defaultKey)}</select></div>
-      <p class="muted note">${t("鍵つきの書き込み a: 入力の活性 x が鍵 κ に合う(ρ = κᵀx が大きい)ときだけ、方向 r_L を α·ρ 倍で書く(α = 1 で、観測した A − B の平均差をそのまま)。触りたくない状態では ρ ≈ 0 で何も足さない。LoRA で当てるので cvec には入りません。3 列チャットの − 列は α が負(打ち消す)。")}</p>`;
+      <p class="muted note">${t("鍵つきの書き込み a: 入力の活性 x に鍵 κ が反応する(鍵の反応の強さ ρ = κᵀx が大きい)ときだけ、方向 r_L を α·ρ 倍で書く(α = 1 で、観測した A − B の平均差をそのまま)。書き込みたくない位置では ρ ≈ 0 で何も足さない。LoRA で当てるので cvec には入りません。3 列チャットの − 列は α が負(打ち消す)。")}</p>`;
   }
 
   // 「鍵つきの書き込み(keyed)を足す」: 鍵・その鍵の層・方向・α を選んで行を足す(保存した鍵があるときだけ)
@@ -628,8 +628,13 @@ export class RecipePanel {
     return this.lx.bake ? `${nm}-headproj` : nm;
   }
   lxKeyedOnly() { return this.r.keyed().length > 0 && !this.r.heads().length && !this.r.projs().length; }
-  // 書き換えたテンソルの型の既定: keyed を含むなら F16(rank 1 の小さな編集が量子化の刻みに埋もれないように)、それ以外は Q8_0
-  lxRequant() { return this.lx.requant ?? (this.r.keyed().length ? "f16" : "q8_0"); }
+  // 書き換えたテンソルの型の既定: keyed を含むなら auto(テンソルごとに、元が Q8_0 なら Q8_0 のまま、それ以外は F16。
+  // Q8_0 のままでは編集の 1 割以上が丸めに消えるテンソルだけ F16)、それ以外は Q8_0。auto は keyed を含むときだけ選べる
+  lxRequant() {
+    const nk = this.r.keyed().length;
+    const rq = this.lx.requant ?? (nk ? "auto" : "q8_0");
+    return rq === "auto" && !nk ? "q8_0" : rq;
+  }
 
   lxHTML() {
     const f = this.lx, r = this.r, bake = f.bake, rq = this.lxRequant(), nk = r.keyed().length;
@@ -642,12 +647,12 @@ export class RecipePanel {
       <div class="rc-lx-row${bake ? "" : " off"}"><span class="muted" title="${t("空なら、いま読んでいるモデルに焼き込む。同じモデルの量子化していない GGUF(F16 / BF16)のパスを入れると、方向はこのモデルで作ったものを使い、そちらに焼き込む(GPU は使わない。少し誤差がある。LoRA 版との比較はできない)")}">${t("焼き込む先")}</span>
         <input id="lx-into" size="30" value="${esc(f.into)}" placeholder="${t("空ならいま読んでいるモデル")}" spellcheck="false"${dis}></div>
       <div class="rc-lx-row${bake ? "" : " off"}"><span class="muted" title="${t("書き換えたテンソルを何の型で書くか。Q8_0 は元より少し大きくなることがある、F16 はもっと大きい。下の「元の型に戻す」を使うとほぼ元の大きさ")}">${t("書き換えたテンソルの型")}</span>
-        <select id="lx-requant"${dis || (f.via_f16 ? " disabled" : "")}><option value="q8_0"${rq === "q8_0" ? " selected" : ""}>Q8_0</option><option value="f16"${rq === "f16" ? " selected" : ""}>F16</option><option value="keep"${rq === "keep" ? " selected" : ""}>${t("元と同じ(F16・BF16 のモデル)")}</option></select>
+        <select id="lx-requant"${dis || (f.via_f16 ? " disabled" : "")}>${nk ? `<option value="auto"${rq === "auto" ? " selected" : ""}>${t("自動(Q8_0 は元のまま、ほかは F16)")}</option>` : ""}<option value="q8_0"${rq === "q8_0" ? " selected" : ""}>Q8_0</option><option value="f16"${rq === "f16" ? " selected" : ""}>F16</option><option value="keep"${rq === "keep" ? " selected" : ""}>${t("元と同じ(F16・BF16 のモデル)")}</option></select>
         <label title="${t("書き換えたテンソルを F16 で書いてから、llama-quantize で元の量子化の型に戻す(ファイルの大きさを元に近く保つ。低ビットの型は imatrix があると誤差が小さい)")}"><input type="checkbox" id="lx-viaf16"${f.via_f16 ? " checked" : ""}${dis}> ${t("元の量子化の型に戻す")}</label></div>
-      ${bake && nk ? `<div class="rc-lx-row"><span class="muted note">${t("鍵つきの書き込みを含むので、書き換えたテンソルの型の既定は F16(rank 1 の小さな編集が量子化の刻みに埋もれないように。配るなら LoRA がおすすめ)")}</span></div>` : ""}
+      ${bake && nk ? `<div class="rc-lx-row"><span class="muted note">${t("鍵つきの書き込みを含むので、書き換えたテンソルの型の既定は「自動」: 元が Q8_0 のテンソルは Q8_0 のまま(F16 にすると計算方法が変わり、LoRA 版とかえってずれる)、それ以外は F16。Q8_0 のままでは編集の 1 割以上が丸めに消えるテンソルだけ F16(配るなら LoRA がおすすめ)")}</span></div>` : ""}
       ${bake && f.via_f16 ? `<div class="rc-lx-row"><span class="muted">llama-quantize</span><input id="lx-lq" size="28" value="${esc(f.llama_quantize)}" placeholder="${t("空なら GNE_LLAMA_QUANTIZE か PATH から探す")}" spellcheck="false">
         <span class="muted" title="${t("低ビットの型(IQ1・IQ2・IQ3_XXS)に戻すときは必須。空なら、モデルの隣の <モデル名>.imatrix.gguf / .imatrix.dat / imatrix.gguf を探して使う")}">imatrix</span><input id="lx-imatrix" size="22" value="${esc(f.imatrix)}" placeholder="${t("空ならモデルの隣を探す")}" spellcheck="false"></div>` : ""}
-      <div class="rc-lx-row${bake && !f.into.trim() ? "" : " off"}"><label title="${t("焼き込み版と LoRA 版で、方向の点数・最初のトークンの分布・最尤トークン・ppl が一致するかを確かめる(モデルを 2 回読むので時間がかかる)")}"><input type="checkbox" id="lx-verify"${f.verify ? " checked" : ""}${bake && !f.into.trim() ? "" : " disabled"}> ${t("LoRA 版と一致するか確かめる")}</label>
+      <div class="rc-lx-row${bake && !f.into.trim() ? "" : " off"}"><label title="${t("焼き込み版と LoRA 版で、方向への射影の値・最初のトークンの分布・最尤トークン・ppl が一致するかを確かめる(モデルを 2 回読むので時間がかかる)")}"><input type="checkbox" id="lx-verify"${f.verify ? " checked" : ""}${bake && !f.into.trim() ? "" : " disabled"}> ${t("LoRA 版と一致するか確かめる")}</label>
         ${bake && f.verify && !f.into.trim() ? `<span class="muted">${t("対照集合")}</span><input id="lx-contrast" size="24" value="${esc(f.contrast)}" placeholder="${t("空なら方向を作った対照集合")}" spellcheck="false">` : ""}</div>
       <div class="rc-lx-row"><span class="muted" title="${t("書き出すファイルの名前(拡張子なし)。空ならレシピの名前から作る。保存先は <root>/export/")}">${t("ファイル名")}</span>
         <input id="lx-file" size="26" value="${esc(f.file)}" placeholder="${esc(this.lxDefaultStem())}" spellcheck="false"><span class="muted mono">${bake ? ".gguf" : ".lora.gguf"}</span></div>

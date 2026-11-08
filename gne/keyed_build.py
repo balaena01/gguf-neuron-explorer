@@ -63,9 +63,36 @@ from .steer import GneError
 Progress = Callable[[int, int, str], None]
 Q_MODES = ("means", "examples", "samples")
 SUBSETS = ("even", "odd", "all")
+# 返事の書き出し: 返事の最初の START_TOKENS トークンを決める位置(生成プロンプトの最後のトークンと、返事の最初の 2 トークンを
+# 読んだ位置)。書き出しの状態はどの質問でも似ているので、側 A がここに偏ると鍵がどの返事の書き出しにも合いやすい
+# (verification.md F134・F138)。
+START_TOKENS = 3
+# 鍵の作成(mode same)で、μ に占める書き出しの位置の重み(側 A の例ごとの「書き出しの行 ÷ 行」の平均。μ は例ごとの平均の
+# 平均)がこれ以上なら警告する。書き出しの状態の Q の外の成分が、側 A の残りの位置の成分と同じ大きさで直交すると、どの返事の
+# 書き出しでも ρ ≈ w / (w² + (1 − w)²) になり、w = 0.25 で 0.4(下の START_RHO_WARN)に当たる。
+START_SHARE_WARN = 0.25
+# key-check で、側 B・dont_touch の返事の書き出しの ρ の中央値(書き出しの位置ごと)がこれ以上なら警告する。実測では書き出しで
+# 合ってしまった鍵が 0.65〜1.6(F134 の dont_touch が計算・事実だけの鍵、F138 の attn の鍵)、書き出しを Q に入れた鍵と ffn の鍵は
+# −0.28〜0.26 だった(ρ = 1 が側 A の平均の書き込み)。
+START_RHO_WARN = 0.4
+# 側 A が少ないときの警告: 位置のある例が MIN_A_EXAMPLES 未満か、行(位置)が MIN_A_ROWS 未満。μ が数位置の活性の平均になり、
+# 鍵が状態ではなくそのトークン・例の本文を拾いやすく、key-check の選択性も数例で揺れる。専門家の鍵は層ごとの行(rows_l)で見る。
+MIN_A_EXAMPLES = 2
+MIN_A_ROWS = 8
+# 鍵の作成で、dont_touch の各群の質問の「返事の冒頭」を、その群の positions とは別の行として Q に入れる(既定。切るのは
+# build_keys の dont_touch_start=False か、対照集合の dont_touch_start: false)。入れるのは返事の最初のトークンを決める位置
+# = 生成プロンプトの最後のトークン(positions の last と同じ。q_mode examples では例ごとに 1 行)。返事の最初の 2・3 トークンを
+# 決める位置(上の START_TOKENS の残り)は入れない: Qwen3-0.6B のツンデレでは、側 A の書き出しの位置はどれも最初のトークンの
+# 直前で、dont_touch の返事の書き出しで鍵が合ったのもそこだけだった(2・3 番目は入れなくても ρ の中央値 0.13 以下)。3 位置の
+# 平均を 1 行にすると、最初のトークンの直前の状態を打ち消し切れず、保留した質問の書き出しの ρ が 0.25〜1.15 残った
+# (最初のトークンの直前だけなら 0.05〜0.55、docs/verification.md F142)。
+# 群の positions が生成プロンプトの位置(last・last:K・assistant)なら、その群の行がもう返事の冒頭の状態なので重ねない。
+# 側 B(鍵を作った場面の質問)の返事の冒頭は入れない(側 A が返事の冒頭にあるとき、側 A そのものを打ち消してしまう)。
+DT_START_POSITIONS = "last"
 _POS_RE = re.compile(r"(response|assistant|last)|last:(\d+)")
 _KEY_NAME_RE = re.compile(r"[\w.][\w.\-]*")
 _DT_KEYS = {"name", "system", "prompts", "replies", "positions"}
+_PROMPT_END = ("last", "assistant")          # 生成プロンプトの位置(返事を作らない)。この群の行は返事の冒頭の状態そのもの
 
 
 # --- 位置 ------------------------------------------------------------------------------------------------
@@ -169,6 +196,27 @@ def select_positions(engine, reply_ids: Sequence[int], positions="response", ski
     return np.asarray(sorted(set(idx)), dtype=np.int64)
 
 
+def start_positions(engine, reply_ids: Sequence[int], positions="response", skip: int = 0, *, n_prompt: int,
+                    k: int = START_TOKENS, pieces: Sequence[bytes] | None = None) -> np.ndarray:
+    """返事の書き出しの位置(列の番号、昇順の int64): 返事の最初の k トークンを決める位置 P−1 … P−2+k(P = n_prompt。
+    生成プロンプトの最後のトークン P−1 はいつも、ほかは返事の長さまで)。書き出しの位置 j = 位置 − (P−1) は返事の j 番目の
+    トークンを決める。positions の種類で絞る:
+    - before: 自分の位置(一致の直前、skip より後)のうち書き出しに入るもの(鍵の作成で、側 A が書き出しに偏っていないか)。
+    - not-before: 書き出しから一致の位置を除いたもの(skip に関係なく。推論時は書き出しも通るので、key-check で測る)。
+    - response・assistant・last: 書き出しのすべて(response の自分の位置は返事のトークンを読んだ位置なので P−1 を含まない)。"""
+    pos = parse_positions(positions)
+    r = list(reply_ids)
+    while r and engine.is_eog(r[-1]):
+        r.pop()
+    R, P = len(r), int(n_prompt)
+    js = [0] + list(range(1, min(int(k), R)))
+    if pos.pattern:
+        pc = [engine.token_bytes(t) for t in r] if pieces is None else list(pieces)[:R]
+        hit = set(match_tokens(pc, pos.pattern))
+        js = [j for j in js if j in hit and j >= max(0, int(skip or 0))] if pos.kind == "before" else [j for j in js if j not in hit]
+    return np.asarray([P - 1 + j for j in js if P - 1 + j >= 1], dtype=np.int64)
+
+
 # --- 鍵の対照集合(dont_touch つき)-------------------------------------------------------------------------
 
 @dataclass
@@ -194,6 +242,7 @@ class KeySpec:
     positions_b: str | None = None
     skip: int | None = None
     replies: dict[str, list[str] | None] = field(default_factory=dict)   # "same"(replies)・"A"(replies_a)・"B"(replies_b)
+    dont_touch_start: bool | None = None     # dont_touch の質問の返事の冒頭を Q に入れるか(None = 既定の True)
 
 
 def _rel(base: Path | None, s: str) -> Path:
@@ -270,6 +319,7 @@ def read_key_spec(path: str | Path) -> KeySpec:
     """鍵の対照集合の YAML を読む。ContrastSet の書き方に次を足したもの(どれも任意):
 
     - dont_touch: [{name?, system?, prompts: [...] | パス, replies?: [...] | パス, positions?}](パスは対照集合のファイルからの相対)
+    - dont_touch_start: dont_touch の質問の返事の冒頭も Q に入れるか(既定 true。build_keys の引数が優先)
     - positions / positions_b / skip: 鍵の作成の既定(build_keys の引数が優先)
     - replies(mode same の返事)/ replies_a / replies_b: 与える返事(リストかパス)
 
@@ -299,11 +349,14 @@ def read_key_spec(path: str | Path) -> KeySpec:
     skip = d.get("skip")
     if skip is not None and (not isinstance(skip, int) or skip < 0):
         raise GneError("BAD_CONTRAST", f"{p}: skip は 0 以上の整数です")
+    dts = d.get("dont_touch_start")
+    if dts is not None and not isinstance(dts, bool):
+        raise GneError("BAD_CONTRAST", f"{p}: dont_touch_start は true か false です")
     replies = {"same": _reply_list(d.get("replies"), cs.prompts("B"), base, f"{p}: replies"),
                "A": _reply_list(d.get("replies_a"), cs.prompts("A"), base, f"{p}: replies_a"),
                "B": _reply_list(d.get("replies_b"), cs.prompts("B"), base, f"{p}: replies_b")}
     return KeySpec(cs, _parse_dont_touch(d.get("dont_touch"), base, str(p)), d.get("positions"), d.get("positions_b"),
-                   skip, replies)
+                   skip, replies, dts)
 
 
 def load_key_spec(path: str | Path) -> tuple[ContrastSet, list[DontTouch]]:
@@ -457,7 +510,7 @@ class AttnCapture(TargetCapture):
         for L in self.layers:
             li = w.arch.layers[L]
             if li.mixer not in ("attention", "linear_attention") or not li.head_writer or not li.head_dim:
-                raise GneError("ARCH_UNSUPPORTED", f"層 {L}({li.mixer})にはヘッドの書き込み行列(attn_output / ssm_out)が"
+                raise GneError("ARCH_UNSUPPORTED", f"層 {L}({li.mixer})にはヘッドの出力を残差に書き込む重み行列(attn_output / ssm_out)が"
                                                    "ありません。attn の鍵は attention・線形注意の層だけです")
             K.post_norm_gamma(w, L, "attn")                       # post-norm の arch は断る
             K.writer_out_scale(w, L, "attn")                      # .scale と LoRA の掛かり方が分からなければ断る
@@ -498,7 +551,7 @@ class AttnCapture(TargetCapture):
     def rows(self, got, L, sel):
         x = got[self._name[L]]
         if x.shape[1] != self.in_dim[L]:
-            raise GneError("ARCH_UNSUPPORTED", f"層 {L}: 捕捉した {self._name[L]} の幅 {x.shape[1]} が書き込み行列の入力の次元 "
+            raise GneError("ARCH_UNSUPPORTED", f"層 {L}: 捕捉した {self._name[L]} の幅 {x.shape[1]} が重み行列の入力の次元 "
                                                f"{self.in_dim[L]} と違います")
         return x[sel], None
 
@@ -693,7 +746,7 @@ def _as_conv(c) -> list[dict]:
 def collect_acts(session, convs, *, layers, positions="response", skip: int = 0, max_tokens: int = 96,
                  replies: Sequence[str] | None = None, iv=None, target: str = "ffn", samples: int = 0,
                  project: Mapping[int, np.ndarray] | None = None, rms_groups: Sequence[str] = ("A",), seed: int = 0,
-                 tick: Callable[[str], None] | None = None) -> dict:
+                 start: int = 0, tick: Callable[[str], None] | None = None) -> dict:
     """会話 convs(メッセージのリストか、1 ターンの質問の文字列)を読み、指定した層の書き込み先の入力活性を位置で選んで集める。
     返事: replies を与えればそれを読ませる(生成しない)。無ければ iv を当てて greedy で max_tokens まで生成する(位置が
     返事を要らないもの(assistant・last)だけなら生成しない)。iv(intervention を参照)は生成と捕捉の両方に当てる。
@@ -705,8 +758,13 @@ def collect_acts(session, convs, *, layers, positions="response", skip: int = 0,
     一様に間引き), "sample_ex": {L: (m,) 例の番号}, "proj": {L: [例ごとの (n_i, k) = x @ project[L].T]}(project のとき),
     "rms": {L: 位置での rms(W x) の平均}(post-norm の層で、rms_groups の群), "gate": {L: ゲートの平均}(rows がゲートを
     返す書き込み先で、rms_groups の群), "index_l": {L: その層で行があった例の番号}(専門家のように層ごとに行を絞る
-    書き込み先では index と違う。means[L] の行はこれに並ぶ), "rows_l": {L: その層の行の数}}},
+    書き込み先では index と違う。means[L] の行はこれに並ぶ), "rows_l": {L: その層の行の数},
+    "count_l": {L: [例ごとの行の数](index_l に並ぶ)}, "start": 返事の書き出し(start > 0 のとき、無ければ None)}},
     "texts", "replies"(given / generated / None), "n_prompt", "n_reply", "layers", "iv"}。
+    start = k(> 0)なら、返事の最初の k トークンを決める位置(start_positions。群の位置の種類で絞る)も見て、群の "start" に
+    {"k", "n_l": {L: [例ごとの書き出しの行の数](index_l に並ぶ)}, "proj": {L: [例ごとの (書き出しの位置 j の (m,), (m, k) の
+    x @ project[L].T)]}(project のとき)} を入れる。鍵の作成は側 A が書き出しに偏っていないかを、key-check は側 B・dont_touch の
+    書き出しで鍵が合っていないかを見る。
     target は書き込み先の文字列(ffn / attn / shared / expert:e)か、TargetCapture(層は呼ぶ側が確かめたもの)。
     tick(msg) は会話 1 本(と生成 1 回)ごとに呼ぶ。"""
     t0 = time.perf_counter()
@@ -767,9 +825,11 @@ def collect_acts(session, convs, *, layers, positions="response", skip: int = 0,
     cap.skipped = {}
 
     acc = {g: {"index": [], "index_l": {L: [] for L in Ls}, "n_pos": [], "means": {L: [] for L in Ls}, "rows": 0,
-               "rows_l": {L: 0 for L in Ls},
+               "rows_l": {L: 0 for L in Ls}, "count_l": {L: [] for L in Ls},
                "res": {L: _Reservoir(samples, seed + 7919 * k) for L in Ls} if samples else None,
                "proj": {L: [] for L in Ls} if project else None,
+               "st_n": {L: [] for L in Ls} if start else None,
+               "st_proj": {L: [] for L in Ls} if start and project else None,
                "rms": {L: [0.0, 0] for L in Ls}, "gate": {L: [0.0, 0] for L in Ls}}
            for k, g in enumerate(groups)}
     proj = {L: np.asarray(project[L], dtype=np.float64) for L in Ls} if project else None
@@ -808,12 +868,26 @@ def collect_acts(session, convs, *, layers, positions="response", skip: int = 0,
                 a["index"].append(i)
                 a["n_pos"].append(max(cnt.values()))
                 a["rows"] += max(cnt.values())
+                st = (start_positions(e, resp[i], groups[g], skip, n_prompt=len(pids[i]), k=start, pieces=pieces)
+                      if start else None)
                 for L in Ls:
                     x = xs[L]
                     if not x.shape[0]:
                         continue
                     a["index_l"][L].append(i)
                     a["rows_l"][L] += int(x.shape[0])
+                    a["count_l"][L].append(int(x.shape[0]))
+                    if st is not None:                    # 返事の書き出しの行(専門家は選ばれた位置だけなので 1 位置ずつ)
+                        offs, xr = [], []
+                        for p0 in st:
+                            r0, _ = tc.rows(got, L, np.asarray([p0], dtype=np.int64))
+                            if r0.shape[0]:
+                                offs.append(int(p0) - (len(pids[i]) - 1))
+                                xr.append(np.asarray(r0[0], dtype=np.float64))
+                        a["st_n"][L].append(len(offs))
+                        if a["st_proj"] is not None:
+                            pj = np.stack(xr) @ proj[L].T if xr else np.zeros((0, proj[L].shape[0]))
+                            a["st_proj"][L].append((np.asarray(offs, dtype=np.int64), pj))
                     a["means"][L].append(x.astype(np.float64).mean(axis=0))
                     if a["res"] is not None:
                         a["res"][L].add(x, i)
@@ -837,7 +911,8 @@ def collect_acts(session, convs, *, layers, positions="response", skip: int = 0,
         res = {L: a["res"][L].array(width[L]) for L in Ls} if a["res"] is not None else None
         out_groups[g] = {
             "positions": groups[g].text, "index": a["index"], "index_l": a["index_l"], "n_pos": a["n_pos"], "rows": a["rows"],
-            "rows_l": a["rows_l"],
+            "rows_l": a["rows_l"], "count_l": a["count_l"],
+            "start": None if a["st_n"] is None else {"k": int(start), "n_l": a["st_n"], "proj": a["st_proj"]},
             "means": {L: (np.stack(a["means"][L]) if a["means"][L] else np.zeros((0, width[L]))) for L in Ls},
             "samples": None if res is None else {L: res[L][0] for L in Ls},
             "sample_ex": None if res is None else {L: res[L][1] for L in Ls},
@@ -867,8 +942,8 @@ def _pick(xs, idx):
 
 def _resolve_mode(pos_a: Positions, pos_b_spec) -> tuple[str, Positions]:
     if pos_a.kind == "not-before":
-        raise GneError("BAD_ARGS", "側 A の positions に not-before は使えません(それは側 B 用の補集合です)",
-                       "側 A は before:<正規表現>(mode same)か response / assistant / last(mode system)です")
+        raise GneError("BAD_ARGS", "書き込みたい位置の positions に not-before は使えません(それは書き込みたくない位置用の補集合です)",
+                       "書き込みたい位置は before:<正規表現>(mode same)か response / assistant / last(mode system)です")
     mode = "same" if pos_a.kind == "before" else "system"
     if pos_b_spec is None:
         pos_b = parse_positions(f"not-before:{pos_a.pattern}") if mode == "same" else pos_a
@@ -878,9 +953,11 @@ def _resolve_mode(pos_a: Positions, pos_b_spec) -> tuple[str, Positions]:
 
 
 def _plan(session, spec: KeySpec, mode: str, pos_a: Positions, pos_b: Positions, subset: str, replies_a, replies_b,
-          vecs0, lora0, warn: Callable[[str], None]) -> tuple[list[_Set], dict]:
+          vecs0, lora0, warn: Callable[[str], None], dt_start: bool = False) -> tuple[list[_Set], dict]:
     """作成・確認で読む会話の組(_Set のリスト)と、記録用の情報。引数で渡す返事のパスは今の作業場所からの相対
-    (対照集合に書いた返事のパスは対照集合のファイルからの相対)。"""
+    (対照集合に書いた返事のパスは対照集合のファイルからの相対)。dt_start なら、dont_touch の各群に、その質問の返事の冒頭
+    (DT_START_POSITIONS = 生成プロンプトの最後のトークン)の群 "dts:<名前>" を同じ捕捉で足す(鍵の作成だけ。群の positions が
+    生成プロンプトの位置なら足さない)。"""
     from .direction import _subset
     from .reverse import side_interventions
     cs = spec.contrast
@@ -900,8 +977,8 @@ def _plan(session, spec: KeySpec, mode: str, pos_a: Positions, pos_b: Positions,
         ra = replies_of(replies_a, "A", cs.prompts("A"))
         rb = replies_of(replies_b, "B", cs.prompts("B"))
         if (not cs.has_recipes and cs.system_a == cs.system_b and not cs.separate_prompts and ra == rb):
-            raise GneError("BAD_CONTRAST", "側 A と側 B が同じです(system も recipe も質問も返事も違いがありません)",
-                           "推論時と同じ文脈の返事の位置で側 A を作るなら positions を before:<正規表現> にしてください")
+            raise GneError("BAD_CONTRAST", "書き込みたい側と書き込みたくない側が同じです(system も recipe も質問も返事も違いがありません)",
+                           "推論時と同じ文脈の返事の中で書き込みたい位置を取るなら positions を before:<正規表現> にしてください")
         for side, pos, rep in (("A", pos_a, ra), ("B", pos_b, rb)):
             prompts, convs = cs.prompts(side), cs.convs(side)
             idx = _subset(len(prompts), subset)
@@ -911,15 +988,15 @@ def _plan(session, spec: KeySpec, mode: str, pos_a: Positions, pos_b: Positions,
                              {side: pos.text}, _pick(rep, idx), _combine(side_iv[side], vecs0, lora0)))
     else:
         if replies_a is not None and replies_b is not None and replies_a != replies_b:
-            raise GneError("BAD_ARGS", "positions が before:<正規表現> のとき(側 A と側 B が同じ返事)は返事を 1 組だけ渡してください")
+            raise GneError("BAD_ARGS", "positions が before:<正規表現> のとき(書き込みたい位置と書き込みたくない位置が同じ返事にある)は返事を 1 組だけ渡してください")
         param = replies_b if replies_b is not None else replies_a
         if param is None and spec.replies.get("A") is not None and spec.replies.get("same") is None:
-            warn("対照集合の replies_a は mode same では使いません(側 A も側 B と同じ返事から取ります。返事は replies に書きます)")
+            warn("対照集合の replies_a は mode same では使いません(書き込みたい位置も書き込みたくない位置と同じ返事から取ります。返事は replies に書きます)")
         prompts, convs = cs.prompts("B"), cs.convs("B")
         rep = replies_of(param, "B", prompts) if param is not None else (spec.replies.get("same") or spec.replies.get("B"))
         idx = _subset(len(prompts), subset)
         if cs.system_a != cs.system_b or cs.recipe_a is not None:
-            notes.append("側 A も側 B と同じ文脈(system_b・recipe_b)の返事から取りました(system_a・recipe_a は方向用で、鍵では使いません)")
+            notes.append("書き込みたい位置も書き込みたくない位置と同じ文脈(system_b・recipe_b)の返事から取りました(system_a・recipe_a は方向用で、鍵では使いません)")
         sets.append(_Set("AB", [convs[i] for i in idx],
                          [K.example_hash(cs.system_b, question_text(prompts[i])) for i in idx],
                          {"A": pos_a.text, "B": pos_b.text}, _pick(rep, idx), _combine(side_iv["B"], vecs0, lora0)))
@@ -929,17 +1006,24 @@ def _plan(session, spec: KeySpec, mode: str, pos_a: Positions, pos_b: Positions,
         if dt.system == "":
             warn(f"dont_touch {dt.name}: system が空の文字列なので空の system メッセージで読みます(system なしにするにはキーを省きます)")
         pos = dt.positions or pos_b.text
+        groups = {f"dt:{dt.name}": pos}
+        start = None
+        if dt_start and parse_positions(pos).kind not in _PROMPT_END:        # 返事の冒頭を別の行として Q に入れる
+            groups[f"dts:{dt.name}"] = start = DT_START_POSITIONS
         sets.append(_Set(f"dt:{dt.name}", dt.convs(idx),
                          [K.example_hash(dt.system, question_text(dt.prompts[i])) for i in idx],
-                         {f"dt:{dt.name}": pos}, _pick(dt.replies, idx), _combine(None, vecs0, lora0)))
+                         groups, _pick(dt.replies, idx), _combine(None, vecs0, lora0)))
         dts.append({"name": dt.name, "system": "none" if dt.system is None else ("empty" if dt.system == "" else "set"),
-                    "positions": pos, "replies": "given" if dt.replies is not None else "generated"})
+                    "positions": pos, "replies": "given" if dt.replies is not None else "generated"}
+                   | ({"start": start} if dt_start else {}))
     return sets, {"notes": notes, "dont_touch": dts}
 
 
 def _run_plan(session, sets: list[_Set], *, layers, target, skip, max_tokens, samples, project=None, seed=0,
-              rms_groups: Sequence[str] = ("A",), progress: Progress | None = None, extra_steps: int = 0) -> dict:
-    """_plan の会話の組を順に捕捉して、群 → collect_acts の群(と、群の例のハッシュ hashes)にまとめる。"""
+              rms_groups: Sequence[str] = ("A",), progress: Progress | None = None, extra_steps: int = 0,
+              start: int = 0) -> dict:
+    """_plan の会話の組を順に捕捉して、群 → collect_acts の群(と、群の例のハッシュ hashes)にまとめる。start は
+    collect_acts の返事の書き出しの位置の数(0 なら見ない)。"""
     def gen_steps(s: _Set) -> int:
         return int(s.replies is None and any(parse_positions(p).needs_reply for p in s.groups.values()))
     total = sum(len(s.convs) + gen_steps(s) for s in sets) + extra_steps
@@ -958,7 +1042,7 @@ def _run_plan(session, sets: list[_Set], *, layers, target, skip, max_tokens, sa
             continue
         r = collect_acts(session, s.convs, layers=layers, positions=s.groups, skip=skip, max_tokens=max_tokens,
                          replies=s.replies, iv=s.iv, target=target, samples=samples, project=project, seed=seed,
-                         rms_groups=rms_groups, tick=tick)
+                         rms_groups=rms_groups, start=start, tick=tick)
         for g, d in r["groups"].items():
             d["hashes"] = [s.hashes[i] for i in d["index"]]
             d["n_examples"] = len(s.convs)
@@ -1006,17 +1090,96 @@ def _basis(q_mode: str, X: np.ndarray, energy: float, max_rank: int | None) -> n
     return K.orth_basis(X, energy=energy, max_rank=max_rank)
 
 
+def few_side_a(n_examples: int, n_rows: int) -> bool:
+    """側 A が少ないか(位置のある例が MIN_A_EXAMPLES 未満か、行が MIN_A_ROWS 未満)。鍵の作成と key-check で同じ基準。"""
+    return int(n_examples) < MIN_A_EXAMPLES or int(n_rows) < MIN_A_ROWS
+
+
+def few_side_a_message(n_examples: int, n_rows: int, *, mode: str = "same", where: str = "", check: bool = False) -> str:
+    """書き込みたい位置(側 A)が少ないときの警告の文。check なら key-check(確かめる側の数)。"""
+    head = (f"{where}key-check の書き込みたい位置が {n_examples} 例の {n_rows} 位置だけです" if check
+            else f"{where}書き込みたい位置が {n_examples} 例の {n_rows} 位置だけです")
+    head += f"(目安は {MIN_A_EXAMPLES} 例・{MIN_A_ROWS} 位置以上)。"
+    if check:
+        return head + "key-check の選択性・AUC が数例で揺れるので、比較用の鍵との比べは参考にとどめ、質問を増やして測り直してください"
+    how = ("質問を増やすか、素のモデルが実際に書く言い方に正規表現を合わせて(結果の samples と matched を見る)、一致する位置を"
+           "増やしてください" if mode == "same" else "質問を増やしてください")
+    return head + "μ が数位置の活性の平均になるので、鍵が状態ではなくそのトークンや例の本文を拾いやすく、key-check の数字も揺れます。" + how
+
+
+def _start_share(g: dict, L: int) -> tuple[float | None, int]:
+    """群 g(collect_acts の群、start つき)の層 L で、μ に占める返事の書き出しの行の重み(例ごとの「書き出しの行 ÷ 行」の平均。
+    μ は例ごとの平均の平均なので、この重みで書き出しの状態が μ に入る)と、書き出しの行の数。"""
+    st = g.get("start")
+    if not st:
+        return None, 0
+    n, c = st["n_l"].get(L) or [], g["count_l"].get(L) or []
+    fr = [a / b for a, b in zip(n, c) if b]
+    return (float(np.mean(fr)) if fr else None), int(sum(n))
+
+
+def _starts_groups(spec: KeySpec, auto: Sequence[str] = ()) -> list[str]:
+    """dont_touch の群のうち、返事の書き出しの状態を Q に入れたもの: 生成プロンプトの位置(last・last:K・assistant)の群と、
+    返事の冒頭を自動で足した群(auto)。dont_touch の並び順。"""
+    auto = set(auto)
+    return [dt.name for dt in spec.dont_touch
+            if dt.name in auto or (dt.positions and parse_positions(dt.positions).kind in _PROMPT_END)]
+
+
+def _reply_start_info(spec: KeySpec, ga: dict, Ls: Sequence[int], mode: str, kind: str,
+                      auto: Sequence[str] | None = None) -> dict | None:
+    """鍵の作成(mode same)で、側 A の位置のうち返事の書き出しにあるもの: {k, share(μ に占める重み。専門家は層の最大),
+    rows(書き出しの行の数)、rows_a、layer(share が最大の層)、dont_touch_starts(書き出しの状態を Q に入れた dont_touch の群)、
+    dont_touch_start(dont_touch の質問の返事の冒頭を自動で Q に入れたか)}。auto は返事の冒頭を自動で足した群(None = 切った)。"""
+    if mode != "same" or not ga.get("start"):
+        return None
+    best = None
+    for L in (Ls if kind == "expert" else Ls[:1]):           # 専門家のほかは全層で行が同じ
+        sh, n = _start_share(ga, L)
+        if sh is not None and (best is None or sh > best[0]):
+            best = (sh, n, L, int(ga["rows_l"][L]))
+    if best is None:
+        return None
+    return {"k": int(ga["start"]["k"]), "share": round(best[0], 4), "rows": best[1], "rows_a": best[3],
+            "layer": best[2] if kind == "expert" else None, "dont_touch_starts": _starts_groups(spec, auto or ()),
+            "dont_touch_start": auto is not None}
+
+
+def _reply_start_message(info: dict, n_dont_touch: int = 0) -> str:
+    """書き込みたい位置(側 A)が返事の冒頭に偏っているときの文。返事の冒頭の状態を Q に入れた dont_touch の群があれば注、
+    無ければ警告(dont_touch の群が無いなら質問を足す案内、返事を書き始める直前の位置の自動を切っているなら戻す案内)。
+    n_dont_touch は dont_touch の群の数。"""
+    where = f"L{info['layer']} の" if info.get("layer") is not None else ""
+    head = (f"{where}書き込みたい位置の {info['share'] * 100:.0f}%(μ に占める重み。{info['rows']} / {info['rows_a']} 位置)が"
+            f"返事の冒頭(返事の最初の {info['k']} トークンを決める位置。返事の最初で正規表現に一致すると、書き込みたい位置は"
+            "返事を書き始める直前の位置になる)にあります。")
+    if info["dont_touch_starts"]:
+        return (head + f"dont_touch の群({', '.join(info['dont_touch_starts'])})の質問の、返事を書き始める直前の位置は Q に"
+                "入れてあります。それでも書いた後に状態が書き込みたい位置の状態から抜けずに鍵が反応し続け、繰り返しに落ちやすく"
+                "なります(keyed-write.md §14)。key-check の返事の冒頭での ρ(start_rho)と、生成した返事で確かめてください")
+    risk = ("返事の冒頭の状態はどの質問でも似ているので、どの返事の冒頭でも鍵が反応しやすくなります(書き込みたくない場面でも"
+            "返事の最初で方向を書く)。")
+    if n_dont_touch and not info.get("dont_touch_start", True):
+        return (head + risk + "dont_touch の質問の、返事を書き始める直前の位置を Q に入れない設定(dont_touch_start: false)に"
+                "なっています。入れる設定に戻して鍵を作り直してください。key-check の返事の冒頭での ρ(start_rho)でも確かめられます")
+    return (head + risk + "dont_touch の群がありません。ふつうの質問(計算・事実の質問など、ここでは書き込みたくない場面)を"
+            "dont_touch に足して鍵を作り直してください(dont_touch の質問の、返事を書き始める直前の位置も Q に入ります)。"
+            "key-check の返事の冒頭での ρ(start_rho)でも確かめられます")
+
+
 def build_keys(session, contrast, *, name: str | None = None, layers, positions: str | None = None,
                positions_b: str | None = None, skip: int | None = None, max_tokens: int = 96, q_mode: str = "examples",
                q_energy: float = 0.99, q_max_rank: int | None = None, q_max_samples: int = 4096, subset: str = "even",
                pseudo: int = 16, replies_a=None, replies_b=None, iv=None, target: str = "ffn", seed: int = 0,
-               progress: Progress | None = None) -> dict:
+               dont_touch_start: bool | None = None, progress: Progress | None = None) -> dict:
     """対照集合(contrast: パス・ContrastSet・KeySpec)から層ごとの鍵 κ を作り、<root>/keys/<model_id>/<name>.npz に保存する。
 
     positions(側 A の位置。省くと対照集合の positions、無ければ response)が before:<re> なら mode same(推論時と同じ文脈の
     返事の位置、側 B は positions_b、既定 not-before:<re>)、それ以外は mode system(system_a・recipe_a の文脈 対 system_b・
     recipe_b の文脈、側 B の位置は既定で positions と同じ)。skip も省くと対照集合の skip、無ければ 0。
     subset(even / odd / all)で使う質問を選ぶ(既定 even。key-check は odd で確かめる)。dont_touch の群は Q に足す。
+    dont_touch_start(省くと対照集合の dont_touch_start、無ければ True)なら、dont_touch の各群の質問の返事の冒頭(生成
+    プロンプトの最後のトークン)も、群の positions とは別の行として Q に足す(側 B の返事の冒頭は足さない)。
     q_mode・q_energy・q_max_rank・q_max_samples は Q の作り方。pseudo 本の擬似鍵(例の単位のラベルの並べ替え、seed で決まる)も
     保存する。iv はレシピ(intervention)を生成と捕捉の全位置に当てた状態で作る(他の介入と重ねるとき)。
     target は書き込み先: ffn(既定、ffn_down の入力)、attn(attn_output / ssm_out の入力 = ヘッド出力の連結。ハイブリッドの
@@ -1056,27 +1219,40 @@ def build_keys(session, contrast, *, name: str | None = None, layers, positions:
     mode, pos_b = _resolve_mode(pos_a, positions_b or spec.positions_b)
     skip = int(skip if skip is not None else (spec.skip or 0))
     vecs0, lora0, iv_desc = intervention(session, iv, warn)
-    sets, pinfo = _plan(session, spec, mode, pos_a, pos_b, subset, replies_a, replies_b, vecs0, lora0, warn)
+    dts_on = bool(dont_touch_start if dont_touch_start is not None else
+                  (spec.dont_touch_start if spec.dont_touch_start is not None else True))
+    sets, pinfo = _plan(session, spec, mode, pos_a, pos_b, subset, replies_a, replies_b, vecs0, lora0, warn,
+                        dt_start=dts_on)
     samples = q_max_samples if q_mode == "samples" else 0
     run = _run_plan(session, sets, layers=Ls, target=target, skip=skip, max_tokens=max_tokens, samples=samples,
-                    seed=seed, progress=progress, extra_steps=len(Ls))
+                    seed=seed, progress=progress, extra_steps=len(Ls), start=START_TOKENS if mode == "same" else 0)
     G = run["groups"]
     ga, gb = G.get("A"), G.get("B")
     dt_keys = [g for g in G if g.startswith("dt:")]
+    dts_keys = [g for g in G if g.startswith("dts:") and G[g]["index"]]      # dont_touch の質問の返事の冒頭(Q だけに使う)
+    dt_start_rec = {"on": dts_on, "positions": DT_START_POSITIONS if dts_on else None,
+                    "groups": {g[4:]: int(G[g]["rows"]) for g in dts_keys}, "rows": sum(int(G[g]["rows"]) for g in dts_keys)}
     if ga is None or not ga["index"]:
         hint = ("返事に正規表現が一致していません。返事(texts)を見て正規表現を直すか、一致する返事を replies で与えてください"
                 if mode == "same" else "返事が空か、位置の指定に合うトークンがありません")
-        raise GneError("BAD_CONTRAST", f"側 A の位置がありません(positions {pos_a.text})", hint)
+        raise GneError("BAD_CONTRAST", f"書き込みたい位置がありません(positions {pos_a.text})", hint)
     if (gb is None or not gb["index"]) and not any(G[g]["index"] for g in dt_keys):
-        raise GneError("BAD_CONTRAST", f"側 B の位置がありません(positions {pos_b.text})")
+        raise GneError("BAD_CONTRAST", f"書き込みたくない位置がありません(positions {pos_b.text})")
     n_a = len(ga["index"])
     n_b = len(gb["index"]) if gb else 0
-    if n_a < 2:
-        warn(f"側 A の位置がある例が {n_a} 個だけです。鍵が例の本文を拾いやすくなります")
+    if kind != "expert" and few_side_a(n_a, int(ga["rows"])):      # 専門家の鍵は層ごとの行で見る(下の層のループ)
+        warn(few_side_a_message(n_a, int(ga["rows"]), mode=mode))
+    starts_info = _reply_start_info(spec, ga, Ls, mode, kind, list(dt_start_rec["groups"]) if dts_on else None)
+    if starts_info is not None and starts_info["share"] >= START_SHARE_WARN:
+        msg = _reply_start_message(starts_info, len(spec.dont_touch))
+        if starts_info["dont_touch_starts"]:
+            pinfo["notes"].append(msg)
+        else:
+            warn(msg)
     rng = np.random.default_rng(seed)
     perms = [balanced_split(rng, n_a, n_b) for _ in range(pseudo)] if n_b else []   # 層をまたいで同じ並べ替え
     if pseudo and not n_b:
-        warn("側 B の例が無い(dont_touch だけ)ので擬似鍵は作りません")
+        warn("書き込みたくない側の例が無い(dont_touch だけ)ので比較用の鍵は作りません")
 
     kappa, mu, kn, gain, qrank, exa, exb, ctrl, rms_a, gate_a = {}, {}, {}, {}, {}, {}, {}, {}, {}, {}
     rows_q, dropped, build_auc, weak, counts_l = {}, {}, {}, [], {}
@@ -1086,15 +1262,16 @@ def build_keys(session, contrast, *, name: str | None = None, layers, positions:
         idx_b = gb["index_l"][L] if gb else []
         na, nb = len(idx_a), len(idx_b)
         if not na:
-            dropped[L] = "側 A の位置でこの層の書き込み先の行がありません"
+            dropped[L] = "書き込みたい位置でこの層の書き込み先の行がありません"
             warn(f"L{L} は鍵にならないので外しました: {dropped[L]}")
             run["tick"](f"L{L}")
             continue
         same_n = (na, nb) == (n_a, n_b)
         if not same_n:
             counts_l[str(L)] = {"a": na, "b": nb}
-            if na < 2:
-                warn(f"L{L}: 側 A の行がある例が {na} 個だけです。鍵が例の本文を拾いやすくなります")
+        if kind == "expert" and few_side_a(na, int(ga["rows_l"][L])):
+            warn(few_side_a_message(na, int(ga["rows_l"][L]), mode=mode,
+                                    where=f"L{L}(専門家 {expert} が選ばれた位置だけ): "))
         if same_n:
             perms_l = perms
         elif nb and pseudo:                                     # 層ごとの例の数で並べ替え(層 L ごとに決まった乱数)
@@ -1104,9 +1281,9 @@ def build_keys(session, contrast, *, name: str | None = None, layers, positions:
             perms_l = []
         EA = ga["means"][L]
         EB = gb["means"][L] if gb else np.zeros((0, EA.shape[1]))
-        DTm = [G[g]["means"][L] for g in dt_keys]
+        DTm = [G[g]["means"][L] for g in dt_keys + dts_keys]
         SB = gb["samples"][L] if (samples and gb) else np.zeros((0, EA.shape[1]), np.float32)
-        DTs = [G[g]["samples"][L] for g in dt_keys] if samples else []
+        DTs = [G[g]["samples"][L] for g in dt_keys + dts_keys] if samples else []
         m = EA.mean(axis=0)
         X = _q_rows(q_mode, EB, DTm, SB, DTs, q_max_samples, np.random.default_rng(seed + 1 + L))
         try:
@@ -1156,7 +1333,7 @@ def build_keys(session, contrast, *, name: str | None = None, layers, positions:
                         if ex.code != "BAD_KEY":
                             raise
                 else:
-                    warn(f"L{L}: 擬似鍵 {j} を作れませんでした(0 にしました)")
+                    warn(f"L{L}: 比較用の鍵 {j} を作れませんでした(0 にしました)")
             ctrl[L] = C.astype(np.float32)
         run["tick"](f"L{L}")
     if not kappa:
@@ -1165,6 +1342,9 @@ def build_keys(session, contrast, *, name: str | None = None, layers, positions:
     counts = {"a": n_a, "b": n_b, "rows_a": int(ga["rows"]), "rows_b": int(gb["rows"]) if gb else 0,
               "dt": sum(len(G[g]["index"]) for g in dt_keys), "rows_dt": sum(int(G[g]["rows"]) for g in dt_keys),
               "examples_a": int(ga["n_examples"]), "examples_b": int(gb["n_examples"]) if gb else 0}
+    if starts_info is not None:
+        counts["rows_a_start"] = int(starts_info["rows"])
+    counts["rows_dt_start"] = int(dt_start_rec["rows"])     # dont_touch の質問の返事の冒頭として Q に入れた行(切れば 0)
     info = {"mode": mode, "positions_b": pos_b.text, "q_energy": q_energy, "q_max_rank": q_max_rank,
             "q_max_samples": q_max_samples, "pseudo": len(perms), "pseudo_method": "balanced", "seed": seed,
             "contrast": cs.name,
@@ -1174,6 +1354,9 @@ def build_keys(session, contrast, *, name: str | None = None, layers, positions:
             "build_auc": {str(L): v for L, v in build_auc.items()}}
     if counts_l:                                            # 層ごとに例の数が違う(専門家など)ときだけ記録する
         info["counts_l"] = counts_l
+    if starts_info is not None:                             # mode same: 側 A のうち返事の書き出しにある位置
+        info["reply_start"] = starts_info
+    info["dont_touch_start"] = dt_start_rec                 # これが無い鍵は、返事の冒頭を自動で入れる前に作ったもの
     if kind == "expert":                                    # 専門家の鍵: 層ごとの行(専門家 e が選ばれた位置)の数
         info["rows_l"] = {str(L): {"a": int(ga["rows_l"][L]), "b": int(gb["rows_l"][L]) if gb else 0,
                                    "of_a": int(ga["rows"]), "of_b": int(gb["rows"]) if gb else 0} for L in Ls}
@@ -1184,11 +1367,16 @@ def build_keys(session, contrast, *, name: str | None = None, layers, positions:
     path = ks.save(K.key_dir(session) / f"{name}.npz")
     rows = []
     for L in ks.layers:
-        rows.append({"layer": L, "kn": kn[L], "gain": gain[L], "q_rank": qrank[L], "q_rows": rows_q[L], "weak": L in weak,
-                     "kappa_mu": float(np.asarray(kappa[L], dtype=np.float64) @ mu[L]),
-                     "build_auc": build_auc[L], "rms_a": rms_a.get(L), "gate_a": gate_a.get(L),
-                     "rows_a": int(ga["rows_l"][L]), "rows_b": int(gb["rows_l"][L]) if gb else 0,
-                     "examples_a": len(ga["index_l"][L]), "examples_b": len(gb["index_l"][L]) if gb else 0})
+        row = {"layer": L, "kn": kn[L], "gain": gain[L], "q_rank": qrank[L], "q_rows": rows_q[L], "weak": L in weak,
+               "kappa_mu": float(np.asarray(kappa[L], dtype=np.float64) @ mu[L]),
+               "build_auc": build_auc[L], "rms_a": rms_a.get(L)}
+        if kind in ("shared", "expert"):                   # MoE: ゲートの平均と、層ごとの行・例の数(ffn・attn の形は変えない)
+            row.update({"gate_a": gate_a.get(L), "rows_a": int(ga["rows_l"][L]), "rows_b": int(gb["rows_l"][L]) if gb else 0,
+                        "examples_a": len(ga["index_l"][L]), "examples_b": len(gb["index_l"][L]) if gb else 0})
+            if kind == "expert" and starts_info is not None:       # 専門家の鍵: 層ごとの書き出しの行と重み
+                sh, nst = _start_share(ga, L)
+                row.update({"rows_a_start": nst, "start_share": sh})
+        rows.append(row)
     texts = run["texts"]
     sample_side = "AB" if mode == "same" else "A"
     return {"name": name, "path": str(path), "target": ks.target, "mode": mode, "positions": pos_a.text,
@@ -1196,7 +1384,7 @@ def build_keys(session, contrast, *, name: str | None = None, layers, positions:
             "contrast": cs.name, "contrast_sha": cs.sha, "layers": rows,
             "dropped": [{"layer": L, "error": v} for L, v in dropped.items()], "counts": counts,
             "n_pseudo": ks.n_pseudo, "replies": run["replies"], "dont_touch": pinfo["dont_touch"], "iv": iv_desc,
-            "matched": {"A": n_a, "of": int(ga["n_examples"])},
+            "matched": {"A": n_a, "of": int(ga["n_examples"])}, "reply_start": starts_info, "dont_touch_start": dt_start_rec,
             "samples": [t[:240] for t in texts.get(sample_side, [])[:4]],
             "notes": pinfo["notes"] + ["build_auc は作成に使った例での値です(甘い)。key-check を保留集合(subset odd か別の対照集合)で"
                                        "回してください"],
@@ -1279,7 +1467,7 @@ def expert_usage(session, contrast, *, layers, positions: str | None = None, pos
                     progress=progress)
     G = run["groups"]
     if "A" not in G or not G["A"]["index"]:
-        raise GneError("BAD_CONTRAST", f"側 A の位置がありません(positions {pos_a.text})")
+        raise GneError("BAD_CONTRAST", f"書き込みたい位置がありません(positions {pos_a.text})")
     out_layers = []
     for L in Ls:
         n = tc.n_expert[L]
@@ -1431,7 +1619,7 @@ def key_check(session, key, *, contrast=None, subset: str = "odd", layers=None, 
         warn(msg)
         notes.append("作成に使った例を含む集合で測りました(held_out: false、甘い値)")
     run = _run_plan(session, sets, layers=Ls, target=ks.target, skip=skip, max_tokens=max_tokens, samples=0,
-                    project=M, rms_groups=(), progress=progress)
+                    project=M, rms_groups=(), progress=progress, start=START_TOKENS)
     G = run["groups"]
     layers_out = []
     for L in Ls:
@@ -1439,10 +1627,97 @@ def key_check(session, key, *, contrast=None, subset: str = "odd", layers=None, 
               for g in G}
         tok = {g: (np.concatenate(G[g]["proj"][L], axis=0) if G[g]["proj"][L] else np.zeros((0, M[L].shape[0])))
                for g in G}
-        layers_out.append(_layer_result(ks, L, ex, tok, n_ps))
+        res = _layer_result(ks, L, ex, tok, n_ps)
+        res["start_rho"] = _start_rho(G, L)
+        layers_out.append(res)
     counts = {g: {"examples": len(G[g]["index"]), "rows": int(G[g]["rows"]), "of": int(G[g]["n_examples"])} for g in G}
+    ga = G.get("A")
+    if ks.target.startswith("expert"):                      # 専門家の鍵は層ごとの行(専門家 e が選ばれた位置だけ)
+        for L in Ls:
+            na, ra = (len(ga["index_l"][L]), int(ga["rows_l"][L])) if ga else (0, 0)
+            if few_side_a(na, ra):
+                warn(few_side_a_message(na, ra, where=f"L{L}: ", check=True))
+    else:
+        na, ra = (len(ga["index"]), int(ga["rows"])) if ga else (0, 0)
+        if few_side_a(na, ra):
+            warn(few_side_a_message(na, ra, check=True))
+    hot = _start_hot(layers_out, {g: G[g]["positions"] for g in G},
+                     auto=((ks.info.get("dont_touch_start") or {}).get("groups") or {}))
+    if hot:
+        warn(_start_hot_message(hot))
     return _check_summary(ks, Ls, layers_out, ov, cs.name, cs.sha, pos_a.text, pos_b.text, skip, max_tokens, mode, counts,
                           pinfo["notes"] + notes, warnings, t0, run["replies"], iv_desc)
+
+
+def _start_rho(G: dict, L: int) -> dict | None:
+    """key-check の層 L の、側 B と dont_touch の群の返事の書き出しでの ρ(主の鍵): 書き出しの位置 j(返事の j 番目のトークンを
+    決める位置、0 = 生成プロンプトの最後のトークン)ごとの中央値・最大・例の数。{"B": {...}, "dont_touch": {名前: {...}}}。
+    dont_touch の ρ の中央値(dont_touch_median)は返事の全位置の中央値なので、書き出しの 1 位置で合っても目立たない(F138)。"""
+    out: dict = {}
+    for g, d in G.items():
+        st = d.get("start")
+        if (g != "B" and not g.startswith("dt:")) or not st or st.get("proj") is None:
+            continue
+        k = int(st["k"])
+        per: list[list[float]] = [[] for _ in range(k)]
+        for offs, pj in st["proj"].get(L) or []:
+            for j, v in zip(offs, pj[:, 0]):
+                if 0 <= int(j) < k:
+                    per[int(j)].append(float(v))
+        row = {"median": [float(np.median(v)) if v else None for v in per],
+               "max": [float(np.max(v)) if v else None for v in per], "n": [len(v) for v in per]}
+        if g == "B":
+            out["B"] = row
+        else:
+            out.setdefault("dont_touch", {})[g[3:]] = row
+    return out or None
+
+
+def _start_hot(layers_out: list[dict], positions: dict[str, str], auto=()) -> list[dict]:
+    """書き出しで鍵が合っている(書き出しの位置ごとの ρ の中央値が START_RHO_WARN 以上、例 2 つ以上)層と群。群ごとに中央値が
+    最大の位置 1 つ。starts は書き出しを Q に入れた群(positions last・assistant の群か、鍵の作成で返事の冒頭を自動で足した
+    群 auto。名前で照らすので、key-check の対照集合の同じ名前の群)か。"""
+    auto = set(auto)
+    hot = []
+    for r in layers_out:
+        sr = r.get("start_rho") or {}
+        groups = ([("B", "B", sr["B"])] if sr.get("B") else []) + [(f"dt:{n}", n, v) for n, v in (sr.get("dont_touch") or {}).items()]
+        for g, label, v in groups:
+            cand = [(m, j) for j, (m, n) in enumerate(zip(v["median"], v["n"])) if m is not None and n >= 2 and m >= START_RHO_WARN]
+            if cand:
+                m, j = max(cand)
+                pos = positions.get(g)
+                hot.append({"layer": r["layer"], "group": label, "j": j, "median": m,
+                            "starts": (g != "B" and label in auto) or (bool(pos) and parse_positions(pos).kind in _PROMPT_END)})
+    return hot
+
+
+def _start_hot_message(hot: list[dict]) -> str:
+    """key-check で、書き込みたくない位置(側 B)・dont_touch の返事の冒頭で鍵が反応しているときの警告の文。dont_touch の
+    冒頭で反応するのは、書き込みたくない場面への漏れ(F134・F138)。書き込みたくない位置(鍵を作った場面の、書き込みたい位置
+    以外)の冒頭だけで反応するのは、その場面の返事の冒頭で方向を書くということで、書き込みたい位置が冒頭に偏った鍵では書いた
+    後も鍵が反応し続けて繰り返しに落ちやすい(F137)。"""
+    def fmt(hs):
+        return "、".join(f"L{h['layer']} {'書き込みたくない位置' if h['group'] == 'B' else h['group']} {h['median']:+.2f}"
+                        f"(位置 {h['j']})" for h in hs[:6]) + ("、…" if len(hs) > 6 else "")
+    dts = [h for h in hot if h["group"] != "B"]
+    bs = [h for h in hot if h["group"] == "B"]
+    fix = ("ふつうの質問を dont_touch に足して、鍵を作り直してください(dont_touch の質問の、返事を書き始める直前の位置は、"
+           "鍵の作成で自動で Q に入ります。dont_touch_start を切っていれば戻します)")
+    if dts:
+        msg = (f"dont_touch の返事の冒頭で鍵が反応しています(返事の冒頭での ρ の中央値 {fmt(dts)}。位置 0 は返事を書き始める"
+               "直前の位置)。書き込みたくない場面でも、返事の最初で方向を書いて言い回しが変わります(dont_touch の ρ の中央値は"
+               "返事の全位置の中央値なので、返事の冒頭の 1 位置だけで反応しても目立ちません)。" + fix)
+        if bs:
+            msg += f"。書き込みたくない位置の返事の冒頭でも反応しています({fmt(bs)})"
+        if any(h["starts"] for h in dts):
+            msg += "。返事の冒頭を Q に入れた群でも保留した例で反応しているので、その群の質問を増やしてください"
+        return msg
+    return (f"書き込みたくない位置(鍵を作った場面の、書き込みたい位置以外)の返事の冒頭で鍵が反応しています(返事の冒頭での ρ の"
+            f"中央値 {fmt(bs)}。位置 0 は返事を書き始める直前の位置)。その場面の返事では、書き込みたい位置でなくても返事の冒頭で"
+            "方向を書きます。書き込みたい位置が返事の冒頭に偏った鍵では、書いた後も状態が書き込みたい位置の状態から抜けずに鍵が"
+            "反応し続け、繰り返しに落ちやすくなります(keyed-write.md §14)。dont_touch の返事の冒頭で反応していなければ、"
+            "ほかの場面には漏れていません。生成した返事で繰り返しを数えてください")
 
 
 def _pct(v: list, q: float) -> float | None:

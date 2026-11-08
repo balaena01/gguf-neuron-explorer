@@ -16,7 +16,7 @@ gne は llama-cpp-python の上で動く。GPU を使うには、llama-cpp-pytho
 - Python 3.11 以上と [uv](https://docs.astral.sh/uv/)。
 - **モデルは WSL 側のディスク(ext4、`~/` の下など)に置く。** `/mnt/c` などの Windows 側のドライブは 9P 経由で読むので、GGUF の読み込みと `gne lens logit` のような重みの読み出しが遅くなる。
 - `gne` の結果の置き場所(`~/.gne`、`--root` / `GNE_ROOT`)も WSL 側に置く。複数の環境で同じ置き場所を共有できる(4 章)。
-- llama.cpp が新しい arch に対応していないときは、llama-cpp-python の vendor の llama.cpp を新しくしてビルドし直す。C の構造体が変わっていればバインディングも直す(`.claude/skills/gne/references/new_model.md`)。
+- llama.cpp が新しい arch に対応していないときは、llama-cpp-python に同梱の llama.cpp(vendor)を新しくしてビルドし直す。C の構造体が変わっていればバインディングも直す(`.claude/skills/gne/references/new_model.md`)。
 
 ## 2. WSL + CUDA(NVIDIA)
 

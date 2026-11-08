@@ -1,10 +1,11 @@
 // direction ビューの「鍵(keyed)」(CHANGE-07 G): 鍵つきの書き込み(mode: keyed)の鍵を対照集合から作り(direction_key のジョブ、
 // gne direction key)、作成に使っていない例で状態を分けているかを確かめる(direction_key_check のジョブ、gne direction key-check)。
-// 1. 鍵を作る: 対照集合・層・名前・positions(before:<正規表現> なら推論時と同じ文脈の返事の「変えたい位置」= 作り方 (b))・
-//    q_mode・subset・擬似鍵の本数。進み具合をここにも出し、終わると層ごとの kn・gain・q_rank・作成に使った例での AUC と警告。
+// 1. 鍵を作る: 対照集合・層・名前・positions(before:<正規表現> なら推論時と同じ文脈の返事の「書き込みたい位置」= 作り方 (b))・
+//    q_mode・subset・比較用の鍵の本数。進み具合をここにも出し、終わると層ごとの kn・gain・q_rank・作成に使った例での AUC と警告。
 //    行の「+ レシピ」で keyed のユニット(L:ffn:keyed:aα@方向#鍵)をレシピに足す。
-// 2. key-check: 層ごとの例単位・トークン単位の AUC、選択性(例ごとの ρ の平均の差 A − B)と擬似鍵の p95、○/×(擬似鍵を超えるか)、
-//    保留集合か(held_out)と重なりの警告。層ごとの ρ = κᵀx の分布のヒストグラム(側 A・側 B・dont_touch の群。群ごとの割合で重ねる SVG)。
+// 2. key-check: 層ごとの例単位・トークン単位の AUC、key-check の選択性(例ごとの ρ の平均の差、書き込みたい位置 − 書き込みたくない位置)と
+//    比較用の鍵の p95、○/×(比較用の鍵を超えるか)、保留集合か(held_out)と重なりの警告。層ごとの鍵の反応の強さ ρ = κᵀx の分布の
+//    ヒストグラム(書き込みたい位置・書き込みたくない位置・dont_touch の群。群ごとの割合で重ねる SVG)。
 // 3. 保存した鍵の一覧(<root>/keys/<model_id>/)。「見る」で作成の記録、「確かめる」で key-check の欄に入れる。
 import { getJSON } from "./api.js";
 import { t } from "./i18n.js";
@@ -35,11 +36,11 @@ export function parseLayers(s) {
 }
 
 // 群の名前(A・B・dt:<名前>)の表示と色の組
-const groupLabel = (g) => (g === "A" ? t("側 A(効かせたい)") : g === "B" ? t("側 B(触りたくない)") : `dont_touch ${g.replace(/^dt:/, "")}`);
+const groupLabel = (g) => (g === "A" ? t("書き込みたい位置") : g === "B" ? t("書き込みたくない位置") : `dont_touch ${g.replace(/^dt:/, "")}`);
 const groupCls = (g, i) => (g === "A" ? "ga" : g === "B" ? "gb" : `gd${i % 3}`);
 
 // 層 1 つの ρ の分布(hist: { edges, A, B, "dt:<名前>": [...] })。群ごとの割合(その群の数で割る)で重ねる。
-// 側 B を先に塗り、側 A を上に、dont_touch は線(段)で。0 と 1(κᵀμ = 1、側 A の平均が来る所)に縦の点線。棒にマウスで数と割合
+// 書き込みたくない位置を先に塗り、書き込みたい位置を上に、dont_touch は線(段)で。0 と 1(κᵀμ = 1、書き込みたい位置の平均が来る所)に縦の点線。棒にマウスで数と割合
 export function histSVG(h, { title = "" } = {}) {
   if (!h || !Array.isArray(h.edges) || h.edges.length < 2) return `<p class="muted note">${t("ヒストグラムがありません")}</p>`;
   const W = 320, H = 140, PL = 34, PR = 8, PT = 18, PB = 24;
@@ -60,7 +61,7 @@ export function histSVG(h, { title = "" } = {}) {
     const f = (top * i) / 2;
     parts.push(`<line class="grid" x1="${PL}" x2="${W - PR}" y1="${Y(f)}" y2="${Y(f)}"/><text class="ax" x="${PL - 4}" y="${Y(f) + 3}" text-anchor="end">${Math.round(f * 100)}%</text>`);
   }
-  for (const v of [0, 1]) {                                              // ρ = 0(何も足さない)と ρ = 1(側 A の平均)
+  for (const v of [0, 1]) {                                              // ρ = 0(何も足さない)と ρ = 1(書き込みたい位置の平均)
     if (v <= lo || v >= hi) continue;
     parts.push(`<line class="ref" x1="${X(v)}" x2="${X(v)}" y1="${PT}" y2="${H - PB}"/><text class="ax" x="${X(v)}" y="${H - PB + 11}" text-anchor="middle">${v}</text>`);
   }
@@ -100,7 +101,7 @@ export class KeyPanel {
     this.loaded = false;
     const n = this.nLayer, sug = n ? [0.3, 0.5, 0.7].map((f) => Math.round((n - 1) * f)).join(",") : "";
     root.innerHTML = `
-      <p class="muted note pp-help">${t("鍵つきの書き込み(keyed): 書き込み行列(ffn_down など)にランク 1 の ΔW = α·d·κᵀ を足し、入力の活性 x が鍵 κ に合う(ρ = κᵀx が大きい)ときだけ方向 d(方向セットの r_L)を書く。κ は側 A(効かせたい状態)の活性の平均 μ から、側 B・dont_touch(触りたくない状態)の張る部分空間を除いたもの(κᵀμ = 1)。鍵を作ったら、作成に使っていない例(subset odd か別の対照集合)で key-check を回し、擬似鍵(ラベルを並べ替えて作った鍵)より選択性が高いことを確かめてから、レシピに足す。")}</p>
+      <p class="muted note pp-help">${t("鍵つきの書き込み(keyed): 残差に書き込む重み行列(ffn_down など)にランク 1 の ΔW = α·d·κᵀ を足し、入力の活性 x に鍵 κ が反応する(鍵の反応の強さ ρ = κᵀx が大きい)ときだけ方向 d(方向セットの r_L)を書く。κ は書き込みたい位置の活性の平均 μ から、書き込みたくない位置と dont_touch の活性が張る部分空間を除いたもの(κᵀμ = 1)。鍵を作ったら、作成に使っていない例(subset odd か別の対照集合)で key-check を回し、比較用の鍵(ラベルをシャッフルして同じ手順で作った鍵)より選択性が高いことを確かめてから、レシピに足す。")}</p>
       <section class="kx-sec"><h4>${t("鍵を作る")}</h4>
         <div class="pp-in">
           <label class="muted">${t("対照集合")} <select id="kx-contrast"></select></label>
@@ -110,24 +111,24 @@ export class KeyPanel {
         <div class="pp-set">
           <label class="muted" title="${t("鍵の名前(<root>/keys/<model_id>/<名前>.npz)。空なら対照集合の名前")}">${t("名前")} <input id="kx-name" size="16" spellcheck="false"></label>
           <label class="muted" title="${t("鍵を作る層(カンマ区切りか 10-16)。層ごとに κ を作る")}">${t("層")} <input id="kx-layers" size="12" value="${sug}" placeholder="8,14,20" spellcheck="false"></label>
-          <label class="muted" title="${t("鍵が読む入力の書き込み行列。ffn = ffn_down(ニューロンの活性)、attn = attn_output(ヘッドの出力の連結)、shared = shared expert、expert = 専門家 e(選ばれた位置だけ)")}">${t("書き込み先")}
+          <label class="muted" title="${t("鍵が入力を読む、残差に書き込む重み行列。ffn = ffn_down(ニューロンの活性)、attn = attn_output(ヘッドの出力の連結)、shared = shared expert、expert = 専門家 e(選ばれた位置だけ)")}">${t("書き込み先")}
             <select id="kx-target"><option value="ffn">ffn</option><option value="attn">attn</option><option value="shared">shared</option><option value="expert">expert</option></select>
             <input id="kx-expert" type="number" min="0" class="hidden" placeholder="e" style="width:4em"></label>
-          <label class="muted" title="${t("側 A の位置。空なら対照集合の値(無ければ response)。before:<正規表現> は一致の直前のトークン(推論時と同じ文脈の返事で、そのトークンを決める位置 = 作り方 (b))。response・last・assistant は system_a の文脈(作り方 (a))")}">positions <input id="kx-pos" size="22" list="kx-pos-list" spellcheck="false"></label>
+          <label class="muted" title="${t("書き込みたい位置。空なら対照集合の値(無ければ response)。before:<正規表現> は一致の直前のトークン(推論時と同じ文脈の返事で、そのトークンを決める位置 = 作り方 (b))。response・last・assistant は system_a の文脈(作り方 (a))")}">positions <input id="kx-pos" size="22" list="kx-pos-list" spellcheck="false"></label>
           <datalist id="kx-pos-list"><option value="response"><option value="last"><option value="assistant"><option value="before:(です|ます)。"></datalist>
-          <label class="muted" title="${t("Q(触りたくない状態の基底)の作り方。examples = 例ごとの平均、means = 群ごとの平均(よく効くが選択性は粗い)、samples = トークンの標本(選択性が高いが、標本が多いと鍵が消える)")}">q_mode
+          <label class="muted" title="${t("Q(書き込みたくない位置の活性が張る部分空間の基底)の作り方。examples = 例ごとの平均、means = 群ごとの平均(よく効くが選択性は粗い)、samples = トークンの標本(選択性が高いが、標本が多いと鍵が消える)")}">q_mode
             <select id="kx-qmode"><option>examples</option><option>means</option><option>samples</option></select></label>
           <label class="muted" title="${t("鍵を作るのに使う質問。even = 偶数番目(key-check は odd で確かめる)、all = 全部(保留集合が残らない)")}">subset
             <select id="kx-subset"><option>even</option><option>odd</option><option>all</option></select></label>
-          <label class="muted" title="${t("擬似鍵の本数(側 A と側 B のラベルを釣り合わせて並べ替えて作る、ランダム対照)。key-check の p95 に使う")}">${t("擬似鍵")} <input id="kx-pseudo" type="number" min="0" max="256" value="16" style="width:4.5em"></label>
+          <label class="muted" title="${t("比較用の鍵の本数。書き込みたい位置・書き込みたくない位置のラベルを、偏らないように例ごとにシャッフルして、同じ手順で作るランダムな対照。key-check の p95 に使う")}">${t("比較用の鍵")} <input id="kx-pseudo" type="number" min="0" max="256" value="16" style="width:4.5em"></label>
           <label class="muted" title="${t("返事を生成するときの長さ(返事を与えるなら関係ない)")}">max_tokens <input id="kx-mt" type="number" min="1" max="2048" value="96" style="width:5em"></label>
         </div>
         <details class="kx-adv"><summary class="muted note">${t("細かい設定")}</summary><div class="pp-set">
-          <label class="muted" title="${t("側 B の位置。空なら before:<re> のとき not-before:<re>、それ以外は positions と同じ")}">positions_b <input id="kx-posb" size="22" spellcheck="false"></label>
+          <label class="muted" title="${t("書き込みたくない位置。空なら before:<re> のとき not-before:<re>、それ以外は positions と同じ")}">positions_b <input id="kx-posb" size="22" spellcheck="false"></label>
           <label class="muted" title="${t("返事の最初の何トークンを飛ばすか。空なら対照集合の値(無ければ 0)")}">skip <input id="kx-skip" type="number" min="0" style="width:4em"></label>
           <label class="muted" title="${t("モデル自身の返事のファイル(YAML / JSON のリストか {プロンプト: 返事}、サーバの作業場所からの相対)。空なら対照集合の replies か、無介入で生成")}">${t("返事のファイル")} <input id="kx-replies" size="26" spellcheck="false"></label>
           <label class="muted" title="${t("他の介入を当てた状態で鍵を作る(保存したレシピの名前か、ユニット 14:8949:+1 などを空白区切りで)。空なら無介入")}">${t("介入(iv)")} <input id="kx-iv" size="18" spellcheck="false"></label>
-          <label class="muted" title="${t("擬似鍵の並べ替えの種")}">seed <input id="kx-seed" type="number" value="0" style="width:4.5em"></label>
+          <label class="muted" title="${t("比較用の鍵のシャッフルの種")}">seed <input id="kx-seed" type="number" value="0" style="width:4.5em"></label>
         </div></details>
         <div class="pp-go"><button id="kx-go">${t("鍵を作る")}</button> <span class="muted note" id="kx-status"></span></div>
         <div id="kx-prog" class="note mono"></div>
@@ -204,8 +205,8 @@ export class KeyPanel {
     this.$("#kx-name").placeholder = c ? c.name : t("(対照集合の名前)");
     this.$("#kx-pos").placeholder = c ? c.positions || "response" : t("(対照集合の値)");
     if (!c) { info.textContent = path ? t("(一覧に無いファイル: そのままジョブに渡します)") : t("対照集合がありません(configs/contrast/ か <root>/contrasts/ の YAML)"); return; }
-    const mode = c.mode === "same" ? t("作り方 (b): 推論時と同じ文脈(system なし)の返事の、正規表現の直前の位置を側 A、同じ返事のそれ以外を側 B")
-      : t("作り方 (a): system_a(や recipe_a)の文脈の活性を側 A、system_b の文脈を側 B");
+    const mode = c.mode === "same" ? t("作り方 (b): 推論時と同じ文脈(system なし)の返事の、正規表現の直前の位置を書き込みたい位置、同じ返事のそれ以外を書き込みたくない位置にする")
+      : t("作り方 (a): system_a(や recipe_a)の文脈の活性を書き込みたい位置、system_b の文脈を書き込みたくない位置にする");
     info.innerHTML = `${esc(c.label)} · ${c.n_prompts ?? "—"} ${t("問")} · positions <span class="mono">${esc(c.positions || "response")}</span> · ${esc(mode)}${
       c.dont_touch.length ? ` · dont_touch: ${esc(c.dont_touch.join(", "))}` : ""}${c.replies ? ` · ${t("返事つき")}` : ""}`;
   }
@@ -352,20 +353,20 @@ export class KeyPanel {
     const counts = r.counts || {};
     const head = `<p class="note">${t("鍵")} <b class="mono">${esc(name)}</b> · ${t("書き込み先")} <span class="mono">${esc(target)}</span> · mode <span class="mono">${esc(mode || "—")}</span>${
       mode === "same" ? ` <span class="muted">(${t("推論時と同じ文脈の返事")})</span>` : mode === "system" ? ` <span class="muted">(${t("system_a の文脈")})</span>` : ""} · positions <span class="mono">${esc(r.positions || "—")}</span>${
-      (isBuild ? r.positions_b : info.positions_b) ? ` / B <span class="mono">${esc(isBuild ? r.positions_b : info.positions_b)}</span>` : ""} · q_mode ${esc(r.q_mode || "—")} · subset ${esc(r.subset || "—")} · ${
-      t("側 A {a} 例 · 側 B {b} 例", { a: counts.a ?? "—", b: counts.b ?? "—" })}${counts.dt ? ` · dont_touch ${counts.dt}` : ""} · ${t("擬似鍵 {n} 本", { n: r.n_pseudo ?? "—" })}${
+      (isBuild ? r.positions_b : info.positions_b) ? ` · positions_b <span class="mono">${esc(isBuild ? r.positions_b : info.positions_b)}</span>` : ""} · q_mode ${esc(r.q_mode || "—")} · subset ${esc(r.subset || "—")} · ${
+      t("書き込みたい側 {a} 例 · 書き込みたくない側 {b} 例", { a: counts.a ?? "—", b: counts.b ?? "—" })}${counts.dt ? ` · dont_touch ${counts.dt}` : ""} · ${t("比較用の鍵 {n} 本", { n: r.n_pseudo ?? "—" })}${
       isBuild && r.matched ? ` · ${t("正規表現が一致した例 {a} / {n}", { a: r.matched.A, n: r.matched.of })}` : ""}${isBuild ? ` · ${fmt(r.seconds, 1)} ${t("秒")}` : ""}</p>`;
     const add = `<div class="kx-add muted note">${t("書き込む方向")} <select id="kx-dir">${dirs.length ? dirs.map((d) => `<option${d === pick ? " selected" : ""}>${esc(d)}</option>`).join("") : `<option value="">${t("(なし)")}</option>`}</select>
       α <input id="kx-alpha" type="number" step="0.05" value="1" style="width:5em" title="${t("α = 1 で、観測した A − B の平均差 r_L をそのまま書く。負で打ち消す")}">
       <span>${dirs.length ? t("行の「+ レシピ」で、その層の keyed のユニットをレシピに足す") : t("方向がありません(gne direction --contrast で作れます)")}</span></div>`;
-    const rows = this._rows().map((x) => `<tr${x.weak ? ` class="rnd"` : ""}><td>L${x.layer}</td><td title="${t("|k| / |μ|: μ のうち側 B の部分空間に直交する割合")}">${fmt(x.kn, 3)}</td><td title="${t("1 / kn: 側 B の漏れが最大これだけ増える")}">${fmt(x.gain, 1)}</td><td>${x.q_rank ?? "—"}</td><td>${fmt(x.build_auc, 3)}</td>
+    const rows = this._rows().map((x) => `<tr${x.weak ? ` class="rnd"` : ""}><td>L${x.layer}</td><td title="${t("|k| / |μ|: μ のうち、書き込みたくない位置の部分空間に直交する割合")}">${fmt(x.kn, 3)}</td><td title="${t("1 / kn: 書き込みたくない位置への漏れが最大これだけ増える")}">${fmt(x.gain, 1)}</td><td>${x.q_rank ?? "—"}</td><td>${fmt(x.build_auc, 3)}</td>
       <td class="l">${x.weak ? `<span class="pp-warn">${t("弱い(kn < 0.05)")}</span>` : ""}</td>
       <td><button class="small" data-kadd="${x.layer}"${dirs.length ? "" : " disabled"} title="${t("この層の keyed のユニットをレシピに足す")}">${t("+ レシピ")}</button></td></tr>`).join("");
     const dropped = isBuild ? (r.dropped || []).map((d) => `L${d.layer}: ${d.error}`) : Object.entries(info.dropped || {}).map(([L, m]) => `L${L}: ${m}`);
     const warns = isBuild ? r.warnings || [] : [];
     const notes = isBuild ? r.notes || [] : [];
     el.innerHTML = `<div class="kx-res">${head}${add}
-      <div class="evx-scroll"><table class="evx mono kx-tab"><thead><tr><th>${t("層")}</th><th>kn</th><th>gain</th><th>q_rank</th><th title="${t("作成に使った例での側 A 対 側 B の AUC(甘い)。key-check で保留した例を測る")}">${t("作成時の AUC")}</th><th class="l">${t("注意")}</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
+      <div class="evx-scroll"><table class="evx mono kx-tab"><thead><tr><th>${t("層")}</th><th>kn</th><th>gain</th><th>q_rank</th><th title="${t("作成に使った例での、書き込みたい位置 対 書き込みたくない位置の AUC(甘い)。key-check で保留した例を測る")}">${t("作成時の AUC")}</th><th class="l">${t("注意")}</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
       ${dropped.length ? `<p class="err note">${t("鍵にならず外した層")}: ${dropped.map(esc).join(" / ")}</p>` : ""}
       ${warns.length ? `<ul class="evx-notes">${warns.map((w) => `<li>${esc(w)}</li>`).join("")}</ul>` : ""}
       ${notes.length ? `<p class="muted note">${notes.map(esc).join("<br>")}</p>` : ""}
@@ -384,15 +385,20 @@ export class KeyPanel {
     const held = r.held_out ? `<p class="note kx-held"><span class="kx-ok">✓</span> ${t("保留した例で測りました(作成 {a}・確認 {b}、重なり 0)", { a: ov.built_subset ?? "—", b: ov.subset ?? "—" })}</p>`
       : `<p class="note err kx-held">⚠ ${t("作成に使った例と重なっています。AUC は甘い値です")}${why.length ? `: ${why.map(esc).join("、")}` : r.contrast ? "" : `: ${t("対照集合を渡していないので、作成時の例ごとの平均で測りました")}`}</p>`;
     const counts = r.counts || {};
-    const cnt = Object.entries(counts).map(([g, c]) => `${esc(g.replace(/^dt:/, "dt "))} ${c.examples}/${c.of}`).join(" · ");
-    const beat = r.all_beat_pseudo === true ? `<span class="kx-ok">○</span> ${t("どの層も擬似鍵を超えました")}`
-      : r.all_beat_pseudo === false ? `<span class="kx-ng">×</span> ${t("擬似鍵を超えない層があります(鍵が本文を拾っているかもしれません。対照集合の本文をそろえる)")}` : "";
+    const cnt = Object.entries(counts).map(([g, c]) => `${esc(g === "A" || g === "B" ? groupLabel(g) : g.replace(/^dt:/, "dt "))} ${c.examples}/${c.of}`).join(" · ");
+    const beat = r.all_beat_pseudo === true ? `<span class="kx-ok">○</span> ${t("どの層も比較用の鍵を超えました")}`
+      : r.all_beat_pseudo === false ? `<span class="kx-ng">×</span> ${t("比較用の鍵を超えない層があります(鍵が本文を拾っているかもしれません。対照集合の本文をそろえる)")}` : "";
     const rows = (r.layers || []).map((x) => {
       const dt = Object.entries(x.dont_touch_median || {}).map(([g, v]) => `${esc(g)} ${fmt(v, 2)}`).join(" · ");
+      // 返事を書き始める直前の位置(返事の冒頭の位置 0)での ρ の中央値: 書き込みたくない位置と dont_touch の群(0.4 以上で警告)
+      const sr = x.start_rho || {};
+      const st = [...(sr.B ? [["B", sr.B]] : []), ...Object.entries(sr.dont_touch || {})]
+        .filter(([, v]) => v && v.median && v.median[0] != null)
+        .map(([g, v]) => `<span class="${v.median[0] >= 0.4 ? "kx-ng" : ""}">${esc(g === "B" ? groupLabel(g) : g)} ${fmt(v.median[0], 2)}</span>`).join(" · ");
       return `<tr${x.layer === r.best_layer ? ` class="best"` : ""} data-kl="${x.layer}"><td>L${x.layer}${x.layer === r.best_layer ? " ★" : ""}</td>
         <td>${fmt(x.auc, 3)}</td><td>${fmt(x.auc_token, 3)}</td><td class="muted">${fmt((x.pseudo_auc_token || {}).p95 ?? (x.pseudo_auc || {}).p95, 3)}</td><td>${mark(x.beats_pseudo_auc)}</td>
         <td>${fmt(x.selectivity, 3)}</td><td class="muted">${fmt((x.pseudo_selectivity || {}).p95, 3)}</td><td>${mark(x.beats_pseudo)}</td>
-        <td class="muted">${fmt(x.b_split_auc, 3)}</td><td class="l">${dt || "—"}</td><td class="muted">${fmt(x.kn, 3)}</td></tr>`;
+        <td class="muted">${fmt(x.b_split_auc, 3)}</td><td class="l">${dt || "—"}${st ? `<br><span class="muted">${t("返事の冒頭")}:</span> ${st}` : ""}</td><td class="muted">${fmt(x.kn, 3)}</td></tr>`;
     }).join("");
     const hists = (r.layers || []).map((x) => `<figure class="kx-fig" data-kl="${x.layer}">${histSVG(x.hist, { title: `L${x.layer} · AUC ${fmt(x.auc_token ?? x.auc, 3)} · ${t("選択性")} ${fmt(x.selectivity, 2)}` })}</figure>`).join("");
     const groups = new Set();
@@ -402,16 +408,16 @@ export class KeyPanel {
       .map((g) => `<span><i class="kx-sw ${groupCls(g, g.startsWith("dt:") ? di++ : 0)}"></i>${esc(groupLabel(g))}</span>`).join("");
     el.innerHTML = `<div class="kx-res">
       <p class="note">${t("鍵")} <b class="mono">${esc(r.key)}</b> · ${t("対照集合")} ${esc(r.contrast || t("(なし)"))}${r.subset ? ` (subset ${esc(r.subset)})` : ""} · mode ${esc(r.mode || "—")} · positions <span class="mono">${esc(r.positions || "—")}</span>${
-        r.positions_b ? ` / B <span class="mono">${esc(r.positions_b)}</span>` : ""}${cnt ? ` · ${cnt}` : ""} · ${t("擬似鍵 {n} 本", { n: r.n_pseudo ?? "—" })} · ${fmt(r.seconds, 1)} ${t("秒")}</p>
+        r.positions_b ? ` · positions_b <span class="mono">${esc(r.positions_b)}</span>` : ""}${cnt ? ` · ${cnt}` : ""} · ${t("比較用の鍵 {n} 本", { n: r.n_pseudo ?? "—" })} · ${fmt(r.seconds, 1)} ${t("秒")}</p>
       ${held}${beat ? `<p class="note">${beat}</p>` : ""}
       <div class="evx-scroll"><table class="evx mono kx-tab kx-check"><thead><tr><th>${t("層")}</th>
-        <th title="${t("例ごとの ρ の平均での側 A 対 側 B の AUC")}">${t("AUC(例)")}</th><th title="${t("トークンごとの ρ での AUC")}">${t("AUC(トークン)")}</th>
-        <th title="${t("擬似鍵のトークン単位の AUC の 95 パーセンタイル")}">${t("擬似 p95")}</th><th title="${t("トークン単位の AUC が擬似鍵の p95 を超えるか")}">${t("AUC で超える")}</th>
-        <th title="${t("例ごとの ρ の平均の差(側 A − 側 B)。書き込む量 α(κᵀx)d の A と B の差")}">${t("選択性")}</th><th title="${t("擬似鍵の選択性の 95 パーセンタイル")}">${t("擬似 p95")}</th>
-        <th title="${t("選択性が擬似鍵の p95 を超え、例の AUC が 0.5 を超えるか(beats_pseudo)")}">${t("擬似鍵を超える")}</th>
-        <th title="${t("参考: 側 B を 2 つに分けて作った擬似差の鍵の AUC(0.5 付近なら鍵が側 B の中の差を拾っていない)")}">${t("B 2 分割")}</th>
-        <th class="l" title="${t("dont_touch の群の ρ の中央値(0 に近いほど触らない)")}">${t("dont_touch 中央値")}</th><th>kn</th></tr></thead><tbody>${rows}</tbody></table></div>
-      <h4 class="note">${t("層ごとの ρ = κᵀx の分布(群ごとの割合。縦の点線: 0 = 何も足さない、1 = 側 A の平均)")}</h4>
+        <th title="${t("例ごとの ρ の平均での、書き込みたい位置 対 書き込みたくない位置の AUC")}">${t("AUC(例)")}</th><th title="${t("トークンごとの ρ での AUC")}">${t("AUC(トークン)")}</th>
+        <th title="${t("比較用の鍵のトークン単位の AUC の 95 パーセンタイル")}">${t("比較用の鍵の p95")}</th><th title="${t("トークン単位の AUC が比較用の鍵の p95 を超えるか")}">${t("AUC で超える")}</th>
+        <th title="${t("key-check の選択性: 例ごとの鍵の反応の強さ ρ の平均の差(書き込みたい位置 − 書き込みたくない位置)。書き込む量 α(κᵀx)d の両者の差にあたる。eval の選択性(残差の変化)とは別の量")}">${t("選択性")}</th><th title="${t("比較用の鍵の選択性の 95 パーセンタイル")}">${t("比較用の鍵の p95")}</th>
+        <th title="${t("選択性が比較用の鍵の p95 を超え、例の AUC が 0.5 を超えるか(beats_pseudo)")}">${t("比較用の鍵を超える")}</th>
+        <th title="${t("参考: 書き込みたくない位置を 2 つに分け、その差から作った鍵の AUC(0.5 付近なら、鍵が書き込みたくない位置の中の差を拾っていない)")}">${t("書き込みたくない位置の 2 分割")}</th>
+        <th class="l" title="${t("dont_touch の群の ρ の中央値(0 に近いほど書き込まない)。下の段は、書き込みたくない位置と dont_touch の群の、返事を書き始める直前の位置での ρ の中央値(0.4 以上は返事の冒頭で鍵が反応している)")}">${t("dont_touch 中央値")}</th><th>kn</th></tr></thead><tbody>${rows}</tbody></table></div>
+      <h4 class="note">${t("層ごとの鍵の反応の強さ ρ = κᵀx の分布(群ごとの割合。縦の点線: 0 = 何も足さない、1 = 書き込みたい位置の平均)")}</h4>
       <div class="evx-legend note kx-legend">${legend}</div>
       <div class="kx-hists">${hists}</div>
       ${(r.warnings || []).length ? `<ul class="evx-notes">${r.warnings.map((w) => `<li>${esc(w)}</li>`).join("")}</ul>` : ""}
@@ -428,7 +434,7 @@ export class KeyPanel {
         <td class="l">${k.layers.map((L) => fmt((k.kn || {})[L], 2)).join(" ")}</td><td>${esc(k.q_mode)}</td><td class="l">${esc(k.positions)}</td><td>${esc(k.subset)}</td>
         <td>${k.n_pseudo}</td><td>${(k.counts || {}).a ?? "—"} / ${(k.counts || {}).b ?? "—"}</td>
         <td><button class="small" data-kview="${esc(k.name)}">${t("見る")}</button> <button class="small" data-kcheck="${esc(k.name)}">${t("確かめる")}</button></td></tr>`)).join("");
-    el.innerHTML = `<div class="evx-scroll"><table class="evx mono kx-keys"><thead><tr><th class="l">${t("名前")}</th><th>${t("書き込み先")}</th><th class="l">${t("層")}</th><th class="l">kn</th><th>q_mode</th><th class="l">positions</th><th>subset</th><th>${t("擬似鍵")}</th><th>${t("例 A / B")}</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    el.innerHTML = `<div class="evx-scroll"><table class="evx mono kx-keys"><thead><tr><th class="l">${t("名前")}</th><th>${t("書き込み先")}</th><th class="l">${t("層")}</th><th class="l">kn</th><th>q_mode</th><th class="l">positions</th><th>subset</th><th>${t("比較用の鍵")}</th><th>${t("例(書き込みたい側 / 書き込みたくない側)")}</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
   }
 
   async view(name) {

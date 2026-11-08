@@ -110,7 +110,7 @@ def test_display_helpers():
            "rho": 120.0, "add": None, "down_norm": None, "mode": "keyed", "k": -1.5, "alpha": -1.5,
            "direction": "zundamon_endings", "key": "zundamon_endings", "diff_rel": 0.17}
     t = _units_text([row, {**row, "kind": "expert", "expert": 3, "norm": 0.0, "rel_push": None}])
-    assert "L19 ffn keyed α=-1.5 @zundamon_endings #zundamon_endings" in t and "ρ の 0.25 倍" in t
+    assert "L19 ffn keyed α=-1.5 @zundamon_endings #zundamon_endings" in t and "残差ノルム ρ_L の 0.25 倍" in t
     assert "L19 E3 keyed" in t and "dose" not in t                  # add の行として出さない
     d = {"keyed_layers": {"19": {"tensors": {"blk.19.ffn_down.weight": 2}, "keys": ["a", "b"], "directions": ["d"],
                                  "rank": 2}}, "requant_error_max": 0.7}
@@ -291,7 +291,8 @@ def test_key_check_keys_verify_json(work, key):
 
 @pytest.mark.model
 def test_keyed_export_json(work, key, tmp_path):
-    """headproj export: --key で #KEY を省いたユニット、既定の名前は <レシピ名>-keyed、焼き込みの既定は F16。"""
+    """headproj export: --key で #KEY を省いたユニット、既定の名前は <レシピ名>-keyed、焼き込みの既定は auto
+    (元が Q8_0 のテンソルは Q8_0 のまま。残った編集の割合 edit_kept も出る)。"""
     d = gne_json(work, "headproj", "export", "--unit", "14:ffn:keyed:a1@zundamon_endings", "--key", "zundamon_endings")
     assert d["kind"] == "lora" and Path(d["path"]).name == "headproj-keyed.lora.gguf" and Path(d["path"]).exists()
     assert d["keyed_layers"]["14"]["keys"] == ["zundamon_endings"] and d["keyed_rank"] == {"blk.14.ffn_down.weight": 1}
@@ -299,7 +300,8 @@ def test_keyed_export_json(work, key, tmp_path):
     out = tmp_path / "z-keyed.gguf"
     b = gne_json(work, "headproj", "export", "--bake", "--unit", "14:ffn:keyed:a1@zundamon_endings#zundamon_endings",
                  "-o", str(out))
-    assert b["kind"] == "bake" and b["modified"][0]["to"] == "F16" and b["requant_error_max"] < 0.5
+    assert b["kind"] == "bake" and b["modified"][0]["to"] == "Q8_0" and b["requant_error_max"] < 0.5
+    assert b["requant"] == "auto" and b["modified"][0]["edit_kept"] >= 0.9 and "fallback" not in b["modified"][0]
     assert b["modified"][0]["requant_error"] == b["requant_error_max"] and b["keyed_layers"]["14"]["rank"] == 1
     out.unlink()
     g = gne_json(work, "gain", "--unit", "8:ffn:keyed:a0.5", "--unit", "14:ffn:keyed:a1", "--key", "zundamon_endings",

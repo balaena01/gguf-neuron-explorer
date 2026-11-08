@@ -81,6 +81,6 @@ gne modal hf-upload --repo <ユーザー>/<名前> --card README.md export/<名�
 - **Modal に上がるもの:** git で追跡している `gne/` と `configs/`、`gne modal put` で名指ししたファイルだけ。追跡していないファイルは上がらない。作業ツリーで編集中の追跡ファイルは、編集後の中身が上がる。
 - **接続が切れても続く:** `gne modal run` は手元の接続が切れても、コマンドが終わるまで動き続け、課金も続く。途中で止めるには `modal app stop <App ID>` を使い、`modal app list` で止まったことを確かめる。App ID は実行の最初に出る。
 - **時間の上限:** 1 回の実行につき既定 6 時間(`--timeout`、最大 24 時間)。
-- **横取り:** GPU のコンテナは Modal の都合で止められることがあり、そのときは同じコマンドが最初から実行し直される。`heads pipeline` や `sweep` は保存済みの続きから動くが、ほかのコマンドはやり直しになる。
+- **途中で止められる(プリエンプション):** GPU のコンテナは Modal の都合で止められることがあり、そのときは同じコマンドが最初から実行し直される。`heads pipeline` や `sweep` は保存済みの続きから動くが、ほかのコマンドはやり直しになる。
 - **llama-server:** `gne fieldtest` は Modal に対応していない。
 - **Hugging Face のトークン:** `gne modal fetch` は公開リポジトリだけを落とせる。

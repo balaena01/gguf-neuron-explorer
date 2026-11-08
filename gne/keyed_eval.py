@@ -177,7 +177,7 @@ class KeyedMetrics:
         signs = {np.sign(k.alpha) for k in self.ku if k.alpha}
         self.sign = float(np.sign(self.ku[0].alpha) or 1.0)
         if len(signs) > 1:
-            self.notes.append("足す(α > 0)と打ち消す(α < 0)のユニットが混ざっています。選択性の向きは最初のユニットの符号です")
+            self.notes.append("足す(α > 0)と打ち消す(α < 0)のユニットが混ざっています。eval の選択性の向きは最初のユニットの符号です")
         self.ks = self._key_of(keys[0])
         self.ds = session.direction_set(self.dname)
         spec, how = resolve_keyed_contrast(session, self.ks, self.ds, contrast)
@@ -187,7 +187,7 @@ class KeyedMetrics:
         self.plan = eval_plan(session, self.ks, spec, subset=subset, warn=self._warn)
         if not self.plan["overlap"]["held_out"]:
             self.notes.append(f"測った例が鍵の作成に使った例と重なっています(作成 {self.ks.subset}・評価 {self.plan['subset']})。"
-                              "選択性は甘くなります")
+                              "eval の選択性は甘くなります")
         n_layer = session.meta.n_layer
         kl = sorted({k.layer for k in self.ku})
         self.layers = sorted({int(L) for L in (layers or kl)})
@@ -201,8 +201,8 @@ class KeyedMetrics:
         self.max_examples = max_examples
         self.n_pseudo = max(0, min(int(pseudo), keyed_control_cap(session, recipe, self._key_of)))
         if pseudo and not self.n_pseudo:
-            self.notes.append(f"鍵 {self.key_name} に擬似鍵が無いので擬似鍵の対照は測りません"
-                              "(gne direction key の pseudo を 1 以上にして作り直してください)")
+            self.notes.append(f"鍵 {self.key_name} に比較用の鍵が無いので、比較用の鍵との比較は測りません"
+                              "(gne direction key の pseudo(比較用の鍵の本数)を 1 以上にして作り直してください)")
         self.match, self.steps, self.rtol = bool(match), int(steps), float(rtol)
         self.gain_neurons = (int(gain_neurons[0]), int(gain_neurons[1]))
         self.sets: list[_EvalSet] = []
@@ -268,10 +268,10 @@ class KeyedMetrics:
             self.sets.append(es)
         items = [it for es in self.sets for it in es.items]
         if not any("A" in it.gidx for it in items):
-            raise GneError("BAD_CONTRAST", f"側 A の位置がありません(positions {self.plan['positions']})",
+            raise GneError("BAD_CONTRAST", f"書き込みたい位置がありません(positions {self.plan['positions']})",
                            "返事に鍵の正規表現が一致していません。一致する返事を対照集合の replies で与えてください")
         if not any(g != "A" for it in items for g in it.gidx):
-            raise GneError("BAD_CONTRAST", "側 B・dont_touch の位置がありません")
+            raise GneError("BAD_CONTRAST", "書き込みたくない位置・dont_touch の位置がありません")
         self.max_len = max(len(it.ids) for it in items)
         if self.max_len > e.n_ctx:
             raise GneError("CONTEXT_FULL", f"{self.max_len} トークンの会話が n_ctx={e.n_ctx} に入りません")
@@ -407,6 +407,9 @@ class KeyedMetrics:
             if k.kind == "attn":
                 return None, ("attn の keyed にはニューロンの gain の対照を作りません(書き込み先がヘッド出力の連結で、"
                               "ffn_down のニューロンではない。ヘッドの対照は proj)")
+            if k.kind in ("shared", "expert"):
+                return None, ("MoE(shared・expert)の keyed にはニューロンの gain の対照を作りません(専門家のニューロンは選ばれた"
+                              "トークンでしか働かず、同じ大きさにそろえる寄与の見積もりが dense の ffn_down と違う。add・proj と並べる)")
             if k.kind != "ffn" or w.is_moe(k.layer):
                 return None, "gain の対照は dense の ffn_down の keyed だけです"
             if k.layer in seen:
@@ -422,14 +425,14 @@ class KeyedMetrics:
             order = np.argsort(-contrib)
             order = order[contrib[order] > 0]
             if not order.size:
-                return None, f"L{k.layer}: 側 A で r̂ に書くニューロンがありません"
+                return None, f"L{k.layer}: 書き込みたい位置で r̂ に書くニューロンがありません"
             aim = GAIN_AIM if self.sign > 0 else min(GAIN_AIM, 1.0)
             want = sum(abs(u.alpha) for u in self.ku if u.layer == k.layer) * float(np.linalg.norm(r)) / aim
             n = int(np.searchsorted(np.cumsum(contrib[order]), want)) + 1
             n = min(max(n, self.gain_neurons[0]), self.gain_neurons[1], int(order.size))
             units += [Unit(k.layer, int(i), 0.0, mode="gain", k=1.0 + self.sign) for i in order[:n]]
         per = {L: sum(u.layer == L for u in units) for L in sorted(seen)}
-        return units, ("keyed の層ごとに、側 A で r̂ に書く寄与の大きいニューロン("
+        return units, ("keyed の層ごとに、書き込みたい位置で r̂ に書く寄与の大きいニューロン("
                        + "・".join(f"L{L} {c} 個" for L, c in per.items()) + f")を k = 1 {'+' if self.sign > 0 else '−'} β 倍")
 
     def _proj_units(self, s: float) -> tuple[list[Unit] | None, str]:
@@ -467,7 +470,7 @@ class KeyedMetrics:
         s, e = self.session, self.session.engine
         kr = self.recipe.like(self.recipe.keyed_units, name=f"{self.recipe.name or 'recipe'}-keyed", ablate=None)
         if len(kr.units) != len(self.recipe.units) or self.recipe.ablate is not None:
-            self.notes.append("方式の比較と擬似鍵は keyed のユニットだけで測りました(レシピのほかのユニットは外しました。"
+            self.notes.append("方式の比較と比較用の鍵との比較は keyed のユニットだけで測りました(レシピのほかのユニットは外しました。"
                               "行の keyed はレシピ全体)")
         obj = self.obj
         methods: list[dict] = []
@@ -489,7 +492,7 @@ class KeyedMetrics:
         scale = max(abs(k.alpha) for k in self.ku) * float(np.linalg.norm(self.ds.raw[obj]))
         weak = target is None or abs(target) < MIN_TARGET * scale
         if self.match and weak:
-            self.notes.append(f"keyed が側 A をほとんど動かしていない(L{obj} の par {0.0 if target is None else target:+.3g}、"
+            self.notes.append(f"keyed が書き込みたい位置の残差をほとんど動かしていない(L{obj} の par {0.0 if target is None else target:+.3g}、"
                               f"全部書いたときの {MIN_TARGET:.0%} 未満)ので、add・gain・proj の大きさは合わせていません")
         elif self.match:
             for spec in self._match_specs(st_a1, add_ok):
@@ -505,7 +508,7 @@ class KeyedMetrics:
                 pr = kr.like(pseudo_keyed(kr, j), name=f"{kr.name}-pseudo{j}")
                 vecs, lora = self._iv(pr)
                 drop += [p for p, _ in (lora or [])]
-                st = self.measure(vecs, lora, layers=[obj], label=f"keyed: 擬似鍵 {j + 1}/{self.n_pseudo}")
+                st = self.measure(vecs, lora, layers=[obj], label=f"keyed: 比較用の鍵 {j + 1}/{self.n_pseudo}")
                 vals.append(self.summary(st[obj])["selectivity"])
                 keys.append(f"{self.key_name}~{j}")
             real = methods[0]["selectivity"]
@@ -515,7 +518,7 @@ class KeyedMetrics:
             pseudo = {"n": len(vals), "keys": keys, "values": vals, "p50": sm["p50"], "p95": sm["p95"], "max": sm["max"],
                       "real": real, "beats": beats, "null_pct": null_pct(real, vals)}
             if beats is False:
-                self.notes.append(f"本物の鍵の選択性 {real:+.3g} が擬似鍵 {len(vals)} 本の p95 {sm['p95']:+.3g} を超えていません"
+                self.notes.append(f"本物の鍵の eval の選択性 {real:+.3g} が比較用の鍵 {len(vals)} 本の p95 {sm['p95']:+.3g} を超えていません"
                                   "(鍵が状態ではなく例の本文を拾っている可能性。key-check と対照集合を見直してください)")
         compare = self._compare(methods)
         for p in set(drop):
@@ -609,17 +612,17 @@ class KeyedMetrics:
             m2 = runner(sp2)
             if abs(m2["value"] - target) < abs(m["value"] - target):
                 sp, m = sp2, m2
-                desc = "keyed の層の全ヘッドの書き込みの r̂ 成分を s = +β 倍ぶん引く(強めると側 A が逆に動くので、消す・反転する向き)"
+                desc = "keyed の層の全ヘッドの書き込みの r̂ 成分を s = +β 倍ぶん引く(強めると書き込みたい位置で逆に動くので、消す・反転する向き)"
         if float(np.sign(target)) * m["value"] < 0.1 * abs(target):        # 側 A をそろえる向きにほとんど動かない
             return {"method": spec["method"], "desc": desc, "beta": m["beta"], "evals": m["evals"], "trace": m["trace"],
-                    "excluded": f"β = 0〜{spec['hi']:g} で側 A の par が keyed の {target:+.3g} に近づきません"
+                    "excluded": f"β = 0〜{spec['hi']:g} で書き込みたい位置の par が keyed の {target:+.3g} に近づきません"
                                 f"(最も近くて {m['value']:+.3g}、β = {m['beta']:.3g})"}
         st = self.measure(*sp["make"](m["beta"]), label=f"keyed: {spec['method']}")
         units = sp["units"](m["beta"])
         row = self._method(spec["method"], desc, st, beta=m["beta"], matched=m["reached"], evals=m["evals"],
                            trace=m["trace"], units=units, recipe=sp["recipe"](m["beta"]))
         if not m["reached"]:
-            self.notes.append(f"{spec['method']}: 側 A の par を keyed に ±{self.rtol:.0%} でそろえられませんでした"
+            self.notes.append(f"{spec['method']}: 書き込みたい位置の par を keyed に ±{self.rtol:.0%} でそろえられませんでした"
                               f"(β = {m['beta']:.3g} で {m['value']:+.3g}、keyed は {target:+.3g})")
         return row
 
@@ -645,7 +648,7 @@ class KeyedMetrics:
                 ok = k["b_norm"] < m["b_norm"]
                 smaller.append(ok)
                 if not ok:
-                    self.notes.append(f"側 B の ‖Δ‖ が {m['method']} より小さくありません"
+                    self.notes.append(f"書き込みたくない位置の ‖Δ‖ が {m['method']} より小さくありません"
                                       f"(keyed {k['b_norm']:.3g}、{m['method']} {m['b_norm']:.3g}。keyed の利点が見えません)")
         out["keyed_smaller"] = all(smaller) if smaller else None
         return out
@@ -693,10 +696,10 @@ def keyed_text(k: dict) -> list[str]:
     dts = [g for g in c if g.startswith("dt:")]
     lines = [f"keyed の選択性(鍵 {k['key']}、方向 {k['direction']}、L{k['objective_layer']} の残差、"
              f"{'保留' if k['held_out'] else '作成と重なる'} subset {k['subset']})",
-             f"  側 A = {k['positions']}: {ca.get('examples', 0)} 例 {ca.get('positions', 0)} 位置 / "
-             f"側 B = {k['positions_b']}: {cb.get('examples', 0)} 例 {cb.get('positions', 0)} 位置"
+             f"  書き込みたい位置 = {k['positions']}: {ca.get('examples', 0)} 例 {ca.get('positions', 0)} 位置 / "
+             f"書き込みたくない位置 = {k['positions_b']}: {cb.get('examples', 0)} 例 {cb.get('positions', 0)} 位置"
              + "".join(f" / {g[3:]}: {c[g]['examples']} 例 {c[g]['positions']} 位置" for g in dts),
-             f"  {'方式':<16} {'β':>7} {'A の r̂':>9} {'B の r̂':>9} {'B の ‖Δ‖':>9} {'dt の ‖Δ‖':>10} {'選択性':>9} {'B/A':>7}"]
+             f"  {'方式':<16} {'β':>7} {'a_par':>9} {'b_par':>9} {'b_norm':>9} {'dt_norm':>10} {'選択性':>9} {'b_over_a':>8}"]
     for m in k.get("methods") or []:
         if "excluded" in m:
             lines.append(f"  {m['method']:<16} 除外: {m['excluded']}")
@@ -704,18 +707,23 @@ def keyed_text(k: dict) -> list[str]:
         mark = "" if m.get("matched") in (None, True) else " (合わず)"
         lines.append(f"  {m['method']:<16} {_f(m.get('beta'), '.3g'):>7} {_f(m.get('a_par')):>9} {_f(m.get('b_par')):>9} "
                      f"{_f(m.get('b_norm'), '.3g'):>9} {_f(m.get('dt_norm'), '.3g'):>10} {_f(m.get('selectivity')):>9} "
-                     f"{_f(m.get('b_over_a'), '.3g'):>7}{mark}")
+                     f"{_f(m.get('b_over_a'), '.3g'):>8}{mark}")
+    if k.get("methods"):
+        lines.append("  a_par・b_par = 書き込みたい位置・書き込みたくない位置での残差の変化の r̂ 方向の成分、b_norm・dt_norm = "
+                     "書き込みたくない位置・dont_touch での残差の変化の大きさ ‖Δ‖、選択性 = eval の選択性(書く向きにそろえた"
+                     " a_par − b_par)、b_over_a = 書き込みたい位置を 1 押すあたりの、書き込みたくない位置の ‖Δ‖")
     cmp_ = k.get("compare") or {}
     if cmp_.get("b_norm_ratio"):
-        lines.append("  側 B の ‖Δ‖ の比(keyed ÷ 対照、同じ α の add とそろえた対照): "
+        lines.append("  書き込みたくない位置の ‖Δ‖ の比(keyed ÷ 対照、同じ α の add とそろえた対照): "
                      + "、".join(f"{m} {v:.2f}" for m, v in cmp_["b_norm_ratio"].items()))
     if cmp_.get("b_over_a_ratio"):
-        lines.append("  側 A を 1 押すあたりの側 B の ‖Δ‖ の比(keyed ÷ 対照): "
+        lines.append("  書き込みたい位置を 1 押すあたりの、書き込みたくない位置の ‖Δ‖ の比(keyed ÷ 対照): "
                      + "、".join(f"{m} {v:.2f}" for m, v in cmp_["b_over_a_ratio"].items()))
     p = k.get("pseudo")
     if p:
         verdict = {True: "超える", False: "超えない", None: "判定なし"}[p.get("beats")]
-        lines.append(f"  擬似鍵 {p['n']} 本の選択性: p50 {_f(p.get('p50'))} p95 {_f(p.get('p95'))} → 本物 {_f(p.get('real'))} は {verdict}")
+        lines.append(f"  比較用の鍵 {p['n']} 本の eval の選択性: p50 {_f(p.get('p50'))} p95 {_f(p.get('p95'))} → 本物 "
+                     f"{_f(p.get('real'))} は {verdict}")
     for n in k.get("notes") or []:
         lines.append(f"  注: {n}")
     return lines

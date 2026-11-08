@@ -402,7 +402,7 @@ def test_u1_overlay_tooltip_list_and_neuron_panel(server, browser):
     rgba = lambda n: pg.evaluate(f"(() => {{ const m = window.gne.map, o = (m.offsets[6] + {n}) * 4; "   # noqa: E731
                                  f"return Array.from(m.colorAttr.array.slice(o, o + 4)); }})()")
     assert rgba(100) == [255, 255, 255, 255]                                         # 名前付きは白
-    assert rgba(7) == [30, 37, 48, 0]                                                # 床(対照の最大 mass)以下
+    assert rgba(7) == [30, 37, 48, 0]                                                # 基準値(対照の最大 mass)以下
     assert rgba(0) == [16, 20, 27, 0]                                                # データ無し
     assert pg.evaluate("document.querySelectorAll('#rank tbody tr').length") == 2    # random は既定で隠す
     pg.click("#rank tbody tr[data-n='100']")
@@ -1323,15 +1323,15 @@ def test_head_panel_in_browser(server, browser):
     assert pg.evaluate("document.querySelectorAll('#head-body table.hp-trig tr').length") == 2   # 見出し + Emily
     pg.click("#hp-out button[data-v=diff]")
     assert pg.evaluate("window.gne.headPanel.heat.sysCol && window.gne.headPanel.heat.colLab.length") == res["S"] + 1
-    # Contrast: 指標と床、上位の表、地図で色付け
+    # Contrast: 指標と基準値、上位の表、地図で色付け
     pg.click("#head-body .tabs button[data-tab=contrast]")
     pg.wait_for_function("document.querySelector('#head-body table.h-top')", timeout=30000)
-    assert pg.evaluate("document.querySelectorAll('#head-body table.h-met td.hot').length") == 3   # 床を超えた 3 指標(dir_cos は無い)
+    assert pg.evaluate("document.querySelectorAll('#head-body table.h-met td.hot').length") == 3   # 基準値を超えた 3 指標(dir_cos は無い)
     pg.click("#head-body button[data-ov=seed]")
     pg.wait_for_function("window.gne.heads && window.gne.heads.field === 'heads:seed'", timeout=30000)
     assert pg.evaluate("window.gne.map.layerParts[12].heads.visible") and not pg.evaluate("window.gne.map.layerParts[11].heads.visible")
     col = pg.evaluate("Array.from(window.gne.map.layerParts[12].heads.geometry.getAttribute('color').array.slice(3 * 18, 3 * 18 + 3))")
-    assert col[0] > col[1] > col[2] > 0                                              # H3 は琥珀(床超え)
+    assert col[0] > col[1] > col[2] > 0                                              # H3 は琥珀(基準値超え)
     assert "ヘッドの対照 seed の z" in pg.evaluate("document.querySelector('#legend').textContent")
     # Details: W_O ブロックの logit lens(後から読み込む)
     pg.click("#head-body .tabs button[data-tab=details]")
@@ -1770,7 +1770,7 @@ def test_moe_panels_in_english(moe_server, browser):
 
 def _seed_causal(s, name: str = "cz", direction: str = "czdir") -> None:
     """方向セット(乱数の向き、対照集合は configs/contrast/evil.yaml、基準層はまだ無い)、因果スクリーニング(ablate・marginal、
-    物差しの層 14・20)と強さの配分、方式の比較とヘッド数の曲線の eval、proj のレシピ(default_direction で方向を省いた行を含む)。"""
+    射影の値を測る層 14・20)と強さの配分、方式の比較とヘッド数の曲線の eval、proj のレシピ(default_direction で方向を省いた行を含む)。"""
     import yaml
 
     from gne.causal import save_causal
@@ -1835,7 +1835,7 @@ def _seed_causal(s, name: str = "cz", direction: str = "czdir") -> None:
 
 @pytest.mark.model
 def test_causal_proj_direction_api(tmp_path):
-    """CHANGE-06 G のサーバ: 因果スクリーニングの一覧・1 件・ヘッドの行と順位、方向セット(層どうしの cos)と速い物差し
+    """CHANGE-06 G のサーバ: 因果スクリーニングの一覧・1 件・ヘッドの行と順位、方向セット(層どうしの cos)と速い指標
     (基準層の記録と手での上書き)、proj のレシピの読み書き(default_direction・direction_layer)、proj のユニットでの 3 列チャット。"""
     from fastapi.testclient import TestClient
 
@@ -1934,7 +1934,7 @@ def _head_rgb(pg, L, h):
 
 @pytest.mark.model
 def test_causal_proj_direction_in_browser(causal_server, browser):
-    """HEAD パネルの Causal(このヘッドの行・上位の表の並べ替えと物差しの層・行で別のヘッドへ・配分の組をレシピに)、
+    """HEAD パネルの Causal(このヘッドの行・上位の表の並べ替えと射影の値を測る層・行で別のヘッドへ・配分の組をレシピに)、
     地図の causal:<name>・eta:<name>、recipe タブの proj の行(s・方向・rank)、direction ビュー(基準層の記録と上書き)、
     eval ビューの方向の列・方式の比較・ヘッド数の曲線。英語の文言もすべて辞書にある。"""
     url = causal_server
@@ -1954,7 +1954,7 @@ def test_causal_proj_direction_in_browser(causal_server, browser):
         assert pg.evaluate("document.querySelector('#head-body table.cz-top tr.sel').dataset.go") == "12:3"
         pg.click("#head-body th[data-czsort=eta]")
         assert pg.evaluate(go)[0] == "12:5"
-        pg.select_option("#cz-layer", "20")                                                  # 物差しの層を替えると下がり方の列も替わる
+        pg.select_option("#cz-layer", "20")                                                  # 射影の値を測る層を替えると下がり方の列も替わる
         assert "causal L20" in pg.evaluate("document.querySelector('#head-body table.cz-top').innerText")
         pg.click("#head-body th[data-czsort=causal]")
         cells = pg.evaluate("[...document.querySelectorAll('#head-body table.cz-top tr[data-go] td')].slice(0, 4).map(td => td.textContent)")

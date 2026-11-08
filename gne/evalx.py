@@ -338,9 +338,9 @@ def direction_of(recipe: Recipe | None) -> str | None:
 
 
 class DirMetrics:
-    """方向を使うレシピの、速い物差しの点数の変化と残差の差の方向成分・直交成分(drift_par / drift_orth、A 側・B 側)。
+    """方向を使うレシピの、速い指標(射影の値)の変化と残差の差の方向成分・直交成分(drift_par / drift_orth、A 側・B 側)。
     外から見える指標として、対照集合に validate.match があれば A 側(system_a 付き)の判定の一致率も測る(behavior)。
-    点数は基準層と最も後ろの層で測り、行に平らに出す値(drift_*・dir_drop_a)は最も後ろの層のもの。"""
+    射影の値は基準層と最も後ろの層で測り、行に平らに出す値(drift_*・dir_drop_a)は最も後ろの層のもの。"""
 
     def __init__(self, session, name: str, *, contrast: str | Path | None = None, layers: list[int] | None = None,
                  behavior: bool = True, max_tokens: int = 64, max_examples: int | None = 64):
@@ -373,7 +373,7 @@ class DirMetrics:
         self.base_rate = None
 
     def prepare(self) -> None:
-        """無介入の点数と一致率(測る前に 1 回)。"""
+        """無介入の射影の値と一致率(測る前に 1 回)。"""
         self.base = self.sc.run(keep=True)
         self.tick(self.n_score, "方向の指標(無介入)")
         if self.behavior:
@@ -416,8 +416,8 @@ class DirMetrics:
 
 def control_set(session, recipe: Recipe, n: int, *, pool: str = "before", score_layers: list[int] | None = None) -> list[Recipe]:
     """レシピのランダム対照。add のユニット・ablate は control_recipes(同じ大きさのランダムな向き)、proj のユニットは
-    同数のランダムなヘッドに同じ s で(CHANGE-06 F.2)、keyed のユニットは鍵を擬似鍵 NAME~j に替えて(CHANGE-07 E.2。
-    α・方向・層はそのまま)。どれも無ければ空。keyed を含むときの本数は n と鍵の擬似鍵の本数の小さい方。"""
+    同数のランダムなヘッドに同じ s で(CHANGE-06 F.2)、keyed のユニットは鍵を比較用の鍵 NAME~j に替えて(CHANGE-07 E.2。
+    α・方向・層はそのまま)。どれも無ければ空。keyed を含むときの本数は n と鍵の比較用の鍵の本数の小さい方。"""
     from .controls import control_recipes, keyed_control_cap, pseudo_keyed
     if n <= 0:
         return []
@@ -425,7 +425,7 @@ def control_set(session, recipe: Recipe, n: int, *, pool: str = "before", score_
     if keyed:
         n = min(n, keyed_control_cap(session, recipe))
         if n <= 0:
-            return []                                # 擬似鍵の無い鍵(pseudo = 0 で作った鍵)
+            return []                                # 比較用の鍵の無い鍵(pseudo = 0 で作った鍵)
     if not recipe.proj_units:
         if recipe.add_units or recipe.ablate is not None:
             out = control_recipes(session, recipe, n)
@@ -438,7 +438,7 @@ def control_set(session, recipe: Recipe, n: int, *, pool: str = "before", score_
         for j, b in enumerate(base):
             c = proj_control_recipes(session, b, n, pool=pool, score_layers=score_layers)[j]
             out.append(c.like(c.units, name=f"{recipe.name or 'recipe'}-random{j}"))
-    if keyed:                                        # CHANGE-07 E.2: 鍵だけを擬似鍵 j に(ほかの対照と同じ j 本目に重ねる)
+    if keyed:                                        # CHANGE-07 E.2: 鍵だけを比較用の鍵 j に(ほかの対照と同じ j 本目に重ねる)
         out = [c.like(pseudo_keyed(c, j), name=c.name) for j, c in enumerate(out)]
     return out
 
@@ -459,14 +459,15 @@ def evaluate(session, recipe: Recipe, *, doses=(0, 0.25, 0.5, 0.75, 1.0), suite:
     行の ctrl に persona・能力・ppl の分布を入れる(CHANGE-03 A。judge は対照では回さない)。
     reactivity(対照集合の YAML)を渡すと、各倍率で反応性(トリガーあり/なしの判定の一致率の差、CHANGE-04 F)も測る。
     head_controls > 0 なら、ヘッドのユニットを同じ k のランダムなヘッドに替えた対照で反応性を測り、null_pct を出す。
-    方向を使うレシピ(proj・方向のユニット・ablate)では、各行に速い物差しの点数の変化と直交成分のずれ(drift_par / drift_orth、
+    方向を使うレシピ(proj・方向のユニット・ablate)では、各行に速い指標(射影の値)の変化と直交成分のずれ(drift_par / drift_orth、
     A 側・B 側)を出す(CHANGE-06 F.1)。proj のユニットの対照は同数のランダムなヘッド(control_pool: before / same-layers、F.2)で、
     目的の指標(dir_drop_a、validate.match があれば判定の一致率の減少 rate_drop)と副作用(drift_orth_b)の null_pct を出す。
     baseline(前の evaluate の戻り値の "_baseline")を渡すと、倍率 0 の測定を使い回す(方式の比較・ヘッド数の曲線用)。
     keyed のユニットを持つレシピ(CHANGE-07 E)では、鍵の対照集合(keyed_contrast。省くと方向を作った対照集合が鍵と同じ
     ものならそれ)を鍵の作成と反対側の subset(keyed_subset で変えられる)で prefill だけして(keyed_eval.KeyedMetrics)、
-    各行に keyed(側 A = 発火位置・側 B・dont_touch の位置での残差の r̂ 方向の変化と ‖Δ‖、選択性)を、結果の keyed に
-    方式の比較(keyed・同じ α の add・側 A をそろえた add / gain / proj)と擬似鍵の選択性(keyed_pseudo 本)を出す。
+    各行に keyed(書き込みたい位置・書き込みたくない位置・dont_touch での残差の r̂ 方向の変化と ‖Δ‖、eval の選択性)を、
+    結果の keyed に方式の比較(keyed・同じ α の add・書き込みたい位置をそろえた add / gain / proj)と比較用の鍵の eval の
+    選択性(keyed_pseudo 本)を出す。
     keyed_examples は会話の組ごとに読む数、keyed_match=False で大きさ合わせ(bisection 相当の探索)を省く、
     keyed_metrics=False で測らない。対照集合が分からなければ結果の keyed に skipped(理由)だけを書く。"""
     from .controls import head_control_recipes
@@ -489,23 +490,23 @@ def evaluate(session, recipe: Recipe, *, doses=(0, 0.25, 0.5, 0.75, 1.0), suite:
         try:
             dm = DirMetrics(session, dname, max_examples=dir_max_examples)
         except GneError as e:
-            session.warn(f"方向 {dname} の点数と直交成分のずれは測りません: {e.message}")
+            session.warn(f"方向 {dname} の射影の値と直交成分のずれは測りません: {e.message}")
     km, kblock = None, None
-    if keyed_metrics and recipe.keyed_units:        # CHANGE-07 E: keyed の選択性(prefill だけ)
+    if keyed_metrics and recipe.keyed_units:        # CHANGE-07 E: keyed の eval の選択性(prefill だけ)
         from .keyed_eval import KeyedMetrics
         try:
             km = KeyedMetrics(session, recipe, contrast=keyed_contrast, subset=keyed_subset, max_examples=keyed_examples,
                               pseudo=keyed_pseudo, match=keyed_match)
         except GneError as e:
-            session.warn(f"keyed の選択性は測りません: {e.message}")
+            session.warn(f"keyed の eval の選択性は測りません: {e.message}")
             kblock = {"skipped": e.message, **({"hint": e.hint} if e.hint else {})}
     if n_ctrl and not control_set(session, recipe, 1, pool=control_pool, score_layers=dm.layers if dm else None):
         n_ctrl = 0                                  # gain だけのレシピには向きが無いので対照を作れない
-    if n_ctrl and recipe.keyed_units:               # keyed の擬似鍵の対照は鍵の擬似鍵の本数まで
+    if n_ctrl and recipe.keyed_units:               # keyed の比較用の鍵の対照は、鍵に保存した比較用の鍵の本数まで
         from .controls import keyed_control_cap
         cap = keyed_control_cap(session, recipe)
         if cap < n_ctrl:
-            session.warn(f"random_controls を鍵の擬似鍵の本数 {cap} に減らしました(gne direction key の pseudo で増やせます)")
+            session.warn(f"random_controls を、鍵に保存した比較用の鍵の本数 {cap} に減らしました(gne direction key の pseudo で増やせます)")
         n_ctrl = min(n_ctrl, cap)
     total, done = (len(doses) + n_ctrl * (len(doses) - 1)) * (len(items) + len(st.ppl)), 0
     rc = Reactivity.load(reactivity) if reactivity else None
@@ -517,7 +518,7 @@ def evaluate(session, recipe: Recipe, *, doses=(0, 0.25, 0.5, 0.75, 1.0), suite:
     n_nonzero = len({float(x) for x in doses} - {0.0})
     if dm is not None:                              # 方向の指標: 無介入 1 回 + 倍率ごと + 対照ごと
         total += dm.cost * (1 + n_nonzero + n_ctrl * n_nonzero)
-    if km is not None:                              # keyed: 無介入 1 回 + 倍率ごと + 対照ごと + 方式の比較と擬似鍵
+    if km is not None:                              # keyed: 無介入 1 回 + 倍率ごと + 対照ごと + 方式の比較と比較用の鍵
         total += km.n_full * (1 + n_nonzero + n_ctrl * n_nonzero) + km.block_cost()
 
     def tick(n: int, d: float = 0.0):
@@ -539,7 +540,7 @@ def evaluate(session, recipe: Recipe, *, doses=(0, 0.25, 0.5, 0.75, 1.0), suite:
         try:
             km.prepare()
         except GneError as e:
-            session.warn(f"keyed の選択性は測りません: {e.message}")
+            session.warn(f"keyed の eval の選択性は測りません: {e.message}")
             kblock = {"skipped": e.message, **({"hint": e.hint} if e.hint else {})}
             km = None
 
@@ -579,7 +580,7 @@ def evaluate(session, recipe: Recipe, *, doses=(0, 0.25, 0.5, 0.75, 1.0), suite:
                 for k in ("dir_drop_a", "drift_par_a", "drift_orth_a", "drift_par_b", "drift_orth_b", "rate", "rate_drop"):
                     if k in row["direction"]:
                         row[k] = row["direction"][k]
-            if km is not None:                         # CHANGE-07 E.1: レシピ全体を当てた側 A・側 B の残差の変化
+            if km is not None:                         # CHANGE-07 E.1: レシピ全体を当てた書き込みたい位置・書き込みたくない位置の残差の変化
                 row["keyed"] = km.row(r, f"keyed 倍率 {d:g}")
             pers_out = [o for _, o in by["persona"]]
             if d == 0:
@@ -620,7 +621,7 @@ def evaluate(session, recipe: Recipe, *, doses=(0, 0.25, 0.5, 0.75, 1.0), suite:
                              "mix": [{"id": t["id"], "text": o["text"][:200]} for t, o in by["mix"][:3]],
                              "failed": [{"id": t["id"], "text": o["text"][:200]} for (t, o), ok in
                                         zip(by["exact"] + by["format"], ex + fm, strict=True) if not ok][:6]}
-    if km is not None:                               # CHANGE-07 E: 方式の比較と擬似鍵(倍率 1、keyed のユニットだけ)
+    if km is not None:                               # CHANGE-07 E: 方式の比較と比較用の鍵(倍率 1、keyed のユニットだけ)
         try:
             kblock = km.block()
         except GneError as e:
@@ -668,13 +669,13 @@ def evaluate(session, recipe: Recipe, *, doses=(0, 0.25, 0.5, 0.75, 1.0), suite:
                 row["keyed"]["ctrl_p95"] = c["keyed_selectivity"]["p95"]
                 if recipe.keyed_units and row["keyed"]["null_pct"] is not None and row["keyed"]["null_pct"] < 0.95:
                     row.setdefault("notes", []).append(
-                        f"keyed の選択性 {ksel:+.3g} が、鍵を擬似鍵に替えた対照の {row['keyed']['null_pct'] * 100:.0f}% より大きい"
+                        f"keyed の eval の選択性 {ksel:+.3g} が、鍵を比較用の鍵に替えた対照の {row['keyed']['null_pct'] * 100:.0f}% より大きい"
                         "だけです(0.95 未満: 鍵が状態を選んでいるとは言えません)")
-            # 外から見える指標(判定の一致率)を主にする。無介入で一致率が 0 なら下がりようが無いので点数の下がり方で見る
+            # 外から見える指標(判定の一致率)を主にする。無介入で一致率が 0 なら下がりようが無いので射影の値の下がり方で見る
             key = "rate_null_pct" if row.get("rate_null_pct") is not None and (dm.base_rate or 0) > 0 else "dir_null_pct"
             if recipe.proj_units and row.get(key) is not None and row[key] < 0.95:      # V29: 対照を超えていないことを明示
                 row.setdefault("notes", []).append(
-                    f"目的の指標({'判定の一致率の減少' if key == 'rate_null_pct' else '点数の下がり方'})が、同数・同じ s のランダムなヘッドの"
+                    f"目的の指標({'判定の一致率の減少' if key == 'rate_null_pct' else '射影の値の下がり方'})が、同数・同じ s のランダムなヘッドの"
                     f" {row[key] * 100:.0f}% より大きいだけです(0.95 未満: ヘッドの選び方が効いているとは言えません)")
     if rc is not None:
         b0 = base.get("reactivity", {}).get("reactivity")
@@ -686,7 +687,7 @@ def evaluate(session, recipe: Recipe, *, doses=(0, 0.25, 0.5, 0.75, 1.0), suite:
     if kblock is not None:
         notes += [f"keyed: {n}" for n in kblock.get("notes", [])]
         if "skipped" in kblock:
-            notes.append(f"keyed: 選択性は測っていません({kblock['skipped']})")
+            notes.append(f"keyed: eval の選択性は測っていません({kblock['skipped']})")
     return {"recipe": recipe.to_dict(), "when": w, "random_controls": n_ctrl,
             **({"keyed": kblock} if kblock is not None else {}),
             **({"control_pool": control_pool} if recipe.proj_units and n_ctrl else {}),

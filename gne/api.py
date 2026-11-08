@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import time
 from collections.abc import Callable
@@ -37,6 +38,11 @@ def open_model(path: str | Path, **kw) -> Session:
 
 
 MIN_ROUTED = 200            # MoE: 専門家の観測トークン数がこれより少ないと分位点を信頼できない(CHANGE-05 §B.1)
+# 焼き込みの確かめ(V26・V33)で、計算方法の違いだけで出る射影の値の誤差を測るときの LoRA の倍率(書き込みはほぼ 0)。同じ LoRA
+# ファイルをこの倍率で当てる(keyed の LoRA は α を最大の |α| で割って書くので、いちばん大きいユニットが α = 1e-6 になる)。
+# 0 ちょうどにすると llama.cpp が LoRA を外して計算の仕方が LoRA 版と変わるおそれがあるので、ごく小さい値にする(書き込みの
+# 効きは 0.6B の最後の層で 1e-4 未満。測りたい誤差は 0.3〜1.9 だった、verification.md F139)。
+NOISE_LORA_SCALE = 1e-6
 
 
 class Session:
@@ -295,7 +301,7 @@ class Session:
             self.warn(msg)
 
     def _key_of(self, name: str):
-        """鍵の名前("NAME" か擬似鍵 "NAME~j")→ KeySet(<root>/keys/<model_id>/、CHANGE-07)。"""
+        """鍵の名前("NAME" か比較用の鍵 "NAME~j")→ KeySet(<root>/keys/<model_id>/、CHANGE-07)。"""
         from .keyed import load_key
         return load_key(self, name)
 
@@ -604,8 +610,10 @@ class Session:
              strip_meta: bool = False, into: str | Path | None = None, lora_f16: bool = False) -> dict:
         """gain ユニットを LoRA アダプタ GGUF(既定)か、W_up(ヘッドは W_O)を書き換えた GGUF(bake)に書き出す(§6.16、CHANGE-04 D)。
         ヘッドの方向成分の射影(proj、CHANGE-06)と鍵つきの書き込み(keyed、CHANGE-07)も同じ LoRA / 焼き込みに入れる
-        (同じテンソルは A・B を連結。記録は gne.headproj と gne.keyed)。keyed を焼き込むときは requant の既定(auto)を f16 にする
-        (rank 1 の小さな編集が Q8_0 の刻みに埋もれやすい、レビュー P13)。量子化し直しで編集の半分以上が消えたら警告する。
+        (同じテンソルは A・B を連結。記録は gne.headproj と gne.keyed)。keyed を焼き込むときの requant の既定(auto)は
+        テンソルごと: 元が Q8_0 なら Q8_0 のまま、それ以外は F16(gain.auto_qtype)。Q8_0 のままでは rank 1 の小さな編集の 1 割以上が
+        刻みに埋もれる(edit_kept < gain.KEYED_KEEP_MIN)テンソルだけ F16(レビュー P13、verification.md F132・F139)。
+        量子化し直しで編集が埋もれたら警告する(_warn_requant)。
         strip_meta なら gne の記録(gne.* のメタデータ・レシピ・名前の印・横の .headproj.json)を残さない(人に渡す版)。
         書いたあと、メタデータに手元のパスらしい文字列が残っていないかも確かめる(local_path_keys)。
         into を渡すと、そのモデル(同じ構造の別の型、例えば量子化していない F16 / BF16)の重みに書く。方向はこのモデルで作った
@@ -639,12 +647,10 @@ class Session:
         if recipe.keyed_units:                           # CHANGE-07: 鍵つきの書き込みも同じ LoRA / 焼き込みに入れる
             if bake and requant == "patch":
                 raise GneError("UNSUPPORTED_QUANT", "鍵つきの書き込み(keyed)はスケールパッチでは書けません(rank 1 の足し算で、単純な倍率ではない)",
-                               "--requant f16(既定)/ q8_0 / keep、または LoRA(--bake なし)で配ってください")
+                               "--requant auto(既定)/ f16 / q8_0 / keep、または LoRA(--bake なし)で配ってください")
             kb = self._keyed_bundle(recipe, W)
             extra_kv["gne.keyed"] = json.dumps(kb["meta"], ensure_ascii=False)
             summary = {**summary, "keyed_layers": kb["layers"], "keyed_rank": kb["rank"]}
-            if bake and requant == "auto":
-                requant = "f16"
         extra = merge_tensors(ptens, kb["tensors"] if kb else {})
         if via_f16 and not bake:
             raise GneError("BAD_ARGS", "--via-f16 は --bake と一緒に使います")
@@ -666,10 +672,15 @@ class Session:
                                                                               extra_kv=extra_kv, via_f16=True,
                                                                               strip_meta=strip_meta),
                                       out, llama_quantize=llama_quantize, imatrix=imatrix, neutral_imatrix=strip_meta)
-                rep["modified"] = [{**m, "to": m["from"]} for m in rep["modified"]]
+                # 中間の F16 の大きさ(bytes_to・専門家のテンソルの増分)は llama-quantize で元の型に戻るので残さない
+                rep["modified"] = [{**{k: v for k, v in m.items() if k != "bytes_to"}, "to": m["from"]}
+                                   for m in rep["modified"]]
+                rep.pop("expert_bytes_added", None)
             elif bake:
                 rep = bake_gain_gguf(W, recipe, out, requant=requant, extra=extra, extra_meta=extra_meta,
-                                     extra_kv=extra_kv, strip_meta=strip_meta)
+                                     extra_kv=extra_kv, strip_meta=strip_meta, keyed=kb is not None)
+                if requant == "auto" and kb is not None:
+                    rep["requant"] = "auto"
             else:
                 rep = export_gain_lora(W, recipe, out, extra=extra, extra_meta=extra_meta, extra_kv=extra_kv,
                                        strip_meta=strip_meta, f16=lora_f16)
@@ -680,6 +691,8 @@ class Session:
         rep.update(summary)
         if kb is not None and bake:
             self._warn_requant(rep)
+            if not via_f16:
+                self._warn_expert_size(rep)
         if into is not None:
             rep["into"] = Path(W.path).name if strip_meta else str(W.path)
         if bake and via_f16:
@@ -728,11 +741,40 @@ class Session:
         return kb
 
     def _warn_requant(self, rep: dict, limit: float = 0.5) -> None:
-        """量子化し直しで失った分 ÷ 編集の大きさ(requant_error_max)が limit を超えたら警告(keyed、レビュー P13)。"""
-        err = rep.get("requant_error_max")
-        if err is not None and err > limit:
-            self.warn(f"量子化し直しで書き込み行列の編集の {err * 100:.0f}% 相当が丸めに消えています(requant_error_max={err:.2f})。"
-                      "--requant f16 にするか、LoRA で配ってください")
+        """量子化し直しで編集が埋もれたときの警告(keyed、レビュー P13)。量子化し直しても残った編集の割合 edit_kept_min が
+        gain.KEYED_KEEP_MIN(0.9)を下回ったら。edit_kept が無い結果(古い記録など)は、量子化し直しで失った分 ÷ 編集の大きさ
+        requant_error_max が limit を超えたら。requant_error は編集と無関係な丸めのゆらぎ(その型の量子化そのもののゆらぎ)も
+        数えるので、刻みより小さい編集では編集が残っていても大きく出る(verification.md F140)。既定(auto)で Q8_0 から F16 に
+        切り替えたテンソル(記録の fallback)も知らせる。"""
+        from .gain import KEYED_KEEP_MIN
+        err, kept = rep.get("requant_error_max"), rep.get("edit_kept_min")
+        if (kept is not None and kept < KEYED_KEEP_MIN) or (kept is None and err is not None and err > limit):
+            what = []
+            if kept is not None:
+                what.append(f"残った編集は {kept * 100:.0f}%(edit_kept_min={kept:.2f})")
+            if err is not None:
+                what.append(f"丸めのずれは編集の {err * 100:.0f}% 相当(requant_error_max={err:.2f})")
+            self.warn("量子化し直しで、残差に書き込む重み行列の編集が丸めに消えています(" + "、".join(what) + ")。"
+                      "--requant f16 か auto(既定。Q8_0 で埋もれるテンソルだけ F16)にするか、LoRA で配ってください")
+        fb = [m["tensor"] for m in rep.get("modified") or [] if isinstance(m, dict) and m.get("fallback")] \
+            or list(rep.get("fallback") or [])                  # 分割 GGUF への焼き込みは modified が名前だけ
+        if fb:
+            self.warn(f"{len(fb)} テンソル({fb[0]} など)は、Q8_0 のままでは編集の 1 割以上が丸めに消えるので F16 で書きました"
+                      "(--requant auto の規則。元の型のままにするなら --requant keep)")
+
+    def _warn_expert_size(self, rep: dict) -> None:
+        """専門家の 3 次元テンソル(ffn_down_exps、keyed の expert:e)を元と違う型で書き直してファイルが大きくなったときの
+        警告(rep の expert_bytes_added、通常の焼き込みと分割 GGUF への焼き込み)。1 つのテンソルの型は 1 つなので、編集しない
+        専門家のスラブも同じ型に変換される(gain._expert_bake)。"""
+        tot = int(rep.get("expert_bytes_added") or 0)
+        if tot > 0:
+            grown = [m["tensor"] for m in rep.get("modified") or []
+                     if isinstance(m, dict) and "experts" in m and int(m.get("bytes_to", 0)) > int(m.get("bytes_from", 0))]
+            what = f"専門家のテンソル {len(grown)} 本({grown[0]} など)" if grown else "専門家のテンソル"
+            self.warn(f"{what}を元と違う型で書き直したので、ファイルが "
+                      f"{tot / 2 ** 20:.0f} MiB 大きくなりました(1 つのテンソルの型は 1 つなので、編集しない専門家も変換されます)。"
+                      "元の型で書き戻すには --requant keep(編集しない専門家はバイトのまま。通常の焼き込みでは K-quant・IQ の型は"
+                      " Q8_0 になります)。配るなら LoRA(--bake なし)が小さく正確です")
 
     def _warn_when(self, recipe: Recipe, what: str) -> None:
         if recipe.ablate is not None:
@@ -746,7 +788,7 @@ class Session:
                       "(control vector は足し算だけ、CHANGE-06)。gne headproj export(か gne gain)で LoRA に書き出してください")
         if recipe.keyed_units:
             self.warn(f"鍵つきの書き込み(keyed、{len(recipe.keyed_units)} 個)は {what} では表せないので外しました"
-                      "(入力の活性が鍵に合うときだけ書くので、定数の足し算にならない、CHANGE-07)。"
+                      "(入力の活性に鍵が反応するときだけ書くので、定数の足し算にならない、CHANGE-07)。"
                       "gne headproj export(か gne gain)で LoRA に書き出してください")
         if recipe.when != "all":
             self.warn(f"レシピの when={recipe.when} は {what} では表せないので、全位置(all)として書き出しました(§6.15)。"
@@ -1183,14 +1225,14 @@ class Session:
 
     def heads_contrast(self, contrast: str | Path, *, name: str | None = None, direction: str | None = None,
                        system_b2: str | None = None, layers: list[int] | None = None, max_tokens: int = 48) -> dict:
-        """対照集合でヘッドごとに trigger_mass・pattern_shift・out_shift・dir_cos を測り、中立どうしを床にして順位づける。"""
+        """対照集合でヘッドごとに trigger_mass・pattern_shift・out_shift・dir_cos を測り、中立どうしの差の p95 を基準値にして順位づける。"""
         from .heads import heads_contrast
         return heads_contrast(self, contrast, name=name, direction=direction, system_b2=system_b2, layers=layers,
                               max_tokens=max_tokens, progress=self.progress)
 
     def experts_contrast(self, contrast: str | Path, *, name: str | None = None, direction: str | None = None,
                          system_b2: str | None = None, layers: list[int] | None = None, max_tokens: int = 48) -> dict:
-        """MoE の層の専門家ごとに usage_shift・weight_shift・contrib_cos・contrib_norm を測り、中立どうしを床にして順位づける(CHANGE-05 §E.1)。"""
+        """MoE の層の専門家ごとに usage_shift・weight_shift・contrib_cos・contrib_norm を測り、中立どうしの差の p95 を基準値にして順位づける(CHANGE-05 §E.1)。"""
         from .experts import experts_contrast
         return experts_contrast(self, contrast, name=name, direction=direction, system_b2=system_b2, layers=layers,
                                 max_tokens=max_tokens, progress=self.progress)
@@ -1462,12 +1504,12 @@ class Session:
         """レシピの倍率ごとの副作用(能力・ppl・言語混入)と性格の変化量を測り、<root>/evals/<model_id>/<name>.json に保存する。
         random_controls > 0 なら各倍率で同じ大きさのランダムな対照レシピも測る(行の ctrl・ctrl_novelty_p95 など)。
         reactivity(対照集合の YAML)で反応性(トリガーあり/なしの差)も測り、head_controls 本のランダムなヘッドと比べる。
-        方向を使うレシピ(proj など)では方向の指標(点数の下がり方・ずれ・判定の一致率)も測る。direction_metrics=False で
+        方向を使うレシピ(proj など)では方向の指標(射影の値の下がり方・ずれ・判定の一致率)も測る。direction_metrics=False で
         測らない。dir_max_examples はその測定で読む質問の数(A・B それぞれ、一致率の返事も。多ければ等間隔に間引く)。
-        keyed のユニットを持つレシピ(CHANGE-07 E)では選択性も測る(行の keyed と結果の keyed、evalx.evaluate)。
+        keyed のユニットを持つレシピ(CHANGE-07 E)では eval の選択性も測る(行の keyed と結果の keyed、evalx.evaluate)。
         keyed_contrast は鍵を作った対照集合(configs/contrast/ の名前かパス。省くと方向を作った対照集合が鍵と同じならそれ、
         どちらも無ければ結果の keyed は skipped)、keyed_examples は会話の組ごとに読む数(None か 0 で全部)、keyed_pseudo は
-        擬似鍵の本数、keyed_subset は読む例(even / odd / all、省くと鍵の作成と反対側)、keyed_match=False で方式の比較の
+        比較用の鍵の本数、keyed_subset は読む例(even / odd / all、省くと鍵の作成と反対側)、keyed_match=False で方式の比較の
         大きさ合わせを省く、keyed_metrics=False で測らない。"""
         from .evalx import Judge, evaluate
         recipe = self._as_recipe(recipe)
@@ -1564,7 +1606,7 @@ class Session:
                              score_layer: int | None = None, top_neurons: int = 20, suite: str | Path | None = None,
                              when: str | None = None, contrast: str | Path | None = None, name: str | None = None) -> dict:
         """CHANGE-06 F.3: 同じ方向について、全層射影(ablate)・ヘッドの方向成分の射影(このレシピの proj)・同じヘッドの
-        丸ごと倍率(gain、k_h = 1 − α·s_h)・上位ニューロンの消去(gain、k = 1 − α)を、A 側の点数(速い物差し、score_layer)が
+        丸ごと倍率(gain、k_h = 1 − α·s_h)・上位ニューロンの消去(gain、k = 1 − α)を、A 側の射影の値(速い指標、score_layer)が
         同じ水準(match_effect、省けばこのレシピの水準)になるよう全体の倍率を二分探索で合わせてから、副作用を同じ表に並べる。
         合わせられなかった方式は理由を書いて除外する。"""
         from .causal import _bisect
@@ -1584,7 +1626,7 @@ class Session:
             self.direction_score(dname, contrast=contrast)
             ds = self.direction_set(dname)
             base = base_layer_of(ds)
-        if score_layer is None:                          # 組のヘッドより後ろの、最初の物差しの層
+        if score_layer is None:                          # 組のヘッドより後ろの、最初の射影の値を測る層
             sls = score_layers_default(self, ds, base)
             score_layer = next((L for L in sls if L >= max(p.layer for p in heads)), sls[-1])
         S = int(score_layer)
@@ -1620,11 +1662,11 @@ class Session:
             if key == "proj" and match_effect is None:
                 alpha, val_a, reached = 1.0, target, True
             else:
-                # 方式によっては点数が倍率に単調でない(丸ごと倍率は直交成分も反転する)ので、粗く見てから詰める
+                # 方式によっては射影の値が倍率に単調でない(丸ごと倍率は直交成分も反転する)ので、粗く見てから詰める
                 alpha, val_a, reached, _ = _bisect(lambda a, make=make: mean_a(make(a)), target, hi, grid=8)
             if not reached:
                 rows.append({"method": key, "desc": desc, "alpha": alpha, "score_a": val_a,
-                             "excluded": f"α = 0〜{hi:g} で A 側の点数は最小でも {val_a:.2f}(α = {alpha:.3g})で、目標 {target:.2f} に届きません"})
+                             "excluded": f"α = 0〜{hi:g} で A 側の射影の値は最小でも {val_a:.2f}(α = {alpha:.3g})で、目標 {target:.2f} に届きません"})
                 continue
             r = make(alpha)
             got = sc.run(self.lora_for(r), keep=True)
@@ -1720,8 +1762,8 @@ class Session:
                         positions: str = "last", units: list[str] | None = None, recipe: str | Path | None = None,
                         side: str = "both", subset: str = "all", set_base: int | None = None,
                         record_base: bool | None = None, max_examples: int | None = None) -> dict:
-        """CHANGE-06 B: 速い物差し。層ごとの A / B の点数と cohen_d、基準層(cohen_d 最大、記録する)、後段の層の方向との cos。
-        units / recipe を渡すと、その介入での点数の変化と直交成分のずれ。set_base で基準層を手で上書きする。"""
+        """CHANGE-06 B: 速い指標。層ごとの A / B の射影の値と cohen_d、基準層(cohen_d 最大、記録する)、後段の層の方向との cos。
+        units / recipe を渡すと、その介入での射影の値の変化と直交成分のずれ。set_base で基準層を手で上書きする。"""
         from .direction import set_base_layer
         from .direction import score as score_fn
         ds, cs, _ = self._direction_contrast(name, contrast)
@@ -1811,13 +1853,13 @@ class Session:
                 for r in layer_rows:
                     if drift_max is not None and (r.get("drift_orth_b") or 0) > drift_max:
                         r["excluded"] = "breaks"
-                # 物差しの層とそれより後の層のヘッドは、測る量を直接動かすので効率が高く見えるが、振る舞いはほとんど変わらなかった
+                # 射影の値を測る層とそれより後の層のヘッドは、測る量を直接動かすので効率が高く見えるが、振る舞いはほとんど変わらなかった
                 # (docs/head-component-steering.md)。既定では 1 個ずつ測る層から外す
                 first = min(st.score_layers)
                 ok = [r for r in layer_rows if r["causal_max"] > 0 and not r.get("excluded")]
                 early = [r for r in ok if r["layer"] < first]
                 if not include_score_layers and not early and ok:
-                    self.warn(f"物差しの層 L{first} より前に、止めて点数が下がる層がないので、物差しの層のヘッドも測ります")
+                    self.warn(f"射影の値を測る層 L{first} より前に、止めて射影の値が下がる層がないので、測る層のヘッドも測ります")
                 pos = sorted(ok if include_score_layers or not early else early, key=lambda r: -r["causal_max"])
                 Ls = sorted(r["layer"] for r in pos[:max(1, top_layers)])
             elif layers in ("auto", "all", None):
@@ -1907,19 +1949,19 @@ class Session:
         if score_layer is None:
             sl = summ.get("score_layers") or []
             if not sl and summ.get("primary") is None:      # 黙って L0 で測らない
-                raise GneError("BAD_ARGS", f"{sp.name} が無いので物差しの層が分かりません",
+                raise GneError("BAD_ARGS", f"{sp.name} が無いので射影の値を測る層が分かりません",
                                "--score-layer を付けるか、.causal.jsonl と同じ名前の .causal.json を横に置いてください")
             score_layer = int(sl[-1]) if sl else int(summ.get("primary"))
         if candidate_layers is not None:          # 候補のヘッドを指定した層に絞る
             keep = {int(x) for x in candidate_layers}
             rows = [r for r in rows if r.get("head") is None or int(r["layer"]) in keep]
-        if not include_score_layers:              # 物差しの層とそれより後のヘッドは候補にしない(heads_causal と同じ理由)
+        if not include_score_layers:              # 射影の値を測る層とそれより後のヘッドは候補にしない(heads_causal と同じ理由)
             first = min([int(x) for x in summ.get("score_layers") or []] + [int(score_layer)])
             kept = [r for r in rows if r.get("head") is None or int(r["layer"]) < first]
             if any(r.get("head") is not None for r in kept):
                 rows = kept
             else:
-                self.warn(f"物差しの層 L{first} より前のヘッドが候補にないので、物差しの層のヘッドも使います"
+                self.warn(f"射影の値を測る層 L{first} より前のヘッドが候補にないので、測る層のヘッドも使います"
                           "(heads causal を前の層で測ると外せます)")
         base = proj_heads(Recipe.load(self.recipe_path(base_recipe))) if base_recipe else None
         return allocate(self, ds, cs, candidates=rows, target=float(target), score_layer=int(score_layer),
@@ -1940,9 +1982,9 @@ class Session:
         spec は対照集合と同じ中身(name・user_prompts か側ごとの prompts_a / prompts_b・system_a / system_b か
         recipe_a / recipe_b・validate)に、任意で
         pipeline: {positions, score_positions, target, n_heads, hard, top_layers, max_examples, s_max, direction_layer}。
-        over(引数)は pipeline より優先。target を省くと、物差しの最後の層での A 側と B 側の平均の真ん中(「残る」はこれを超える例)。
+        over(引数)は pipeline より優先。target を省くと、射影の値を測る最後の層での A 側と B 側の平均の真ん中(「残る」はこれを超える例)。
         止めると中立の入力の残差が大きく動く(直交成分のずれ > 0.5)層とヘッドは、モデルを壊しているだけなので候補から外す。
-        方向づくりには質問を全部使い、止めて測る段階(物差し・因果・配分)は max_examples 個に等間隔に間引く。
+        方向づくりには質問を全部使い、止めて測る段階(射影の値・因果・配分)は max_examples 個に等間隔に間引く。
         resume(既定 True)なら、同じ対照集合・同じ設定で作り済みの方向と因果の結果を使い回す(止めて流し直したとき、配分から
         やり直せる)。結果は <root>/heads/<model_id>/<name>.pipeline.json。"""
         import yaml
@@ -2041,14 +2083,14 @@ class Session:
     def heads_refine(self, name: str, *, n_heads: int | None = None, new_heads=(3, 2, 1), out_name: str | None = None,
                      min_questions: int = 4, resume: bool = True) -> dict:
         """配分の組を当てても目標まで下がらない A 側の質問(「残り」)だけで、追加のヘッドを探す。
-        1. 組を当てて A 側の全部の質問を測り、物差しの層の点数が閾値(配分の remain_threshold)を超える質問を残りとする。
+        1. 組を当てて A 側の全部の質問を測り、射影の値を測る層での射影の値が閾値(配分の remain_threshold)を超える質問を残りとする。
         2. 新しい対照集合を作る: A = 残りの質問、B = 元の B 側の質問。両側に元の側の作り方(system・レシピ)と組を当てる
            (組を当てたうえでまだ残っている違いを方向にする)。validate と一括の設定は元のものを使う。
         3. それを heads pipeline に流す(方向 <name>_rK → 基準層 → 因果 → 配分)。見つかるのは、組に足すヘッドと強さ。
         4. 比較表のどの組も、元の組と合わせたレシピ(<name>_rK.combined-n<N>.yaml)を作り、元の方向で残りと B 側のずれを
            測り直す(追加の組は元の組を当てた状態で探したので、単独では使わない)。代表(推す組、無ければ合わせた残りが
            最も少ない組)は <name>_rK.combined.yaml にも置く。
-        残りが min_questions 個より少なければ、点数の高い順に min_questions 個まで足して方向を作る(残りの数はそのまま報告)。"""
+        残りが min_questions 個より少なければ、射影の値の高い順に min_questions 個まで足して方向を作る(残りの数はそのまま報告)。"""
         import dataclasses
 
         import yaml
@@ -2177,7 +2219,7 @@ class Session:
 
     @staticmethod
     def _pipeline_target(spec, bs: dict) -> tuple[float, str]:
-        """一括の目標: 数(物差しの最後の層の点数)、"B"(B 側の平均、振る舞いを B 側の水準まで消す)、"mid" か省略
+        """一括の目標: 数(射影の値を測る最後の層での射影の値)、"B"(B 側の平均、振る舞いを B 側の水準まで消す)、"mid" か省略
         (A と B の平均の真ん中)。返り値は (目標の値, どこから決めたか)。"""
         if spec is None or (isinstance(spec, str) and spec.strip().lower() in ("", "mid", "middle")):
             return 0.5 * (float(bs["A"]) + float(bs["B"])), "A と B の平均の真ん中"
@@ -2516,21 +2558,27 @@ round_01.scores.txt に「番号 P C」を 1 行ずつ書く(例: 17 3 4)。全�
                         via_f16: bool = False, imatrix: str | None = None, llama_quantize: str | None = None,
                         verify: bool = False, contrast: str | Path | None = None, strip_meta: bool = False,
                         into: str | Path | None = None, lora_f16: bool = False) -> dict:
-        """CHANGE-06 E: proj のユニット(と gain)を LoRA(既定)か、書き込み行列だけ量子化し直した GGUF に書き出す
+        """CHANGE-06 E: proj のユニット(と gain)を LoRA(既定)か、残差に書き込む重み行列だけ量子化し直した GGUF に書き出す
         (gne gain と同じ経路)。鍵つきの書き込み(keyed、CHANGE-07)だけのレシピと、proj・keyed(・gain)を混ぜたレシピも受ける。
-        requant を省くと q8_0、keyed を含むなら f16(rank 1 の小さな編集が量子化の刻みに埋もれないように、レビュー P13)。
+        requant を省くと q8_0、keyed を含むなら auto(テンソルごと: 元が Q8_0 なら Q8_0 のまま、それ以外は F16。Q8_0 のままでは
+        rank 1 の小さな編集の 1 割以上が刻みに埋もれるテンソルだけ F16。gain.auto_qtype・KEYED_KEEP_MIN、レビュー P13、
+        verification.md F132・F139)。keyed を含まないレシピの auto は q8_0。
         verify なら焼き込み版と LoRA 版を V26 の 4 項目で比べる(keyed だけなら keyed の方向で測る)。"""
         recipe = self._as_recipe(recipe)
         if not recipe.proj_units and not recipe.gain_units and not recipe.keyed_units:
             raise GneError("BAD_RECIPE", "proj のユニットがありません(例 --unit 33:H16:s6@NAME、鍵つきの書き込みは 19:ffn:keyed:a1@NAME#KEY)")
         if requant is None:
-            requant = "f16" if recipe.keyed_units else "q8_0"
+            requant = "auto" if recipe.keyed_units else "q8_0"
+        if requant == "auto" and not recipe.keyed_units:
+            requant = "q8_0"
+        if requant not in ("auto", "q8_0", "f16", "keep", "patch"):
+            raise GneError("BAD_ARGS", f"--requant は auto / q8_0 / f16 / keep です({requant!r})")
         if into is not None and verify and Path(into).resolve() != Path(self.weights.path).resolve():
             raise GneError("BAD_ARGS", "別のモデルに焼き込むときは、LoRA 版との比較(verify)はできません",
                            "焼き込む先のモデルを読み直して eval で確かめてください")
         if bake and into is None and self.weights.gguf.is_split:     # 分割のままでは、同じ型で書き戻す(大きさを変えない)
             from .headproj import bake_proj_split
-            rq = "f16" if requant == "f16" else "q8_0" if requant == "q8_0" else "keep"
+            rq = requant
             kb = self._keyed_bundle(recipe) if recipe.keyed_units else None
             d = bake_proj_split(self.weights, recipe, out, self.direction_set, requant=rq, warn=self.warn,
                                 extra=kb["tensors"] if kb else None, extra_meta={"keyed": kb["meta"]} if kb else None)
@@ -2538,6 +2586,7 @@ round_01.scores.txt に「番号 P C」を 1 行ずつ書く(例: 17 3 4)。全�
             if kb is not None:
                 d.update(keyed_layers=kb["layers"], keyed_rank=kb["rank"])
                 self._warn_requant(d)
+                self._warn_expert_size(d)
         else:
             d = self.gain(recipe, out, bake=bake, requant="q8_0" if via_f16 else requant, via_f16=via_f16,
                           imatrix=imatrix, llama_quantize=llama_quantize, strip_meta=strip_meta, into=into, lora_f16=lora_f16)
@@ -2554,8 +2603,14 @@ round_01.scores.txt に「番号 P C」を 1 行ずつ書く(例: 17 3 4)。全�
         from .keyed_build import build_keys
         return build_keys(self, contrast, **kw)
 
+    def direction_key_experts(self, contrast: str | Path, **kw) -> dict:
+        """expert:e の鍵の専門家を選ぶ: 鍵と同じ対照集合・位置で、書き込みたい位置・書き込みたくない位置で各専門家が選ばれた
+        割合と重み(keyed_build.expert_usage。層ごとに書き込みたい位置で選ばれた割合の大きい順)。MoE でない層は BAD_RECIPE。"""
+        from .keyed_build import expert_usage
+        return expert_usage(self, contrast, **kw)
+
     def direction_key_check(self, key: str, **kw) -> dict:
-        """鍵の確かめ(gne direction key-check: 層ごとの AUC・ρ の分布・擬似鍵との比較・保留集合)。中身は keyed_build.key_check。"""
+        """鍵の確かめ(gne direction key-check: 層ごとの AUC・ρ の分布・比較用の鍵との比較・保留集合)。中身は keyed_build.key_check。"""
         from .keyed_build import key_check
         return key_check(self, key, **kw)
 
@@ -2566,7 +2621,7 @@ round_01.scores.txt に「番号 P C」を 1 行ずつ書く(例: 17 3 4)。全�
 
     def check_keyed(self, L: int, *, key: str, direction: str, **kw) -> dict:
         """V30: keyed の LoRA の出力の差 = α (κᵀx) d(|κᵀx| の大きいトークンで相対誤差の中央値 < 3%)、鍵の作成に使った
-        側 B の例では |Δ̄| / (|α|·‖d‖) < 0.1。keyed.check_keyed。"""
+        書き込みたくない側の例では |Δ̄| / (|α|·‖d‖) < 0.1。keyed.check_keyed。"""
         from .keyed import check_keyed
         return check_keyed(self, L, key=key, direction=direction, **kw)
 
@@ -2588,9 +2643,16 @@ round_01.scores.txt に「番号 P C」を 1 行ずつ書く(例: 17 3 4)。全�
 
     def check_proj_bake(self, recipe: Recipe, baked: Path, *, contrast: str | Path | None = None,
                         suite: str | Path | None = None) -> dict:
-        """V26: 焼き込み版と LoRA 版で (a) A・B の点数、(b) 最初のトークンの分布の KL、(c) 最尤トークンの一致率、
+        """V26: 焼き込み版と LoRA 版で (a) A・B の射影の値、(b) 最初のトークンの分布の KL、(c) 最尤トークンの一致率、
         (d) perplexity を比べる。LoRA 版を測ってからモデルを閉じ、焼き込み版を読む(大きいモデルでも 1 つずつ)。
-        点数の方向は proj の方向、proj が無ければ keyed の方向(V33、CHANGE-07)。"""
+        射影する方向は proj の方向、proj が無ければ keyed の方向(V33、CHANGE-07)。
+
+        射影の値の判定は、層ごと・側ごとに、例ごとの |LoRA 版 − 焼き込み版| の最大を許容誤差(その層の両側の射影の値の標準偏差の
+        1 割)と比べる。最後の層(基準の層と違うとき)だけは、合格の線を「許容誤差 + 計算方法の違いだけで出る誤差」にする。
+        その誤差は、LoRA 版を測ったのと同じセッションで、書き込みがほぼ 0 の LoRA(同じ LoRA ファイルを倍率 NOISE_LORA_SCALE で
+        当てる)と LoRA なしの射影の値を測り、その層の両側の例ごとの差の最大を取る。Q8_0 の掛け算は途中の値も 8 ビットに丸めるので、LoRA を
+        当てるだけで変わる計算の小さな違いが後ろの層で広がり、最後の層の射影の値は焼き込みと関係なく許容誤差の 7〜8 割動いた
+        (verification.md F139)。基準の層の射影の値・最尤トークン・ppl の判定はそのまま。"""
         from .direction import Scorer, base_layer_of, last_logprobs
         from .evalx import _ppl, load_suite
         from .headproj import proj_heads
@@ -2601,6 +2663,7 @@ round_01.scores.txt に「番号 P C」を 1 行ずつ書く(例: 17 3 4)。全�
         ds, cs, _ = self._direction_contrast(dname, contrast)
         b = base_layer_of(ds)
         Ls = sorted({x for x in (b, max(L for L in ds.raw if L <= self.meta.n_layer - 2)) if x is not None})
+        last = Ls[-1] if Ls[-1] != b else None                 # 合格の線に計算方法の違いの誤差を足す層
         convs = cs.convs("A") + cs.convs("B")
         texts = load_suite(suite).ppl
 
@@ -2609,27 +2672,28 @@ round_01.scores.txt に「番号 P C」を 1 行ずつ書く(例: 17 3 4)。全�
             got = sc.run(lora)
             lp = last_logprobs(sess, convs, None, lora)
             ppl = _ppl(sess, texts, None, lora, lambda n: None) if texts else {}
-            return got, lp, ppl
+            return got, lp, ppl, sc
         lora = self.lora_for(recipe)
-        a, lpa, ppa = measure(self, lora)
+        a, lpa, ppa, sc = measure(self, lora)
+        # 計算方法の違いだけで出る誤差: 書き込みがほぼ 0 の LoRA と LoRA なしの射影の値の差(射影の値だけ。モデルは開き直さない)。
+        # 倍率を 0 ちょうどにすると llama.cpp が LoRA を外して計算の仕方が LoRA 版と変わるおそれがあるので、ごく小さい倍率にする
+        noise = None
+        if lora and last is not None:
+            t0 = time.perf_counter()
+            tiny = sc.run([(p, math.copysign(NOISE_LORA_SCALE, float(s_))) for p, s_ in lora], sides="AB")
+            none = sc.run(None, sides="AB")
+            by_side = {side: float(np.abs(np.asarray(tiny[side]["values"][last]) - np.asarray(none[side]["values"][last])).max())
+                       for side in "AB"}
+            noise = {"layer": last, "max_abs_diff": max(by_side.values()), "by_side": by_side,
+                     "lora_scale": NOISE_LORA_SCALE, "seconds": time.perf_counter() - t0}
         self.close()
         other = Session(baked, root=self.store.root, n_gpu_layers=self._engine_kw["n_gpu_layers"],
                         n_ctx=self._engine_kw["n_ctx"], n_seq_max=self._engine_kw["n_seq_max"])
         try:
-            bb, lpb, ppb = measure(other, None)
+            bb, lpb, ppb, _ = measure(other, None)
         finally:
             other.close()
-        scores = {}
-        ok_s = True
-        for L in Ls:
-            for side in "AB":
-                va, vb = a[side]["values"][L], bb[side]["values"][L]
-                sd = float(np.std(np.concatenate([a["A"]["values"][L], a["B"]["values"][L]])))
-                diff = float(np.abs(va - vb).max())
-                res = 0.1 * sd                                    # 物差しの分解能: 両側の点数の広がりの 1 割
-                scores[f"{L}{side}"] = {"lora": float(va.mean()), "baked": float(vb.mean()), "max_abs_diff": diff,
-                                        "resolution": res, "ok": diff <= res}
-                ok_s &= diff <= res
+        scores, ok_s = bake_score_check(a, bb, Ls, last=last, noise=noise["max_abs_diff"] if noise else 0.0)
         kl = float(np.mean(np.sum(np.exp(lpa) * (lpa - lpb), axis=1)))
         ta, tb = np.argmax(lpa, axis=1), np.argmax(lpb, axis=1)
         top1 = float(np.mean(ta == tb))
@@ -2640,9 +2704,10 @@ round_01.scores.txt に「番号 P C」を 1 行ずつ書く(例: 17 3 4)。全�
         ppl_diff = None if pa is None else (pb / pa - 1) * 100
         return {"scores": scores, "kl_first_token": kl, "top1_match": top1, "top1_mismatch_gaps": gaps,
                 "n_prompts": len(convs), "ppl_lora": pa, "ppl_baked": pb, "ppl_diff_pct": ppl_diff,
+                "base_layer": b, "last_layer": last, "noise": noise,
                 "pass": bool(ok_s and all(g < 0.5 for g in gaps) and (ppl_diff is None or abs(ppl_diff) < 0.5)),
                 "note": None if not gaps else "最尤トークンが分かれた例はどれも僅差(0.5 nats 未満)なら合格。"
-                                             "量子化し直しの丸めで分かれる(--requant f16 なら誤差が小さい)"}
+                                             "量子化し直しの丸めや、書き換えたテンソルの計算方法(Q8_0 か F16 か)の違いで分かれる"}
 
     def evals(self) -> list[dict]:
         """保存済みの eval の一覧(新しい順)。"""
@@ -2697,6 +2762,29 @@ round_01.scores.txt に「番号 P C」を 1 行ずつ書く(例: 17 3 4)。全�
                      "text": texts.get((c.layer, c.neuron), "")} for c in cands]
         baselines = {f"L{L}": texts.get((L, None), "") for L in sorted(by_layer)}
         return {"design": design_name, "runs": runs, "examples": examples, "baselines": baselines}
+
+
+def bake_score_check(lora: dict, baked: dict, layers, *, last: int | None = None, noise: float = 0.0) -> tuple[dict, bool]:
+    """V26・V33 の射影の値の判定。lora・baked は Scorer.run の結果({側: {"values": {L: 例ごとの射影の値}}})。層ごと・側ごとに
+    {lora・baked(平均), max_abs_diff(例ごとの |LoRA − 焼き込み| の最大), resolution(許容誤差 = その層の LoRA 版の両側の
+    射影の値の標準偏差の 1 割), threshold(合格の線), ok} を返す。合格の線は許容誤差で、last の層だけ許容誤差 + noise
+    (計算方法の違いだけで出る誤差、check_proj_bake)。last の行には noise も入れる。戻り値 (scores, 全部 ok か)。"""
+    scores, ok_all = {}, True
+    for L in layers:
+        sd = float(np.std(np.concatenate([lora["A"]["values"][L], lora["B"]["values"][L]])))
+        res = 0.1 * sd                                    # 許容誤差: 両側の射影の値の広がりの 1 割
+        line = res + float(noise) if L == last else res
+        for side in "AB":
+            va, vb = np.asarray(lora[side]["values"][L]), np.asarray(baked[side]["values"][L])
+            diff = float(np.abs(va - vb).max())
+            row = {"lora": float(va.mean()), "baked": float(vb.mean()), "max_abs_diff": diff, "resolution": res}
+            if L == last:
+                row["noise"] = float(noise)
+            row.update(threshold=line, ok=diff <= line)
+            scores[f"{L}{side}"] = row
+            ok_all &= diff <= line
+    return scores, bool(ok_all)
+
 
 def load_prompt_list(path: str | Path) -> list[str]:
     """プロンプトの組の YAML: 文字列のリスト、{prompts: [...]}、または対照集合(reactivity の with、無ければ user_prompts)。"""

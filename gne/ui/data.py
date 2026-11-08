@@ -483,7 +483,7 @@ class UIData:
     def head(self, L: int, h: int, *, lens: bool = True) -> dict:
         """ヘッドの調書(gne.heads.head_dossier)。W_O ブロックの logit lens は重みだけで決まるので 1 回だけ計算して覚える
         (語彙全体との内積なので大きいモデルでは数秒。lens=False なら覚えていればそれ、無ければ None で先に返す)。
-        保存済みの対照分析ごとに、その床(対照の p95)も添える。"""
+        保存済みの対照分析ごとに、その基準値(中立どうしの差の p95)も添える。"""
         self._check(L)
         d = self.s.head(L, h, lens=False)
         key = ("head_lens", L, h)
@@ -587,7 +587,7 @@ class UIData:
                         "score_layers": x.get("score_layers"), "base_scores": s.get("base_scores"), "rows": mine, "rank": rank})
         return out
 
-    # --- CHANGE-06 G: 方向(gne direction)の速い物差し。direction ビュー・recipe タブの proj の方向 ------------------
+    # --- CHANGE-06 G: 方向(gne direction)の速い指標。direction ビュー・recipe タブの proj の方向 ------------------
     def directions_list(self) -> list[dict]:
         """gne direction で作った方向セット(逆引きの方向は入れない)。基準層(gne direction score で記録したもの)など。"""
         from ..direction import base_layer_of
@@ -651,7 +651,7 @@ class UIData:
 
     def key_one(self, name: str) -> dict:
         """鍵 1 つ: 要約(層ごとの kn・gain・q_rank、作成の条件)と、作成のときの記録(mode・作成に使った例での AUC・外した層・
-        弱い層・dont_touch・返事の出どころ・擬似鍵の本数)。モデルは使わない。"""
+        弱い層・dont_touch・返事の出どころ・比較用の鍵の本数)。モデルは使わない。"""
         from ..keyed import load_key
         if not re.fullmatch(r"[\w.][\w.\-]*", name or ""):
             raise GneError("BAD_ARGS", f"鍵の名前 {name!r} が不正です")
@@ -670,7 +670,7 @@ class UIData:
     def contrasts_list(self) -> list[dict]:
         """鍵を作る対照集合の候補: リポジトリの configs/contrast/*.yaml と、<root>/contrasts/*.yaml(UI や JSON から受け取った
         もの)。中身は YAML を読んで要約だけ(名前・質問の数・positions・dont_touch の群の名前・返事を持つか・mode)。
-        mode は positions が before:<正規表現> なら same(推論時と同じ文脈の返事の位置で側 A を作る)、それ以外は system。"""
+        mode は positions が before:<正規表現> なら same(推論時と同じ文脈の返事の位置で書き込みたい位置を作る)、それ以外は system。"""
         import yaml
 
         from ..store import CONFIGS

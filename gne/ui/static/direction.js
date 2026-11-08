@@ -1,6 +1,6 @@
-// direction ビュー(CHANGE-06 G): gne direction の方向セットの速い物差し(gne direction score)。Canvas 2D。
-// 上: 層ごとの A / B の点数(残差 · r̂_L)の cohen_d と、基準層の方向との cos。基準層(記録したもの)と cohen_d 最大の層に印。
-// 下: 選んだ層(グラフをクリック、既定は基準層)での例ごとの A / B の点数の分布と、例ごとの表。
+// direction ビュー(CHANGE-06 G): gne direction の方向セットの速い指標(gne direction score)。Canvas 2D。
+// 上: 層ごとの A / B の射影の値(残差 · r̂_L)の cohen_d と、基準層の方向との cos。基準層(記録したもの)と cohen_d 最大の層に印。
+// 下: 選んだ層(グラフをクリック、既定は基準層)での例ごとの A / B の射影の値の分布と、例ごとの表。
 // 基準層は「L を基準層にする」で手で上書きできる(direction_score の set_base)。初めて測るときに基準層がまだ無ければ、
 // cohen_d が最大の層が記録される(gne direction score と同じ)。基準層があれば測り直しても上書きしない。
 // 上の切り替えで「JSON から方向とヘッドを作る」(pipeline.js、head_pipeline のジョブ)と「強さの候補」(candidates.js、
@@ -33,14 +33,14 @@ export class DirectionView {
     root.innerHTML = `<div class="dv-mode"><span class="seg" id="dv-mode"><button data-m="dir">${t("方向を見る")}</button><button data-m="pipe">${t("JSON から方向とヘッドを作る")}</button><button data-m="cand">${t("強さの候補")}</button><button data-m="key" title="${t("鍵つきの書き込み(keyed)の鍵を対照集合から作り、作成に使っていない例で状態を分けているかを確かめる")}">${t("鍵(keyed)")}</button></span></div>
       <div id="dv-dir"><div class="dv-tools">
         <label class="muted">${t("方向")} <select id="dv-pick"></select></label>
-        <button id="dv-run" title="${t("対照集合の A / B のプロンプトを流して、全層の点数を測り直す(モデルを使う。GPU を待つことがあります)")}">${t("測り直す")}</button>
+        <button id="dv-run" title="${t("対照集合の A / B のプロンプトを流して、全層の射影の値を測り直す(モデルを使う。GPU を待つことがあります)")}">${t("測り直す")}</button>
         <button id="dv-base" disabled></button>
         <span class="muted note" id="dv-status"></span></div>
       <div id="dv-info" class="note mono"></div>
       <div id="dv-tip" class="mono"><span class="muted">${t("(層にマウスを当てると、ここにその層の値が出ます。クリックでその層の分布)")}</span></div>
       <canvas id="dv-line"></canvas>
       <div class="evx-legend note">
-        <span><i style="background:${C.amber}"></i>${t("cohen_d(A と B の点数の離れ方、左の目盛り)")}</span>
+        <span><i style="background:${C.amber}"></i>${t("cohen_d(A と B の射影の値の離れ方、左の目盛り)")}</span>
         <span><i style="background:${C.b}"></i>${t("基準層の方向との cos(右の目盛り)")}</span>
         <span><i style="background:${C.base};width:2px;height:12px"></i>${t("基準層")}</span>
         <span><i style="background:${C.best};width:2px;height:12px"></i>${t("cohen_d が最大の層")}</span></div>
@@ -205,7 +205,7 @@ export class DirectionView {
     const base = this.$("#dv-base");
     base.disabled = !r || this.busy || this.sel === null || this.sel === m.base_layer;
     base.textContent = this.sel !== null ? t("L{L} を基準層にする", { L: this.sel }) : t("基準層にする");
-    base.title = t("選んだ層を、この方向の基準層(proj の direction_layer: base と、因果スクリーニングの主の物差しの層の既定)として記録する");
+    base.title = t("選んだ層を、この方向の基準層(proj の direction_layer: base と、因果スクリーニングで射影の値を測る主の層の既定)として記録する");
     this.$("#dv-run").disabled = this.busy || !m || !m.contrast_ok;
     if (m) {
       const best = r ? r.best_layer : null;
@@ -286,11 +286,11 @@ export class DirectionView {
       t("基準層との cos")} ${fmt(this._cosBase(L), 3)} · |mean_A − mean_B| ${i >= 0 ? fmt(m.norm[i], 2) : "—"}<br>A ${st(row && row.A)} · B ${st(row && row.B)}`;
   }
 
-  // 選んだ層での例ごとの点数の分布(A = 琥珀、B = 青灰)と、例ごとの表
+  // 選んだ層での例ごとの射影の値の分布(A = 琥珀、B = 青灰)と、例ごとの表
   _hist(m, r) {
     const cv = this.hv, w = Math.max(320, this.root.clientWidth - 24), dpr = window.devicePixelRatio || 1, L = this.sel;
     const A = r && L !== null ? (r.values.A || {})[String(L)] : null, B = r && L !== null ? (r.values.B || {})[String(L)] : null;
-    this.$("#dv-hist-title").textContent = A || B ? t("L{L} の例ごとの点数(残差 · r̂_L、最後のトークン)", { L }) : "";
+    this.$("#dv-hist-title").textContent = A || B ? t("L{L} の例ごとの射影の値(残差 · r̂_L、最後のトークン)", { L }) : "";
     cv.style.display = A || B ? "block" : "none";
     if (!(A || B)) { this.$("#dv-ex").innerHTML = ""; return; }
     cv.width = w * dpr; cv.height = HH * dpr; cv.style.width = `${w}px`; cv.style.height = `${HH}px`;
@@ -329,7 +329,7 @@ export class DirectionView {
       const a = A ? A[i] : null, b = B ? B[i] : null;
       return `<tr><td class="w">${esc(ps.length === n ? qText(ps[i]) : `#${i}`)}</td><td>${fmt(a, 2)}</td><td>${fmt(b, 2)}</td><td>${a !== null && b !== null ? fmt(a - b, 2) : "—"}</td></tr>`;
     }).join("");
-    this.$("#dv-ex").innerHTML = `<details><summary class="muted note">${t("例ごとの点数(L{L}、{n} 件)", { L, n })}</summary>
+    this.$("#dv-ex").innerHTML = `<details><summary class="muted note">${t("例ごとの射影の値(L{L}、{n} 件)", { L, n })}</summary>
       <table class="evx mono dv-ex"><thead><tr><th>${t("プロンプト")}</th><th>A</th><th>B</th><th>A − B</th></tr></thead><tbody>${rows}</tbody></table></details>`;
   }
 }

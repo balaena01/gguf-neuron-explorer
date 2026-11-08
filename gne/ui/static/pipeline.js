@@ -142,12 +142,12 @@ export class PipelinePanel {
       <textarea id="pp-text" class="mono" rows="9" spellcheck="false" placeholder='{"name": "…", "system_a": "…", "system_b": "…", "user_prompts": ["…", "…", "…", "…"]}'></textarea>
       <div id="pp-check" class="note"></div>
       <div class="pp-set">
-        <label class="muted" title="${t("配分で A 側の点数をここまで下げる(物差しの最後の層)。数か、B(B 側の平均まで = 消し切る)。空なら A と B の平均の真ん中(半分ほど消す)")}">${t("目標")} <input id="pp-target" size="7" placeholder="${t("真ん中")}" spellcheck="false"></label>
+        <label class="muted" title="${t("配分で A 側の射影の値をここまで下げる(射影の値を測る最後の層)。数か、B(B 側の平均まで = 消し切る)。空なら A と B の平均の真ん中(半分ほど消す)")}">${t("目標")} <input id="pp-target" size="7" placeholder="${t("真ん中")}" spellcheck="false"></label>
         <label class="muted" title="${t("比べる組のヘッドの数(カンマ区切り)。少ない組ほど 1 ヘッドの強さが大きくなる")}">${t("ヘッド数")} <input id="pp-nheads" size="8" value="${DEFAULTS.n_heads}" spellcheck="false"></label>
-        <label class="muted" title="${t("止めて測る段(物差し・因果・配分)で使う質問の数(等間隔に間引く)。方向づくりには全部使う")}">max_examples <input id="pp-mx" type="number" min="4" max="4096" value="${DEFAULTS.max_examples}"></label>
+        <label class="muted" title="${t("射影の値を測る段(基準層・因果・配分)で使う質問の数(等間隔に間引く)。方向づくりには全部使う")}">max_examples <input id="pp-mx" type="number" min="4" max="4096" value="${DEFAULTS.max_examples}"></label>
         <label class="muted" title="${t("方向を作る位置。last = 質問の最後のトークン、response = 返事を書かせてその位置(遅い)")}">positions <select id="pp-pos"><option>last</option><option>response</option></select></label>
         <label class="muted" title="${t("層ごとのスクリーニングのあと、ヘッドを 1 個ずつ止めて測る層の数")}">top_layers <input id="pp-tl" type="number" min="1" max="64" value="${DEFAULTS.top_layers}"></label>
-        <label class="muted" title="${t("効率を測るときの、点数が残りやすい質問の数")}">hard <input id="pp-hard" type="number" min="1" max="1024" value="${DEFAULTS.hard}"></label>
+        <label class="muted" title="${t("効率を測るときの、射影の値が残りやすい質問の数")}">hard <input id="pp-hard" type="number" min="1" max="1024" value="${DEFAULTS.hard}"></label>
         <label class="muted" title="${t("同じ JSON・同じ設定で作り済みの方向と因果の結果があっても使い回さず、最初から作り直す(止めて流し直すときは外したままにすると配分からやり直せる)")}"><input type="checkbox" id="pp-fresh"> ${t("最初から作り直す")}</label></div>
       <div class="pp-go"><button id="pp-go" disabled>${t("方向とヘッドを作る")}</button> <span class="muted note" id="pp-status"></span></div>
       <h4>${t("これまでの実行")}</h4><div id="pp-past"><p class="muted note">${t("読み込み中…")}</p></div>
@@ -278,7 +278,7 @@ export class PipelinePanel {
     if (!r) return "";
     const rm = r.remaining || {}, c = r.combined;
     return `<div class="pp-refine note"><p>${t("{base} の {n} ヘッドの組で目標まで下がらなかった {k} 問(A 側 {nA} 問のうち)から作った、追加のヘッドの結果です。A と B の両側に元の組を当てたまま、方向を作り直しています。",
-      { base: esc(r.base), n: r.n_heads, k: rm.n ?? "—", nA: rm.n_a ?? "—" })}${rm.padded ? ` ${t("(残りが少ないので、点数の高い順に {u} 問で作りました)", { u: rm.used })}` : ""}</p>
+      { base: esc(r.base), n: r.n_heads, k: rm.n ?? "—", nA: rm.n_a ?? "—" })}${rm.padded ? ` ${t("(残りが少ないので、射影の値の高い順に {u} 問で作りました)", { u: rm.used })}` : ""}</p>
       ${c ? `<p><b>${t("元の組と合わせた組({m} ヘッド)", { m: c.n_heads })}</b>${c.chosen_by === "fewest_remaining" ? ` <span class="muted">${t("(目標に届いた組が無いので、合わせた残りが最も少ない組)")}</span>` : ""}: ${t("残り {a} → {b} 問", { a: c.remain_before, b: c.remain_after })} ·
         ${t("A 平均 {a} → {b}", { a: fmt(c.a_mean_before, 2), b: fmt(c.a_mean_after, 2) })} · ${t("B ⊥ {a} → {b}", { a: fmt(c.b_drift_orth_base, 3), b: fmt(c.b_drift_orth, 3) })}
         <button class="small" id="pp-rf-load" title="${t("元の組と追加の組を合わせたユニットで今のレシピを置き換える")}">${t("合わせた組をレシピに読み込む")}</button>
@@ -341,9 +341,9 @@ export class PipelinePanel {
       ${this.refineNote(d)}
       ${(d.reused || []).length ? `<p class="note muted">${t("同じ JSON・同じ設定で作り済みの{w}を使い回しました(作り直すときは「最初から作り直す」に印を付けて流し直す)",
         { w: d.reused.map((x) => (x === "direction" ? t("方向") : x === "causal" ? t("因果の結果") : x)).join(t("と")) })}</p>` : ""}
-      <p class="note">${t("目標: L{L} の A 側の点数を {v} まで({src})", { L: (d.causal && (d.causal.score_layers || []).slice(-1)[0]) ?? "—", v: fmt(d.target, 2),
+      <p class="note">${t("目標: L{L} の A 側の射影の値を {v} まで({src})", { L: (d.causal && (d.causal.score_layers || []).slice(-1)[0]) ?? "—", v: fmt(d.target, 2),
         src: esc(d.target_from === "settings" ? t("設定") : d.target_from ? t(d.target_from) : "—") })}${d.recommended ? ` · <b>${t("推す組: {n} ヘッド", { n: d.recommended.n_heads })}</b>` : ` · ${t("推す組なし(どの組も目標に届かない)")}`}</p>
-      <div class="pp-actions"><button class="small" id="pp-showdir" title="${t("上の「方向を見る」で、この方向の層ごとの点数と分布を見る")}">${t("方向を見る")}</button>
+      <div class="pp-actions"><button class="small" id="pp-showdir" title="${t("上の「方向を見る」で、この方向の層ごとの射影の値と分布を見る")}">${t("方向を見る")}</button>
         <button class="small" id="pp-map" title="${t("地図の板の上辺のヘッドを、止めたときの下がり方で色付けする")}">${t("地図: 効き")}</button>
         ${d.spec ? `<button class="small" id="pp-respec" title="${t("この実行に使った JSON を入力欄に戻す(設定を変えて流し直すため)")}">${t("入力欄に戻す")}</button>` : ""}</div>
       ${this.stage1(d)}${this.stage2(d)}${this.stage3(d)}${this.stage4(d)}</div>`;
@@ -487,9 +487,9 @@ export class PipelinePanel {
   stage1(d) {
     const sc = d.score || {}, dir = d.direction || {}, nr = dir.n_rows || {};
     return `<section class="pp-stage"><h4>${t("1. 方向と基準層")}</h4>
-      <p class="muted note">${t("A と B で同じ質問を読ませ、層ごとに残差の平均の差を方向にします(質問は全部使う)。cohen_d は、A と B の点数(残差 · 方向)がどれだけ離れているか。いちばん離れる層を基準層として記録します。")}</p>
+      <p class="muted note">${t("A と B で同じ質問を読ませ、層ごとに残差の平均の差を方向にします(質問は全部使う)。cohen_d は、A と B の射影の値(残差 · 方向)がどれだけ離れているか。いちばん離れる層を基準層として記録します。")}</p>
       <p class="note mono">${t("基準層")} <b>L${sc.base_layer ?? "—"}</b> · ${t("cohen_d 最大")} L${sc.best_layer ?? "—"} · positions ${esc(dir.positions || "—")} · ${t("方向を作った例")} A ${nr.A ?? "—"} / B ${nr.B ?? "—"} · ${
-        t("点数を測った例")} A ${(sc.n || {}).A ?? "—"} / B ${(sc.n || {}).B ?? "—"}</p>
+        t("射影の値を測った例")} A ${(sc.n || {}).A ?? "—"} / B ${(sc.n || {}).B ?? "—"}</p>
       ${dChart(sc.layers, sc.base_layer, sc.best_layer)}
       <p class="muted note">${t("棒 = 層ごとの cohen_d(白 = 基準層、緑 = cohen_d 最大)。棒にマウスを当てると値。")}</p></section>`;
   }
@@ -509,37 +509,37 @@ export class PipelinePanel {
       <td>${fmt(r.drift_orth_b, 3)}</td><td class="l">${r.excluded ? why(r) : measured.has(r.layer) ? t("ヘッドを測った") : ""}</td></tr>`).join("");
     const heads = (c.top || []).map((r, i) => `<tr class="${r.excluded ? "rnd" : ""}"><td>${i + 1}</td><td class="l">${headChip(r.layer, r.head)}</td><td>${fmt(r.causal_max, 2)}</td>${dropCells(r)}
       <td>${fmt(r.contrib, 2)}</td><td>${fmt(r.ratio, 2)}</td><td>${sgn(r.b_side_delta, 2)}</td><td>${fmt(r.drift_orth_b, 3)}</td><td class="l">${why(r)}</td></tr>`).join("");
-    const slh = SL.map((L) => `<th title="${t("止めたときの、L{L} での A 側の点数の下がり方", { L })}">L${L}${L === P ? "*" : ""}</th>`).join("");
+    const slh = SL.map((L) => `<th title="${t("止めたときの、L{L} での A 側の射影の値の下がり方", { L })}">L${L}${L === P ? "*" : ""}</th>`).join("");
     return `<section class="pp-stage"><h4>${t("2. 因果スクリーニング")}</h4>
-      <p class="muted note">${t("層ごとにその層のヘッドを全部止め、後ろの層(物差しの層)で A 側の点数がどれだけ下がるかを測って、よく下がる層を選びます(top_layers = {k})。止めると中立の入力(B 側)の残差まで大きく動く層とヘッドは、効いているのではなくモデルを壊しているだけなので外します。選んだ層のヘッドを 1 個ずつ止めて、同じように下がり方(因果の効き目)を測ります。", { k: k ?? "—" })}</p>
-      <p class="note mono">${t("物差しの層")} ${SL.map((L) => (L === P ? `<b>L${L}</b>` : `L${L}`)).join(" ")} · ${t("測った例")} A ${c.n_a ?? "—"} / B ${c.n_b ?? "—"} · ${t("ヘッドの行 {n}", { n: c.n_rows ?? "—" })} · ${
+      <p class="muted note">${t("層ごとにその層のヘッドを全部止め、後ろの層(射影の値を測る層)で A 側の射影の値がどれだけ下がるかを測って、よく下がる層を選びます(top_layers = {k})。止めると中立の入力(B 側)の残差まで大きく動く層とヘッドは、効いているのではなくモデルを壊しているだけなので外します。選んだ層のヘッドを 1 個ずつ止めて、同じように下がり方(因果の効き目)を測ります。", { k: k ?? "—" })}</p>
+      <p class="note mono">${t("射影の値を測る層")} ${SL.map((L) => (L === P ? `<b>L${L}</b>` : `L${L}`)).join(" ")} · ${t("測った例")} A ${c.n_a ?? "—"} / B ${c.n_b ?? "—"} · ${t("ヘッドの行 {n}", { n: c.n_rows ?? "—" })} · ${
         t("ヘッドを測った層")} ${[...measured].sort((a, b) => a - b).map((L) => `L${L}`).join(", ") || "—"}${broke.length ? ` · ${t("外した層")} ${broke.map((r) => `L${r.layer}`).join(", ")}` : ""}</p>
       <h4 class="pp-sub">${t("止めたときの下がり方が大きいヘッド(上位 {n})", { n: (c.top || []).length })}</h4>
-      <div class="evx-scroll"><table class="evx mono pp-top"><thead><tr><th>#</th><th class="l">${t("ヘッド")}</th><th title="${t("止めたときの下がり方の、物差しの層での最大")}">causal_max</th>${slh}
-        <th title="${t("無介入でこのヘッドが主の物差しの層の方向に直接書く量")}">contrib</th><th title="${t("causal ÷ 直接の寄与。1 より大きい = 後段のユニットを通る間接の経路")}">ratio</th>
-        <th title="${t("B 側の点数の変化")}">B Δ</th><th title="${t("B 側の直交成分のずれ")}">B ⊥</th><th></th></tr></thead><tbody>${heads}</tbody></table></div>
+      <div class="evx-scroll"><table class="evx mono pp-top"><thead><tr><th>#</th><th class="l">${t("ヘッド")}</th><th title="${t("止めたときの下がり方の、射影の値を測る層での最大")}">causal_max</th>${slh}
+        <th title="${t("無介入でこのヘッドが、射影の値を測る主の層の方向に直接書く量")}">contrib</th><th title="${t("causal ÷ 直接の寄与。1 より大きい = 後段のユニットを通る間接の経路")}">ratio</th>
+        <th title="${t("B 側の射影の値の変化")}">B Δ</th><th title="${t("B 側の直交成分のずれ")}">B ⊥</th><th></th></tr></thead><tbody>${heads}</tbody></table></div>
       ${lr.length ? `<details><summary class="muted note">${t("層ごとのスクリーニング({n} 層、層のヘッドを全部止めたとき)", { n: lr.length })}</summary>
         <div class="evx-scroll"><table class="evx mono pp-layers"><thead><tr><th>${t("層")}</th>${slh}<th>causal_max</th><th title="${t("B 側の直交成分のずれ")}">B ⊥</th><th></th></tr></thead><tbody>${layerRows}</tbody></table></div></details>` : ""}
-      <p class="muted note">${t("* = 主の物差しの層。下がり方 = 止める前 − 後の A 側の点数(正 = A 側の向きに押していた)。")}</p></section>`;
+      <p class="muted note">${t("* = 射影の値を測る主の層。下がり方 = 止める前 − 後の A 側の射影の値(正 = A 側の向きに押していた)。")}</p></section>`;
   }
 
   // 3. 最初の比率
   stage3(d) {
     const a = d.allocate || {}, init = a.initial;
-    const intro = `<p class="muted note">${t("前の段の因果の効き目(ヘッドを 1 個ずつ止めたときに、後ろの層の点数がどれだけ下がるか)が大きいヘッドを選び、強さはこの効き目に比例させます。全体の大きさ α だけを、返事を書かせない速い点数が目標に届くよう二分探索で決めます。")}</p>`;
+    const intro = `<p class="muted note">${t("前の段の因果の効き目(ヘッドを 1 個ずつ止めたときに、後ろの層の射影の値がどれだけ下がるか)が大きいヘッドを選び、強さはこの効き目に比例させます。全体の大きさ α だけを、返事を書かせずに測る射影の値が目標に届くよう二分探索で決めます。")}</p>`;
     if (!init) return `<section class="pp-stage"><h4>${t("3. 最初の比率")}</h4>${intro}<p class="muted note">${t("(この実行には最初の組がありません)")}</p></section>`;
     const us = (init.heads || []).map(parseUnit).filter(Boolean);
     const mx = Math.max(1e-9, ...us.map((u) => u.s));
     const rows = us.map((u) => `<tr><td class="l">${headChip(u.layer, u.head)}</td><td>${fmt(u.s, 2)}</td><td>${fmt(u.s / mx, 2)}</td></tr>`).join("");
     return `<section class="pp-stage"><h4>${t("3. 最初の比率")}</h4>${intro}
-      <p class="note mono">α ${fmt(init.alpha, 2)} · ${t("A 側の点数の平均 {v}(目標 {g})", { v: fmt(init.mean_a, 2), g: fmt(d.target, 2) })} · ${init.reached ? `<span class="ok">${t("目標に届いた")}</span>` : `<span class="ng">${t("届かない(強さの上限)")}</span>`}</p>
+      <p class="note mono">α ${fmt(init.alpha, 2)} · ${t("A 側の射影の値の平均 {v}(目標 {g})", { v: fmt(init.mean_a, 2), g: fmt(d.target, 2) })} · ${init.reached ? `<span class="ok">${t("目標に届いた")}</span>` : `<span class="ng">${t("届かない(強さの上限)")}</span>`}</p>
       <table class="evx mono pp-init"><thead><tr><th class="l">${t("ヘッド")}</th><th title="${t("射影の強さ s(= α × 比率)")}">s</th><th title="${t("効き目の比率(最大のヘッドを 1)")}">${t("比率")}</th></tr></thead><tbody>${rows}</tbody></table></section>`;
   }
 
   // 4. 効率での配り直し: η の表と、ヘッドの数ごとの組の比較
   stage4(d) {
     const a = d.allocate || {}, hard = a.hard || {}, S = a.score_layer;
-    const ab = new Map();                                                // 丸ごと止めたときの効き目(配分の物差しの層)
+    const ab = new Map();                                                // 丸ごと止めたときの効き目(配分で射影の値を測る層)
     for (const r of (this.causal && this.causal.rows ? this.causal.rows.filter((x) => (x.mode || "ablate") === "ablate") : (d.causal || {}).top || [])) {
       ab.set(`${r.layer}:${r.head}`, (r.score_drop || {})[String(S)] ?? r.causal);
     }
@@ -568,18 +568,18 @@ export class PipelinePanel {
     }).join("");
     const hp = hard.prompts || [], hs = hard.scores || [];
     return `<section class="pp-stage"><h4>${t("4. 効率での配り直し")}</h4>
-      <p class="muted note">${t("最初の組を当てた状態で、点数が残りやすい質問を選び、ヘッドごとに強さを少しだけ上げて、その質問での下がり方(効率 η)を測ります。強さを効率に比例させて 0 から配り直し、もう一度二分探索で目標に合わせます。丸ごと止めたときの効き目と効率では順位が入れ替わるので、この段が要ります。ヘッドの数を減らした組も作って比べます。")}</p>
-      ${hp.length ? `<details><summary class="muted note">${t("点数が残りやすい質問 {n} 個(L{L} の点数)", { n: hard.n ?? hp.length, L: hard.layer ?? S ?? "—" })}</summary>
+      <p class="muted note">${t("最初の組を当てた状態で、射影の値が残りやすい質問を選び、ヘッドごとに強さを少しだけ上げて、その質問での下がり方(効率 η)を測ります。強さを効率に比例させて 0 から配り直し、もう一度二分探索で目標に合わせます。丸ごと止めたときの効き目と効率では順位が入れ替わるので、この段が要ります。ヘッドの数を減らした組も作って比べます。")}</p>
+      ${hp.length ? `<details><summary class="muted note">${t("射影の値が残りやすい質問 {n} 個(L{L} の射影の値)", { n: hard.n ?? hp.length, L: hard.layer ?? S ?? "—" })}</summary>
         <table class="evx mono dv-ex"><tbody>${hp.map((q, i) => `<tr><td class="w">${esc(q)}</td><td>${fmt(hs[i], 2)}</td></tr>`).join("")}</tbody></table></details>` : ""}
       <h4 class="pp-sub">${t("効率 η(大きい順)")}</h4>
-      <div class="evx-scroll"><table class="evx mono pp-eta"><thead><tr><th>#</th><th class="l">${t("ヘッド")}</th><th title="${t("s を Δs 上げたときの、点数が残りやすい質問での下がり方 ÷ Δs")}">η</th>
+      <div class="evx-scroll"><table class="evx mono pp-eta"><thead><tr><th>#</th><th class="l">${t("ヘッド")}</th><th title="${t("s を Δs 上げたときの、射影の値が残りやすい質問での下がり方 ÷ Δs")}">η</th>
         <th title="${t("丸ごと止めたときの下がり方(L{L})", { L: S ?? "—" })}">${t("止めた効き目")}</th><th title="${t("丸ごと止めたときの効き目での順位。黄 = 効率の順位と 2 つ以上ずれている")}">${t("効き目の順位")}</th>
-        <th title="${t("B 側の点数の変化")}">B Δ</th><th title="${t("B 側の直交成分のずれ")}">B ⊥</th><th title="${t("最初の組に入っていたヘッド")}">${t("最初の組")}</th><th></th></tr></thead><tbody>${eta}</tbody></table></div>
+        <th title="${t("B 側の射影の値の変化")}">B Δ</th><th title="${t("B 側の直交成分のずれ")}">B ⊥</th><th title="${t("最初の組に入っていたヘッド")}">${t("最初の組")}</th><th></th></tr></thead><tbody>${eta}</tbody></table></div>
       ${etaRows.length > ETA_SHOWN ? `<button class="small" id="pp-eta-more">${t("残り {n} 行も見る", { n: etaRows.length - ETA_SHOWN })}</button>` : ""}
       <h4 class="pp-sub">${t("ヘッドの数ごとの組の比較")}</h4>
       <div class="evx-scroll"><table class="evx mono pp-cmp"><thead><tr><th>${t("ヘッド数")}</th><th class="l">${t("ヘッドと強さ")}</th><th>s max</th>
-        <th title="${t("目標を超えて残った A 側の例の数")}">${t("残り")}</th><th title="${t("A 側の点数の最大")}">A max</th><th title="${t("A 側の点数の平均")}">${t("A 平均")}</th>
-        <th title="${t("B 側の点数の変化")}">B Δ</th><th title="${t("B 側の直交成分のずれ(小さいほど他を壊さない)")}">B ⊥</th><th title="${t("点数が残りやすい質問の平均が目標に届いたか")}">${t("届いた")}</th><th></th></tr></thead><tbody>${cmp}</tbody></table></div>
+        <th title="${t("目標を超えて残った A 側の例の数")}">${t("残り")}</th><th title="${t("A 側の射影の値の最大")}">A max</th><th title="${t("A 側の射影の値の平均")}">${t("A 平均")}</th>
+        <th title="${t("B 側の射影の値の変化")}">B Δ</th><th title="${t("B 側の直交成分のずれ(小さいほど他を壊さない)")}">B ⊥</th><th title="${t("射影の値が残りやすい質問の平均が目標に届いたか")}">${t("届いた")}</th><th></th></tr></thead><tbody>${cmp}</tbody></table></div>
       <p class="muted note">${t("推奨 = 目標に届いた組のうち、残る例の数が最も少ない組と同程度(A 側の 5% まで)で、B 側のずれが最小の 1.25 倍までの組の中で、ヘッドが最も少ない組。ヘッドの名前をクリックで HEAD パネル。")}</p>
       ${this.candForm(d)}</section>`;
   }

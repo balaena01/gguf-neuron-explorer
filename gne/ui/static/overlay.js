@@ -1,9 +1,9 @@
 // 色の重ね合わせ(別冊 §4.3、色は §13.2)。層ごとの値(Float32Array、NaN = データ無し)を点の RGBA に写す。
-// a は「目立たせる度合い」: 光る点(床・閾値より上)は 255 にして、遠くから見ても消えないようにする。
+// a は「目立たせる度合い」: 光る点(基準値・閾値より上)は 255 にして、遠くから見ても消えないようにする。
 // 光る点が全体の 2% を超えるときは、全層で同じ係数で a を下げる(emphasize、F39)。
 // CHANGE-05 G: MoE の層の専門家ごとの値(expert_usage = 選択率、experts:<name> = 専門家の対照分析の z)。値は専門家の全ニューロンに同じ
 // (地図ではタイルごとの色になる)。
-// CHANGE-06 G: 因果スクリーニング(gne heads causal)のヘッドの色。causal:<name> = 止めたときの A 側の点数の下がり方(ablate の
+// CHANGE-06 G: 因果スクリーニング(gne heads causal)のヘッドの色。causal:<name> = 止めたときの A 側の射影の値の下がり方(ablate の
 // causal_max)、eta:<name> = s を上げたときの効率 η(marginal)。heads:<name>(CHANGE-04 の対照の z)とは別の量で、板の上辺の帯に塗る。
 import { t } from "./i18n.js";
 import { COLORS } from "./map.js";
@@ -103,7 +103,7 @@ export function colorize(name, v, meta, scale, opt = {}) {
     if (name === "sweep") {
       const f = meta.floor ?? 0;
       if (x <= f) put(i, COLORS.swept, 0);
-      else put(i, amber(Math.pow((x - f) / Math.max(f, 1e-6), 0.7)), 255);   // 床の 2 倍で最も明るい
+      else put(i, amber(Math.pow((x - f) / Math.max(f, 1e-6), 0.7)), 255);   // 基準値の 2 倍で最も明るい
     } else if (name === "sweep_null") {
       if (x < 0.95) put(i, COLORS.swept, 0);
       else put(i, amber((x - 0.95) / 0.05), 255);
@@ -158,7 +158,7 @@ export function colorizeHits(n, hits) {
 // fires_heads: 選んだトークンへの注目(後ろの位置からの平均)。明るさ = √(値 / 全ヘッドの最大)、最大の 5% 以上を光るとして数える
 export const HEAD_IDLE = [44, 52, 66];
 export const HEAD_EXCLUDED = [64, 112, 124];          // eta:<name> で B 側の変化が大きく配分から外したヘッド
-// causal / eta: 符号つき。正(止めると・強めると A 側の点数が下がる)は黄、負は赤紫、明るさ = √(|値| / 全ヘッドの最大)。
+// causal / eta: 符号つき。正(止めると・強めると A 側の射影の値が下がる)は黄、負は赤紫、明るさ = √(|値| / 全ヘッドの最大)。
 // 最大の 10% 以上を光るとして数える。opt.excluded: 外したヘッドの印(Uint8Array(n_head))
 export function colorizeHeads(kind, v, opt = {}) {
   const out = new Uint8Array(v.length * 3);
@@ -207,7 +207,7 @@ const it = (...xs) => `<span class="it">${xs.join("")}</span>`;      // 凡例�
 const fmt = (x, d = 2) => (x === null || x === undefined || !Number.isFinite(x) ? "—" : x.toFixed(d));
 const pctS = (x) => (Number.isFinite(x) ? `${(x * 100).toFixed(1)}%` : "—");
 
-// 凡例(色の意味は常に出す、§4.3)。opt: { threshold, nHits, floors: [層の床] }
+// 凡例(色の意味は常に出す、§4.3)。opt: { threshold, nHits, floors: [層の基準値] }
 export function legendHTML(name, scale, opt = {}) {
   const none = it(sw(COLORS.idle), t("データ無し"));
   const ramp = (a, b, text) => it(sw(a), "→", sw(b), text);
@@ -215,7 +215,7 @@ export function legendHTML(name, scale, opt = {}) {
   if (name.startsWith("search:")) return none + it(sw(COLORS.sel), t("当たり {n} 件", { n: opt.nHits ?? 0 }));
   const fl = (opt.floors || []).filter((x) => Number.isFinite(x));
   const parts = {
-    sweep: [it(sw(COLORS.swept), t("床以下")), ramp(AMBER_LO, AMBER_HI, t("mass 床〜床の 2 倍(床 = 対照の最大{v})", { v: fl.length === 1 ? ` ${fmt(fl[0], 1)}` : "" })),
+    sweep: [it(sw(COLORS.swept), t("基準値以下")), ramp(AMBER_LO, AMBER_HI, t("mass 基準値〜基準値の 2 倍(基準値 = 対照の最大 mass{v})", { v: fl.length === 1 ? ` ${fmt(fl[0], 1)}` : "" })),
             it(sw(COLORS.sel), t("名前付き"))],
     sweep_null: [it(sw(COLORS.swept), t("0.95 未満")), ramp(AMBER_LO, AMBER_HI, "0.95〜1.0")],
     steer_kl: [it(sw(COLORS.swept), t("対照の 95% 点以下")), it(sw(COLORS.plus), t("+ が強い")), it(sw(COLORS.minus), t("− が強い"))],
@@ -236,9 +236,9 @@ export function legendHTML(name, scale, opt = {}) {
       it(t("色 = 板の上辺のヘッドの帯"));
   }
   if (name.startsWith("causal:")) {
-    return none + ramp(HEAD_IDLE, COLORS.plus, t("止めると A 側の点数が下がる 0〜{m}", { m: fmt(scale.max, 2) })) +
+    return none + ramp(HEAD_IDLE, COLORS.plus, t("止めると A 側の射影の値が下がる 0〜{m}", { m: fmt(scale.max, 2) })) +
       it(sw(COLORS.minus), t("止めると上がる")) +
-      it(t("値 = ヘッドの出力を 0 にしたときの方向の点数の下がり方(物差しの層の最大、causal_max)。対照の z(ヘッドの対照)とは別物")) +
+      it(t("値 = ヘッドの出力を 0 にしたときの、方向への射影の値の下がり方(射影の値を測る層での最大、causal_max)。対照の z(ヘッドの対照)とは別物")) +
       it(t("色 = 板の上辺のヘッドの帯"));
   }
   if (name.startsWith("eta:")) {

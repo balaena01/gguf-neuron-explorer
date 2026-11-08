@@ -698,7 +698,7 @@ def test_allocate_needs_a_score_layer_and_can_limit_layers(session, pipeline, mo
     src = Path(causal.causal_paths(session, "tiny")[0])
     lone = tmp_path / "lone.causal.jsonl"
     shutil.copy(src, lone)
-    with pytest.raises(Exception, match="物差しの層"):
+    with pytest.raises(Exception, match="射影の値を測る層"):
         session.heads_allocate("tiny", target=-1.0, candidates=str(lone))
 
 

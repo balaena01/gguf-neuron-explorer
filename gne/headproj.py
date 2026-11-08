@@ -1,6 +1,6 @@
 """ヘッドの方向成分だけを変える介入(CHANGE-06 A・E・F、手法の説明は docs/head-component-steering.md)。
 
-ヘッド h の書き込み行列(attention の層は attn_output、線形注意の層は ssm_out)の列ブロック blk_h を
+ヘッド h が残差に書き込む重み行列(attention の層は attn_output、線形注意の層は ssm_out)の列ブロック blk_h を
 
     W[:, blk_h] → W[:, blk_h] − s_h · r̂ r̂ᵀ W[:, blk_h]
 
@@ -99,7 +99,7 @@ def head_direction(ds, L: int, direction_layer: str = "own") -> tuple[np.ndarray
 
 
 class ProjBuilder:
-    """r̂ᵀW(層・方向ごと)と書き込み行列 W(層ごと、少数だけ)を覚えておき、LoRA の行列を何度も作る(因果・配分のループ用)。"""
+    """r̂ᵀW(層・方向ごと)と残差に書き込む重み行列 W(層ごと、少数だけ)を覚えておき、LoRA の行列を何度も作る(因果・配分のループ用)。"""
 
     def __init__(self, weights, directions: DirSource | dict, *, direction_layer: str = "own", keep_w: int = 2):
         self.weights = weights
@@ -150,7 +150,7 @@ class ProjBuilder:
         return out
 
     def tensors(self, heads: list[ProjHead], warn=None) -> dict[str, tuple[np.ndarray, np.ndarray]]:
-        """書き込み行列の名前 → (A, B)。"""
+        """残差に書き込む重み行列の名前 → (A, B)。"""
         return {self.weights.head_block(L, 0)[0]: ab for L, ab in self.matrices(heads, warn).items()}
 
     def ablate_tensors(self, L: int, heads: list[int] | None = None) -> dict[str, tuple[np.ndarray, np.ndarray]]:
@@ -248,7 +248,7 @@ def merge_tensors(*parts: dict[str, tuple[np.ndarray, np.ndarray]]) -> dict[str,
 
 def bake_proj_gguf(weights, recipe: Recipe, dst: str | Path, directions: DirSource, *, requant: str = "q8_0",
                    warn: Callable[[str], None] | None = None) -> dict:
-    """書き込み行列のうち proj(と、あればヘッド・ニューロンの gain)で書き換えるテンソルだけを Q8_0 か F16 にし、
+    """残差に書き込む重み行列のうち proj(と、あればヘッド・ニューロンの gain)で書き換えるテンソルだけを Q8_0 か F16 にし、
     他は元のバイトのまま写した GGUF を書く。変化量は LoRA と同じ B @ A を元の重みに足したもの(LoRA 版と一致させるため)。
     書き換えたテンソル名と元の型は GGUF の gne.patches と、<dst>.headproj.json に残す。"""
     from .gain import bake_gain_gguf
@@ -267,13 +267,14 @@ def bake_proj_split(weights, recipe: Recipe, dst: str | Path, directions: DirSou
                     warn: Callable[[str], None] | None = None,
                     extra: dict[str, tuple[np.ndarray, np.ndarray]] | None = None,
                     extra_meta: dict[str, object] | None = None) -> dict:
-    """分割 GGUF への焼き込み。書き換える書き込み行列は元と同じ型で量子化し直して同じ場所に書き戻すので、
+    """分割 GGUF への焼き込み。書き換える重み行列は元と同じ型で量子化し直して同じ場所に書き戻すので、
     ファイルの大きさもヘッダーも変わらない(gne.* のメタデータは入れられないので、記録は <1 番目>.headproj.json に残す)。
     書き換えのない分割ファイルはそのまま写す。dst は出力の 1 番目のファイル(-00001-of-0000N.gguf で終わらなければ付ける)。
     requant="keep" は元と同じ型でその場に書き戻す(大きさが変わらない。小さな編集は量子化の粗さに埋もれやすい)。
     "f16" / "q8_0" は書き換えるテンソルだけその型にして、それを含む分割ファイルを書き直す(少し大きくなるが編集が残る)。
     extra は proj のほかに足す LoRA(鍵つきの書き込み CHANGE-07 の ffn_down・attn_output・専門家の 3 次元など。同じテンソルの
-    proj とは連結する)、extra_meta はサイドカーに足す記録(例 {"keyed": …})。requant_error_max は
+    proj とは連結する)、extra_meta はサイドカーに足す記録(例 {"keyed": …})。専門家の 3 次元テンソルは専門家(スラブ)ごとに
+    書く(_split_expert。keep なら編集しないスラブはバイトのまま、f16 / q8_0 は通常の焼き込みと同じ)。requant_error_max は
     ‖量子化し直して戻した値 − 書きたい値‖ / ‖B @ A‖ の最大(0.5 を超えたら編集の半分以上が丸めに消えている)。"""
     import re
     import shutil
@@ -294,53 +295,143 @@ def bake_proj_split(weights, recipe: Recipe, dst: str | Path, directions: DirSou
     b = ProjBuilder(weights, directions, direction_layer=recipe.direction_layer)
     ptens = b.tensors(heads, warn) if heads else {}
     tens = merge_tensors(ptens, extra or {})
-    if requant not in ("keep", "f16", "q8_0"):
-        raise GneError("BAD_ARGS", "--requant は keep・f16・q8_0 です")
+    if requant not in ("keep", "f16", "q8_0", "auto"):
+        raise GneError("BAD_ARGS", "--requant は keep・f16・q8_0・auto です")
     from gguf import GGMLQuantizationType as _Q
-    target = {"f16": _Q.F16, "q8_0": _Q.Q8_0}.get(requant)
+    from .gain import KEYED_KEEP_MIN, edit_kept, expert_bytes_added
+
+    def target_of(t):                             # None = 元と同じ型でその場に書き戻す
+        if requant == "auto":                     # keyed の既定: Q8_0 はその場に、それ以外は F16(gain.auto_qtype)
+            return None if t.tensor_type == _Q.Q8_0 else _Q.F16
+        return {"f16": _Q.F16, "q8_0": _Q.Q8_0}.get(requant)
     dst.parent.mkdir(parents=True, exist_ok=True)
-    if target is None:
-        for p, o in zip(parts, outs):
-            shutil.copyfile(p, o)
-    replace: dict[int, dict] = {}
+    pidx = [p.resolve() for p in parts]
+    # plans: (分割の番号, テンソル名, その場に書けるか, その場に書くもの [(位置, バイト列)], 書き直すときの差し替え (型, 中身))
+    plans: list[tuple[int, str, bool, list | None, tuple]] = []
     modified, worst = [], 0.0
     for name, (A, B) in sorted(tens.items()):
         t = weights.tensor(name)
-        k = [p.resolve() for p in parts].index(Path(t._mm.filename).resolve())   # マウント先が別名のことがある(Modal の Volume)
+        k = pidx.index(Path(t._mm.filename).resolve())   # マウント先が別名のことがある(Modal の Volume)
+        tq = target_of(t)
+        if np.ndim(A) == 3:                       # 専門家の 3 次元(keyed の expert:e): スラブごと。テンソル全体を float32 にしない
+            rec = _split_expert(t, A, B, requant, tq)
+            rec["file"] = outs[k].name
+            worst = max(worst, rec.get("requant_error") or 0.0)
+            writes, repl = rec.pop("_inplace", None), rec.pop("_stream")
+            plans.append((k, name, writes is not None, writes, repl))
+            modified.append(rec)
+            continue
         data = t.data
-        shape = tuple(B.shape[:-1]) + (int(A.shape[-1]),)          # (out, in)、専門家は (E, out, in)
+        shape = tuple(B.shape[:-1]) + (int(A.shape[-1]),)          # (out, in)
         W = (data.astype(np.float32) if data.dtype != np.uint8 else dequantize(data, t.tensor_type)).reshape(shape)
-        dW = np.matmul(B.astype(np.float32), A.astype(np.float32))  # 専門家の 3 次元は専門家ごとの積
+        dW = np.matmul(B.astype(np.float32), A.astype(np.float32))
         W2 = W + dW
-        q = target or t.tensor_type
-        raw = quantize(W2.reshape(-1, shape[-1]), q)
-        if target is None and len(raw) != t.n_bytes:
+
+        def enc(q):
+            raw = quantize(W2.reshape(-1, shape[-1]), q)
+            back = dequantize(np.frombuffer(raw, np.uint8).reshape(int(np.prod(shape[:-1])), -1), q).reshape(shape)
+            return raw, float(np.linalg.norm(back - W2) / max(np.linalg.norm(dW), 1e-12)), edit_kept(back, W2, dW)
+        q = tq or t.tensor_type
+        raw, err, kept = enc(q)                   # 量子化し直しで失った分 ÷ 編集の大きさ、残った編集の割合
+        fallback = None
+        if requant == "auto" and tq is None and kept < KEYED_KEEP_MIN:   # Q8_0 のままでは編集が埋もれる: F16 で書き直す
+            fallback = {"from": q.name, "edit_kept": kept}
+            tq = q = _Q.F16
+            raw, err, kept = enc(q)
+        if tq is None and len(raw) != t.n_bytes:
             raise GneError("INTERNAL", f"{name}: 書き戻す大きさ {len(raw)} が元の {t.n_bytes} と違います")
-        back = dequantize(np.frombuffer(raw, np.uint8).reshape(int(np.prod(shape[:-1])), -1), q).reshape(shape)
-        err = float(np.linalg.norm(back - W2) / max(np.linalg.norm(dW), 1e-12))     # 量子化し直しで失った分 ÷ 編集の大きさ
         worst = max(worst, err)
-        if target is None:
-            with open(outs[k], "r+b") as f:
-                f.seek(t.data_offset)
+        plans.append((k, name, tq is None, [(int(t.data_offset), raw)] if tq is None else None, (q, raw)))
+        rec = {"tensor": name, "type": t.tensor_type.name, "to": q.name, "file": outs[k].name, "requant_error": err,
+               "edit_kept": kept}
+        if fallback is not None:
+            rec["fallback"] = fallback
+        modified.append(rec)
+    # 型を変えたテンソルを含む分割ファイルは書き直し(同じ型のテンソルも差し替えに入れる)、ほかは写してその場に書き戻す
+    rewrite = {k for k, _, inplace, _, _ in plans if not inplace}
+    for k, (p, o) in enumerate(zip(parts, outs)):
+        if k not in rewrite:
+            shutil.copyfile(p, o)
+    replace: dict[int, dict] = {}
+    for k, name, inplace, writes, repl in plans:
+        if k in rewrite:
+            replace.setdefault(k, {})[name] = repl
+            continue
+        with open(outs[k], "r+b") as f:
+            for off, raw in writes:
+                f.seek(off)
                 f.write(raw)
-        else:
-            replace.setdefault(k, {})[name] = (q, raw)
-        modified.append({"tensor": name, "type": t.tensor_type.name, "to": q.name, "file": outs[k].name, "requant_error": err})
-    if target is not None:                        # 型を変えたテンソルを含む分割ファイルだけ書き直し、他は写す
+    if replace:
         from .gguf_fast import rewrite_gguf
-        for k, (p, o) in enumerate(zip(parts, outs)):
-            if k in replace:
-                rewrite_gguf(p, o, replace[k])
-            else:
-                shutil.copyfile(p, o)
+        for k, rep in replace.items():
+            rewrite_gguf(parts[k], outs[k], rep)
     meta = proj_meta(heads, b) if heads else None
     side = Path(str(outs[0]) + ".headproj.json")
     side.write_text(json.dumps({"recipe": recipe.to_dict(), "headproj": meta, **(extra_meta or {}), "modified": modified,
-                                "requant": "same type, in place" if target is None else requant},
+                                "requant": "same type, in place" if requant == "keep" else requant},
                                ensure_ascii=False, indent=1), encoding="utf-8")
+    grow = expert_bytes_added(modified)
+    kept_all = [x["edit_kept"] for x in modified if x.get("edit_kept") is not None]
     return {"path": str(outs[0]), "parts": [str(o) for o in outs], "bytes": sum(o.stat().st_size for o in outs),
             "modified": [x["tensor"] for x in modified], "requant_error_max": worst, "sidecar": str(side),
+            **({"edit_kept_min": min(kept_all)} if kept_all else {}),
+            **({"fallback": [x["tensor"] for x in modified if x.get("fallback")]} if any(x.get("fallback") for x in modified) else {}),
+            **({"expert_bytes_added": grow} if grow is not None else {}),
             **(layer_summary(weights, heads, ptens) if heads else {})}
+
+
+def _split_expert(t, A: np.ndarray, B: np.ndarray, requant: str, target) -> dict:
+    """分割 GGUF への焼き込みの、専門家の 3 次元テンソル(ffn_down_exps、keyed の expert:e)1 つ。通常の焼き込み
+    (gain._expert_bake)と同じく専門家(スラブ)ごとに作り、テンソル全体を float32 にしない。書くのは呼ぶ側(bake_proj_split)。
+    - 元と同じ型(target None: keep と、auto で元が Q8_0): 編集した専門家のスラブだけを元の型で作り、戻り値の "_inplace"
+      [(ファイルの中の位置, バイト列)] を写した分割ファイルに書き戻す(大きさは変わらず、編集しないスラブはバイトのまま)。
+      分割ファイルを書き直すときのために "_stream"(元のバイトに編集したスラブを差し込むもの)も返す。型は llama.cpp の
+      量子化で書く(K-quant も同じ型に戻せる。imatrix の要る型は断る)。auto で編集の 1 割以上が丸めに消える
+      (edit_kept < KEYED_KEEP_MIN)なら F16 にする(記録の fallback)。
+    - f16 / q8_0: gain._expert_bake と同じ(書き出す型が元と違えば編集しないスラブも 1 枚ずつ変換し、テンソルが大きくなる)。
+      "_stream" を rewrite_gguf の差し替えに渡す。
+    戻り値は記録(サイドカーの modified の 1 つ。type・to・experts・untouched・bytes_from・bytes_to・requant_error・edit_kept)。"""
+    from gguf import GGMLQuantizationType as _Q
+    from .gain import KEYED_KEEP_MIN, _expert_bake, _SlabStream, expert_record, expert_slab_edits
+    from .quant import dequantize, quantize
+    fallback = None
+    if target is None:
+        q = t.tensor_type
+        n_exp = int(t.data.shape[0])
+        slab = int(t.n_bytes) // n_exp
+
+        def enc(W, qt):
+            try:
+                return np.frombuffer(quantize(W.reshape(-1, W.shape[-1]), qt), dtype=np.uint8)
+            except NotImplementedError as e:
+                raise GneError("UNSUPPORTED_QUANT", f"{t.name}: {e}(--requant keep は元と同じ型に書き戻します)",
+                               "--requant f16 / q8_0 で書き直すか、LoRA(--bake なし)で配ってください") from e
+
+        def dec(data, qt, shape):
+            return dequantize(np.asarray(data, dtype=np.uint8).reshape(int(np.prod(shape[:-1])), -1), qt).reshape(shape)
+        stats: dict = {}
+        edited, err = expert_slab_edits(t, A, B, q, encode=enc, decode=dec, stats=stats)
+        if requant == "auto" and stats.get("kept", 1.0) < KEYED_KEEP_MIN:
+            fallback = {"from": q.name, "edit_kept": stats["kept"]}
+            target = _Q.F16
+        else:
+            for e, raw in edited.items():
+                if raw.nbytes != slab:
+                    raise GneError("INTERNAL", f"{t.name}: 専門家 {e} の書き戻す大きさ {raw.nbytes} が元の {slab} と違います")
+            rec = expert_record(t, q, edited, int(t.n_bytes))
+            out = {"tensor": rec.pop("tensor"), "type": rec.pop("from"), **rec, "requant_error": err or 0.0}
+            if "kept" in stats:
+                out["edit_kept"] = stats["kept"]
+            out["_inplace"] = [(int(t.data_offset) + e * slab, raw.tobytes()) for e, raw in sorted(edited.items())]
+            out["_stream"] = (q, _SlabStream(t, q, edited, (slab,), np.uint8))
+            return out
+    st, qt, rec = _expert_bake(t, A, B, "f16" if target == _Q.F16 else "q8_0", False)
+    rec = {"tensor": rec.pop("tensor"), "type": rec.pop("from"), **rec}
+    rec.setdefault("requant_error", 0.0)
+    if fallback is not None:
+        rec["fallback"] = fallback
+    rec["_stream"] = (qt, st)
+    return rec
 
 
 # --- ランダム対照(F.2)-------------------------------------------------------------------------------
@@ -391,7 +482,7 @@ def proj_control_recipes(session, recipe: Recipe, n: int, *, pool: str = "before
 
 def check_head_proj(session, L: int, h: int, direction: str, *, ss=(1.0, 2.0, 6.0), k_gain: float = 0.0,
                     text: str | None = None, direction_layer: str = "own") -> dict:
-    """V24: ヘッド h の proj(s 倍)の LoRA を当てると、書き込み行列の出力の差が −s · r̂ (r̂ · W[:, blk] x_h)
+    """V24: ヘッド h の proj(s 倍)の LoRA を当てると、重み行列の出力の差が −s · r̂ (r̂ · W[:, blk] x_h)
     (無介入の per-head 出力から numpy で計算)と合う(相対誤差の中央値 < 3%)。s=1 でそのヘッドの書き込みの方向成分が 0、
     s=2 で符号が反転する。V25: 差のうち r̂ に直交する成分が数値誤差以内(同じヘッドを gain k_gain で変えると直交成分も
     変わることを対比で出す)。"""
@@ -404,7 +495,7 @@ def check_head_proj(session, L: int, h: int, direction: str, *, ss=(1.0, 2.0, 6.
     names = _names(e, probe, ctx, e.tokenize(text, add_special=True, parse_special=False)[:16])
     out_name = writer_out_name(session, names, L)
     if out_name is None:
-        raise GneError("ARCH_UNSUPPORTED", f"層 {L} の書き込み行列の出力が捕捉できません")
+        raise GneError("ARCH_UNSUPPORTED", f"層 {L} の、残差に書き込む重み行列の出力が捕捉できません")
     ds = session.direction_set(direction)
     r, src = head_direction(ds, L, direction_layer)
     r = r.astype(np.float64)

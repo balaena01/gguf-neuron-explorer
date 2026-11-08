@@ -59,7 +59,7 @@ def _result(keyed: dict | None, sel=(0.0, 2.5)) -> dict:
     if keyed is not None:
         d["keyed"] = keyed
         d["notes"] = [f"keyed: {n}" for n in keyed.get("notes", [])] + (
-            [f"keyed: 選択性は測っていません({keyed['skipped']})"] if "skipped" in keyed else [])
+            [f"keyed: eval の選択性は測っていません({keyed['skipped']})"] if "skipped" in keyed else [])
     return d
 
 
@@ -198,10 +198,10 @@ def test_cli_eval_keyed_null_and_skipped(monkeypatch):
     d["rows"][1] = _row(1.0, 2.5, 0.97)
     r, _ = _cli_eval(monkeypatch, d)
     head = next(ln for ln in r.output.splitlines() if ln.lstrip().startswith("倍率"))
-    assert head.rstrip().endswith("null") and "97%" in r.output and "擬似鍵に替えた対照" in r.output
+    assert head.rstrip().endswith("null") and "97%" in r.output and "比較用の鍵に替えた対照" in r.output
     r, _ = _cli_eval(monkeypatch, _result(SKIPPED, sel=None))
     assert r.exit_code == 0, r.output
-    assert "keyed の選択性は測っていません: 鍵 zk の対照集合が分かりません" in r.output
+    assert "keyed の eval の選択性は測っていません: 鍵 zk の対照集合が分かりません" in r.output
     assert "ヒント: 鍵を作った対照集合を --keyed-contrast で渡してください" in r.output
     assert r.output.count("対照集合が分かりません") == 1 and "選択性 =" not in r.output
     r, _ = _cli_eval(monkeypatch, _result(BLOCK), "--json")
@@ -375,7 +375,7 @@ def test_eval_text_shows_keyed(work):
     assert p.returncode == 0, p.stderr[-2000:]
     out = p.stdout
     assert "keyed の選択性(鍵 zun_wire、方向 zun_wire、L14 の残差、保留 subset odd)" in out
-    assert "add_same_alpha" in out and "擬似鍵 2 本の選択性" in out and "行の選択性 = L14" in out
+    assert "add_same_alpha" in out and "比較用の鍵 2 本の eval の選択性" in out and "行の選択性 = L14" in out
     head = next(ln for ln in out.splitlines() if ln.lstrip().startswith("倍率"))
     assert "選択性" in head
 
@@ -394,5 +394,5 @@ def test_eval_keyed_skipped(work):
     k = d["keyed"]
     assert "pseudo" not in k and "対照集合" in k["skipped"] and "--keyed-contrast" in k["hint"]
     assert all("keyed" not in r for r in d["rows"])
-    assert any("keyed の選択性は測りません" in w for w in d["warnings"])
+    assert any("keyed の eval の選択性は測りません" in w for w in d["warnings"])
     assert any("選択性は測っていません" in n for n in d["notes"])

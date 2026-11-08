@@ -381,14 +381,14 @@ class Weights:
         return self._arch
 
     def head_block(self, L: int, h: int) -> tuple[str, int, int]:
-        """ヘッド h の書き込み行列の名前と列ブロック [lo, hi)。W_O(numpy (n_embd, n_head·head_dim))の列 lo:hi が
+        """ヘッド h が残差に書き込む重み行列の名前と列ブロック [lo, hi)。W_O(numpy (n_embd, n_head·head_dim))の列 lo:hi が
         ヘッド h の出力を残差に書く(ggml ne = [n_head·head_dim, n_embd] の ne0 方向)。"""
         from .steer import GneError
         if not 0 <= L < self.meta.n_layer:
             raise GneError("BAD_RECIPE", f"層 {L} は範囲外です")
         li = self.arch.layers[L]
         if li.head_writer is None or not li.head_dim:
-            raise GneError("ARCH_UNSUPPORTED", f"層 {L}({li.mixer})にはヘッドの書き込み行列がありません")
+            raise GneError("ARCH_UNSUPPORTED", f"層 {L}({li.mixer})にはヘッドが残差に書き込む重み行列がありません")
         if not 0 <= h < li.n_head:
             raise GneError("BAD_RECIPE", f"L{L} のヘッド {h} は範囲外です(0..{li.n_head - 1})")
         return f"blk.{L}.{li.head_writer}.weight", h * li.head_dim, (h + 1) * li.head_dim

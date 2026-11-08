@@ -139,17 +139,19 @@ def test_attn_capture_names_and_shapes(tiny):
     assert ei.value.code == "BAD_RECIPE"
 
 
-def test_attn_refusals():
-    """post-norm の arch と、attention の出力に後から倍率を掛ける arch は attn の keyed を断る。shared・expert の捕捉はまだ無い。"""
+def test_attn_refusals(tiny):
+    """post-norm の arch と、attention の出力に後から倍率を掛ける arch は attn の keyed を断る。MoE でないモデルの
+    shared・expert の捕捉は BAD_RECIPE(MoE の捕捉は tests/test_change07_moe.py)。"""
     for arch in ("gemma2", "olmo2", "mimo2"):
         with pytest.raises(GneError) as ei:
             K.post_norm_gamma(SimpleNamespace(meta=SimpleNamespace(arch=arch)), 1, "attn")
         assert ei.value.code == "ARCH_UNSUPPORTED", arch
     assert K.post_norm_gamma(SimpleNamespace(meta=SimpleNamespace(arch="qwen35")), 1, "attn") is None
+    s, _, _ = tiny
     for t in ("shared", "expert:1"):
         with pytest.raises(GneError) as ei:
-            target_capture(None, t, [1])
-        assert ei.value.code == "ARCH_UNSUPPORTED"
+            target_capture(s, t, [1])
+        assert ei.value.code == "BAD_RECIPE", t
 
 
 def test_mixed_width_key_and_lora(tiny, tmp_path):
@@ -245,7 +247,7 @@ def test_attn_key_saved_fields(msession, akey):
     assert r["counts"]["a"] == 8 and r["counts"]["b"] == 8 and r["counts"]["dt"] == 2
     assert r["replies"] == {"AB": "given", "dt:english": "generated"}
     for row in r["layers"]:
-        assert abs(row["kappa_mu"] - 1) < 1e-9 and row["q_rank"] == 8 + 2 and 0 < row["kn"] <= 1
+        assert abs(row["kappa_mu"] - 1) < 1e-9 and row["q_rank"] == 8 + 2 + 2 and 0 < row["kn"] <= 1   # 英語の返事の冒頭 2 行も
     ks = load_key(msession, "zunda_attn")
     li = msession.weights.arch.layers[LAYERS[0]]
     n_in = li.n_head * li.head_dim
@@ -334,8 +336,8 @@ def test_attn_lora_and_f16_bake(msession, akey, tmp_path):
     np.testing.assert_allclose(B[:, 0], 2.0 * raw, rtol=1e-4, atol=1e-5)         # 配る LoRA は倍率 1 で α を書く
     keyed_meta = json.loads(str(rd.fields["gne.keyed"].contents()))
     assert keyed_meta["units"][0]["target"] == "attn" and keyed_meta["units"][0]["tensor"] == name
-    # F16 の焼き込み
-    b = msession.headproj_export(r, tmp_path / "ka-bake.gguf", bake=True)
+    # F16 の焼き込み(既定の auto なら元の Q8_0 のまま。ここでは丸めの小さい F16 で式どおりかを見る)
+    b = msession.headproj_export(r, tmp_path / "ka-bake.gguf", bake=True, requant="f16")
     assert [m["tensor"] for m in b["modified"]] == [name] and [m["to"] for m in b["modified"]] == ["F16"]
     baked = {x.name: x for x in GGUFReader(b["path"]).tensors}[name]
     W1 = tensor_to_f32(baked).astype(np.float64)

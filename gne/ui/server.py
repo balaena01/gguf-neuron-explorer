@@ -6,7 +6,7 @@ U2: 3 列チャット(SSE)、fires、reads you、レシピ、cvec の書き出�
 U5: エージェント連携。MCP の ui_* が POST /api/ui/{highlight,note,open,clear} を叩き、ブラウザへ SSE(/api/ui/events)。
 CHANGE-04 G: ヘッドの調書(/api/head)・名前、保存済みのヘッドの対照分析(/api/heads)、注目のパターン(/api/attention)、
 fires の文章でのヘッドの注目(/api/fires/{id}/heads)。GPU を使うものは live.Live の調停を通す。
-CHANGE-06 G: 因果スクリーニングと強さの配分(/api/causal)、方向セットと速い物差し(/api/directions、.../score は GPU)、
+CHANGE-06 G: 因果スクリーニングと強さの配分(/api/causal)、方向セットと速い指標(/api/directions、.../score は GPU)、
 方向とヘッドの一括の結果(/api/pipelines。実行は head_pipeline のジョブ)、強さの候補と名前を伏せた採点(/api/candidates。
 生成は heads_candidates のジョブ)。
 CHANGE-07 G: 鍵つきの書き込み(keyed)の鍵の一覧(/api/keys)と対照集合の候補(/api/contrasts)。鍵の作成と確認は
@@ -196,7 +196,7 @@ def create_app(session, *, warm: bool = True, openai: bool = False) -> FastAPI:
         return data.heads_one(name)
 
     # --- CHANGE-06 G: 因果スクリーニング・強さの配分(HEAD パネルの Causal、地図の causal:<name>・eta:<name>)、
-    # 方向の速い物差し(direction ビュー) --------------------------------------------------------------------------
+    # 方向の速い指標(direction ビュー) --------------------------------------------------------------------------
     @app.get("/api/causal")
     def causal_list():
         return data.causal_list()

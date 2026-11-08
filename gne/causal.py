@@ -1,20 +1,20 @@
 """因果スクリーニング(`gne heads causal`)と効率ベースの強さ配分(`gne heads allocate`)。CHANGE-06 C・D。
 
-どちらも生成せず、速い物差し(direction.Scorer: 測定位置の残差 · r̂_L)だけで回す。
+どちらも生成せず、速い指標(direction.Scorer: 測定位置の残差 · r̂_L = 方向への射影の値)だけで回す。
 
-- 層単位(screen_layers): 層のヘッドを全部止める(書き込み行列の出力を 0 にする LoRA)と、score_layers の A 側の点数が
+- 層単位(screen_layers): 層のヘッドを全部止める(残差に書き込む重み行列の出力を 0 にする LoRA)と、score_layers の A 側の射影の値が
   どれだけ下がるか。下がる層を見つける。
 - ヘッド単位(screen_heads):
   - ablate: ヘッド 1 個の出力を 0 にしたときの下がり方 d_h(causal)。最初の候補出し。
   - marginal: base_units(いまの組)を当てた状態で、そのヘッドの s を delta_s だけ上げたときの、効きにくい例(hard_subset)
     での下がり方 ÷ delta_s = 効率 η_h。配り直し用。
   ablate と marginal は順位が一致しない(丸ごと止めたときの効き目と、方向成分を強めたときの効き目は別物)。
-- 直接の寄与 contrib: 無介入で、ヘッドが残差に書く r̂_Sᵀ W[:, blk_h] x_h の A 側の平均(S は物差しの層)。止めたときに
+- 直接の寄与 contrib: 無介入で、ヘッドが残差に書く r̂_Sᵀ W[:, blk_h] x_h の A 側の平均(S は射影の値を測る層)。止めたときに
   直接の経路だけで見込める下がり方。ratio = causal / contrib が 1 より大きければ間接の経路(後段のユニットを通る)、
-  1 より小さければ補い合い。物差しの層より後ろのヘッドは contrib が 0 になる(後段の層の点数で見る)。
-- B 側: 各ヘッドで B 側の点数の変化(b_side_delta)と直交成分のずれ(drift_orth_b)も測る。
+  1 より小さければ補い合い。射影の値を測る層より後ろのヘッドは contrib が 0 になる(後段の層の射影の値で見る)。
+- B 側: 各ヘッドで B 側の射影の値の変化(b_side_delta)と直交成分のずれ(drift_orth_b)も測る。
 
-点数の下がり方は「止める前 − 止めた後」(正 = そのヘッドが A 側の向きに押していた)。目標は A 側の点数を下げること
+射影の値の下がり方は「止める前 − 止めた後」(正 = そのヘッドが A 側の向きに押していた)。目標は A 側の射影の値を下げること
 (振る舞いを足したいときは、A と B を入れ替えた対照集合で方向を作る)。
 """
 
@@ -68,7 +68,7 @@ class TmpLora:
 
 @dataclass
 class Setup:
-    """スクリーニングと配分で共有するもの(物差し・無介入の点数・行列の材料)。"""
+    """スクリーニングと配分で共有するもの(射影の値の測り方・無介入の射影の値・行列の材料)。"""
     session: object
     ds: DirectionSet
     cs: ContrastSet
@@ -81,7 +81,7 @@ class Setup:
     base: dict = field(default_factory=dict)     # 無介入: {"A": {L: (n,)}, "B": {L: (nb,)}, "B_resid": {L: [...]}}
 
     def measure(self, lora, *, a_idx: list[int] | None = None, b: bool = True) -> dict:
-        """A 側(a_idx で絞れる)の点数と、B 側(b_idx)の点数と残差(直交成分のずれ用)。"""
+        """A 側(a_idx で絞れる)の射影の値と、B 側(b_idx)の射影の値と残差(直交成分のずれ用)。"""
         ga = self.scorer.run(lora, sides="A", which=None if a_idx is None else {"A": a_idx})
         out = {"A": ga["A"]["values"]}
         if b:
@@ -118,7 +118,7 @@ def prepare(session, direction: str | DirectionSet, contrast, *, score_layers=No
 
 
 def _row_common(st: Setup, got: dict, ref: dict, a_ref_idx: list[int] | None = None) -> dict:
-    """ref(介入前)と got(介入後)の点数の差。A の下がり方は層ごと、B は主の層。"""
+    """ref(介入前)と got(介入後)の射影の値の差。A の下がり方は層ごと、B は主の層。"""
     drop = {}
     for L in st.score_layers:
         a0 = ref["A"][L] if a_ref_idx is None else ref["A"][L][a_ref_idx]
@@ -145,7 +145,7 @@ def kind_of(session, L: int) -> str:
 
 def screen_layers(session, ds, cs, *, mode: str = "ablate", layers=None, score_layers=None, setup: Setup | None = None,
                   progress: Progress | None = None, **kw) -> list[dict]:
-    """各層のヘッドを全部止めて、score_layers の点数の下がり方を測る(層数ぶんの試行)。"""
+    """各層のヘッドを全部止めて、score_layers の射影の値の下がり方を測る(層数ぶんの試行)。"""
     if mode != "ablate":
         raise GneError("BAD_ARGS", "層単位のスクリーニングは mode=ablate だけです(marginal はヘッド単位で)")
     st = setup or prepare(session, ds, cs, score_layers=score_layers, **kw)
@@ -216,7 +216,7 @@ def resolve_candidates(st: Setup, layers: list[int], candidates) -> tuple[list[t
     n = int(m[1])
     con = head_contrib(st, every)
 
-    def key(hk):                                  # そのヘッドより後ろの物差しの層のうち、一番前の層での寄与
+    def key(hk):                                  # そのヘッドより後ろの射影の値を測る層のうち、一番前の層での寄与
         L = hk[0]
         S = next((S for S in st.score_layers if S >= L), None)
         return con[hk][str(S)] if S is not None else 0.0
@@ -359,7 +359,7 @@ def list_causal(session) -> list[dict]:
 # --- 効きにくい例 ----------------------------------------------------------------------------------------
 
 def hard_examples(st: Setup, heads: list[ProjHead], *, n: int = 16, layer: int | None = None) -> dict:
-    """いまの組を当てた状態で、A 側のうち点数が高く残る上位 n 件(Scorer の添字・対照集合の番号・プロンプト・点数)。"""
+    """いまの組を当てた状態で、A 側のうち射影の値が高く残る上位 n 件(Scorer の添字・対照集合の番号・プロンプト・射影の値)。"""
     L = st.primary if layer is None else layer
     with st.tmp.use(st.builder.tensors(heads)) as lora:
         got = st.scorer.run(lora, sides="A")
@@ -437,16 +437,16 @@ def allocate(session, ds, cs, *, candidates, target: float, score_layer: int, ha
              progress: Progress | None = None) -> dict:
     """効率ベースの強さ配分(CHANGE-06 D)。
     1. いまの組(base_units。無ければ candidates の ablate の行の上位 max(n_heads) 個に causal 比例で、A 側の平均が target に
-       なるよう二分探索した組)を当てた状態で、A 側の点数が高く残る hard 件を効きにくい例にする(hard/<model_id>/<name>.json)。
+       なるよう二分探索した組)を当てた状態で、A 側の射影の値が高く残る hard 件を効きにくい例にする(hard/<model_id>/<name>.json)。
     2. いまの組 + causal の上位 pool 個の効率 η を marginal で測る。
-    3. n_heads の各値について、η の上位 n 個に s ∝ η(from_zero=False ならいまの s に足す)で配り、効きにくい例の点数の
+    3. n_heads の各値について、η の上位 n 個に s ∝ η(from_zero=False ならいまの s に足す)で配り、効きにくい例の射影の値の
        平均が target になるまで全体の大きさを二分探索する(s の最大は s_max)。
-    4. 比較表(ヘッド数・各ヘッドの s・最大の s・A 側で remain_threshold を超えて残る件数・A 側の最大点数・B 側の直交成分の
+    4. 比較表(ヘッド数・各ヘッドの s・最大の s・A 側で remain_threshold を超えて残る件数・A 側の射影の値の最大・B 側の直交成分の
        ずれ・所要時間)と、残る件数と B 側のずれが同程度なら最少のヘッド数の組に recommended を付ける。
-    method="greedy" は 3 を置き換える。η の上位 n 個を候補に、毎回いちばん点数が下がるヘッドの s だけを delta_s 上げる。比を固定
+    method="greedy" は 3 を置き換える。η の上位 n 個を候補に、毎回いちばん射影の値が下がるヘッドの s だけを delta_s 上げる。比を固定
     しないので、ヘッドの効き方が直線でなくても追える。止まるのは、目標に届いたとき(stop=target)、B 側の直交成分のずれが drift_max を
     超えるとき(drift。超える手前の組を使う)、どのヘッドも下がらないとき(no_gain)、s_max を渡して全部が当たったとき(s_max)。
-    目標はスコアの目標で、振る舞いの目標ではない。止まった組は振る舞いで確かめる。"""
+    目標は射影の値の目標で、振る舞いの目標ではない。止まった組は振る舞いで確かめる。"""
     from .direction import load_contrast
     t_all = time.perf_counter()
     if proportional_to not in ("eta", "causal"):
@@ -495,7 +495,7 @@ def allocate(session, ds, cs, *, candidates, target: float, score_layer: int, ha
     else:
         top = [r for r in abl if causal_at(r) > 0][:max(n_heads)]
         if not top:
-            raise GneError("BAD_ARGS", f"L{S} の点数を下げるヘッドが候補にありません(causal ≤ 0)")
+            raise GneError("BAD_ARGS", f"L{S} の射影の値を下げるヘッドが候補にありません(causal ≤ 0)")
         wmax = max(causal_at(r) for r in top)
         wts = [(r["layer"], r["head"], causal_at(r) / wmax) for r in top]
         # 仮の組は効きにくい例を選ぶためのもの。greedy で s_max が無くても、壊れる強さの状態で η を測らないように上限を置く
@@ -532,7 +532,7 @@ def allocate(session, ds, cs, *, candidates, target: float, score_layer: int, ha
     elig = [r for r in mrows if weight(r) > 0 and not r.get("excluded")]
     elig.sort(key=lambda r: -weight(r))
     def greedy(keys: list[tuple[int, int]]) -> tuple[list[ProjHead], float, bool, int, str]:
-        """毎回いちばん点数が下がるヘッドだけを delta_s 上げる。戻り値 (組, 効きにくい例の平均, 届いたか, 回数, 止まった理由)。"""
+        """毎回いちばん射影の値が下がるヘッドだけを delta_s 上げる。戻り値 (組, 効きにくい例の平均, 届いたか, 回数, 止まった理由)。"""
         cur_s: dict[tuple[int, int], float] = {}
         val = float(st.base["A"][S][h_idx].mean())
         make_ = lambda d: [ProjHead(L, h, x, ds.name) for (L, h), x in d.items()]   # noqa: E731
@@ -586,7 +586,7 @@ def allocate(session, ds, cs, *, candidates, target: float, score_layer: int, ha
             heads, val, reached, n_iter, stop = greedy([(r["layer"], r["head"]) for r in pick])
             alpha = None
             if not heads:
-                table.append({"n_heads": n, "skipped": "どのヘッドも点数を下げませんでした", "stop": stop})
+                table.append({"n_heads": n, "skipped": "どのヘッドも射影の値を下げませんでした", "stop": stop})
                 continue
         else:
             hi = s_max - max(s0.values(), default=0.0)
