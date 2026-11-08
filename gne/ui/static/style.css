@@ -337,7 +337,7 @@ table.dv-ex th:first-child { text-align: left; }
 .pp-help { margin: 8px 0 6px; max-width: 980px; }
 .pp-in, .pp-set, .pp-go, .pp-actions { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin: 6px 0; }
 .pp-set input[type=number] { width: 5.5em; }
-#pp-text { width: 100%; box-sizing: border-box; font-size: 12px; line-height: 1.45; resize: vertical; }
+#pp-text, #kx-text, #kx-vtexts { width: 100%; box-sizing: border-box; font-size: 12px; line-height: 1.45; resize: vertical; }
 #pp-check { margin: 4px 0; line-height: 1.6; }
 .pp-sum { color: #c9d6e6; }
 .pp-warn { color: #d9b36a; }
@@ -570,6 +570,10 @@ table.fi-tab.moe th:nth-child(1) { width: 52px; } table.fi-tab.moe th:nth-child(
 .kx-sec > h4 { color: #dfe6ee; font-weight: 500; }
 .kx-sec .pp-set input[type=number] { width: 5em; }
 .kx-res { margin: 6px 0; }
+#kx-src button { font-size: 12px; padding: 2px 10px; }
+#kx-tpl-about { max-width: 980px; margin: 2px 0 6px; }
+#kx-dirinfo { margin: 2px 0 4px; }
+#kx-exp, #kx-verify { margin-top: 6px; }
 .kx-add { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; margin: 4px 0; }
 .kx-ok { color: var(--kx-ok); }
 .kx-ng { color: var(--kx-ng); }

@@ -790,7 +790,7 @@ async function onJobFinished(j) {
   updateStatus();
   if (j.kind === "fieldtest" && evalView) evalView.ft.jobEnded(j);        // 実地テスト: eval ビューに結果を出す
   if (j.kind === "headproj_export" && recipePanel) recipePanel.lxDone(j);   // レシピのタブの LoRA・焼き込み
-  if ((j.kind === "direction_key" || j.kind === "direction_key_check") && directionView) directionView.jobEnded(j);   // CHANGE-07: 鍵の作成・確認
+  if (String(j.kind).startsWith("direction_key") && directionView) directionView.jobEnded(j);   // CHANGE-07: 鍵の作成・確認・専門家・key-verify・一括
   if (j.kind === "head_pipeline" || j.kind === "heads_candidates" || j.kind === "heads_refine") {    // 一括・強さの候補・残りから追加: direction ビューに結果を出す
     if (j.status === "done") {
       if (j.kind !== "heads_candidates") causalCache.clear();
@@ -818,8 +818,8 @@ async function onJobFinished(j) {
     causalCache.clear();
     if (headPanel && state.headFocus) { headPanel.causalSums.clear(); headPanel.open(state.headFocus); }
   }
-  if (j.kind === "direction" && directionView) directionView.refresh();
-  if (j.kind === "direction_key" && recipePanel && !$("#recipe-list").classList.contains("hidden")) recipePanel.render();   // 鍵の選択肢
+  if ((j.kind === "direction" || j.kind === "direction_key_pipeline") && directionView) directionView.refresh();   // 一括も方向を作る
+  if ((j.kind === "direction_key" || j.kind === "direction_key_pipeline") && recipePanel && !$("#recipe-list").classList.contains("hidden")) recipePanel.render();   // 鍵・方向の選択肢
   if ((j.kind === "experts_contrast" || j.kind === "experts_sweep" || j.kind === "stats_act") && expertPanel && state.expertFocus) {
     expertPanel.open(state.expertFocus);                                 // 専門家の対照分析・使用統計(CHANGE-05 G): 開いている専門家を取り直す
   }
@@ -891,6 +891,7 @@ async function setView(v) {
           onAddKeyed: (u) => { state.recipe.addKeyed(u); expand("list"); listTab("recipe"); },
           directions: () => (state.model ? (state.model.direction_sets || []).map((x) => x.name) : []),
           nLayer: state.arch.n_layer,
+          moeLayers: state.arch.layers.map((li, L) => (String(li.ffn || "").startsWith("moe") ? L : null)).filter((L) => L !== null),   // 専門家を選ぶ材料
         },
       });
       state.directionView = directionView;                               // 自動テスト用

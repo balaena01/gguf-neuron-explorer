@@ -357,7 +357,7 @@ keyed のユニットを持つレシピの `gne eval` は、生成せずに、�
 - Q8_0 のままではランク 1 の小さな編集の 1 割以上が丸めで消えるテンソルだけ、F16 にします。
 - 元が Q8_0 でない専門家のテンソルを焼き込むときは、`--requant keep`(できるだけ元の型で書き戻す)にすると、編集しない専門家をバイトのまま残し、テンソル全体を F16 にせずに済みます。
 
-UI では、direction ビューの「鍵(keyed)」タブで鍵を作って確かめ、層ごとの反応の強さの分布を見て、keyed のユニットをレシピに足せます。手法・例・MoE での使い方は [docs/keyed-write.md](docs/keyed-write.md) にあります。
+UI では、direction ビューの「鍵(keyed)」タブで、ボタン 1 つで最後まで回せます。対照集合(ファイルか、`configs/keyed/` の 3 つのひな形から始める JSON: 文末の言い方を変える・特定の場面の返事だけ変える・system で作った状態を使う)から、方向を作り、鍵を作り、作成に使っていない質問で確かめます。層ごとの反応の強さの分布を見て、作ったばかりの方向を選んだまま keyed のユニットをレシピに足し、行ごとに LoRA が式どおりに書くかも確かめられます。MoE のモデルでは専門家の選ばれ方の表も出て、表から選んだ専門家の鍵づくりに進めます。手法・例・MoE での使い方は [docs/keyed-write.md](docs/keyed-write.md) にあります。
 
 ランク 1 の条件つき編集 `ΔW = α d kᵀ / (μᵀk)`、`k = μ − QQᵀμ`(`Q` は書き込みたくない位置の入力が張る部分空間の正規直交基底)の形は、nwn さんの Zenn の記事「[Weight-Space Programming でずんだもん語尾](https://zenn.dev/nwn/articles/cf9fe78aa33861)」(2026)によるものです。gne はこれを、対照集合から鍵を作り、`gne direction` の方向に沿って書き、作成に使っていない例でラベルをシャッフルした比較用の鍵と比べて確かめる道具にしました。
 
@@ -418,7 +418,7 @@ gne serve -m models/Qwen3.5-4B-Q8_0.gguf      # http://127.0.0.1:8791
 主なビューは次のとおりです。
 - **map:** 全層をニューロンのシートで並べ、値を重ねます。
 - **layers:** 層ごとのまとめです。
-- **direction:** 保存した方向が、対照集合の両側を層ごとにどれだけ分けているか、基準層がどこか、選んだ層での例ごとの射影の値を見ます。もう 1 つのタブでは、対照集合を JSON で渡して（貼り付け、ファイル、用途別の 5 つのひな形から）、ボタン 1 つでヘッド探しを最後まで回せます。方向を作り、基準層を選び、層とヘッドを止めて効き目を測り、強さを配ります。結果には各段階の短い説明、外したヘッドとその理由、止めたときの順位と効率の順位がどう入れ替わったか、ヘッドを減らした組の比較が出ます。どの組もレシピのタブに読み込んだり、eval に回したりできます。比較表の下から強さの候補を作ると、3 つめのタブ「強さの候補」で返事を並べ、名前を伏せたまま採点して集計できます。4 つめのタブ「鍵(keyed)」では、鍵つきの書き込みの鍵を作り、作成に使っていない例で比較用の鍵(ラベルをシャッフルして作ったもの)と比べて確かめ、keyed のユニットをレシピに足せます。
+- **direction:** 保存した方向が、対照集合の両側を層ごとにどれだけ分けているか、基準層がどこか、選んだ層での例ごとの射影の値を見ます。もう 1 つのタブでは、対照集合を JSON で渡して（貼り付け、ファイル、用途別の 5 つのひな形から）、ボタン 1 つでヘッド探しを最後まで回せます。方向を作り、基準層を選び、層とヘッドを止めて効き目を測り、強さを配ります。結果には各段階の短い説明、外したヘッドとその理由、止めたときの順位と効率の順位がどう入れ替わったか、ヘッドを減らした組の比較が出ます。どの組もレシピのタブに読み込んだり、eval に回したりできます。比較表の下から強さの候補を作ると、3 つめのタブ「強さの候補」で返事を並べ、名前を伏せたまま採点して集計できます。4 つめのタブ「鍵(keyed)」では、対照集合をファイルか JSON(用途別の 3 つのひな形から)で渡し、ボタン 1 つで、方向を作り、鍵つきの書き込みの鍵を作り、作成に使っていない例で比較用の鍵(ラベルをシャッフルして作ったもの)と比べて確かめます。結果から keyed のユニットをレシピに足し、層ごとに LoRA が式どおりに書くか(key-verify)を確かめられます。MoE のモデルでは、専門家の選ばれ方の表から選んだ専門家の鍵づくりに進めます。
 - **eval:** 保存した eval を、倍率ごとのグラフと表、出力の例で見ます。今のレシピの eval もここから始められます。方式の比較や、ヘッドを減らした組の比較、keyed のユニットを持つレシピが書き込みたい位置とそうでない位置をどれだけ書き分けたか(選択性)もここに出ます。
 - **embed:** rollout の文の UMAP です。
 
@@ -485,7 +485,7 @@ r = client.chat.completions.create(
 claude mcp add gne -- gne mcp --model /path/to/model.gguf
 ```
 
-ツールは `model_overview`・`layer_summary`・`neuron`・`search`・`steer`・`steer_lens`・`fires`・`reverse`・`recipe_save`・`export_cvec`・`gain_export`・`bake`・`eval`・`direction`・`ablate_export`・`head`・`heads_contrast`・`attention`・`direction_score`・`heads_causal`・`heads_allocate`・`headproj_export`・`direction_key`・`direction_key_check`・`direction_key_experts`・`direction_key_verify`・`keys`・`keyed_export`・`set_name`・`job_start` / `job_status` / `job_cancel` です。
+ツールは `model_overview`・`layer_summary`・`neuron`・`search`・`steer`・`steer_lens`・`fires`・`reverse`・`recipe_save`・`export_cvec`・`gain_export`・`bake`・`eval`・`direction`・`ablate_export`・`head`・`heads_contrast`・`attention`・`direction_score`・`heads_causal`・`heads_allocate`・`headproj_export`・`direction_key`・`direction_key_check`・`direction_key_experts`・`direction_key_verify`・`direction_key_pipeline`・`keys`・`keyed_export`・`set_name`・`job_start` / `job_status` / `job_cancel` です。
 
 Web UI を開いているなら `--ui-url http://127.0.0.1:8791` を付けます。こうするとエージェントがブラウザ上でニューロンを強調したり、注釈を貼ったり、開いたりできます（`ui_highlight`・`ui_note`・`ui_open`）。同じ GPU に UI がモデルを載せているときは、`--n-gpu-layers 0` も付けます。
 

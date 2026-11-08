@@ -134,6 +134,7 @@
 `d` は `direction` で作った方向の平均差 `r_L` を、正規化せずにそのまま使う。α はその倍率で、α = 1 なら鍵が反応した位置に、観測した A − B の差をそのまま書く(負で打ち消す)。**proj(4.4)は「どの方向を」変えるか、keyed は「どの状態で」書くかを選ぶ。** 両者は重ねられる(同じ LoRA に入る)。proj はヘッドがいま書いている分しか動かせないが、keyed は無い振る舞いも書ける。add の方向は全位置に足すので、「この場面のときだけ」がはっきりしているなら keyed を試す。
 
 1. **書く向きを作る。** `direction(contrast, positions="response")`。方向と鍵は同じ対照集合から作れる(例 `configs/contrast/zundamon_endings.yaml`)。
+   - 手順 1〜3(方向 → 鍵 → 作成に使っていない例での key-check)を一通り回すだけなら `direction_key_pipeline(contrast, layers=[…])`(ジョブ)。contrast は表か、`configs/contrast/` の名前・`configs/keyed/` のひな形の名前・パス。同じ名前の方向があれば使い回し(結果の `direction.reused`)、`rebuild_direction=True` で作り直す。結果の `key` と `check` は手順 2・3 と同じ形で、判断も同じ。用途別のひな形は `configs/keyed/`(文末の言い方・特定の場面の返事・system で作った状態)。表の `keyed`(layers・target など)は渡していない引数の既定になり、`alpha` は結果の `alpha_hint`(レシピの α の目安。system で作った状態の例は負)。
 2. **鍵を作る: `direction_key(contrast, layers=[…])`(ジョブ)。** 鍵は無介入で作る。鍵と一緒に、比較用の鍵(書き込みたい位置・書き込みたくない位置のラベルを例ごとにシャッフルして、同じ手順で作った鍵。既定 16 本)も作られる。書き込みたい位置の選び方は 2 つ。
    - (b) 対照集合の `positions` を `"before:<正規表現>"` にする。実際に使うときと同じ文脈(system なし)でモデル自身の返事を読み、正規表現に一致する文字を書く直前の位置を書き込みたい位置、同じ返事のそれ以外の位置を書き込みたくない位置にする。実際に使うときに通る状態なので、鍵がそのまま反応する。語尾・口調・「お礼を言う直前」のような場面はこちら。
    - (a) `positions` が response / assistant / last なら、`system_a`(`recipe_a`)の文脈を書き込みたい位置にする。実際に使うときには system_a が無いので、ふつうは反応しない。レシピを当てた状態を鍵にするときなどに使う。

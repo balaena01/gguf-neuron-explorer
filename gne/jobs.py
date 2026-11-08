@@ -186,10 +186,24 @@ def _layers(x) -> list[int] | None:
     return parse_layers(str(x))
 
 
-def _direction_key(s, contrast, layers=None, **p) -> dict:
-    """鍵つきの書き込みの鍵を作る(CHANGE-07、gne direction key)。contrast は対照集合のパス、layers は必須(リストか "8,14,20")。
-    ほかの引数は Session.direction_key(keyed_build.build_keys)と同じ。"""
-    Ls = _layers(layers)
+def _key_contrast(s, contrast, spec, params: dict, keys) -> tuple:
+    """鍵のジョブの対照集合: contrast(パス)か spec(UI の入力欄の表。heads_pipeline と同じく <root>/contrasts/<name>.yaml に
+    書いてから使う)。spec の keyed の設定(keys のもの)を、渡していない引数の既定にする。戻り値 (パス, 引数)。"""
+    if (contrast is None) == (spec is None):
+        raise GneError("BAD_ARGS", "対照集合は contrast(パス)か spec(表)のどちらかで渡してください")
+    if spec is None:
+        return contrast, params
+    from .keyed_pipeline import apply_settings, save_spec
+    path, settings = save_spec(s, spec)
+    return str(path), apply_settings(settings, params, keys)
+
+
+def _direction_key(s, contrast=None, layers=None, spec: dict | None = None, **p) -> dict:
+    """鍵つきの書き込みの鍵を作る(CHANGE-07、gne direction key)。contrast は対照集合のパスか、spec に対照集合の表(UI の入力欄)。
+    layers は必須(リストか "8,14,20"。spec の keyed.layers でも可)。ほかの引数は Session.direction_key(keyed_build.build_keys)と同じ。"""
+    contrast, p = _key_contrast(s, contrast, spec, {"layers": layers, **p},
+                                ("layers", "target", "q_mode", "subset", "pseudo", "max_tokens"))
+    Ls = _layers(p.pop("layers", None))
     if not Ls:
         raise GneError("BAD_ARGS", "鍵の層(layers)を指定してください(例 [8, 14, 20] か \"8,14,20\")")
     return s.direction_key(contrast, layers=Ls, progress=s.progress, **p)
@@ -208,13 +222,38 @@ def _direction_key_check(s, key: str, layers=None, compact: bool = False, **p) -
     return d
 
 
-def _direction_key_experts(s, contrast, layers=None, **p) -> dict:
+def _direction_key_experts(s, contrast=None, layers=None, spec: dict | None = None, **p) -> dict:
     """expert:e の鍵の専門家を選ぶ材料(CHANGE-07 MoE、gne direction key-experts): 書き込みたい位置・書き込みたくない位置で各専門家が
-    選ばれた割合と重み。contrast は対照集合のパス、layers は必須(リストか "6,12,18")。ほかの引数は keyed_build.expert_usage と同じ。"""
-    Ls = _layers(layers)
+    選ばれた割合と重み。contrast は対照集合のパスか、spec に対照集合の表(UI の入力欄)。layers は必須(リストか "6,12,18")。
+    ほかの引数は keyed_build.expert_usage と同じ。"""
+    contrast, p = _key_contrast(s, contrast, spec, {"layers": layers, **p}, ("layers", "subset", "max_tokens"))
+    Ls = _layers(p.pop("layers", None))
     if not Ls:
         raise GneError("BAD_ARGS", "調べる MoE の層(layers)を指定してください(例 [6, 12, 18] か \"6,12,18\")")
     return s.direction_key_experts(contrast, layers=Ls, progress=s.progress, **p)
+
+
+def _direction_key_pipeline(s, contrast=None, spec: dict | None = None, **p) -> dict:
+    """方向(gne direction --positions response と同じ)→ 鍵 → 作成と反対側の subset での key-check を 1 回で(CHANGE-07、
+    keyed_pipeline.run)。contrast は対照集合のパスか、spec に対照集合の表(UI の入力欄。<root>/contrasts/<name>.yaml に書く)。
+    同じ名前の方向があれば使い回し、rebuild_direction=True で作り直す。"""
+    if (contrast is None) == (spec is None):
+        raise GneError("BAD_ARGS", "対照集合は contrast(パス)か spec(表)のどちらかで渡してください")
+    from .keyed_pipeline import run
+    return run(s, spec if spec is not None else contrast, progress=s.progress, **p)
+
+
+def _direction_key_verify(s, layer, key: str, direction: str, alphas=None, target: str | None = None,
+                          direction_layer: str = "own", texts=None) -> dict:
+    """V30(CHANGE-07、gne direction key-verify): keyed の LoRA が式どおり ΔW x = α (κᵀx) d を書くか(数秒)。target を省くと
+    鍵の書き込み先。texts は流す文か会話のリスト、または 1 行に 1 文の文字列(省くと語尾の違う日本語と英語の 2 文。
+    専門家の鍵はその専門家が選ばれる文を)。"""
+    from .keyed import load_key, parse_target
+    kind, expert = parse_target(target or load_key(s, str(key)).target)
+    if isinstance(texts, str):
+        texts = [x for x in texts.splitlines() if x.strip()]
+    return s.check_keyed(int(layer), key=str(key), direction=str(direction), alphas=tuple(float(a) for a in (alphas or (1.0, 2.0))),
+                         kind=kind, expert=expert, direction_layer=direction_layer, texts=list(texts) if texts else None)
 
 
 def standard_kinds() -> dict[str, Callable[..., dict]]:
@@ -248,6 +287,8 @@ def standard_kinds() -> dict[str, Callable[..., dict]]:
         "direction_key": _direction_key,                                                # CHANGE-07: 鍵の作成
         "direction_key_check": _direction_key_check,                                    # CHANGE-07: 鍵の分離の確認
         "direction_key_experts": _direction_key_experts,                                # CHANGE-07 MoE: 専門家の選ばれ方
+        "direction_key_pipeline": _direction_key_pipeline,                              # CHANGE-07: 方向 → 鍵 → key-check
+        "direction_key_verify": _direction_key_verify,                                  # CHANGE-07 V30: LoRA が式どおりか
     }
 
 

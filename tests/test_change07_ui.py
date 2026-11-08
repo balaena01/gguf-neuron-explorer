@@ -7,6 +7,9 @@
 ジョブで LoRA と F16 の焼き込み、cvec の書き出しは keyed を外した警告)。
 ブラウザ(Playwright の Chromium、無ければ飛ばす): direction ビューの「鍵(keyed)」で鍵を作り、層ごとの表を見て、key-check の
 表と層ごとのヒストグラム(SVG)が描かれる。行の「+ レシピ」で keyed のユニットがレシピに入り、保存して読み直しても残る。英語の文言もある。
+鍵のタブの「JSON を書く」: ひな形(configs/keyed/)を選ぶと入力欄に入り、書き換えた入力欄を置き換える前に確かめる。「方向から key-check
+まで」(direction_key_pipeline のジョブ)で方向・鍵・key-check を続けて回し、書き込む方向に作ったばかりの方向が選ばれる。行の
+「key-verify」(direction_key_verify のジョブ)。専門家の選ばれ方の表から専門家の鍵づくりの欄に入る(MoE の層は与えて描く)。
 """
 
 import json
@@ -516,3 +519,168 @@ def test_eval_keyed_params_and_block_in_browser(ui_server, browser):
             assert missing == [], missing
         assert not errors, errors
         pg.close()
+
+
+# --- ひな形と入力欄、方向から key-check まで、専門家の選ばれ方、key-verify ----------------------------------------------
+
+def _key_tab(pg):
+    pg.click("#views button[data-view=direction]")
+    pg.wait_for_function("window.gne.directionView && window.gne.directionView.mode", timeout=60000)
+    pg.click("#dv-mode button[data-m=key]")
+    pg.wait_for_function("window.gne.directionView.key.loaded && document.querySelector(\"#kx-tpl-sel option[value='sentence_endings.json']\")",
+                         timeout=30000)
+
+
+@pytest.mark.model
+def test_key_panel_template_pipeline_and_verify_in_browser(ui_server, browser):
+    """鍵のタブの「JSON を書く」: ひな形を選ぶと入力欄に入り(説明つき)、手で直せる。書き換えた入力欄を別のひな形で置き換える前に
+    確かめ、書き換えていなければ確かめない。表の keyed.alpha が「+ レシピ」の α の既定になる。読めない JSON はボタンを押しても
+    投げない。「方向から key-check まで」で方向(まだ無いので作る)→ 鍵 → 保留した例の key-check を 1 回のジョブで回し、鍵の表・
+    key-check の表とヒストグラムが出て、書き込む方向は作ったばかりの方向が選ばれる。2 回目は方向を使い回すと出る。行の
+    「key-verify」で V30 の表。ジョブのバーの名前。"""
+    url, s = ui_server["url"], ui_server["session"]
+    pg, errors = _open(browser, url, "ja")
+    dialogs = []
+    pg.on("dialog", lambda dl: dialogs.append(dl.message))                  # _open が受け入れる。ここでは数えるだけ
+    _key_tab(pg)
+    assert not pg.evaluate("document.querySelector('#kx-src-file').classList.contains('hidden')")         # 既定はファイルを選ぶ
+    pg.select_option("#kx-tpl-sel", "sentence_endings.json")
+    assert pg.evaluate("document.querySelector('#kx-src-file').classList.contains('hidden')")             # JSON を書くに替わる
+    assert '"noda_endings"' in pg.input_value("#kx-text") and dialogs == []
+    assert "「です。」「ます。」を書く直前" in pg.evaluate("document.querySelector('#kx-tpl-about').textContent")
+    jc = pg.evaluate("document.querySelector('#kx-jcheck').textContent")
+    assert "noda_endings" in jc and "質問 16 個" in jc and "作り方 (b)" in jc and "english 4 問" in jc
+    assert "まだありません" in pg.evaluate("document.querySelector('#kx-dirinfo').textContent")
+    assert pg.evaluate("document.querySelector('#kx-name').placeholder") == "noda_endings"
+    # 手で直す → 別のひな形を選ぶと確かめる(受け入れる)。(a) の例の keyed.alpha −1 が「+ レシピ」の α に入る
+    pg.fill("#kx-text", pg.input_value("#kx-text").replace('"noda_endings"', '"noda_web"'))
+    assert "noda_web" in pg.evaluate("document.querySelector('#kx-jcheck').textContent")
+    pg.select_option("#kx-tpl-sel", "system_state.json")
+    assert len(dialogs) == 1 and '"polite_state"' in pg.input_value("#kx-text")
+    assert "作り方 (a)" in pg.evaluate("document.querySelector('#kx-jcheck').textContent")
+    pg.evaluate("(() => { const k = window.gne.directionView.key; k.built = {kind: 'saved', r: {name: 'tmp', target: 'ffn', layers: [8], kn: {8: 0.5}, info: {}}}; k.renderBuilt(); })()")
+    assert pg.input_value("#kx-alpha") == "-1"
+    pg.select_option("#kx-tpl-sel", "sentence_endings.json")                # 書き換えていないので確かめない
+    assert len(dialogs) == 1 and '"noda_endings"' in pg.input_value("#kx-text")
+    # 読めない JSON: エラーを出し、ボタンを押してもジョブを投げない
+    good = pg.input_value("#kx-text")
+    pg.fill("#kx-text", good.replace('"name": "noda_endings"', '"name": "a/b"'))
+    assert pg.evaluate("document.querySelectorAll('#kx-jcheck .err').length") == 1
+    pg.click("#kx-pipe-go")
+    assert "直すところ" in pg.evaluate("document.querySelector('#kx-status').textContent")
+    pg.fill("#kx-text", good)
+    # 書き込む方向に別の方向を選んでおく(一括の後は作ったばかりの方向に替わる)
+    pg.evaluate("(() => { const k = window.gne.directionView.key; k.renderBuilt(); })()")
+    pg.select_option("#kx-dir", NAME)
+    pg.fill("#kx-layers", "8,14")
+    pg.fill("#kx-pseudo", "8")
+    pg.fill("#kx-mt", "24")
+    pg.click(".kx-adv summary")
+    pg.fill("#kx-replies", ui_server["replies"])
+    pg.fill("#kx-rt", "16")
+    pg.click("#kx-pipe-go")
+    pg.wait_for_selector("#kc-res table.kx-check tbody tr", timeout=600000)
+    pg.wait_for_selector("#kx-build table.kx-tab tbody tr", timeout=10000)
+    rows = pg.evaluate("[...document.querySelectorAll('#kx-build table.kx-tab tbody tr')].map(tr => tr.cells[0].textContent)")
+    assert rows == ["L8", "L14"]
+    pipe = pg.evaluate("document.querySelector('#kx-pipe').textContent")
+    assert "noda_endings" in pipe and "作りました" in pipe and "subset odd" in pipe
+    assert pg.input_value("#kx-dir") == "noda_endings" and pg.input_value("#kx-alpha") == "1"
+    assert pg.input_value("#kc-key") == "noda_endings" and pg.input_value("#kc-subset") == "odd"
+    assert pg.input_value("#kc-contrast").endswith("/contrasts/noda_endings.yaml")
+    assert "保留した例で測りました" in pg.evaluate("document.querySelector('#kc-res').textContent")
+    assert pg.evaluate("document.querySelectorAll('#kc-res svg.kx-hist').length") == 2
+    assert "noda_endings" in pg.evaluate("document.querySelector('#kx-keys').textContent")
+    assert "使い回します" in pg.evaluate("document.querySelector('#kx-dirinfo').textContent")
+    y = yaml.safe_load((s.store.contrast_dir() / "noda_endings.yaml").read_text(encoding="utf-8"))
+    assert "about" not in y and y["positions"] == "before:(です|ます)。"
+    _shot(pg, "keyed_pipeline.png")
+    # key-verify(L14、書き込む方向 noda_endings)
+    pg.click("#kx-build [data-kverify='14']")
+    pg.wait_for_selector("#kx-vres table.kx-verify tbody tr", timeout=300000)
+    assert pg.evaluate("document.querySelectorAll('#kx-vres table.kx-verify tbody tr').length") == 2
+    assert "合格(V30)" in pg.evaluate("document.querySelector('#kx-verify').textContent")
+    bar = pg.evaluate("document.querySelector('#jobs-bar').textContent")
+    assert "LoRA の確かめ(key-verify)" in bar or "方向から key-check まで" in bar
+    names = pg.evaluate("import('/jobs.js').then((m) => [m.KIND.direction_key_experts, m.KIND.direction_key_verify, m.KIND.direction_key_pipeline])")
+    assert names == ["専門家の選ばれ方", "LoRA の確かめ(key-verify)", "方向から key-check まで"]
+    assert not errors, errors
+    pg.close()
+
+
+EXPERTS = {"contrast": "noda_endings", "mode": "same", "positions": "before:(です|ます)。", "positions_b": "not-before:(です|ます)。",
+           "subset": "even", "replies": {"AB": "given"}, "iv": None, "notes": ["n"], "seconds": 2.0,
+           "layers": [{"layer": 3, "n_expert": 32, "n_used": 8, "positions_a": 15, "positions_b": 700, "base_rate": 0.25,
+                       "top": [{"expert": 5, "rate_a": 1.0, "rate_b": 0.32, "diff": 0.68, "lift": 3.1, "weight_a": 0.21, "rows_a": 15.0,
+                                "rate_dt": {"english": 0.1}},
+                               {"expert": 9, "rate_a": 0.9, "rate_b": 0.0, "diff": 0.9, "lift": None, "weight_a": None, "rows_a": 13.5,
+                                "rate_dt": {}}]}]}
+VERIFY = {"layer": 3, "kind": "expert", "expert": 5, "tensor": "blk.3.ffn_down_exps.weight", "key": "k_L3E5", "direction": "noda_endings",
+          "direction_layer": "own", "in_name": "x", "out_name": "y", "d_norm": 1.5, "direction_norm": 2.0, "post_norm": False, "kn": 0.4,
+          "leak_b_key_examples": 0.01, "judged_leak": True, "v30": False, "gate": 0.21, "note": "専門家 5 は texts で一度も選ばれなかったので測れません",
+          "rows": [{"alpha": 1.0, "adapter_scale": 1.0, "n_tokens": 0, "n_big": 0, "kx_threshold": 0.0, "kx_max": None, "rel_err_median": None,
+                    "rel_err_p95": None, "cos_median": None, "leak_b": None, "leak_b_source": None, "leak_b_token_median": None, "ok": False,
+                    "other_max": 0.0, "selection_changed": 0}]}
+
+
+@pytest.mark.model
+def test_key_panel_experts_verify_in_english(ui_server, browser):
+    """英語の画面: ひな形(場面の例、説明に starts)と入力欄の要約・エラー、MoE の層が無ければ専門家のボタンは隠れ、MoE の層を
+    与えると出る。層の欄に MoE の層が無ければ投げない。専門家の選ばれ方の表(rate_a・rate_b・差・lift・重み・行の見込み)の
+    「この専門家で鍵を作る」で、書き込み先 expert:e・層 L・名前が鍵づくりの欄に入る。key-verify の専門家の表と注、一括のまとめ、
+    方向の欄の説明(使い回す・作り直す)の文言が辞書にある。ジョブのバーの名前も英語。"""
+    url = ui_server["url"]
+    pg, errors = _open(browser, url, "en")
+    _key_tab(pg)
+    assert pg.evaluate("document.querySelector('#kx-exp-go').classList.contains('hidden')")              # Qwen3-0.6B は dense
+    pg.select_option("#kx-tpl-sel", "one_scene.json")
+    assert "starts" in pg.evaluate("document.querySelector('#kx-tpl-about').textContent")
+    assert "tsundere_scene" in pg.evaluate("document.querySelector('#kx-jcheck').textContent")
+    txt = pg.input_value("#kx-text")
+    pg.fill("#kx-text", txt.replace('"positions": "before:', '"positions": "bogus:'))
+    assert "must be response" in pg.evaluate("document.querySelector('#kx-jcheck').textContent")
+    spec = json.loads(txt)
+    spec.pop("dont_touch")
+    spec["user_prompts"] = spec["user_prompts"][:6]
+    spec["keyed"] = {"nope": 1}
+    pg.fill("#kx-text", json.dumps(spec, ensure_ascii=False))
+    jc = pg.evaluate("document.querySelector('#kx-jcheck').textContent")
+    assert "No dont_touch" in jc and "Only 6 questions" in jc and "keyed cannot contain nope" in jc
+    spec.pop("keyed")
+    pg.fill("#kx-text", json.dumps(spec, ensure_ascii=False))
+    # 専門家: MoE の層を与えてボタンを出す。層の欄に MoE の層が無ければ投げない
+    pg.evaluate("(() => { const k = window.gne.directionView.key; k.moe = new Set([3]); k.$('#kx-exp-go').classList.remove('hidden'); })()")
+    pg.fill("#kx-layers", "1")
+    pg.click("#kx-exp-go")
+    assert "no MoE layer" in pg.evaluate("document.querySelector('#kx-estatus').textContent")
+    pg.evaluate(f"(() => {{ const k = window.gne.directionView.key; k.experts = {json.dumps(EXPERTS)}; k.renderExperts(); }})()")
+    head = pg.evaluate("[...document.querySelectorAll('#kx-eres table.kx-exps thead th')].map(th => th.textContent)")
+    assert head[:7] == ["expert", "rate_a", "rate_b", "diff", "lift", "weight", "expected rows"]
+    cells = pg.evaluate("[...document.querySelectorAll('#kx-eres table.kx-exps tbody tr')][0].textContent")
+    assert "E5" in cells and "100%" in cells and "32%" in cells and "3.10×" in cells and "15.0" in cells
+    pg.click("#kx-eres [data-kexp='3:5']")
+    assert pg.input_value("#kx-target") == "expert" and pg.input_value("#kx-expert") == "5" and pg.input_value("#kx-layers") == "3"
+    assert pg.input_value("#kx-name") == "tsundere_scene_L3E5"
+    assert "expert 5 at L3" in pg.evaluate("document.querySelector('#kx-status').textContent")
+    # key-verify(専門家の鍵、測れなかった注)と一括のまとめ、方向の欄
+    pg.evaluate(f"(() => {{ const k = window.gne.directionView.key; k.built = {{kind: 'saved', r: {{name: 'k_L3E5', target: 'expert:5', layers: [3], kn: {{3: 0.4}}, info: {{}}}}}};"
+                f" k.renderBuilt(); k.verified = {json.dumps(VERIFY)}; k.renderVerify();"
+                " k.pipeResult = {name: 'k_L3E5', direction: {name: 'tsundere_scene', reused: true}, key_seconds: 1, check: {subset: 'odd'}, check_seconds: 2, seconds: 3,"
+                " warnings: ['w']}; k.renderPipe(); })()")
+    vt = pg.evaluate("document.querySelector('#kx-verify').textContent")
+    assert "failed (V30)" in vt and "other experts' slots" in vt and "専門家 5" in vt
+    assert "reused" in pg.evaluate("document.querySelector('#kx-pipe').textContent")
+    assert "does not exist yet" in pg.evaluate("document.querySelector('#kx-dirinfo').textContent")
+    pg.evaluate("(() => { const k = window.gne.directionView.key; k.dirs = [...k.dirs, {name: 'tsundere_scene', positions: 'last'}]; k.dirInfo(); })()")
+    di = pg.evaluate("document.querySelector('#kx-dirinfo').textContent")
+    assert "will be reused" in di and "built with positions last" in di
+    pg.check("#kx-rebuild")
+    assert "will be rebuilt" in pg.evaluate("document.querySelector('#kx-dirinfo').textContent")
+    names = pg.evaluate("import('/jobs.js').then((m) => [m.KIND.direction_key_experts, m.KIND.direction_key_verify, m.KIND.direction_key_pipeline])")
+    assert names == ["expert usage", "LoRA check (key-verify)", "Direction to key-check"]
+    pg.click("#kx-src button[data-src=file]")
+    assert not pg.evaluate("document.querySelector('#kx-src-file').classList.contains('hidden')")
+    missing = pg.evaluate("[...window.gneI18n.missing]")
+    assert missing == [], missing
+    assert not errors, errors
+    pg.close()

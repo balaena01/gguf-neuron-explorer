@@ -58,7 +58,7 @@ dose は既定で rel(その層の残差の大きさに対する比)。0.5 で�
 | 効くヘッドを探す・強さを配る | `heads causal`・`heads allocate` | `heads_causal`・`heads_allocate` | 生成なし。止めたとき・強めたときの射影の値の変化から、少ないヘッドの組を作る |
 | 組で消し切れない質問に足す | `heads refine` | `heads_refine` | 残りの質問だけで、組を当てたまま方向を作り直して足すヘッドを探す |
 | 全体の倍率を返事で決める | `heads candidates`(`--tally`) | `heads_candidates`・`heads_candidates_tally` | 組 × 倍率で返事を作り、どの候補か伏せた採点のファイルを書いて集計する |
-| 決まった状態のときだけ書く(鍵) | `direction key`・`direction key-check`・`direction key-verify`・`direction keys`・`direction key-experts` | `direction_key`・`direction_key_check`・`direction_key_verify`・`keys`・`direction_key_experts` | 鍵を作り、作成に使っていない例で、比較用の鍵(ラベルをシャッフルして作った鍵)より書き込みたい位置をよく選ぶかを確かめる。返事を与えれば生成なし |
+| 決まった状態のときだけ書く(鍵) | `direction key`・`direction key-check`・`direction key-verify`・`direction keys`・`direction key-experts` | `direction_key`・`direction_key_check`・`direction_key_verify`・`keys`・`direction_key_experts`・`direction_key_pipeline`(方向 → 鍵 → key-check の一括) | 鍵を作り、作成に使っていない例で、比較用の鍵(ラベルをシャッフルして作った鍵)より書き込みたい位置をよく選ぶかを確かめる。返事を与えれば生成なし |
 | 副作用を測る | `eval` | `eval` | 能力・ppl・言語の混入・性格の変化量 |
 | 実際の使い方で確かめる | `fieldtest` | `fieldtest` | llama-server で長い作業・ツール呼び出し・質問集・perplexity。ファイルどうしを比べる。配る前に |
 | 書き出す | `export-cvec`・`gain`・`headproj export`・`bake` | `export_cvec`・`gain_export`・`headproj_export`・`keyed_export`・`bake` | llama.cpp の `--control-vector`・`--lora`。proj・keyed は LoRA か焼き込みだけ |

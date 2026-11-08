@@ -113,7 +113,7 @@ W → W + ΔW,   ΔW = α_L · d_L · κ_Lᵀ,   κ_L = k_L / (μ_Lᵀ k_L),   k
 
 ### 対照集合に書けるもの
 
-CHANGE-06 の対照集合の書き方に、次を足せる(どれも任意)。
+用途別のひな形が `configs/keyed/` にある(文末の言い方・特定の場面の返事・system で作った状態、§13)。CHANGE-06 の対照集合の書き方に、次を足せる(どれも任意)。
 
 ```yaml
 name: zundamon_endings
@@ -465,17 +465,38 @@ gne headproj export --recipe R --bake --verify --contrast C   # 焼き込み版�
 
 ## 13. UI での手順
 
-`gne serve` の **direction** ビューの 4 つめのタブ「鍵(keyed)」。
+`gne serve` の **direction** ビューの 4 つめのタブ「鍵(keyed)」。方向づくりから key-check までをボタン 1 つで回せる(CLI に戻らなくてよい)。
 
-1. **方向を作っておく。** 書く向きは `gne direction --contrast … --positions response`(または UI のジョブ)で作った方向セット。
-2. **鍵を作る。** 対照集合(一覧か YAML のパス)・名前・層・書き込み先(ffn / attn / shared / expert と番号)・positions(空なら対照集合の値。`before:<正規表現>` で作り方 (b))・q_mode・subset・比較用の鍵の本数を入れて「鍵を作る」。細かい設定に positions_b・skip・返事の長さ・返事のファイル・介入(iv)・種。dont_touch の質問の、返事を書き始める直前の位置は自動で Q に入る(UI には切る欄が無いので、切るなら対照集合に `dont_touch_start: false` を書く)。ジョブの進み具合が欄に出て、終わると層ごとの kn・1/kn・q_rank・作成時の AUC、弱い層の印、外した層、読んだ返事の例が並ぶ。
-3. **key-check。** 「この鍵で key-check(subset odd)」を押すと、作ったときの対照集合と返事、作成と反対側の subset が key-check の欄に入って回る。層ごとの AUC(例・トークン)・選択性(key-check の選択性)と比較用の鍵の p95・○ / ×、保留集合で測れたか(重なりがあれば理由)を見る。層ごとの ρ の分布のヒストグラム(書き込みたい位置・書き込みたくない位置・dont_touch の群。0 と 1 に縦の点線)も出る。dont_touch の中央値の欄の下の段は、書き込みたくない位置と dont_touch の、返事の冒頭での ρ(0.4 以上は赤)。○ の層だけを使う。鍵の作成と key-check の警告(書き込みたい位置が少ない、書き込みたい位置が返事の冒頭に偏っている、返事の冒頭で鍵が反応する)は、それぞれの結果の下に出る。
-4. **レシピに足す。** 結果の上で書き込む方向と α を選び、使う層の行の「+ レシピ」。recipe タブに keyed の行(`L14 ffn keyed a+1.00 @方向 #鍵`)が入る。recipe タブの「鍵つきの書き込み(keyed)を足す」からも、保存した鍵・層・方向・α を選んで足せる。方向・鍵を「既定」にした行は、レシピの `default_direction`・`default_key` を使う。
-5. **試す。** 3 列チャット(− の列は α が負 = 打ち消す)か 1 列のチャットで、鍵が反応する場面と dont_touch の場面の両方を話しかける。
-6. **eval。** eval タブで「keyed の選択性」を入れたまま流す(鍵の対照集合・問・比較用の鍵・subset・大きさ合わせ)。表に eval の選択性・書き込みたくない位置の ‖Δ‖(残差の変化の大きさ)・比較用の鍵の p95 と null(本物の鍵の eval の選択性が比較用の鍵の何割を上回ったか)、下に方式の比較(書き込みたい位置の変化をそろえた add・gain・proj の乱れ)と比較用の鍵の表が出る。
-7. **書き出す。** recipe タブの「LoRA・焼き込み」。keyed を含むと、焼き込みの型の既定は「自動」(元が Q8_0 のテンソルは Q8_0 のまま、それ以外は F16、§12)。
+1. **対照集合を入れる。** 「対照集合」の切り替えで 2 通り。
+   - **JSON を書く(ひな形から)**: 「ひな形」で用途を選ぶと、`configs/keyed/` のひな形が入力欄に入り、下に説明が出る。入力欄は手で直してよい(書き換えた後に別のひな形を選ぶと、置き換える前に確かめる。書き換えていなければ確かめない)。JSON ファイルを読み込むか、貼り付けてもよい。入力欄の中身はその場で確かめ、名前・質問の数・作り方 (a) / (b)・positions・dont_touch の群・方向の A 側と B 側を出す。読めないところ(名前・positions・dont_touch のキーなど)は赤で、気をつけること(質問が少ない、作り方 (b) なのに dont_touch が無い、system_a が無くて方向を作れない)は黄色で出る。ジョブには表のまま渡し、ジョブが `<root>/contrasts/<name>.yaml` に書いてから使う(ひな形の説明 `about` と設定 `keyed` は書かない。CHiPS の「JSON から方向とヘッドを作る」タブと同じ)。書いたファイルは、あとで「ファイルを選ぶ」と key-check の対照集合の一覧にも出る。
+   - **ファイルを選ぶ**: `configs/contrast/` か `<root>/contrasts/` の YAML を一覧から選ぶか、パスを入れる(これまでどおり)。
+2. **設定を入れる。** 名前(空なら対照集合の name)・層・書き込み先(ffn / attn / shared / expert と番号)・positions(空なら対照集合の値。`before:<正規表現>` で作り方 (b))・q_mode・subset・比較用の鍵の本数。細かい設定に positions_b・skip・返事の長さ・返事のファイル・介入(iv)・種・方向の返事の長さ。表の最上位の `keyed`(`layers`・`target`・`q_mode`・`subset`・`pseudo`・`max_tokens`・`alpha`)に書いた値は、表を入れたときに欄に入る(`alpha` は手順 5 の α の欄の既定)。dont_touch の質問の、返事を書き始める直前の位置は自動で Q に入る(切るなら対照集合に `dont_touch_start: false`)。
+3. **「方向から key-check まで」を押す**(ジョブ `direction_key_pipeline`)。続けて次を回す。進み具合(「1/3 方向」「2/3 鍵」「3/3 key-check」)は欄の下と下のジョブのバーに出て、バーの「止める」で止められる。見積もりが 30 分を超えるときは確かめてから投げる(ほかのジョブと同じ)。
+   1. **方向**: `gne direction --contrast … --positions response` と同じもの(A 側 = system_a か recipe_a、B 側 = system_b か system なしの返事の差)。名前は対照集合の name。同じ名前の方向がもうあれば使い回す。ボタンの下に、方向がもうあるか(使い回すか、作るか)が出る。「方向を作り直す」に印を付けると、あっても返事を作って作り直す。使い回す方向が中身の違う対照集合や positions response 以外で作られていれば、結果に警告が出る。
+   2. **鍵**: 「鍵を作る」と同じ。
+   3. **key-check**: 鍵の作成と反対側の subset(even ↔ odd)で、同じ対照集合・同じ返事で測る。
+
+   終わると、各段の時間と方向を作ったか使い回したかのまとめ、鍵の層ごとの表(kn・1/kn・q_rank・作成時の AUC、弱い層の印、外した層、読んだ返事の例)、下の key-check の欄の結果(手順 4)が出る。key-check の欄には鍵・対照集合・subset が入るので、設定を変えて測り直せる。鍵だけを作り直すなら「鍵を作る」(ジョブ `direction_key`)。
+4. **key-check の結果を見る。** 層ごとの AUC(例・トークン)・key-check の選択性と比較用の鍵の p95・○ / ×、保留集合で測れたか(重なりがあれば理由)。層ごとの ρ の分布のヒストグラム(書き込みたい位置・書き込みたくない位置・dont_touch の群。0 と 1 に縦の点線)。dont_touch の中央値の欄の下の段は、書き込みたくない位置と dont_touch の、返事の冒頭での ρ(0.4 以上は赤)。○ の層だけを使う。鍵の作成と key-check の警告(書き込みたい位置が少ない、書き込みたい位置が返事の冒頭に偏っている、返事の冒頭で鍵が反応する)は、それぞれの結果の下に出る。保存した鍵を測り直すときは、鍵の表の「この鍵で key-check」か、一覧の「確かめる」。
+5. **レシピに足す。** 鍵の表の上の「書き込む方向」には、手順 3 で作ったばかりの方向が選ばれている。α を決めて、使う層の行の「+ レシピ」。recipe タブに keyed の行(`L14 ffn keyed a+1.00 @方向 #鍵`)が入る。recipe タブの「鍵つきの書き込み(keyed)を足す」からも、保存した鍵・層・方向・α を選んで足せる。方向・鍵を「既定」にした行は、レシピの `default_direction`・`default_key` を使う。
+6. **LoRA が式どおりに書くかを確かめる。** 行の「key-verify」(ジョブ `direction_key_verify`、数秒)で、その層・選んだ方向・鍵の書き込み先で V30 を回す(α = 1・2)。表に α ごとの相対誤差の中央値(< 3%)・測った行・cos・書き込みたくない側への漏れ(< 0.1)、専門家の鍵ならほかの専門家の枠の差と選ばれ方の変化、合格・不合格が出る。「流す文」に 1 行 1 文で文を入れられる(空なら既定の 2 文。専門家の鍵は、その専門家が選ばれる文を入れる)。新しい arch では一度回す。
+7. **試す。** 3 列チャット(− の列は α が負 = 打ち消す)か 1 列のチャットで、鍵が反応する場面と dont_touch の場面の両方を話しかける。
+8. **eval。** eval タブで「keyed の選択性」を入れたまま流す(鍵の対照集合・問・比較用の鍵・subset・大きさ合わせ)。表に eval の選択性・書き込みたくない位置の ‖Δ‖(残差の変化の大きさ)・比較用の鍵の p95 と null(本物の鍵の eval の選択性が比較用の鍵の何割を上回ったか)、下に方式の比較(書き込みたい位置の変化をそろえた add・gain・proj の乱れ)と比較用の鍵の表が出る。key-check の選択性(鍵の反応の強さの差)とは別の量。
+9. **書き出す。** recipe タブの「LoRA・焼き込み」。keyed を含むと、焼き込みの型の既定は「自動」(元が Q8_0 のテンソルは Q8_0 のまま、それ以外は F16、§12)。
+
+**MoE の専門家を書き込み先にするとき。** MoE の層があるモデルでは「専門家を選ぶ材料を出す」(ジョブ `direction_key_experts`)が出る。層の欄のうち MoE の層だけで、鍵と同じ対照集合・位置・返事で測り、層ごとに `rate_a` の大きい順に 8 個の専門家を、`rate_a`(書き込みたい位置で選ばれた割合)・`rate_b`(書き込みたくない位置で選ばれた割合)・差・lift(rate_a / rate_b)・重み(選ばれたときのルーターの重み、鍵の gate_a の見込み)・行の見込み(書き込みたい位置で選ばれる行の数)・dont_touch の群での割合と並べる。`rate_a` が高いだけでなく、`rate_b` との差が大きく行の見込みが多い専門家の「この専門家で鍵を作る」を押すと、書き込み先がその専門家(expert と番号)、層がその層、名前が `<名前>_L<層>E<番号>` になる。そのまま「方向から key-check まで」か「鍵を作る」で進める(§11)。
+
+**ひな形(`configs/keyed/`)。** JSON の対照集合に、説明 `about`(並び順と、日本語・英語の題と説明。読むときに捨てる)と、任意の設定 `keyed` を足したもの。JSON は YAML としても読めるので、`gne direction key --contrast configs/keyed/sentence_endings.json` のように CLI にもそのまま渡せる。
+
+| ファイル | 用途 | 作り方 | 中身 |
+|---|---|---|---|
+| `sentence_endings.json` | 文末の言い方を変える(です・ます → のだ) | (b) `before:(です\|ます)。` | §6 の `zundamon_endings.yaml` と同じ質問・system_a・dont_touch(英語)。名前は `noda_endings` |
+| `one_scene.json` | 特定の場面(褒められた・お礼を言われた)の返事だけ変える | (b) `before:(ありがとう\|嬉しい\|うれしい\|楽しい)` | §7 の `tsundere_thanks.yaml` と同じ質問・system_a・dont_touch の tasks(計算・事実・手順の質問)と starts(ふつうの質問、`positions: last`)。名前は `tsundere_scene`。starts が要るのは、お礼が返事の最初に来ると書き込みたい位置が返事を書き始める直前の位置になり、その状態はどの質問でも似ているため(tasks の数問だけでは、ふつうの質問の返事の冒頭で鍵が反応した、§7) |
+| `system_state.json` | system で作った状態を書き込みたい位置にする(丁寧語 → くだけた口調) | (a) `response` | system_a = 丁寧語、system_b = くだけた口調で同じ 20 問を読ませる。素のモデルの日本語の返事が丁寧語になる状態を鍵にして、方向(丁寧語 − くだけた口調)を負の α で書いて打ち消す(`keyed.alpha: -1`)。key-check は system の文脈で測るので、推論時に鍵が反応するかは生成で確かめる |
 
 保存した鍵の一覧はタブのいちばん下(「見る」で作成の記録、「確かめる」で key-check の欄に入れる)。
+
+MCP からは `direction_key_pipeline(contrast, layers)` が同じ一括を回す(contrast は表か、`configs/contrast/` の名前・`configs/keyed/` のひな形の名前・パス)。
 
 ---
 
@@ -518,10 +539,11 @@ gne headproj export --recipe R --bake --verify --contrast C   # 焼き込み版�
 | 手順 | コマンド(MCP のツール) | 生成 |
 |---|---|---|
 | 書く向きを作る | `gne direction --contrast C --positions response`(`direction`) | 返事を作る |
+| 方向 → 鍵 → key-check を 1 回で | UI の「方向から key-check まで」(`direction_key_pipeline`、ジョブ) | 方向の返事と、(b) で返事を与えなければ鍵の返事 |
 | 鍵を作る | `gne direction key --contrast C --layers …`(`direction_key`、ジョブ) | (b) で返事を与えなければ 1 回 |
 | 専門家を選ぶ(MoE) | `gne direction key-experts --contrast C --layers …`(`direction_key_experts`、ジョブ) | 同上 |
 | 鍵が状態を分けているか確かめる | `gne direction key-check --key K --contrast C`(`direction_key_check`、ジョブ) | 同上 |
-| LoRA が式どおりか(V30) | `gne direction key-verify --layer L --key K --direction D`(`direction_key_verify`) | なし |
+| LoRA が式どおりか(V30) | `gne direction key-verify --layer L --key K --direction D`(`direction_key_verify`。UI は鍵の表の「key-verify」、ジョブ `direction_key_verify`) | なし |
 | 保存した鍵の一覧 | `gne direction keys`(`keys`) | なし |
 | 試す | `gne steer --unit L:ffn:keyed:a1@D#K -p … --compare`(`steer`) | あり |
 | 振る舞いを数える | `gne behave --prompts q.yaml --recipe R --match <正規表現>` | あり |

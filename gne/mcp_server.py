@@ -71,6 +71,9 @@ direction で作った方向は "L:dir:NAME:dose"、attention ヘッドの gain 
    ブロック(行の keyed.selectivity、結果の keyed の方式の比較と比較用の鍵)を足す。鍵と方向を別の対照集合で作ったなど、鍵の対照集合を推定できないときは
    eval(keyed_contrast=鍵を作った対照集合)で渡す(渡さないと keyed は skipped)。
    例: ずんだもんの語尾 configs/contrast/zundamon_endings.yaml(direction(positions="response") → direction_key(layers=[…]) → direction_key_check)。
+   一通り回すだけなら direction_key_pipeline(contrast, layers)(方向 → 鍵 → 作成と反対側の subset での key-check を 1 回のジョブで。
+   同じ名前の方向があれば使い回し、rebuild_direction=True で作り直す)。用途別のひな形は configs/keyed/(文末の言い方・特定の場面の返事・
+   system で作った状態。about は説明だけで読むときに捨てる)。
    MoE の層は direction_key(target="shared")で shared expert に、target="expert:e" で専門家 e に書く(ユニットは L:S / L:Ee:keyed:…)。
    専門家は direction_key_experts で書き込みたい位置でよく選ばれる(rate_a が大きく rate_b が小さい)ものを選ぶ。焼き込みは
    既定(auto)と requant="keep" なら、元が Q8_0 の専門家のテンソルは元の型のまま(f16 だとテンソル全体が F16 になって大きくなる)。
@@ -640,6 +643,50 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
             return _err(e)
 
     @srv.tool()
+    async def direction_key_pipeline(contrast: dict[str, Any] | str, layers: list[int] | str | None = None,
+                                     name: str | None = None, direction: str | None = None, rebuild_direction: bool = False,
+                                     response_tokens: int = 96, target: str | None = None, positions: str | None = None,
+                                     positions_b: str | None = None, skip: int | None = None, max_tokens: int | None = None,
+                                     q_mode: str | None = None, subset: str | None = None, pseudo: int | None = None,
+                                     replies_a: str | list[str] | None = None, replies_b: str | list[str] | None = None,
+                                     iv: str | list[str] | None = None, seed: int | None = None,
+                                     dont_touch_start: bool | None = None, check: bool = True) -> dict:
+        """鍵つきの書き込みを、対照集合 1 つから「方向 → 鍵 → key-check」まで 1 回のジョブで回す(CHANGE-07、job_status で結果。
+        UI の鍵のタブの「方向から key-check まで」と同じ)。contrast は対照集合の表(name・user_prompts・positions・dont_touch・
+        system_a など。<root>/contrasts/<name>.yaml に書いてから使う)か、configs/contrast/ の名前・configs/keyed/ のひな形の名前・パス。
+        1. 方向 direction(省くと対照集合の name): gne direction --positions response と同じ(A 側 = system_a、B 側 = system_b か system なしの
+        返事の差)。同じ名前の方向がもうあれば使い回す(rebuild_direction=True で作り直す。中身の違う対照集合から作った方向なら warnings)。
+        2. 鍵 name(省くと対照集合の name): direction_key と同じ引数(target・positions・q_mode・subset・pseudo・replies_a など)。
+        3. key-check: 作成と反対側の subset(even ↔ odd)で、同じ対照集合・同じ返事で測る(結果の check は direction_key_check を
+        compact にしたもの)。check=False で回さない。layers は必須(引数か表の keyed.layers)。表の keyed(layers・target・q_mode・
+        subset・pseudo・max_tokens・alpha)は渡していない引数の既定になる(alpha は結果の alpha_hint に返すだけ。レシピの α の目安)。
+        結果: direction(name・reused・rebuilt)、key(direction_key の結果)、check(key-check の結果)、contrast_path、warnings。
+        判断は direction_key_check と同じ: check の held_out が true で、beats_pseudo の層だけを使う。"""
+        from .jobs import _layers
+        try:
+            spec, path = None, None
+            if isinstance(contrast, dict):
+                spec = contrast
+            else:
+                try:
+                    path = str(_contrast_path(session, contrast, None, None, None, None))
+                except GneError:
+                    tpl = CONFIGS / "keyed" / f"{contrast}.json"
+                    if not tpl.exists():
+                        raise
+                    spec = json.loads(tpl.read_text(encoding="utf-8"))
+            if layers is not None and not _layers(layers):
+                raise GneError("BAD_ARGS", "layers に鍵を作る層を指定してください(例 [8, 14, 20])")
+            p = {"spec": spec, "contrast": path, "layers": layers, "name": name, "direction": direction,
+                 "rebuild_direction": bool(rebuild_direction) or None, "response_tokens": response_tokens, "target": target,
+                 "positions": positions, "positions_b": positions_b, "skip": skip, "max_tokens": max_tokens, "q_mode": q_mode,
+                 "subset": subset, "pseudo": pseudo, "replies_a": replies_a, "replies_b": replies_b, "iv": iv, "seed": seed,
+                 "dont_touch_start": dont_touch_start, "check": None if check else False, "compact": True}
+            return jobs.start("direction_key_pipeline", {k: v for k, v in p.items() if v is not None}).view()
+        except Exception as e:  # noqa: BLE001
+            return _err(e)
+
+    @srv.tool()
     async def keys() -> dict:
         """保存した鍵の一覧(CHANGE-07、<root>/keys/<model_id>/): 名前・書き込み先・層・層ごとの kn・作成の条件(位置・subset・q_mode)。"""
         return await call(lambda: {"keys": session.keys()}, gpu=False)
@@ -725,7 +772,7 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
 
     @srv.tool()
     async def job_start(kind: str, params: dict[str, Any] | None = None, workers: str | None = None) -> dict:
-        """長時間の処理を投げる。kind: stats_resid / stats_act / lens_logit / lens_steer / sweep / rank / reverse / eval / direction / ablate / heads_contrast / heads_causal / heads_allocate / head_pipeline / heads_candidates / heads_refine / headproj_export / fieldtest / direction_key / direction_key_check / direction_key_experts。
+        """長時間の処理を投げる。kind: stats_resid / stats_act / lens_logit / lens_steer / sweep / rank / reverse / eval / direction / ablate / heads_contrast / heads_causal / heads_allocate / head_pipeline / heads_candidates / heads_refine / headproj_export / fieldtest / direction_key / direction_key_check / direction_key_experts / direction_key_pipeline / direction_key_verify。
         params は gne.api の同名メソッドの引数(例 sweep: {"layer": 22, "neurons": "random:64", "design": "quick"})。
         見積もりが 30 分を超えるジョブは走らせずに NEEDS_CONFIRM と見積もりを返す。params に budget("30m" など)を入れると
         予算に収まるように絞る(lens_steer は方向に近いニューロンの上位、sweep は quick 設計で steer lens の上位、reverse は

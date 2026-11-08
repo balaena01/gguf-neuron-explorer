@@ -9,8 +9,9 @@ fires の文章でのヘッドの注目(/api/fires/{id}/heads)。GPU を使う�
 CHANGE-06 G: 因果スクリーニングと強さの配分(/api/causal)、方向セットと速い指標(/api/directions、.../score は GPU)、
 方向とヘッドの一括の結果(/api/pipelines。実行は head_pipeline のジョブ)、強さの候補と名前を伏せた採点(/api/candidates。
 生成は heads_candidates のジョブ)。
-CHANGE-07 G: 鍵つきの書き込み(keyed)の鍵の一覧(/api/keys)と対照集合の候補(/api/contrasts)。鍵の作成と確認は
-direction_key・direction_key_check のジョブ、keyed のレシピの書き出しは headproj_export のジョブ。
+CHANGE-07 G: 鍵つきの書き込み(keyed)の鍵の一覧(/api/keys)、対照集合の候補(/api/contrasts)とひな形(/api/keyed-templates)。
+鍵の作成・確認・専門家の選ばれ方・LoRA の確かめ・方向から key-check までの一括は direction_key・direction_key_check・
+direction_key_experts・direction_key_verify・direction_key_pipeline のジョブ、keyed のレシピの書き出しは headproj_export のジョブ。
 ローカル専用なので、Host が 127.0.0.1 / localhost 以外の要求(DNS rebinding)と、別のオリジンからの書き込み(POST / DELETE)は断る。
 大きい配列は JSON にせず octet-stream で返し、形は X-Shape、付帯情報は X-Meta(JSON)に入れる(§8.2)。
 """
@@ -241,6 +242,11 @@ def create_app(session, *, warm: bool = True, openai: bool = False) -> FastAPI:
     def pipeline_templates():
         """用途別の質問集のテンプレート(configs/pipeline/、「ひな形」で選ぶ)。"""
         return data.pipeline_templates()
+
+    @app.get("/api/keyed-templates")
+    def keyed_templates():
+        """鍵つきの書き込みの対照集合のひな形(configs/keyed/、鍵のタブの「ひな形」で選ぶ)。"""
+        return data.keyed_templates()
 
     @app.get("/api/pipelines")
     def pipelines():

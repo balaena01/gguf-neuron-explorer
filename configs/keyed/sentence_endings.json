@@ -1,0 +1,49 @@
+{
+  "about": {
+    "order": 1,
+    "ja": {
+      "title": "文末の言い方を変える(作り方 (b)、です・ます → のだ)",
+      "text": "推論時と同じ文脈(system なし)のモデル自身の返事を読み、「です。」「ます。」を書く直前の位置を書き込みたい位置、同じ返事のそれ以外の位置を書き込みたくない位置にして鍵を作る(positions: before:<正規表現>)。dont_touch の english は英語の質問の群で、英語の返事の位置には書き込まない。system_a は方向を作るためのもの(A = ずんだもんの system、B = system なしの返事の差)で、鍵には使わない。書き換えるときは、system_a を目的の言い方に、正規表現をモデルが実際に書く文末に合わせる(鍵の結果の「正規表現が一致した例」と読んだ返事の例を見る)。「+ レシピ」の α は正(方向をそのまま書く)。"
+    },
+    "en": {
+      "title": "Change how sentences end (method (b): です/ます → のだ)",
+      "text": "Reads the model's own replies in the inference-time context (no system prompt). The position just before it writes です。 or ます。 is a position to write at, and every other position in the same replies is a position to leave alone (positions: before:<regex>). dont_touch english is a group of English questions, so nothing is written in English replies. system_a is only for building the direction (A = the Zundamon system prompt, B = replies without a system prompt) and is not used for the key. To adapt it, rewrite system_a for the ending you want and the regex for the endings the model actually writes (check the key result's matched examples and the sample replies). Use a positive α in “+ recipe” (writes the direction as is)."
+    }
+  },
+  "name": "noda_endings",
+  "system_a": "あなたはずんだもんです。日本語で話し、文の終わりは必ず「〜のだ」「〜なのだ」にしてください(例: 「おいしいのだ。」「元気なのだ！」)。 セリフだけを書き、動作の描写やかっこ書きは書かないでください。",
+  "positions": "before:(です|ます)。",
+  "user_prompts": [
+    "週末は何をして過ごすのがおすすめ？",
+    "朝ごはんに何を食べたらいい？",
+    "おすすめの趣味を教えて。",
+    "雨の日は何をする？",
+    "疲れたときはどうすればいい？",
+    "好きな季節はいつ？",
+    "カレーの作り方を簡単に教えて。",
+    "眠れない夜はどうしたらいい？",
+    "日本のおすすめの観光地は？",
+    "勉強に集中するコツは？",
+    "猫と犬、どっちが好き？",
+    "健康のために何をしている？",
+    "おすすめの飲み物は？",
+    "部屋を片付けるコツは？",
+    "友達の誕生日に何を贈ればいい？",
+    "朝早く起きるコツは？"
+  ],
+  "dont_touch": [
+    {
+      "name": "english",
+      "prompts": [
+        "What is a good way to spend the weekend?",
+        "How do I make a simple curry?",
+        "Any tips for falling asleep faster?",
+        "What should I give a friend for their birthday?"
+      ]
+    }
+  ],
+  "validate": {
+    "match": "のだ|なのだ",
+    "target": "Zundamon, a cheerful character who ends every Japanese sentence with 'noda' or 'nanoda'"
+  }
+}

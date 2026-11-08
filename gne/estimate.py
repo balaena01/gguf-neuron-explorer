@@ -177,6 +177,16 @@ def estimate(session, kind: str, params: dict) -> dict:
         kd = _keyed_job(session, sp, kind, p)
         sec = kd["seconds"]
         detail = kd
+    elif kind == "direction_key_pipeline":                     # CHANGE-07: 方向(返事を作る)+ 鍵 + key-check
+        kd = _keyed_pipeline(session, sp, p)
+        sec = kd["seconds"]
+        detail = kd
+    elif kind == "direction_key_verify":                       # CHANGE-07 V30: 文を無介入 1 回 + α ごとに 1 回流す(生成なし)
+        n_t = len(p.get("texts") or []) if not isinstance(p.get("texts"), str) else len([x for x in p["texts"].splitlines() if x.strip()])
+        n_t = n_t or 2
+        n_a = len(p.get("alphas") or (1.0, 2.0))
+        sec = (1 + n_a) * n_t * sp.setprefill / 1000 + 1.0       # + LoRA を作る分
+        detail = {"texts": n_t, "alphas": n_a}
     elif kind == "connections":
         from .connections import dense_layers
         Ls = dense_layers(session.weights)
@@ -353,6 +363,58 @@ def _plan_cost(sp: Speed, sets, max_tokens: int, max_examples: int | None = None
             "seconds": gen_s + n * sp.setprefill / 1000}
 
 
+def _spec_of(p: dict):
+    """見積もりの対照集合: p の spec(UI の入力欄の表)か contrast(パス)→ (KeySpec, keyed の設定)。表は一時ファイルに書いて
+    読む(本番は <root>/contrasts/ に書く。見積もりでは置き場所を変えない)。"""
+    import tempfile
+
+    import yaml
+
+    from .keyed_build import _as_spec, read_key_spec
+    from .keyed_pipeline import clean_spec, file_settings
+    if p.get("spec") is not None:
+        d, settings = clean_spec(p["spec"])
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / f"{d['name']}.yaml"
+            path.write_text(yaml.safe_dump(d, allow_unicode=True, sort_keys=False), encoding="utf-8")
+            return read_key_spec(path), settings
+    c = p["contrast"]
+    return _as_spec(c), (file_settings(c) if isinstance(c, str | Path) else {})
+
+
+def _keyed_pipeline(session, sp: Speed, p: dict) -> dict:
+    """direction_key_pipeline の見積もり: 方向(A・B の返事を response_tokens まで作って流す。同じ名前の方向があって作り直さない
+    なら 0)+ 鍵の作成 + 作成と反対側の subset での key-check。"""
+    try:
+        spec, settings = _spec_of(p)
+        q = {**{k: v for k, v in settings.items() if k != "alpha"}, **{k: v for k, v in p.items() if v is not None}}
+        cs = spec.contrast
+        dname = q.get("direction") or cs.name
+        try:
+            session.direction_set(dname)
+            have = True
+        except Exception:  # noqa: BLE001
+            have = False
+        dir_s = 0.0
+        if not have or q.get("rebuild_direction"):
+            n_conv = len(cs.prompts("A")) + len(cs.prompts("B"))
+            dir_s = n_conv * sp.setprefill / 1000 * 2 + sp.gen(len(cs.prompts("A")), int(q.get("response_tokens") or 96)) \
+                + sp.gen(len(cs.prompts("B")), int(q.get("response_tokens") or 96))
+        pos = q.get("positions") or spec.positions or "response"
+        pos_b = q.get("positions_b") or spec.positions_b
+        subset = q.get("subset") or "even"
+        mt = int(q.get("max_tokens") or 96)
+        build = _plan_cost(sp, _key_sets(spec, pos, pos_b, subset, q.get("replies_a"), q.get("replies_b")), mt)
+        check = {"seconds": 0.0}
+        if q.get("check", True) is not False:
+            sub = q.get("check_subset") or {"even": "odd", "odd": "even"}.get(subset, "all")
+            check = _plan_cost(sp, _key_sets(spec, pos, pos_b, sub, q.get("replies_a"), q.get("replies_b")), mt)
+        return {"direction_seconds": dir_s, "direction_reused": have and not q.get("rebuild_direction"),
+                "build": build, "check": check, "seconds": dir_s + build["seconds"] + check["seconds"]}
+    except Exception:  # noqa: BLE001  対照集合が読めなくても見積もりで止めない(本番がエラーを返す)
+        return {"seconds": 3 * 32 * sp.setprefill / 1000, "guess": True}
+
+
 def _keyed_job(session, sp: Speed, kind: str, p: dict) -> dict:
     """direction_key・direction_key_check・direction_key_experts の見積もり(会話の prefill と返事の生成)。"""
     from .keyed_build import _as_spec
@@ -368,7 +430,8 @@ def _keyed_job(session, sp: Speed, kind: str, p: dict) -> dict:
             mt = p.get("max_tokens") or ks.max_tokens
             subset = p.get("subset") or "odd"
         else:
-            spec = _as_spec(p["contrast"])
+            spec, settings = _spec_of(p)
+            p = {**{k: v for k, v in settings.items() if k != "alpha"}, **{k: v for k, v in p.items() if v is not None}}
             pos = p.get("positions") or spec.positions or "response"
             pos_b = p.get("positions_b") or spec.positions_b
             mt = p.get("max_tokens") or 96

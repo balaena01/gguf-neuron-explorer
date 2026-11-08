@@ -2614,6 +2614,13 @@ round_01.scores.txt に「番号 P C」を 1 行ずつ書く(例: 17 3 4)。全�
         from .keyed_build import key_check
         return key_check(self, key, **kw)
 
+    def direction_key_pipeline(self, contrast: str | Path | dict, **kw) -> dict:
+        """方向(gne direction --positions response と同じ)→ 鍵 → 作成と反対側の subset での key-check を 1 回で回す。
+        contrast は対照集合のパスか表(表は <root>/contrasts/<name>.yaml に書く。about と keyed の設定は書かない)。
+        同じ名前の方向があれば使い回し、rebuild_direction=True で作り直す。中身は gne/keyed_pipeline.py の run。"""
+        from .keyed_pipeline import run
+        return run(self, contrast, **kw)
+
     def keys(self) -> list[dict]:
         """<root>/keys/<model_id>/ の鍵の一覧と要約(層・書き込み先・kn・作成の条件、パスなし)。読めないファイルは error だけ。"""
         from .keyed import list_keys

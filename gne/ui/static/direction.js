@@ -5,7 +5,8 @@
 // cohen_d が最大の層が記録される(gne direction score と同じ)。基準層があれば測り直しても上書きしない。
 // 上の切り替えで「JSON から方向とヘッドを作る」(pipeline.js、head_pipeline のジョブ)と「強さの候補」(candidates.js、
 // heads_candidates のジョブの結果と名前を伏せた採点)に替わる。方向が 1 つも無ければ「JSON から作る」を開く。
-// 「鍵(keyed)」(keys.js、CHANGE-07 G)は鍵つきの書き込みの鍵の作成(direction_key)と key-check(direction_key_check)。
+// 「鍵(keyed)」(keys.js、CHANGE-07 G)は鍵つきの書き込みの鍵の作成(direction_key)・key-check(direction_key_check)・
+// 方向から key-check までの一括(direction_key_pipeline)・専門家の選ばれ方(direction_key_experts)・key-verify(direction_key_verify)。
 import { getJSON, postJSON } from "./api.js";
 import { t } from "./i18n.js";
 import { esc, qText } from "./panels.js";
@@ -94,7 +95,7 @@ export class DirectionView {
 
   // app.js の onJobFinished から: 一括(head_pipeline)と候補(heads_candidates)
   async jobEnded(j) {
-    if (j.kind === "direction_key" || j.kind === "direction_key_check") return this.key.jobEnded(j);   // CHANGE-07: 鍵
+    if (String(j.kind).startsWith("direction_key")) return this.key.jobEnded(j);   // CHANGE-07: 鍵(作成・確認・専門家・key-verify・一括)
     if (j.kind === "head_pipeline" || j.kind === "heads_refine") return this.pipe.jobEnded(j);
     if (j.kind !== "heads_candidates") return;
     const mine = j.id === this.pipe.candJobId;

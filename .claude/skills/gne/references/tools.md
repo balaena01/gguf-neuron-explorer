@@ -187,7 +187,7 @@ gne headproj export --recipe R [--bake [--requant auto|f16|q8_0|keep]]          
 - eval: keyed のユニットがあれば、生成なしで次を出す。目的の層の選択性(行の keyed)と、同じ α の add・書き込みたい位置での変化をそろえた add / gain / proj と比べた、書き込みたくない位置・dont_touch での乱れ(結果の keyed)。`--random-controls N` は鍵を比較用の鍵 `NAME~j` に替えた対照。鍵と方向の対照集合が違えば `--keyed-contrast`。報告は `gne behave --match` で数えた振る舞いと能力・ppl で。
 - MoE: shared は dense の ffn と同じ。専門家の鍵はその専門家が選ばれた位置の行だけで作るので、書き込みたい位置でよく選ばれ、書き込みたくない位置ではあまり選ばれない専門家を選ぶ(`gne direction key-experts --contrast C --layers …` で層ごとの rate_a・rate_b・lift・重み・行の見込みを見る)。焼き込みは既定(auto)でも、元が Q8_0 の専門家のテンソルは編集しない専門家をバイトのまま残す。K-quant などは auto だと F16 になる(1 層で数百 MB 増えることがある)ので `--requant keep`。
 - 書き出しは LoRA が第一候補(keyed だけなら `<レシピ名>-keyed.lora.gguf`)。焼き込みの既定 auto は、元が Q8_0 のテンソルを Q8_0 のまま書く(F16 は掛け算の計算方法が変わり、LoRA 版とかえってずれた。F132)。Q8_0 のままでは編集の 1 割以上が丸めに消えるテンソル(`edit_kept` < 0.9)だけ F16(記録の `fallback`)。`edit_kept_min` < 0.9 で警告(`requant_error` は編集と関係のない丸め誤差も数えるので、小さな編集では大きく出る)。
-- 焼き込みの確かめ: V33・V26(`--verify`)で比べる最後の層での射影の値は、書き込みがほぼ 0 の LoRA でも許容誤差の 7〜8 割動く(GPU、F139)。そこで最後の層だけ、合格の線(`threshold`)を許容誤差 + 計算方法の違いだけで出る誤差(`noise.max_abs_diff` = 倍率 1e-6 の LoRA と LoRA なしの射影の値の差の最大)にしてある。control vector には入らない。UI は direction ビューの「鍵(keyed)」タブ(作成・key-check・ρ のヒストグラム・「+ レシピ」)。
+- 焼き込みの確かめ: V33・V26(`--verify`)で比べる最後の層での射影の値は、書き込みがほぼ 0 の LoRA でも許容誤差の 7〜8 割動く(GPU、F139)。そこで最後の層だけ、合格の線(`threshold`)を許容誤差 + 計算方法の違いだけで出る誤差(`noise.max_abs_diff` = 倍率 1e-6 の LoRA と LoRA なしの射影の値の差の最大)にしてある。control vector には入らない。UI は direction ビューの「鍵(keyed)」タブ。対照集合はファイルか JSON(用途別のひな形 `configs/keyed/`: 文末の言い方・特定の場面の返事・system で作った状態。`about` は説明だけで読むときに捨て、`keyed` は欄の既定と「+ レシピ」の α)。「方向から key-check まで」(ジョブ `direction_key_pipeline`)で方向・鍵・key-check を続けて回し、ρ のヒストグラム・「+ レシピ」(作ったばかりの方向が選ばれる)・行の「key-verify」(ジョブ `direction_key_verify`)。MoE なら「専門家を選ぶ材料を出す」(ジョブ `direction_key_experts`)の表から専門家の鍵づくりに進める。
 
 ## 4. 確かめる
 
@@ -230,7 +230,7 @@ MCP のツール: `model_overview`・`layer_summary`・`neuron`・`search`・`st
 
 MCP のツール(ヘッドの方向成分): `direction_score`・`heads_causal`(ジョブ)・`heads_allocate`(ジョブ)・`headproj_export`。`eval` に `compare_methods`・`alloc`・`n_heads`・`control_pool`。
 
-MCP のツール(鍵つきの書き込み): `direction_key`(ジョブ)・`direction_key_check`(ジョブ)・`direction_key_experts`(ジョブ)・`direction_key_verify`・`keys`・`keyed_export`。`eval` に `keyed_contrast`・`keyed_examples`・`keyed_pseudo`・`keyed_subset`・`keyed_match`・`keyed_metrics`。
+MCP のツール(鍵つきの書き込み): `direction_key`(ジョブ)・`direction_key_check`(ジョブ)・`direction_key_experts`(ジョブ)・`direction_key_verify`・`direction_key_pipeline`(ジョブ。方向(positions response)→ 鍵 → 作成と反対側の subset での key-check を 1 回で。contrast は表か、configs/contrast/ の名前・configs/keyed/ のひな形の名前・パス。同じ名前の方向があれば使い回し、`rebuild_direction=True` で作り直す)・`keys`・`keyed_export`。`eval` に `keyed_contrast`・`keyed_examples`・`keyed_pseudo`・`keyed_subset`・`keyed_match`・`keyed_metrics`。
 
 ## 7. Python API(`gne.api.Session`)
 

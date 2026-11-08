@@ -744,9 +744,19 @@ class UIData:
     @staticmethod
     def pipeline_templates() -> list[dict]:
         """用途別の質問集のテンプレート(configs/pipeline/*.json): ファイル名・説明(about の ja / en)・中身(about を除く)。"""
+        return UIData._templates("pipeline")
+
+    @staticmethod
+    def keyed_templates() -> list[dict]:
+        """鍵つきの書き込みの対照集合のひな形(configs/keyed/*.json、鍵のタブの「ひな形」): pipeline_templates と同じ形。
+        中身の keyed(UI の欄の既定と、「+ レシピ」の α)はそのまま残す(ジョブが対照集合に書くときに捨てる)。"""
+        return UIData._templates("keyed")
+
+    @staticmethod
+    def _templates(sub: str) -> list[dict]:
         from ..store import CONFIGS
         out = []
-        for p in sorted((CONFIGS / "pipeline").glob("*.json")):
+        for p in sorted((CONFIGS / sub).glob("*.json")):
             try:
                 d = json.loads(p.read_text(encoding="utf-8"))
             except (OSError, ValueError):
