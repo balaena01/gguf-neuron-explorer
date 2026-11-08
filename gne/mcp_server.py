@@ -99,11 +99,12 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
                  n_gpu_layers: int = -1, n_ctx: int = 4096, seed: int = 0):
     from mcp.server.mcpserver import MCPServer
 
+    from . import __version__
     from .api import Session
     session = Session(model, root=root, n_gpu_layers=n_gpu_layers, n_ctx=n_ctx, seed=seed)
     arbiter = GpuArbiter()
     jobs = JobRunner(session, arbiter, standard_kinds())
-    srv = MCPServer("gne", instructions=INSTRUCTIONS, version="0.1.0", log_level="WARNING")
+    srv = MCPServer("gne", instructions=INSTRUCTIONS, version=__version__, log_level="WARNING")
 
     async def call(fn, *a, gpu: bool = True, **kw) -> dict:
         def run():
