@@ -323,7 +323,7 @@ export class RecipePanel {
     }).join("");
     this.root.innerHTML = `
       <div class="list-tools"><input id="rc-name" placeholder="${t("レシピ名(英数字・_・-)")}" value="${esc(r.name)}" spellcheck="false">
-        <button class="small" id="rc-save" title="${t("~/.gne/recipes に保存")}">${t("保存")}</button></div>
+        <button class="small" id="rc-save" title="${t("保存先の recipes フォルダに保存(既定は ~/.gne/recipes、--root を指定していればその下)")}">${t("保存")}</button></div>
       <div class="list-tools"><select id="rc-load"><option value="">${t("保存したレシピを読む…")}</option>${
         this.saved.map((x) => `<option value="${esc(x.name)}">${esc(x.name)}(${x.units.length})</option>`).join("")}</select></div>
       ${r.units.length ? `<table class="rc mono"><tbody>${rows}</tbody></table>`
@@ -585,13 +585,13 @@ export class RecipePanel {
     this.r.name = name; this.r._save();
     try {
       const kd = this.r.keyed().length;                // keyed は省いた方向・鍵を省いたまま、既定を添えて保存する(CHANGE-07)
-      await postJSON(`/api/recipes/${encodeURIComponent(name)}`, { units: this.r.specs(1, false), ablate: this.r.ablate, sampling: this.r.sampling,
+      const saved = await postJSON(`/api/recipes/${encodeURIComponent(name)}`, { units: this.r.specs(1, false), ablate: this.r.ablate, sampling: this.r.sampling,
                                                                    ...((this.r.projs().length || kd) && this.r.directionLayer !== "own" ? { direction_layer: this.r.directionLayer } : {}),
                                                                    ...(kd && this.r.defaultDirection ? { default_direction: this.r.defaultDirection } : {}),
                                                                    ...(kd && this.r.defaultKey ? { default_key: this.r.defaultKey } : {}) });
       await this.refreshSaved();                     // 一覧を描き直してから知らせる(描き直すと #rc-result も作り直される)
       this.root.querySelector("#rc-result").innerHTML =
-        `<p class="muted note">${t("保存しました({path})", { path: `~/.gne/recipes/${esc(name)}.yaml` })}</p>`;
+        `<p class="muted note">${t("保存しました({path})", { path: esc((saved && saved.path) || `${name}.yaml`) })}</p>`;   // 保存先はサーバが返す実際のパス(--root を指定していればその下)
     } catch (e) { res.innerHTML = `<p class="err">${esc(e.message)}</p>`; }
   }
 
@@ -608,7 +608,7 @@ export class RecipePanel {
       const norms = Object.entries(x.layer_norms).map(([L, v]) => `L${L} ${fmt(v, 1)}`).join(" · ");
       const v = x.verify;
       res.innerHTML = `<p class="note">${t("{file} を書き出しました", { file: `<a href="${esc(x.url)}" download="${esc(x.file)}">${esc(x.file)}</a>` })}${
-          x.recipe_saved ? "" : `<br><span class="muted">${t("(レシピ自体は未保存。上の「保存」で ~/.gne/recipes に残せます)")}</span>`}</p>
+          x.recipe_saved ? "" : `<br><span class="muted">${t("(レシピ自体は未保存。上の「保存」で保存先の recipes フォルダに残せます)")}</span>`}</p>
         <p class="muted note mono" title="${t("層ごとに残差へ足すベクトルの長さ(残差ノルムと同じ単位)")}">${t("足すベクトルの長さ")}: ${esc(norms)}</p>
         <p class="muted note">${t("llama.cpp で使う: + 列は {plus}、− 列は {minus}", { plus: `<code>--control-vector ${esc(x.file)}</code>`, minus: `<code>--control-vector-scaled ${esc(x.file)}:-1</code>` })}</p>${v ? `
         <p class="note">${v.match ? "✓" : "✗"} ${t(v.match ? "「{p}」の {n} トークン(+1 倍、greedy)で、gne がこのファイルを読み直した生成と llama-completion --control-vector の生成が一致"

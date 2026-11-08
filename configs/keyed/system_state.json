@@ -3,11 +3,11 @@
     "order": 3,
     "ja": {
       "title": "system で作った状態を書き込みたい位置にする(作り方 (a)、丁寧語 → くだけた口調、α は負)",
-      "text": "system_a(丁寧語で話す)の文脈の返事を書き込みたい位置、system_b(くだけた口調で話す)の文脈の返事を書き込みたくない位置にして鍵を作る(positions: response)。同じ質問を 2 つの system で読ませるので、両側の本文がそろう。推論時には system_a が無いので、この作り方の鍵はふつう推論時には反応しにくい。向いているのは、system で作った状態が推論時にも自然に起きる場合で、ここでは素のモデルの日本語の返事が丁寧語になる状態を鍵にし、方向(A = 丁寧語の返事 − B = くだけた口調の返事)を負の α で書いて打ち消す(ひな形の keyed.alpha が −1 なので、「+ レシピ」の α に −1 が入る)。key-check は system_a・system_b の文脈で測るので、推論時に鍵が反応するかは生成で確かめる。dont_touch の english は英語の返事を変えないための群。positions を last や assistant にすると返事を作らないので速い。"
+      "text": "system_a(丁寧語で話す)の文脈の返事を書き込みたい位置、system_b(くだけた口調で話す)の文脈の返事を書き込みたくない位置にして鍵を作る(positions: response)。同じ質問を 2 つの system で読ませるので、両側の本文がそろう。推論時には system_a が無いので、この作り方の鍵はふつう推論時には反応しにくい。向いているのは、system で作った状態が推論時にも自然に起きる場合で、ここでは素のモデルの日本語の返事が丁寧語になる状態を鍵にし、方向(A = 丁寧語の返事 − B = くだけた口調の返事)を負の α で書いて打ち消す(ひな形の keyed.alpha が −1 なので、「+ レシピ」の α に −1 が入る)。key-check は system_a・system_b の文脈で測るので、推論時に鍵が反応するかは生成で確かめる。dont_touch の english は英語の返事を変えないための群。positions を last や assistant にすると返事を作らないので速い。system_b の指示に従うモデルが要る。Qwen3.5-4B(system_b でくだけた口調で答える)では効いた: α = −1 で、調整に使っていない日本語 8 問の「です。」「ます。」の文末が 100 → 58 に減り、繰り返しは無く、英語の返事は変わらなかった(「だよ」「だね」のタメ口にまではならない)。Qwen3-0.6B は system_b を与えても丁寧語で答えるので、方向に丁寧語とくだけた口調の差が入らず、効かなかった(文末は逆に増えた)。key-check で比較用の鍵を超えても、生成で確かめる。"
     },
     "en": {
       "title": "Use a state made with a system prompt as the positions to write at (method (a): polite → casual, negative α)",
-      "text": "The replies under system_a (speak politely) are the positions to write at, and the replies under system_b (speak casually) are the positions to leave alone (positions: response). Both sides read the same questions, so their content matches. At inference time there is no system_a, so a key built this way usually responds little at inference time. It suits a state made with a system prompt that also occurs naturally at inference time: here the key is the state in which the plain model answers in polite Japanese, and the direction (A = polite replies minus B = casual replies) is written with a negative α to cancel it (the template's keyed.alpha is −1, so “+ recipe” starts with α = −1). key-check measures under system_a and system_b, so check by generating whether the key responds at inference time. dont_touch english keeps English replies unchanged. With positions last or assistant, no replies are generated, which is faster."
+      "text": "The replies under system_a (speak politely) are the positions to write at, and the replies under system_b (speak casually) are the positions to leave alone (positions: response). Both sides read the same questions, so their content matches. At inference time there is no system_a, so a key built this way usually responds little at inference time. It suits a state made with a system prompt that also occurs naturally at inference time: here the key is the state in which the plain model answers in polite Japanese, and the direction (A = polite replies minus B = casual replies) is written with a negative α to cancel it (the template's keyed.alpha is −1, so “+ recipe” starts with α = −1). key-check measures under system_a and system_b, so check by generating whether the key responds at inference time. dont_touch english keeps English replies unchanged. With positions last or assistant, no replies are generated, which is faster. This needs a model that follows system_b. It worked on Qwen3.5-4B, which answers casually under system_b: with α = −1, the です。/ます。 sentence endings in 8 held-out Japanese questions fell from 100 to 58, with no loops and unchanged English replies (it does not go as far as casual だよ/だね endings). Qwen3-0.6B still answers politely under system_b, so the direction carries no polite-versus-casual difference, and it did not work (the endings even increased). Even when key-check beats the control keys, check by generating."
     }
   },
   "name": "polite_state",
@@ -43,7 +43,11 @@
         "What is a good way to spend a day off?",
         "How do I make good coffee at home?",
         "Any tips for keeping a room tidy?",
-        "How can I start a reading habit?"
+        "How can I start a reading habit?",
+        "What are some easy breakfast ideas?",
+        "How can I make exercise a habit?",
+        "What should I keep in mind when living alone?",
+        "Any tips for keeping houseplants alive?"
       ]
     }
   ],

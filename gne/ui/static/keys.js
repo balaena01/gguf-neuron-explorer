@@ -148,6 +148,19 @@ export function checkKeySpec(text) {
   return out;
 }
 
+// key-check の start_rho の 1 群({median: [位置 0, 1, 2], max, n})→ 中央値が最大の位置 { j, m, hot }。例 2 つ以上の位置から
+// 選び(無ければ全部の位置から)、hot は例 2 つ以上で 0.4 以上(サーバの警告 keyed_build._start_hot と同じ決まり)。値が無ければ null
+export const START_RHO_WARN = 0.4;
+export function startPeak(v) {
+  if (!v || !Array.isArray(v.median)) return null;
+  const all = v.median.map((m, j) => ({ j, m, n: Array.isArray(v.n) ? +v.n[j] || 0 : 0 }))
+    .filter((x) => x.m !== null && x.m !== undefined && Number.isFinite(+x.m));
+  if (!all.length) return null;
+  const pool = all.some((x) => x.n >= 2) ? all.filter((x) => x.n >= 2) : all;
+  const p = pool.reduce((a, b) => (+b.m > +a.m ? b : a));
+  return { j: p.j, m: +p.m, hot: p.n >= 2 && +p.m >= START_RHO_WARN };
+}
+
 // 群の名前(A・B・dt:<名前>)の表示と色の組
 const groupLabel = (g) => (g === "A" ? t("書き込みたい位置") : g === "B" ? t("書き込みたくない位置") : `dont_touch ${g.replace(/^dt:/, "")}`);
 const groupCls = (g, i) => (g === "A" ? "ga" : g === "B" ? "gb" : `gd${i % 3}`);
@@ -746,7 +759,7 @@ export class KeyPanel {
       mode === "same" ? ` <span class="muted">(${t("推論時と同じ文脈の返事")})</span>` : mode === "system" ? ` <span class="muted">(${t("system_a の文脈")})</span>` : ""} · positions <span class="mono">${esc(r.positions || "—")}</span>${
       (isBuild ? r.positions_b : info.positions_b) ? ` · positions_b <span class="mono">${esc(isBuild ? r.positions_b : info.positions_b)}</span>` : ""} · q_mode ${esc(r.q_mode || "—")} · subset ${esc(r.subset || "—")} · ${
       t("書き込みたい側 {a} 例 · 書き込みたくない側 {b} 例", { a: counts.a ?? "—", b: counts.b ?? "—" })}${counts.dt ? ` · dont_touch ${counts.dt}` : ""} · ${t("比較用の鍵 {n} 本", { n: r.n_pseudo ?? "—" })}${
-      isBuild && r.matched ? ` · ${t("正規表現が一致した例 {a} / {n}", { a: r.matched.A, n: r.matched.of })}` : ""}${isBuild && Number.isFinite(+r.seconds) ? ` · ${fmt(r.seconds, 1)} ${t("秒")}` : ""}</p>`;
+      isBuild && r.matched && mode === "same" ? ` · ${t("正規表現が一致した例 {a} / {n}", { a: r.matched.A, n: r.matched.of })}` : ""}${isBuild && Number.isFinite(+r.seconds) ? ` · ${fmt(r.seconds, 1)} ${t("秒")}` : ""}</p>`;
     const add = `<div class="kx-add muted note">${t("書き込む方向")} <select id="kx-dir">${dirs.length ? dirs.map((d) => `<option${d === pick ? " selected" : ""}>${esc(d)}</option>`).join("") : `<option value="">${t("(なし)")}</option>`}</select>
       α <input id="kx-alpha" type="number" step="0.05" value="${esc(String(alpha))}" style="width:5em" title="${t("α = 1 で、観測した A − B の平均差 r_L をそのまま書く。負で打ち消す")}">
       <span>${dirs.length ? t("行の「+ レシピ」で、その層の keyed のユニットをレシピに足す。「key-verify」で LoRA が式どおりに書くかを確かめる") : t("方向がありません(「方向から key-check まで」で作れます)")}</span></div>`;
@@ -846,11 +859,12 @@ export class KeyPanel {
       : r.all_beat_pseudo === false ? `<span class="kx-ng">×</span> ${t("比較用の鍵を超えない層があります(鍵が本文を拾っているかもしれません。対照集合の本文をそろえる)")}` : "";
     const rows = (r.layers || []).map((x) => {
       const dt = Object.entries(x.dont_touch_median || {}).map(([g, v]) => `${esc(g)} ${fmt(v, 2)}`).join(" · ");
-      // 返事を書き始める直前の位置(返事の冒頭の位置 0)での ρ の中央値: 書き込みたくない位置と dont_touch の群(0.4 以上で警告)
+      // 返事の冒頭(返事の最初の 3 トークンを決める位置 0〜2)での ρ: 書き込みたくない位置と dont_touch の群ごとに、位置ごとの
+      // 中央値が最大の位置。サーバの key-check の警告(keyed_build._start_hot)と同じ選び方で、0.4 以上(例 2 つ以上)は赤
       const sr = x.start_rho || {};
       const st = [...(sr.B ? [["B", sr.B]] : []), ...Object.entries(sr.dont_touch || {})]
-        .filter(([, v]) => v && v.median && v.median[0] != null)
-        .map(([g, v]) => `<span class="${v.median[0] >= 0.4 ? "kx-ng" : ""}">${esc(g === "B" ? groupLabel(g) : g)} ${fmt(v.median[0], 2)}</span>`).join(" · ");
+        .map(([g, v]) => [g, startPeak(v)]).filter(([, p]) => p)
+        .map(([g, p]) => `<span class="${p.hot ? "kx-ng" : ""}">${esc(g === "B" ? groupLabel(g) : g)} ${fmt(p.m, 2)}${t("(位置 {j})", { j: p.j })}</span>`).join(" · ");
       return `<tr${x.layer === r.best_layer ? ` class="best"` : ""} data-kl="${x.layer}"><td>L${x.layer}${x.layer === r.best_layer ? " ★" : ""}</td>
         <td>${fmt(x.auc, 3)}</td><td>${fmt(x.auc_token, 3)}</td><td class="muted">${fmt((x.pseudo_auc_token || {}).p95 ?? (x.pseudo_auc || {}).p95, 3)}</td><td>${mark(x.beats_pseudo_auc)}</td>
         <td>${fmt(x.selectivity, 3)}</td><td class="muted">${fmt((x.pseudo_selectivity || {}).p95, 3)}</td><td>${mark(x.beats_pseudo)}</td>
@@ -872,7 +886,7 @@ export class KeyPanel {
         <th title="${t("key-check の選択性: 例ごとの鍵の反応の強さ ρ の平均の差(書き込みたい位置 − 書き込みたくない位置)。書き込む量 α(κᵀx)d の両者の差にあたる。eval の選択性(残差の変化)とは別の量")}">${t("選択性")}</th><th title="${t("比較用の鍵の選択性の 95 パーセンタイル")}">${t("比較用の鍵の p95")}</th>
         <th title="${t("選択性が比較用の鍵の p95 を超え、例の AUC が 0.5 を超えるか(beats_pseudo)")}">${t("比較用の鍵を超える")}</th>
         <th title="${t("参考: 書き込みたくない位置を 2 つに分け、その差から作った鍵の AUC(0.5 付近なら、鍵が書き込みたくない位置の中の差を拾っていない)")}">${t("書き込みたくない位置の 2 分割")}</th>
-        <th class="l" title="${t("dont_touch の群の ρ の中央値(0 に近いほど書き込まない)。下の段は、書き込みたくない位置と dont_touch の群の、返事を書き始める直前の位置での ρ の中央値(0.4 以上は返事の冒頭で鍵が反応している)")}">${t("dont_touch 中央値")}</th><th>kn</th></tr></thead><tbody>${rows}</tbody></table></div>
+        <th class="l" title="${t("dont_touch の群の ρ の中央値(0 に近いほど書き込まない)。下の段は、書き込みたくない位置と dont_touch の群の、返事の冒頭(返事の最初の 3 トークンを決める位置 0〜2。位置 0 は返事を書き始める直前の位置)での ρ の、位置ごとの中央値のうち最大のものとその位置(0.4 以上は赤: 返事の冒頭で鍵が反応している。下の警告と同じ決まり)")}">${t("dont_touch 中央値")}</th><th>kn</th></tr></thead><tbody>${rows}</tbody></table></div>
       <h4 class="note">${t("層ごとの鍵の反応の強さ ρ = κᵀx の分布(群ごとの割合。縦の点線: 0 = 何も足さない、1 = 書き込みたい位置の平均)")}</h4>
       <div class="evx-legend note kx-legend">${legend}</div>
       <div class="kx-hists">${hists}</div>

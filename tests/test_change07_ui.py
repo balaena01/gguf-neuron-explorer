@@ -684,3 +684,49 @@ def test_key_panel_experts_verify_in_english(ui_server, browser):
     assert missing == [], missing
     assert not errors, errors
     pg.close()
+
+
+# key-check の結果(返事の冒頭での ρ の表示を見るためのもの)。位置 0 は低く、位置 1・2 で高い群と、例が 1 つしかない位置
+START_CHECK = {"key": "k_sys", "contrast": "polite_state", "subset": "odd", "mode": "system", "positions": "response", "held_out": True,
+               "overlap": {"built_subset": "even", "subset": "odd"}, "counts": {}, "n_pseudo": 16, "seconds": 1.0, "best_layer": 8,
+               "all_beat_pseudo": True,
+               "layers": [{"layer": 8, "auc": 0.8, "auc_token": 0.6, "selectivity": 0.3, "pseudo_selectivity": {"p95": 0.2}, "beats_pseudo": True,
+                           "dont_touch_median": {"english": 0.19}, "kn": 0.2,
+                           "start_rho": {"B": {"median": [0.11, 0.2, 0.74], "max": [0.3, 0.5, 0.74], "n": [2, 2, 1]},
+                                         "dont_touch": {"english": {"median": [-0.05, 1.23, 0.9], "max": [0.1, 1.5, 1.2], "n": [2, 2, 2]},
+                                                        "few": {"median": [0.5, None, None], "max": [0.5, None, None], "n": [1, 0, 0]}}}}]}
+
+
+@pytest.mark.model
+def test_key_check_start_rho_cell_and_matched_label(ui_server, browser):
+    """key-check の表の、返事の冒頭での ρ(dont_touch の中央値の欄の下の段): 位置 0〜2 のうち中央値が最大の位置とその値を出し、
+    例 2 つ以上で 0.4 以上なら赤(サーバの警告 keyed_build._start_hot と同じ決まり)。位置 0 だけを見ると、位置 1・2 で反応して
+    警告が出ている群が赤にならなかった(作り方 (a) のひな形 system_state を Qwen3-0.6B で回して見つけた)。鍵の表の
+    「正規表現が一致した例」は作り方 (b)(mode same)だけに出す。英語の文言もある。"""
+    url = ui_server["url"]
+    for lang in ("ja", "en"):
+        pg, errors = _open(browser, url, lang)
+        _key_tab(pg)
+        pg.evaluate(f"(() => {{ const k = window.gne.directionView.key; k.checked = {json.dumps(START_CHECK)}; k.renderCheck(); }})()")
+        cell = "document.querySelectorAll('#kc-res table.kx-check tbody tr')[0].cells[9]"
+        spans = pg.evaluate(f"[...{cell}.querySelectorAll('span:not(.muted)')].map(s => [s.textContent, s.classList.contains('kx-ng')])")
+        if lang == "ja":
+            assert spans == [["書き込みたくない位置 0.20(位置 1)", False],      # 例 1 つの位置 2(0.74)は選ばない
+                             ["english 1.23(位置 1)", True],                  # 位置 0 は −0.05 でも、位置 1 で反応している
+                             ["few 0.50(位置 0)", False]], spans                # 例 2 つ以上の位置が無ければ全部から選ぶが赤にしない
+        else:
+            assert spans == [["positions to leave alone 0.20 (position 1)", False], ["english 1.23 (position 1)", True],
+                             ["few 0.50 (position 0)", False]], spans
+        # 鍵の表: 作り方 (a)(mode system)には「正規表現が一致した例」を出さない。(b)(mode same)には出す
+        built = {"name": "k_sys", "target": "ffn", "mode": "system", "positions": "response", "q_mode": "examples", "subset": "even",
+                 "layers": [{"layer": 8, "kn": 0.2, "gain": 5.0, "q_rank": 13, "build_auc": 1.0}], "matched": {"A": 10, "of": 10},
+                 "counts": {"a": 10, "b": 10}, "n_pseudo": 16, "seconds": 2.0}
+        for mode, shown in (("system", False), ("same", True)):
+            pg.evaluate(f"(() => {{ const k = window.gne.directionView.key; k.built = {{kind: 'build', params: {{}}, r: {json.dumps({**built, 'mode': mode})}}}; k.renderBuilt(); }})()")
+            head = pg.evaluate("document.querySelector('#kx-build .kx-res p.note').textContent")
+            assert (("正規表現が一致した例 10 / 10" if lang == "ja" else "regex matched in 10 / 10 examples") in head) is shown, (mode, head)
+        if lang == "en":
+            missing = pg.evaluate("[...window.gneI18n.missing]")
+            assert missing == [], missing
+        assert not errors, errors
+        pg.close()
