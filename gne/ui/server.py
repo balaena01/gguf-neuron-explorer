@@ -19,6 +19,7 @@ direction_key_experts・direction_key_verify・direction_key_pipeline のジョ�
 from __future__ import annotations
 
 import json
+import re
 import sys
 import threading
 from pathlib import Path
@@ -224,6 +225,33 @@ def create_app(session, *, warm: bool = True, openai: bool = False) -> FastAPI:
     def key_one(name: str):
         return data.key_one(name)
 
+    # CHiPS で残った場面から keyed の JSON を作る(鍵のタブ)。behave を回すのはジョブ behave
+    @app.get("/api/behave")
+    def behave_list():
+        """保存した behave の結果の要約(新しい順、返事は返さない)。"""
+        return data.behave_list()
+
+    @app.get("/api/chips-source")
+    def chips_source(direction: str | None = None, contrast: str | None = None):
+        """CHiPS の方向と対照集合の要約(A 側・B 側の質問の数、validate.match、positions の既定)。"""
+        return data.chips_source(direction or None, contrast or None)
+
+    @app.post("/api/keyed-from-behave")
+    def keyed_from_behave(behave: str = Body(...), recipe: str = Body(...), direction: str | None = Body(None),
+                          contrast: str | None = Body(None), labels: list[str] | str | None = Body(None),
+                          match: str | None = Body(None), min_rate: float | None = Body(None), positions: str | None = Body(None),
+                          name: str | None = Body(None), replies: bool = Body(True), strict: bool = Body(False)):
+        """behave の結果から、CHiPS のレシピを当てても振る舞いが残った質問を集めて keyed の対照集合の JSON を <root>/keyed/ に
+        書く(gne direction key-from-behave と同じ。モデルは動かさない)。結果に、書いた JSON の中身 spec を添える。"""
+        for nm, v in (("behave", behave), ("recipe", recipe), ("name", name)):
+            if v and not re.fullmatch(r"[\w.\-]+", v):
+                raise GneError("BAD_ARGS", f"{nm} は名前で渡してください({v!r})")
+        d = session.direction_key_from_behave(behave, recipe=recipe, direction=direction or None, contrast=contrast or None,
+                                              labels=labels or None, match=match or None, min_rate=min_rate,
+                                              positions=positions or None, name=name or None, replies=replies, strict=strict)
+        spec = json.loads(Path(d["path"]).read_text(encoding="utf-8")) if d.get("path") else None
+        return {**d, "spec": spec}
+
     @app.get("/api/contrasts")
     def contrasts():
         """鍵を作る対照集合の候補(configs/contrast/ と <root>/contrasts/ の YAML の要約)。"""
@@ -245,8 +273,8 @@ def create_app(session, *, warm: bool = True, openai: bool = False) -> FastAPI:
 
     @app.get("/api/keyed-templates")
     def keyed_templates():
-        """鍵つきの書き込みの対照集合のひな形(configs/keyed/、鍵のタブの「ひな形」で選ぶ)。"""
-        return data.keyed_templates()
+        """鍵つきの書き込みの対照集合のひな形(configs/keyed/ と、自分で作った <root>/keyed/。鍵のタブの「ひな形」で選ぶ)。"""
+        return data.keyed_templates_all()
 
     @app.get("/api/pipelines")
     def pipelines():

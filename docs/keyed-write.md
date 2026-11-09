@@ -468,7 +468,7 @@ gne headproj export --recipe R --bake --verify --contrast C   # 焼き込み版�
 `gne serve` の **direction** ビューの 4 つめのタブ「鍵(keyed)」。方向づくりから key-check までをボタン 1 つで回せる(CLI に戻らなくてよい)。
 
 1. **対照集合を入れる。** 「対照集合」の切り替えで 2 通り。
-   - **JSON を書く(ひな形から)**: 「ひな形」で用途を選ぶと、`configs/keyed/` のひな形が入力欄に入り、下に説明が出る。入力欄は手で直してよい(書き換えた後に別のひな形を選ぶと、置き換える前に確かめる。書き換えていなければ確かめない)。JSON ファイルを読み込むか、貼り付けてもよい。入力欄の中身はその場で確かめ、名前・質問の数・作り方 (a) / (b)・positions・dont_touch の群・方向の A 側と B 側を出す。読めないところ(名前・positions・dont_touch のキーなど)は赤で、気をつけること(質問が少ない、作り方 (b) なのに dont_touch が無い、system_a が無くて方向を作れない)は黄色で出る。ジョブには表のまま渡し、ジョブが `<root>/contrasts/<name>.yaml` に書いてから使う(ひな形の説明 `about` と設定 `keyed` は書かない。CHiPS の「JSON から方向とヘッドを作る」タブと同じ)。書いたファイルは、あとで「ファイルを選ぶ」と key-check の対照集合の一覧にも出る。
+   - **JSON を書く(ひな形から)**: 「ひな形」で用途を選ぶと、`configs/keyed/` のひな形が入力欄に入り、下に説明が出る。`<root>/keyed/` の JSON(`gne direction key-from-behave` で作ったものなど、§17)も「自分で作ったひな形」の組に出る。入力欄は手で直してよい(書き換えた後に別のひな形を選ぶと、置き換える前に確かめる。書き換えていなければ確かめない)。JSON ファイルを読み込むか、貼り付けてもよい。入力欄の中身はその場で確かめ、名前・質問の数・作り方 (a) / (b)・positions・dont_touch の群・方向の A 側と B 側を出す。読めないところ(名前・positions・dont_touch のキーなど)は赤で、気をつけること(質問が少ない、作り方 (b) なのに dont_touch が無い、system_a が無くて方向を作れない)は黄色で出る。ジョブには表のまま渡し、ジョブが `<root>/contrasts/<name>.yaml` に書いてから使う(ひな形の説明 `about` と設定 `keyed` は書かない。CHiPS の「JSON から方向とヘッドを作る」タブと同じ)。書いたファイルは、あとで「ファイルを選ぶ」と key-check の対照集合の一覧にも出る。
    - **ファイルを選ぶ**: `configs/contrast/` か `<root>/contrasts/` の YAML を一覧から選ぶか、パスを入れる(これまでどおり)。
 2. **設定を入れる。** 名前(空なら対照集合の name)・層・書き込み先(ffn / attn / shared / expert と番号)・positions(空なら対照集合の値。`before:<正規表現>` で作り方 (b))・q_mode・subset・比較用の鍵の本数。細かい設定に positions_b・skip・返事の長さ・返事のファイル・介入(iv)・種・方向の返事の長さ。表の最上位の `keyed`(`layers`・`target`・`q_mode`・`subset`・`pseudo`・`max_tokens`・`alpha`)に書いた値は、表を入れたときに欄に入る(`alpha` は手順 5 の α の欄の既定)。dont_touch の質問の、返事を書き始める直前の位置は自動で Q に入る(切るなら対照集合に `dont_touch_start: false`)。
 3. **「方向から key-check まで」を押す**(ジョブ `direction_key_pipeline`)。続けて次を回す。進み具合(「1/3 方向」「2/3 鍵」「3/3 key-check」)は欄の下と下のジョブのバーに出て、バーの「止める」で止められる。見積もりが 30 分を超えるときは確かめてから投げる(ほかのジョブと同じ)。
@@ -484,9 +484,11 @@ gne headproj export --recipe R --bake --verify --contrast C   # 焼き込み版�
 8. **eval。** eval タブで「keyed の選択性」を入れたまま流す(鍵の対照集合・問・比較用の鍵・subset・大きさ合わせ)。表に eval の選択性・書き込みたくない位置の ‖Δ‖(残差の変化の大きさ)・比較用の鍵の p95 と null(本物の鍵の eval の選択性が比較用の鍵の何割を上回ったか)、下に方式の比較(書き込みたい位置の変化をそろえた add・gain・proj の乱れ)と比較用の鍵の表が出る。key-check の選択性(鍵の反応の強さの差)とは別の量。
 9. **書き出す。** recipe タブの「LoRA・焼き込み」。keyed を含むと、焼き込みの型の既定は「自動」(元が Q8_0 のテンソルは Q8_0 のまま、それ以外は F16、§12)。
 
+**CHiPS で残った場面から作るとき。** タブのいちばん上の「CHiPS で残った場面から作る」を開くと、CHiPS のレシピを当てた behave を回してから、振る舞いが残った質問の JSON を作り、上の入力欄に入れるところまでを画面で進められる(手順は §17 の「UI での手順」)。入力欄に入った後は、手順 2 からと同じ。
+
 **MoE の専門家を書き込み先にするとき。** MoE の層があるモデルでは「専門家を選ぶ材料を出す」(ジョブ `direction_key_experts`)が出る。層の欄のうち MoE の層だけで、鍵と同じ対照集合・位置・返事で測り、層ごとに `rate_a` の大きい順に 8 個の専門家を、`rate_a`(書き込みたい位置で選ばれた割合)・`rate_b`(書き込みたくない位置で選ばれた割合)・差・lift(rate_a / rate_b)・重み(選ばれたときのルーターの重み、鍵の gate_a の見込み)・行の見込み(書き込みたい位置で選ばれる行の数)・dont_touch の群での割合と並べる。`rate_a` が高いだけでなく、`rate_b` との差が大きく行の見込みが多い専門家の「この専門家で鍵を作る」を押すと、書き込み先がその専門家(expert と番号)、層がその層、名前が `<名前>_L<層>E<番号>` になる。そのまま「方向から key-check まで」か「鍵を作る」で進める(§11)。
 
-**ひな形(`configs/keyed/`)。** JSON の対照集合に、説明 `about`(並び順と、日本語・英語の題と説明。読むときに捨てる)と、任意の設定 `keyed` を足したもの。JSON は YAML としても読めるので、`gne direction key --contrast configs/keyed/sentence_endings.json` のように CLI にもそのまま渡せる。
+**ひな形(`configs/keyed/`)。** JSON の対照集合に、説明 `about`(並び順と、日本語・英語の題と説明。読むときに捨てる)と、任意の設定 `keyed` を足したもの。`keyed` には欄の既定(`layers`・`target`・`q_mode`・`subset`・`pseudo`・`max_tokens`)と「+ レシピ」の α の既定(`alpha`)のほか、書き込む方向の名前 `direction`(別の対照集合で作った方向を使い回す。その方向が無くても、この対照集合からは作らず作り直しもしない)と、鍵の作成と key-check で当てる介入 `iv`(`--iv` と同じ。入力欄の「介入(iv)」に入る)を書ける。JSON は YAML としても読めるので、`gne direction key --contrast configs/keyed/sentence_endings.json` のように CLI にもそのまま渡せる。
 
 | ファイル | 用途 | 作り方 | 中身 |
 |---|---|---|---|
@@ -546,8 +548,110 @@ MCP からは `direction_key_pipeline(contrast, layers)` が同じ一括を回�
 | LoRA が式どおりか(V30) | `gne direction key-verify --layer L --key K --direction D`(`direction_key_verify`。UI は鍵の表の「key-verify」、ジョブ `direction_key_verify`) | なし |
 | 保存した鍵の一覧 | `gne direction keys`(`keys`) | なし |
 | 試す | `gne steer --unit L:ffn:keyed:a1@D#K -p … --compare`(`steer`) | あり |
-| 振る舞いを数える | `gne behave --prompts q.yaml --recipe R --match <正規表現>` | あり |
+| 振る舞いを数える | `gne behave --prompts q.yaml --recipe R --match <正規表現>`(`behave`、ジョブ) | あり |
+| CHiPS で残った質問から対照集合を作る | `gne direction key-from-behave --behave B --recipe R --direction D`(`direction_key_from_behave`。UI は鍵のタブの「CHiPS で残った場面から作る」、§17) | なし |
 | 評価する | `gne eval --recipe R [--keyed-contrast C] [--random-controls N]`(`eval`) | あり |
 | 書き出す | `gne headproj export --recipe R [--bake]`(`keyed_export`・`headproj_export`) | なし |
 
 判断の仕方は [agent_playbook.md](agent_playbook.md) §4.5、検証の記録は [verification.md](verification.md) §21、仕様から変えた点は [divergence.md](divergence.md) §3。
+
+---
+
+## 17. CHiPS で残った場面を keyed で抑える(`gne direction key-from-behave`)
+
+CHiPS(`mode: proj`)のレシピは、ヘッドがいま方向に沿って書いている量に比例して打ち消す。多くの質問で消したい振る舞いが減っても、一部の質問では残ることがある。そこで強さを上げると、ほかの場面の返事まで変わりやすい。そういうときは、**レシピを当てても振る舞いが残った質問の場面だけ**を鍵にして、同じ方向を α = −1 で打ち消す keyed のユニットを、レシピに足す。両者は同じ LoRA に入る(§8)。
+
+### 手順
+
+```bash
+# 1. CHiPS のレシピを当てて、A 側の質問に答えさせる(--prompts に対照集合を渡すと A 側の質問を読む)。種を増やすなら --temperature と --seeds
+gne behave --prompts <CHiPS の対照集合> --recipe chips.yaml --match "<validate.match>" --name left --max-tokens 256
+
+# 2. 振る舞いが残った質問を集めて、keyed の対照集合の JSON を作る(モデルは動かさない)→ <root>/keyed/left_keyed.json
+gne direction key-from-behave --behave left --recipe chips --direction <CHiPS の方向>
+
+# 3. 鍵を作る。UI なら鍵のタブの「ひな形」の「自分で作ったひな形」から選び、層を入れて「方向から key-check まで」
+#    (方向は keyed.direction のものを使い回し、介入(iv)の欄に CHiPS のレシピが入る)。CLI なら
+gne direction key --contrast <root>/keyed/left_keyed.json --layers 8,14,20 --iv chips
+gne direction key-check --key left_keyed --contrast <root>/keyed/left_keyed.json --iv chips
+
+# 4. key-check で比較用の鍵を超えた層の keyed のユニット(下の left_keyed_units.yaml)を、CHiPS のレシピに足して 1 つの LoRA にする
+gne recipe-combine chips.yaml left_keyed_units.yaml -o chips_keyed.yaml
+gne headproj export --recipe chips_keyed.yaml                               # 同じテンソルの proj と keyed は 1 つのファイルに
+
+# 5. 生成で確かめる: 残っていた質問で振る舞いが減ったか、B 側(dont_touch の ordinary)の返事が変わらないか、能力・ppl
+gne behave --prompts <CHiPS の対照集合> --recipe chips_keyed.yaml --match "<validate.match>" --name left2 --max-tokens 256
+gne eval --recipe chips_keyed.yaml
+```
+
+```yaml
+# left_keyed_units.yaml(層は key-check で ○ の層)
+name: left_keyed_units
+default_direction: <CHiPS の方向>
+default_key: left_keyed
+units:
+  - {layer: 14, kind: ffn, mode: keyed, alpha: -1}
+  - {layer: 20, kind: ffn, mode: keyed, alpha: -1}
+```
+
+### UI での手順
+
+`gne serve` の direction ビューの「鍵(keyed)」タブの、いちばん上の「CHiPS で残った場面から作る」を開く。
+
+1. **CHiPS の方向・対照集合・レシピを選ぶ。** 対照集合は既定で、方向を作った対照集合になる。選ぶと、A 側・B 側の質問の数と validate.match が出る。A 側を system_a で作った対照集合なら、黄色の注意が出る(system で起こした振る舞いには向かない)。レシピは保存したレシピから選ぶ(proj のユニットを持つレシピには「CHiPS」の印が付き、先に並ぶ)。
+2. **「behave を回す」。** ジョブ `behave` が、選んだレシピを当てて、対照集合の A 側の質問に答えさせる。進み具合は欄の下と下のジョブのバーに出て、バーの「止める」で止められる。返事の長さ(既定 256)・温度と種・判定の正規表現(既定は validate.match)・judge の文面とラベル・保存名は「behave の細かい設定」で変える。終わると、結果は「behave の結果」の一覧に入って選ばれる(待っている間に別の結果を選んでいれば、それを残す)。前に保存した結果も一覧から選べる。選んだ結果の要約(質問の数・種ごとの一致の数やラベルの数・当てたレシピ)が出て、選んだレシピと違うレシピで答えた結果なら黄色の注意が出る。
+3. **判定と positions を決めて「JSON を作る」。** 判定は「正規表現」(空なら behave の判定の正規表現、無ければ validate.match)か「judge のラベル」(例 P)。min_rate は振る舞いが出た種の割合の下限(既定 1 = 全部の種)。positions は空なら `before:<validate.match>`(英字があれば `(?i)` を付ける)。押すと `gne direction key-from-behave` と同じ処理で `<root>/keyed/<名前>.json` に保存し、下の「鍵を作る」の入力欄に入れる(書き換えた入力欄があれば、置き換える前に確かめる)。結果には、残った質問・一部の種でだけ出た質問・残らなかった質問の数、書き込みたい位置の見込み、警告(赤 = 広すぎる正規表現・レシピ違い・残った質問が無い、黄色 = 少なすぎ・一致の無い質問・B 側の重なりなど)、残った質問の一覧(行の「返事」で behave の返事を開ける)が出る。
+4. **「方向から key-check まで」。** 結果の下のボタンか、「鍵を作る」の同じボタンで進める。入力欄の JSON の keyed.direction の方向を使い回し(作らない)、keyed.iv のレシピが「介入(iv)」の欄に入っているので、そのレシピを当てた状態で鍵を作り、作成と反対側の subset で key-check まで回す。層は「鍵を作る」の層の欄で決める。
+5. **レシピに足す。** recipe タブに CHiPS のレシピを読み込んでから、鍵の表の行の「+ レシピ」で keyed の行を足す(α の欄には keyed.alpha の −1 が入る)。保存して「LoRA・焼き込み」で 1 つの LoRA にし、生成で確かめる。
+
+読み込み(方向と対照集合の要約・behave の結果の一覧・JSON を作った結果)は、後から始めたものだけを使う。遅れて届いた古い結果は捨てるので、待っている間に選び直したものは上書きされない。
+
+### 何を作るか
+
+出力は `configs/keyed/one_scene.json` と同じ形の JSON(既定の置き場所 `<root>/keyed/<名前>.json`、名前の既定は `<behave の名前>_keyed`、`-o` でパス)。
+
+```json
+{
+  "about": {"order": 50, "ja": {"title": "CHiPS で残った場面を抑える(behave left、レシピ chips)", "text": "…"}, "en": {"…": "…"}},
+  "name": "left_keyed",
+  "positions": "before:(?i)べ、別に|ふん|Hmph",
+  "user_prompts": ["今日なんか可愛いね。", "…"],
+  "replies": ["そう言われても、ふん、…", "…"],
+  "dont_touch": [{"name": "ordinary", "prompts": ["今日の天気はどう？", "…"]}],
+  "validate": {"match": "べ、別に|ふん|Hmph", "target": "…"},
+  "keyed": {"direction": "<CHiPS の方向>", "alpha": -1, "iv": "chips"}
+}
+```
+
+- `user_prompts`: 振る舞いが残った質問(behave の質問の順)。鍵の作成は偶数番目、key-check は奇数番目を使う。
+- `replies`: その質問の behave の返事(振る舞いが出た種のうち、書き込みたい位置の正規表現に一致し、繰り返していないものを先に選ぶ)。鍵の作成はこれを読み、返事を作らない。鍵の作成で返事を作ると、長さ(`--max-tokens`、既定 96)や乱数の違いで振る舞いが出ないことがあるため。`--no-replies` なら入れず、`keyed.max_tokens` に behave の長さを入れる。思考ありの behave の結果では入れない。
+- `positions`: 既定は `before:<CHiPS の対照集合の validate.match>`(下の「positions の正規表現」)。`--positions` で上書きできる。
+- `dont_touch` の `ordinary`: CHiPS の対照集合の B 側の質問。positions は省くので、書き込みたくない位置と同じ `not-before:<正規表現>`(返事のうち一致の直前以外の全部)になる。返事を書き始める直前の位置は、鍵の作成が既定で自動で入れる(§3)。B 側の質問のうち `user_prompts` と同じものは外し、警告する(system で両側を作る対照集合では、両側の質問が同じ)。残らなければ dont_touch を書かずに警告する。
+- `validate`: CHiPS の対照集合のものをそのまま写す。
+- `keyed`: `direction` = CHiPS の方向、`alpha` = −1(「+ レシピ」の α の既定)、`iv` = CHiPS のレシピ(保存したレシピなら名前、ほかはパス)。鍵の作成と key-check はこのレシピを当てた状態で活性を集める(§8: 同じ層の gain や別のレシピと重ねるなら、その状態で鍵を作る)。
+
+### 「残った」の判定
+
+| 設定(CLI) | 既定 | 何か |
+|---|---|---|
+| `--label` | なし | 読み手の判定のラベル(例 `--label P`。複数可)。behave を `--judge` で回した結果だけ |
+| `--match` | behave の `--match`、無ければ validate.match | 返事にこの正規表現が一致すれば「出た」。ここで渡す `--match` と behave に渡した `--match` は大文字小文字を区別し、validate.match は(CHiPS の判定と同じく)無視する |
+| `--min-rate` | 1.0 | 振る舞いが出た種の割合がこれ以上の質問を入れる |
+
+`--min-rate` の既定 1.0 は「全部の種で出た質問だけ」(greedy の 1 回なら「出た」と同じ)。A 側には振る舞いが確実に出る質問だけを入れる、という決まりに合わせた。種によって出たり出なかったりする質問は、鍵の作成で読む返事の状態がぼやける。一部の種でだけ出た質問の数は結果に出るので、質問が足りないときは下げる(例 0.5)。
+
+### 確かめること(警告)
+
+- **behave の結果が、そのレシピを当てて A 側の質問に答えたものか。** gne behave は結果に、質問(`prompts`)と当てたレシピ(`recipe` と名前の `recipe_names`)を残す。レシピはユニットで比べる(方向を省いたユニットは既定の方向を書き込んでから)。レシピを当てていない・別のレシピ・ほかのレシピを重ねた結果と、A 側(A 側の質問と validate.prompts)に無い質問を含む結果は、警告する(`--strict` ならエラー)。質問の記録の無い前の版の結果は、behave に渡した質問集を `--prompts` で渡す。
+- **少なすぎ。** 鍵の作成(偶数番目)と key-check(奇数番目)のそれぞれで、書き込みたい位置を含む例が 2 未満か、書き込みたい位置が 8 未満の見込みなら警告する(鍵の作成の警告と同じ目安、§3)。
+- **一致の無い質問。** 振る舞いは「残った」と判定された(ラベルや別の正規表現で)のに、positions の正規表現が返事に一致しない質問は、書き込みたい位置ができない。数と質問を知らせる。
+- **system で作った A 側。** CHiPS の対照集合の A 側が `system_a`(や `recipe_a`)で作った状態なら警告する(下)。
+
+### positions の正規表現と validate.match の違い
+
+validate.match は「返事に振る舞いが出たか」を判定する正規表現で、`before:` は「どの位置に書くか」を決める正規表現。同じ文字列を使えるとは限らない。
+
+- **大文字小文字。** validate.match は大文字小文字を無視して使われるが、`before:` は区別する。既定の positions は、validate.match が大文字と小文字のある文字(英字など)を含めば先頭に `(?i)` を付ける(すでに `(?i)` などで無視するなら付けない。かなだけの正規表現には付けない)。
+- **モデルが自分で書く文字列でないと位置が取れない。** 書き込みたい位置は、レシピを当てたモデル自身の返事の中で、正規表現に一致する文字を書く直前の位置(§3 の (b))。モデルが実際に書く言い方に合っていない正規表現では位置ができない(一致の無い質問として数える)。振る舞いの書き始めに当たる言い方を `--positions` で渡す。
+- **system で起こした振る舞いには向かない。** behave も鍵の作成も、system なしで答えた返事を読む。system_a で振る舞いを起こした対照集合では、system なしの返事には振る舞いが出にくく、抜き出せる質問が少ないか無い。抜き出せたのは「system なしでも出た」質問だけになる。
+- **一致が広すぎる正規表現は使えない。** 例えば、かな 1 文字の `[ぁ-んァ-ン]` は日本語の返事のほとんどのトークンに一致する。書き込みたい位置が返事のほとんどになり、鍵が場面ではなく「その言語を書いている状態」に反応するだけになる。そこで、behave の返事のトークンのうち書き込みたい位置(一致の始まり)になる割合を見込み、25% 以上なら警告する(結果の `position_share`)。トークンの区切りは記録に無いので、返事の文字を記録されたトークンの数で等分した区間に一致の始まりを落として数える。Qwen3-0.6B のトークンで測ると、文末ごとに出る言い方(「(です|ます)。」)は短い日本語の返事で 8.5%(この見込みも同じ)、うまく働いた鍵(§6・§7)の書き込みたい位置は返事の位置の 2% ほど。かな 1 文字の正規表現は 57%(見込み 75%)、英語の `\w+` は 89%(見込み 75%)。25% は文末ごとに出る言い方の 3 倍ほどで、文字の種類に当たる正規表現より十分に低い。

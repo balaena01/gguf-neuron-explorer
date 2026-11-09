@@ -568,6 +568,8 @@ table.fi-tab.moe th:nth-child(1) { width: 52px; } table.fi-tab.moe th:nth-child(
 #dv-key { max-width: 1180px; }
 .kx-sec { border-top: 1px solid var(--line); margin-top: 10px; padding-top: 2px; }
 .kx-sec > h4 { color: #dfe6ee; font-weight: 500; }
+details.kx-sec.kb > summary { cursor: pointer; color: #dfe6ee; margin: 6px 0; }
+details.kx-sec.kb textarea { width: 100%; box-sizing: border-box; }
 .kx-sec .pp-set input[type=number] { width: 5em; }
 .kx-res { margin: 6px 0; }
 #kx-src button { font-size: 12px; padding: 2px 10px; }

@@ -168,6 +168,7 @@ gne direction key --contrast configs/contrast/zundamon_endings.yaml --layers 8,1
 gne direction key-experts --contrast C --layers 6,12,18                                # MoE: 書き込みたい位置・書き込みたくない位置で各専門家が選ばれた割合(専門家の鍵の前に)
 gne direction key --contrast C --layers 12 --target expert:31                          # 書き込み先: ffn(既定)/ attn / shared / expert:e
 gne direction key --contrast C --layers 14 --iv R.yaml                                 # レシピを当てた状態で鍵を作る(重ねるとき)
+gne direction key-from-behave --behave B --recipe R --direction D                       # CHiPS のレシピ R を当てても振る舞いが残った質問(behave B)→ <root>/keyed/<名前>.json
 gne direction key-check --key zundamon_endings --contrast configs/contrast/zundamon_endings.yaml   # 作成に使っていない例(subset odd)で比較用の鍵と比べる
 gne direction key-verify --layer 14 --key zundamon_endings --direction zundamon_endings          # V30: LoRA が α (κᵀx) d を書くか
 gne direction keys                                                                     # 保存した鍵の一覧
@@ -189,7 +190,8 @@ gne headproj export --recipe R [--bake [--requant auto|f16|q8_0|keep]]          
 - MoE: shared は dense の ffn と同じ。専門家の鍵はその専門家が選ばれた位置の行だけで作るので、書き込みたい位置でよく選ばれ、書き込みたくない位置ではあまり選ばれない専門家を選ぶ(`gne direction key-experts --contrast C --layers …` で層ごとの rate_a・rate_b・lift・重み・行の見込みを見る)。焼き込みは既定(auto)でも、元が Q8_0 の専門家のテンソルは編集しない専門家をバイトのまま残す。K-quant などは auto だと F16 になる(1 層で数百 MB 増えることがある)ので `--requant keep`。
 - 書き出しは LoRA が第一候補(keyed だけなら `<レシピ名>-keyed.lora.gguf`)。焼き込みの既定 auto は、元が Q8_0 のテンソルを Q8_0 のまま書く(F16 は掛け算の計算方法が変わり、LoRA 版とかえってずれた。F132)。Q8_0 のままでは編集の 1 割以上が丸めに消えるテンソル(`edit_kept` < 0.9)だけ F16(記録の `fallback`)。`edit_kept_min` < 0.9 で警告(`requant_error` は編集と関係のない丸め誤差も数えるので、小さな編集では大きく出る)。
 - 焼き込みの確かめ: V33・V26(`--verify`)で比べる最後の層での射影の値は、書き込みがほぼ 0 の LoRA でも許容誤差の 7〜8 割動く(GPU、F139)。そこで最後の層だけ、合格の線(`threshold`)を許容誤差 + 計算方法の違いだけで出る誤差(`noise.max_abs_diff` = 倍率 1e-6 の LoRA と LoRA なしの射影の値の差の最大)にしてある。control vector には入らない。
-- UI は direction ビューの「鍵(keyed)」タブ。対照集合はファイルか JSON(用途別のひな形 `configs/keyed/`: 文末の言い方・特定の場面の返事・system で作った状態。`about` は説明だけで読むときに捨て、`keyed` は欄の既定と「+ レシピ」の α)。「方向から key-check まで」(ジョブ `direction_key_pipeline`)で方向・鍵・key-check を続けて回し、ρ のヒストグラム・「+ レシピ」(作ったばかりの方向が選ばれる)・行の「key-verify」(ジョブ `direction_key_verify`)。MoE なら「専門家を選ぶ材料を出す」(ジョブ `direction_key_experts`)の表から専門家の鍵づくりに進める。
+- CHiPS で残った場面(§17): `key-from-behave` は behave の結果(レシピを当てて A 側の質問に答えたもの。記録されたレシピと質問を確かめ、違えば警告、`--strict` でエラー)から、振る舞いが残った質問(`--label P` か `--match`、既定は behave の `--match` か validate.match。`--min-rate` 既定 1.0)を user_prompts、その返事を replies、CHiPS の対照集合の B 側の質問を dont_touch の ordinary に入れ、keyed = {direction: D, alpha: −1, iv: R}。positions の既定 `before:<validate.match>`(英字があれば `(?i)`)。返事のトークンの 25% 以上が書き込みたい位置になる見込みなら広すぎると警告(結果の `position_share`)。書き込みたい位置の見込みが偶数番目・奇数番目で 2 例・8 位置未満、一致の無い質問(`no_match`)、B 側の重なりも知らせる。モデルは動かさない。UI は鍵のタブのいちばん上の「CHiPS で残った場面から作る」(方向・対照集合・レシピを選ぶ →「behave を回す」= ジョブ `behave` →「JSON を作る」= POST /api/keyed-from-behave → 入力欄に入る →「方向から key-check まで」。警告は赤 = error・黄色 = warn、結果の `issues`)。
+- UI は direction ビューの「鍵(keyed)」タブ。対照集合はファイルか JSON(用途別のひな形 `configs/keyed/` と、自分で作ったひな形 `<root>/keyed/`: 文末の言い方・特定の場面の返事・system で作った状態。`about` は説明だけで読むときに捨て、`keyed` は欄の既定と「+ レシピ」の α、`direction` は使い回す方向、`iv` は介入の欄)。「方向から key-check まで」(ジョブ `direction_key_pipeline`)で方向・鍵・key-check を続けて回し、ρ のヒストグラム・「+ レシピ」(作ったばかりの方向が選ばれる)・行の「key-verify」(ジョブ `direction_key_verify`)。MoE なら「専門家を選ぶ材料を出す」(ジョブ `direction_key_experts`)の表から専門家の鍵づくりに進める。
 
 ## 4. 確かめる
 
@@ -232,7 +234,7 @@ MCP のツール: `model_overview`・`layer_summary`・`neuron`・`search`・`st
 
 MCP のツール(ヘッドの方向成分): `direction_score`・`heads_causal`(ジョブ)・`heads_allocate`(ジョブ)・`headproj_export`。`eval` に `compare_methods`・`alloc`・`n_heads`・`control_pool`。
 
-MCP のツール(鍵つきの書き込み): `direction_key`(ジョブ)・`direction_key_check`(ジョブ)・`direction_key_experts`(ジョブ)・`direction_key_verify`・`direction_key_pipeline`(ジョブ。方向(positions response)→ 鍵 → 作成と反対側の subset での key-check を 1 回で。contrast は表か、configs/contrast/ の名前・configs/keyed/ のひな形の名前・パス。同じ名前の方向があれば使い回し、`rebuild_direction=True` で作り直す)・`keys`・`keyed_export`。`eval` に `keyed_contrast`・`keyed_examples`・`keyed_pseudo`・`keyed_subset`・`keyed_match`・`keyed_metrics`。
+MCP のツール(鍵つきの書き込み): `direction_key`(ジョブ)・`direction_key_check`(ジョブ)・`direction_key_experts`(ジョブ)・`direction_key_verify`・`direction_key_pipeline`(ジョブ。方向(positions response)→ 鍵 → 作成と反対側の subset での key-check を 1 回で。contrast は表か、configs/contrast/ の名前・configs/keyed/ と <root>/keyed/ のひな形の名前・パス。同じ名前の方向があれば使い回し、`rebuild_direction=True` で作り直す。表の keyed.direction の方向は作らない)・`direction_key_from_behave`(behave の結果 → keyed の対照集合の JSON、モデルを動かさない)・`behave`(ジョブ。gne behave と同じ引数、prompts に対照集合を渡せば A 側の質問)・`keys`・`keyed_export`。`eval` に `keyed_contrast`・`keyed_examples`・`keyed_pseudo`・`keyed_subset`・`keyed_match`・`keyed_metrics`。
 
 ## 7. Python API(`gne.api.Session`)
 

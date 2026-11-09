@@ -1351,6 +1351,35 @@ class DirectionKeyExpertsOut(Envelope):         # CHANGE-07 MoE(gne direction ke
     seconds: float
 
 
+class DirectionKeyFromBehaveOut(Envelope):      # gne direction key-from-behave(CHiPS で残った質問 → keyed の対照集合の JSON)
+    name: str
+    path: str | None                            # 書き出した JSON(残った質問が無ければ None)
+    behave: str
+    behave_path: str
+    recipe: str
+    iv: str                                     # 出力の keyed.iv(保存したレシピの名前かパス)
+    direction: str
+    contrast: str
+    contrast_path: str
+    n_prompts: int
+    n_seeds: int
+    judge: dict[str, Any]                       # method(match / label)・source・match・ignore_case・labels・min_rate
+    extracted: list[dict[str, Any]]             # 抜き出した質問: i・question・rate・starts(一致の始まり)・tokens・loop・seed・reply
+    n_partial: int                              # 一部の種でだけ出た質問(min_rate に届かない)
+    n_none: int
+    positions: str
+    positions_source: Literal["validate", "given"]
+    position_share: dict[str, Any]              # share(返事のトークンのうち一致の始まりの割合の見込み)・starts・tokens・threshold・broad
+    no_match: int                               # 抜き出したのに positions の正規表現が一致しない質問
+    halves: dict[str, Any]                      # even(鍵の作成)・odd(key-check)の質問・位置のある例・位置の数の見込み
+    replies: bool
+    ordinary: dict[str, Any]                    # n・removed(user_prompts と同じなので外した B 側の質問)
+    checks: dict[str, Any]                      # recipe(behave のレシピが同じか)・questions_in_a
+    keyed: dict[str, Any]
+    issues: list[dict[str, Any]] = []           # 警告の種類(recipe・broad・few など)と重さ(error・warn)と文
+    notes: list[str]
+
+
 COMMAND_SCHEMAS: dict[str, type[Envelope]] = {
     "chat": ChatOut, "neuron": NeuronOut,
     "sweep": SweepOut, "rank": RankOut,
@@ -1369,4 +1398,5 @@ COMMAND_SCHEMAS: dict[str, type[Envelope]] = {
     "heads refine": HeadsRefineOut, "fieldtest": FieldtestOut,
     "direction key": DirectionKeyOut, "direction key-check": DirectionKeyCheckOut, "direction keys": DirectionKeysOut,
     "direction key-verify": DirectionKeyVerifyOut, "direction key-experts": DirectionKeyExpertsOut,
+    "direction key-from-behave": DirectionKeyFromBehaveOut,
 }

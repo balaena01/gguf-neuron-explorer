@@ -1798,9 +1798,10 @@ class Session:
                    max_tokens=max_tokens, thinking=thinking, temperature=temperature, seeds=seeds, progress=self.progress)
         out = self.store.root / "behave" / self.meta.model_id / f"{name}.json"
         out.parent.mkdir(parents=True, exist_ok=True)
-        d.update(name=name, recipe=rec.to_dict() if rec is not None else None)
+        # 質問と当てたレシピの名前も残す(direction_key_from_behave が、CHiPS のレシピを当てて A 側の質問に答えたものかを確かめる)
+        d.update(name=name, recipe=rec.to_dict() if rec is not None else None, recipe_names=[r.name for r in rs], prompts=qs)
         out.write_text(json.dumps(d, ensure_ascii=False, indent=1), encoding="utf-8")
-        return {**{k: v for k, v in d.items() if k != "runs"}, "path": str(out),
+        return {**{k: v for k, v in d.items() if k not in ("runs", "prompts")}, "path": str(out),
                 "runs": [{k: v for k, v in r.items() if k != "replies"} for r in d["runs"]]}
 
     def heads_writers(self, direction: str, *, contrast: str | Path | None = None, ref_layer: int | None = None,
@@ -2613,6 +2614,13 @@ round_01.scores.txt に「番号 P C」を 1 行ずつ書く(例: 17 3 4)。全�
         """鍵の確かめ(gne direction key-check: 層ごとの AUC・ρ の分布・比較用の鍵との比較・保留集合)。中身は keyed_build.key_check。"""
         from .keyed_build import key_check
         return key_check(self, key, **kw)
+
+    def direction_key_from_behave(self, behave: str | Path, **kw) -> dict:
+        """CHiPS のレシピを当てても消したい振る舞いが残った A 側の質問(gne behave の結果)を集めて、keyed の対照集合の JSON を
+        <root>/keyed/<name>.json に書く(gne direction key-from-behave)。モデルは動かさない。中身は gne/keyed_from_behave.py の
+        from_behave(引数 recipe・direction・contrast・labels・match・min_rate・positions・name・out・replies・prompts・strict)。"""
+        from .keyed_from_behave import from_behave
+        return from_behave(self, behave, **kw)
 
     def direction_key_pipeline(self, contrast: str | Path | dict, **kw) -> dict:
         """方向(gne direction --positions response と同じ)→ 鍵 → 作成と反対側の subset での key-check を 1 回で回す。

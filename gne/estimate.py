@@ -187,6 +187,10 @@ def estimate(session, kind: str, params: dict) -> dict:
         n_a = len(p.get("alphas") or (1.0, 2.0))
         sec = (1 + n_a) * n_t * sp.setprefill / 1000 + 1.0       # + LoRA を作る分
         detail = {"texts": n_t, "alphas": n_a}
+    elif kind == "behave":                                     # 種ごとに質問を max_tokens まで生成 + 判定(読み手、8 トークン)
+        kd = _behave_cost(session, sp, p)
+        sec = kd["seconds"]
+        detail = kd
     elif kind == "connections":
         from .connections import dense_layers
         Ls = dense_layers(session.weights)
@@ -313,6 +317,28 @@ def estimate(session, kind: str, params: dict) -> dict:
         sec = 10.0 * sp.setprefill / REF["setprefill_ms"]
     return {"kind": kind, "seconds": None if sec is None else float(sec), "detail": detail, "speed": sp.to_dict(),
             "needs_confirm": bool(sec is not None and sec > CONFIRM_S)}
+
+
+def _behave_cost(session, sp: Speed, p: dict) -> dict:
+    """behave の見積もり: 種ごとに、質問を n_seq_max 本ずつまとめて max_tokens まで生成する(EOG で早く止まれば短い)。判定が
+    あれば、読み手が返事ごとに 8 トークン生成する(返事を読む prefill の分を set_cvec + prefill 1 回とみる)。思考ありも同じ長さまで。"""
+    from .behave import load_prompts
+    qs = p.get("prompts")
+    try:
+        if isinstance(qs, str) and not Path(qs).exists():
+            qs = session._contrast_file(qs)
+        n = len(load_prompts(qs)) if isinstance(qs, str | Path) else len(qs or [])
+    except Exception:  # noqa: BLE001  質問集が読めなくても見積もりで止めない(本番がエラーを返す)
+        return {"seconds": 32 * sp.step(8) / 1000 * 400, "guess": True}
+    seeds = p.get("seeds")
+    if isinstance(seeds, str):
+        seeds = [x for x in seeds.split(",") if x.strip()]
+    n_seeds = max(1, len(seeds or [0]))
+    mt = int(p.get("max_tokens") or 400)
+    gen = sp.gen(n, mt, session._engine_kw.get("n_seq_max", 8) or 8) + n * sp.setprefill / 1000 / 4
+    judge = (sp.gen(n, 8) + n * sp.setprefill / 1000) if p.get("judge") else 0.0
+    return {"prompts": n, "seeds": n_seeds, "max_tokens": mt, "judge": bool(p.get("judge")),
+            "seconds": n_seeds * (gen + judge) + 1.0}
 
 
 # --- CHANGE-07: 鍵つきの書き込み(keyed)----------------------------------------------------------------------

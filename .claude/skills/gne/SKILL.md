@@ -59,7 +59,7 @@ dose は既定で rel(その層の残差の大きさに対する比)。0.5 で�
 | 効くヘッドを探す・強さを配る | `heads causal`・`heads allocate` | `heads_causal`・`heads_allocate` | 生成なし。止めたとき・強めたときの射影の値の変化から、少ないヘッドの組を作る |
 | 組で消し切れない質問に足す | `heads refine` | `heads_refine` | 残りの質問だけで、組を当てたまま方向を作り直して足すヘッドを探す |
 | 全体の倍率を返事で決める | `heads candidates`(`--tally`) | `heads_candidates`・`heads_candidates_tally` | 組 × 倍率で返事を作り、どの候補か伏せた採点のファイルを書いて集計する |
-| 決まった状態のときだけ書く(鍵) | `direction key`・`direction key-check`・`direction key-verify`・`direction keys`・`direction key-experts` | `direction_key`・`direction_key_check`・`direction_key_verify`・`keys`・`direction_key_experts`・`direction_key_pipeline`(方向 → 鍵 → key-check の一括) | 鍵を作り、作成に使っていない例で、比較用の鍵(ラベルをシャッフルして作った鍵)より書き込みたい位置をよく選ぶかを確かめる。返事を与えれば生成なし |
+| 決まった状態のときだけ書く(鍵) | `direction key`・`direction key-check`・`direction key-verify`・`direction keys`・`direction key-experts`・`direction key-from-behave` | `direction_key`・`direction_key_check`・`direction_key_verify`・`keys`・`direction_key_experts`・`direction_key_pipeline`(方向 → 鍵 → key-check の一括)・`direction_key_from_behave`(CHiPS で残った質問 → 対照集合の JSON) | 鍵を作り、作成に使っていない例で、比較用の鍵(ラベルをシャッフルして作った鍵)より書き込みたい位置をよく選ぶかを確かめる。返事を与えれば生成なし |
 | 副作用を測る | `eval` | `eval` | 能力・ppl・言語の混入・性格の変化量 |
 | 実際の使い方で確かめる | `fieldtest` | `fieldtest` | llama-server で長い作業・ツール呼び出し・質問集・perplexity。ファイルどうしを比べる。配る前に |
 | 書き出す | `export-cvec`・`gain`・`headproj export`・`bake` | `export_cvec`・`gain_export`・`headproj_export`・`keyed_export`・`bake` | llama.cpp の `--control-vector`・`--lora`。proj・keyed は LoRA か焼き込みだけ |
@@ -133,6 +133,7 @@ dose は既定で rel(その層の残差の大きさに対する比)。0.5 で�
     - 比較用の鍵を超えた層の行で α を決めて「+ レシピ」。新しい arch や、初めて使う書き込み先では、行の「key-verify」(数秒)で LoRA が式どおりに書くかを確かめる。
     - MoE の専門家に書くなら、先に「専門家を選ぶ材料を出す」(`direction_key_experts`)の表で、書き込みたい位置でよく選ばれ、書き込みたくない位置ではあまり選ばれない専門家を選び、「この専門家で鍵を作る」から進める。
     - 最後は 3 列チャットや `gne behave` で、鍵が反応する場面と dont_touch の場面の両方の返事を見る。
+  - **CHiPS のレシピで消し切れなかった場面だけを抑えるなら**(`docs/keyed-write.md` §17): レシピを当てた `gne behave --prompts <CHiPS の対照集合>`(A 側の質問を読む)の結果から、`gne direction key-from-behave --behave B --recipe R --direction D` で、振る舞いがまだ出た質問を集めた JSON を `<root>/keyed/` に作る(keyed.iv = R、keyed.direction = D、alpha −1、dont_touch の ordinary = B 側の質問)。鍵のタブの「自分で作ったひな形」から鍵を作り、keyed のユニットを R に足して 1 つの LoRA にする。UI なら鍵のタブのいちばん上の「CHiPS で残った場面から作る」で、方向・レシピを選んで「behave を回す」(ジョブ `behave`、MCP も `behave`)→「JSON を作る」→「方向から key-check まで」を画面で続けられる。「残った」の既定は全部の種で出た質問だけ(`--min-rate 1.0`)。positions の既定は `before:<validate.match>`(英字があれば `(?i)` を付ける)だが、一致が返事のトークンの 25% 以上になる広すぎる正規表現(かな 1 文字など)は警告が出るので、振る舞いの書き始めに当たる正規表現を `--positions` で渡す。system で起こした振る舞いには向かない。
   - 語尾・口調は、対照集合を `positions: "before:<正規表現>"` にして作る(モデル自身の返事で、変えたい文字を書く直前を書き込みたい位置にする)。正規表現はモデルが実際に書く言い方に合わせる(結果の `samples`・`matched` を見る)。
   - α は方向をそのままの大きさで使う倍率(1 で、観測した A − B の差をそのまま書く)。`when` は効かない。同じ層の gain や別のレシピと重ねるなら、`--iv` でその状態で鍵を作り直す。
   - 鍵は ffn と attn の両方で作って比べる。0.6B では attn がはっきり上だった(F133)。Qwen3.5-4B では両方超えたが、attn の鍵が英語・ふつうの質問の返事の冒頭でも反応して、英語の ppl を +30% にした(F138)。

@@ -1,7 +1,8 @@
 // direction ビューの「鍵(keyed)」(CHANGE-07 G): 鍵つきの書き込み(mode: keyed)の鍵を対照集合から作り(direction_key のジョブ、
 // gne direction key)、作成に使っていない例で状態を分けているかを確かめる(direction_key_check のジョブ、gne direction key-check)。
 // 1. 鍵を作る: 対照集合は「ファイルを選ぶ」(configs/contrast/ と <root>/contrasts/ の YAML)か「JSON を書く」(ひな形 configs/keyed/ を
-//    選ぶと入力欄に入り、手で直せる。head_pipeline と同じく、表を spec としてジョブに渡し、ジョブが <root>/contrasts/<name>.yaml に書く)。
+//    選ぶと入力欄に入り、手で直せる。<root>/keyed/ の JSON(gne direction key-from-behave などで作ったもの)も「自分で作ったひな形」として出る。
+//    head_pipeline と同じく、表を spec としてジョブに渡し、ジョブが <root>/contrasts/<name>.yaml に書く)。
 //    層・名前・positions(before:<正規表現> なら推論時と同じ文脈の返事の「書き込みたい位置」= 作り方 (b))・q_mode・subset・
 //    比較用の鍵の本数。ボタンは 3 つ:
 //    - 「方向から key-check まで」(direction_key_pipeline のジョブ): 方向(gne direction --positions response と同じ。同じ名前の方向が
@@ -15,7 +16,10 @@
 //    比較用の鍵の p95、○/×(比較用の鍵を超えるか)、保留集合か(held_out)と重なりの警告。層ごとの鍵の反応の強さ ρ = κᵀx の分布の
 //    ヒストグラム(書き込みたい位置・書き込みたくない位置・dont_touch の群。群ごとの割合で重ねる SVG)。
 // 3. 保存した鍵の一覧(<root>/keys/<model_id>/)。「見る」で作成の記録、「確かめる」で key-check の欄に入れる。
+// 0. いちばん上の「CHiPS で残った場面から作る」(chips_left.js): CHiPS のレシピを当てた behave の結果から、振る舞いが残った質問の
+//    JSON を作って入力欄に入れる(方向は keyed.direction、介入は keyed.iv)。
 import { getJSON } from "./api.js";
+import { ChipsLeft } from "./chips_left.js";
 import { LANG, t } from "./i18n.js";
 import { esc } from "./panels.js";
 
@@ -27,10 +31,13 @@ const OPP = { even: "odd", odd: "even", all: "all" };            // key-check �
 const mark = (b) => (b === true ? `<span class="kx-ok">○</span>` : b === false ? `<span class="kx-ng">×</span>` : "—");
 const DRAFT = "gne.keyed.draft";                                 // 入力欄の下書き(このブラウザだけ)
 const SRC = "gne.keyed.src";                                     // 対照集合の入れ方(file / json)
-const SETTINGS = ["layers", "target", "q_mode", "subset", "pseudo", "max_tokens", "alpha"];   // 表の keyed に書ける設定
+const SETTINGS = ["layers", "target", "q_mode", "subset", "pseudo", "max_tokens", "alpha", "direction", "iv"];   // 表の keyed に書ける設定
 const DT_KEYS = ["name", "system", "prompts", "replies", "positions"];
-// 表の keyed → 欄(target は専門家の番号と分けて入れる、alpha は「+ レシピ」の α の既定)
-const FIELDS = [["layers", "#kx-layers"], ["q_mode", "#kx-qmode"], ["subset", "#kx-subset"], ["pseudo", "#kx-pseudo"], ["max_tokens", "#kx-mt"]];
+// 表の keyed → 欄(target は専門家の番号と分けて入れる、alpha は「+ レシピ」の α の既定、direction は書き込む方向、iv は介入の欄)
+const FIELDS = [["layers", "#kx-layers"], ["q_mode", "#kx-qmode"], ["subset", "#kx-subset"], ["pseudo", "#kx-pseudo"], ["max_tokens", "#kx-mt"], ["iv", "#kx-iv"]];
+// 表の keyed.direction(別の対照集合で作った方向を使い回すときに書く。gne direction key-from-behave の JSON など)
+export const specDirection = (d) => (d && d.keyed && typeof d.keyed === "object" && !Array.isArray(d.keyed) && typeof d.keyed.direction === "string"
+  && SPEC_NAME_RE.test(d.keyed.direction) ? d.keyed.direction : null);
 
 // 鍵の target(ffn / attn / shared / expert:e)→ レシピのユニットの kind と専門家
 export function targetKind(target) {
@@ -117,8 +124,9 @@ export function checkKeySpec(text) {
   const hasRecipe = (d.recipe_a !== undefined && d.recipe_a !== null) || (d.recipe_b !== undefined && d.recipe_b !== null);
   const sysA = d.system_a !== undefined && d.system_a !== null, sysB = d.system_b !== undefined && d.system_b !== null;
   const dirOk = hasRecipe || !samePrompts || ((sysA || sysB) && d.system_a !== d.system_b);   // 方向(A − B)を作れるか
+  const kdir = specDirection(d);
   if (!before && !dirOk) out.errors.push(t("作り方 (a) では A と B の違いが要ります: system_a・system_b(片方だけでも可)・recipe_a / recipe_b のどれか"));
-  else if (before && !dirOk) out.warns.push(t("system_a が無いので、この対照集合からは方向を作れません(同じ名前の方向がもうあれば「方向から key-check まで」で使えます)"));
+  else if (before && !dirOk && !kdir) out.warns.push(t("system_a が無いので、この対照集合からは方向を作れません(同じ名前の方向がもうあれば「方向から key-check まで」で使えます)"));
   const dts = d.dont_touch === undefined || d.dont_touch === null ? [] : Array.isArray(d.dont_touch) ? d.dont_touch : [d.dont_touch];
   const dtSum = [];
   dts.forEach((g, i) => {
@@ -142,9 +150,14 @@ export function checkKeySpec(text) {
     else {
       const bad = Object.keys(d.keyed).filter((k) => !SETTINGS.includes(k));
       if (bad.length) out.errors.push(t("keyed に {k} は使えません({ok})", { k: bad.join(", "), ok: SETTINGS.join(", ") }));
+      const kd = d.keyed;
+      if (kd.direction !== undefined && kd.direction !== null && !kdir) out.errors.push(t("keyed.direction は方向の名前です(英数字・_・-・. だけ)"));
+      if (kd.iv !== undefined && kd.iv !== null && !((typeof kd.iv === "string" && kd.iv) || (Array.isArray(kd.iv) && kd.iv.length && kd.iv.every((u) => typeof u === "string")))) {
+        out.errors.push(t("keyed.iv は保存したレシピの名前かパス、またはユニットの書き方のリストです"));
+      }
     }
   }
-  if (n !== null) out.summary = { n: samePrompts ? n : `${pa.length} / ${pb.length}`, before, positions: pos, dt: dtSum, A: sideText(d, "a"), B: sideText(d, "b"), dirOk };
+  if (n !== null) out.summary = { n: samePrompts ? n : `${pa.length} / ${pb.length}`, before, positions: pos, dt: dtSum, A: sideText(d, "a"), B: sideText(d, "b"), dirOk, dir: kdir };
   return out;
 }
 
@@ -222,7 +235,7 @@ export class KeyPanel {
     this.contrasts = [];
     this.keys = [];
     this.dirs = [];                                 // /api/directions(作ったばかりの方向も入るように、ここでも取り直す)
-    this.templates = [];                            // configs/keyed/ のひな形(/api/keyed-templates)
+    this.templates = [];                            // configs/keyed/ と <root>/keyed/ のひな形(/api/keyed-templates。src で分ける)
     this.tplText = null;                            // 最後に入れたひな形の文字列(書き換えていなければ確かめずに差し替える)
     this.lastSet = null;                            // 最後に欄に入れた表の keyed(変わったときだけ欄を書き換える)
     this.alphaNext = null;                          // 次に結果を描くとき「+ レシピ」の α の欄に入れる値(表の keyed.alpha、無ければ 1)
@@ -240,10 +253,11 @@ export class KeyPanel {
     const n = this.nLayer, sug = n ? [0.3, 0.5, 0.7].map((f) => Math.round((n - 1) * f)).join(",") : "";
     root.innerHTML = `
       <p class="muted note pp-help">${t("鍵つきの書き込み(keyed): 残差に書き込む重み行列(ffn_down など)にランク 1 の ΔW = α·d·κᵀ を足し、入力の活性 x に鍵 κ が反応する(鍵の反応の強さ ρ = κᵀx が大きい)ときだけ方向 d(方向セットの r_L)を書く。κ は書き込みたい位置の活性の平均 μ から、書き込みたくない位置と dont_touch の活性が張る部分空間を除いたもの(κᵀμ = 1)。鍵を作ったら、作成に使っていない例(subset odd か別の対照集合)で key-check を回し、比較用の鍵(ラベルをシャッフルして同じ手順で作った鍵)より選択性が高いことを確かめてから、レシピに足す。")}</p>
+      <details class="kx-sec kb" id="kb-wrap"></details>
       <section class="kx-sec"><h4>${t("鍵を作る")}</h4>
         <div class="pp-in"><span class="muted">${t("対照集合")}</span>
           <span class="seg" id="kx-src"><button data-src="file" title="${t("configs/contrast/ か <root>/contrasts/ の YAML を選ぶ")}">${t("ファイルを選ぶ")}</button><button data-src="json" title="${t("用途別のひな形(configs/keyed/)から始めて、入力欄の JSON を手で直す")}">${t("JSON を書く(ひな形から)")}</button></span>
-          <label class="muted" title="${t("用途別のひな形(configs/keyed/)。選ぶと入力欄に入る")}">${t("ひな形")}
+          <label class="muted" title="${t("用途別のひな形(configs/keyed/)と、自分で作ったひな形(<root>/keyed/)。選ぶと入力欄に入る")}">${t("ひな形")}
             <select id="kx-tpl-sel"><option value="">${t("(ひな形を選ぶ)")}</option></select></label>
           <button class="small" id="kx-tpl" title="${t("選んだひな形を入力欄に入れる")}">${t("入れる")}</button></div>
         <div id="kx-src-file">
@@ -315,6 +329,16 @@ export class KeyPanel {
       </section>
       <section class="kx-sec"><h4>${t("保存した鍵")}</h4><div id="kx-keys"><p class="muted note">${t("読み込み中…")}</p></div></section>`;
     this.$ = (s) => root.querySelector(s);
+    this.chips = new ChipsLeft(this.$("#kb-wrap"), {
+      onRun: (kind, p) => this.onRun(kind, p), dirs: () => this.dirs, contrasts: () => this.contrasts,
+      putSpec: (spec, text, file) => {                       // 作った JSON を入力欄に入れ、ひな形の一覧にも出す
+        const ok = this.putSpec(spec, `${t("自分で作ったひな形(<root>/keyed/{f})", { f: file })} ${text}`, `<root>/keyed/${file}`,
+                                t("入力欄の JSON を、作った JSON で置き換えます。よいですか?"));
+        this.loadTemplates().then(() => { if (ok) this.$("#kx-tpl-sel").value = `root/${file}`; });
+        return ok;
+      },
+      runPipeline: () => { this.$("#kx-pipe-go").scrollIntoView({ block: "nearest" }); this.runPipeline(); },
+    });
     this.$("#kx-contrast").addEventListener("change", () => this.contrastChanged());
     this.$("#kx-cpath").addEventListener("input", () => this.contrastChanged());
     this.$("#kx-target").addEventListener("change", (ev) => this.$("#kx-expert").classList.toggle("hidden", ev.target.value !== "expert"));
@@ -339,31 +363,39 @@ export class KeyPanel {
     const sel = this.$("#kx-tpl-sel");
     this.$("#kx-tpl").addEventListener("click", () => this.insertTemplate(sel.value, false));
     sel.addEventListener("change", () => this.insertTemplate(sel.value, true));
-    getJSON("/api/keyed-templates").then((list) => {
-      this.templates = Array.isArray(list) ? list : [];
-      for (const x of this.templates) {
-        const o = document.createElement("option");
-        o.value = x.file;
-        o.textContent = (x[LANG] && x[LANG].title) || (x.ja && x.ja.title) || x.file;
-        sel.appendChild(o);
-      }
-    }).catch(() => { /* ひな形が無くてもファイルと貼り付けで使える */ });
+    this.loadTemplates();
     let src = "file";
     try { src = localStorage.getItem(SRC) === "json" ? "json" : "file"; } catch { /* 既定はファイル */ }
     this.setSource(src, false);
     root.addEventListener("click", (ev) => this.onClick(ev));
   }
 
-  // direction ビューで「鍵」を開いたとき・ジョブが終わったとき: 対照集合の候補・保存した鍵・方向を取り直す
+  // ひな形の一覧(configs/keyed/ と <root>/keyed/)を取り直して「ひな形」の選択に入れる。<root>/keyed/ のものは別の組に
+  // 「自分で作ったひな形」として出す(値は root/<ファイル名>。configs/keyed/ と同じ名前でもぶつからない)。選んでいた値は残す
+  async loadTemplates() {
+    let list;
+    try { list = await getJSON("/api/keyed-templates"); } catch { return; }   // ひな形が無くてもファイルと貼り付けで使える
+    this.templates = (Array.isArray(list) ? list : []).map((x) => ({ ...x, key: x.src === "root" ? `root/${x.file}` : x.file }));
+    const sel = this.$("#kx-tpl-sel"), cur = sel.value;
+    const opt = (x) => `<option value="${esc(x.key)}">${esc((x[LANG] && x[LANG].title) || (x.ja && x.ja.title) || x.file)}</option>`;
+    const own = this.templates.filter((x) => x.src === "root");
+    sel.innerHTML = `<option value="">${t("(ひな形を選ぶ)")}</option>${this.templates.filter((x) => x.src !== "root").map(opt).join("")}${
+      own.length ? `<optgroup label="${esc(t("自分で作ったひな形(<root>/keyed/)"))}">${own.map(opt).join("")}</optgroup>` : ""}`;
+    if (cur && this.templates.some((x) => x.key === cur)) sel.value = cur;
+  }
+
+  // direction ビューで「鍵」を開いたとき・ジョブが終わったとき: 対照集合の候補・保存した鍵・方向・ひな形を取り直す
   async refresh() {
     const [cs, ks, ds] = await Promise.all([getJSON("/api/contrasts").catch(() => []), getJSON("/api/keys").catch(() => []),
                                             getJSON("/api/directions").catch(() => null)]);
     this.contrasts = Array.isArray(cs) ? cs : [];
     this.keys = Array.isArray(ks) ? ks : [];
     if (Array.isArray(ds)) this.dirs = ds;
+    await this.loadTemplates();
     this.fillContrasts();
     this.fillKeys();
     this.renderKeys();
+    await this.chips.refresh();
     this.loaded = true;
   }
 
@@ -434,22 +466,31 @@ export class KeyPanel {
       c.dont_touch.length ? ` · dont_touch: ${esc(c.dont_touch.join(", "))}` : ""}${c.replies ? ` · ${t("返事つき")}` : ""}`;
   }
 
-  // ひな形を入力欄に入れる(configs/keyed/ のファイル名)。選び直したときは、書きかけの JSON を消す前に確かめる
-  insertTemplate(file, ask) {
-    const x = this.templates.find((y) => y.file === file);
+  // ひな形を入力欄に入れる(configs/keyed/ のファイル名か、root/<<root>/keyed/ のファイル名>)。選び直したときは、書きかけの JSON を
+  // 消す前に確かめる
+  insertTemplate(key, ask) {
+    const x = this.templates.find((y) => y.key === key);
     if (!x) return;
+    const text = (x[LANG] && x[LANG].text) || (x.ja && x.ja.text) || "";
+    const ok = this.putSpec(x.spec, x.src === "root" ? `${t("自分で作ったひな形(<root>/keyed/{f})", { f: x.file })} ${text}` : text,
+                            x.src === "root" ? `<root>/keyed/${x.file}` : `configs/keyed/${x.file}`,
+                            ask ? t("入力欄の JSON をひな形で置き換えます。よいですか?") : null);
+    if (!ok) this.$("#kx-tpl-sel").value = "";
+  }
+
+  // 表を入力欄に入れて「JSON を書く」にする。confirm(確かめの文)を渡すと、書き換えた入力欄を消す前に確かめる(書き換えていなければ
+  // 確かめない)。入れたら true
+  putSpec(spec, aboutText, aboutTitle, confirm = null) {
     const ta = this.$("#kx-text"), about = this.$("#kx-tpl-about");
     const cur = ta.value.trim();
-    if (ask && cur && cur !== this.tplText && !window.confirm(t("入力欄の JSON をひな形で置き換えます。よいですか?"))) {
-      this.$("#kx-tpl-sel").value = "";
-      return;
-    }
-    ta.value = JSON.stringify(x.spec, null, 2);
+    if (confirm && cur && cur !== this.tplText && !window.confirm(confirm)) return false;
+    ta.value = JSON.stringify(spec, null, 2);
     this.tplText = ta.value.trim();
-    about.textContent = (x[LANG] && x[LANG].text) || (x.ja && x.ja.text) || "";
-    about.title = `configs/keyed/${x.file}`;
+    about.textContent = aboutText;
+    about.title = aboutTitle;
     if (this.src !== "json") this.setSource("json");
     else this.checkJSON();
+    return true;
   }
 
   // 入力欄を確かめて要約を出す。表の keyed が変わったら、その値を欄に入れる
@@ -465,8 +506,9 @@ export class KeyPanel {
       const mode = s ? (s.before ? t("作り方 (b): 推論時と同じ文脈(system なし)の返事の、正規表現の直前の位置を書き込みたい位置、同じ返事のそれ以外を書き込みたくない位置にする")
         : t("作り方 (a): system_a(や recipe_a)の文脈の活性を書き込みたい位置、system_b の文脈を書き込みたくない位置にする")) : "";
       const dt = s && s.dt.length ? s.dt.map((g) => `${esc(g.name)}${g.n !== null ? ` ${g.n} ${t("問")}` : ""}${g.positions ? ` (${esc(g.positions)})` : ""}`).join("、") : "";
+      const dirText = s && s.dir ? t("方向: keyed.direction の {d} を使い回す", { d: esc(s.dir) }) : s ? t("方向: A = {a} · B = {b}", { a: esc(s.A), b: esc(s.B) }) : "";
       el.innerHTML = `${s ? `<div class="pp-sum"><b>${esc(String(c.spec.name ?? ""))}</b> · ${t("質問 {n} 個", { n: s.n })} · positions <span class="mono">${esc(s.positions)}</span><br>${esc(mode)}${
-        dt ? `<br>dont_touch: ${dt}` : ""}<br><span class="muted">${t("方向: A = {a} · B = {b}", { a: esc(s.A), b: esc(s.B) })}</span></div>` : ""}${
+        dt ? `<br>dont_touch: ${dt}` : ""}<br><span class="muted">${dirText}</span></div>` : ""}${
         c.errors.map((x) => `<div class="err">${esc(x)}</div>`).join("")}${c.warns.map((x) => `<div class="pp-warn">${esc(x)}</div>`).join("")}`;
     }
     if (c.spec) {
@@ -477,6 +519,7 @@ export class KeyPanel {
       if (key !== this.lastSet) {                              // 表の keyed にある値だけを欄に入れる(無い欄はそのまま)
         this.lastSet = key;
         for (const [k, sel] of FIELDS) if (kd[k] !== undefined && kd[k] !== null) this.$(sel).value = Array.isArray(kd[k]) ? kd[k].join(",") : String(kd[k]);
+        if (kd.iv) this.$(".kx-adv").open = true;               // 介入の欄は細かい設定の中にあるので開いて見せる
         if (kd.target) {
           const { kind, expert } = targetKind(kd.target);
           this.$("#kx-target").value = kind;
@@ -497,13 +540,19 @@ export class KeyPanel {
     return c ? c.name : path ? String(path).split("/").pop().replace(/\.(ya?ml|json)$/, "") : null;
   }
 
-  // 「方向から key-check まで」で使う方向が、もうあるか
+  // 「方向から key-check まで」で使う方向が、もうあるか。表の keyed.direction は、別の対照集合で作った方向(作らない・作り直さない)
   dirInfo() {
     const el = this.$("#kx-dirinfo");
     if (!el) return;
-    const name = this.contrastName();
+    const fixed = this.src === "json" ? specDirection(this.jspec.spec) : null;
+    const name = fixed || this.contrastName();
     if (!name) { el.textContent = ""; return; }
     const d = this.dirs.find((x) => x.name === name) || (this.dirNames().includes(name) ? { name } : null);
+    if (fixed) {
+      el.innerHTML = d ? t("書き込む方向は表の keyed.direction の {d} を使い回します(この対照集合からは作らず、作り直しもしません)", { d: `<b class="mono">${esc(name)}</b>` })
+        : `<span class="pp-warn">${t("表の keyed.direction の方向 {d} がありません。その方向を作った対照集合で方向を作ってから回してください", { d: `<b class="mono">${esc(name)}</b>` })}</span>`;
+      return;
+    }
     const rebuild = this.$("#kx-rebuild").checked;
     el.innerHTML = !d ? t("書き込む方向 {d} はまだありません。「方向から key-check まで」は A・B の返事を作って方向を作ります", { d: `<b class="mono">${esc(name)}</b>` })
       : rebuild ? t("書き込む方向 {d} を作り直します(A・B の返事を作ります)", { d: `<b class="mono">${esc(name)}</b>` })
@@ -685,6 +734,8 @@ export class KeyPanel {
     const done = () => this.status(which, t("できました({s} 秒)", { s: fmt(r.seconds, 1) }));
     if (which === "build") {
       done();
+      const sd = specDirection((j.params || {}).spec);          // 表の keyed.direction があれば、書き込む方向にそれを選ぶ
+      if (sd) this.preferDir = sd;
       this.built = { kind: "build", params: j.params || {}, r };
       await this.refresh();
       this.fillKeys(r.name);

@@ -10,7 +10,8 @@ export const KIND = { embed: tr("埋め込み"), connections: "connections", lay
                heads_causal: tr("因果スクリーニング"), heads_allocate: tr("強さの配分"), head_pipeline: tr("方向とヘッドの一括"), direction: tr("方向"),
                heads_candidates: tr("強さの候補"), heads_refine: tr("残りから追加"), headproj_export: tr("LoRA・焼き込み"), fieldtest: tr("実地テスト"),
                direction_key: tr("鍵の作成"), direction_key_check: tr("鍵の確認"), direction_key_experts: tr("専門家の選ばれ方"),
-               direction_key_verify: tr("LoRA の確かめ(key-verify)"), direction_key_pipeline: tr("方向から key-check まで") };
+               direction_key_verify: tr("LoRA の確かめ(key-verify)"), direction_key_pipeline: tr("方向から key-check まで"),
+               behave: tr("振る舞いを数える(behave)") };
 
 function eta(s) {
   if (s === null || s === undefined || !Number.isFinite(s)) return "";
@@ -31,6 +32,8 @@ function what(j) {
   if (p.spec && typeof p.spec === "object" && p.spec.name) bits.push(p.spec.name);            // head_pipeline(JSON の name)
   if (j.kind === "heads_candidates" && p.alloc) bits.push(String(p.alloc).split("/").pop());
   if ((j.kind === "direction_key_check" || j.kind === "direction_key_verify") && p.key) bits.push(`#${p.key}`);   // CHANGE-07: 確かめる鍵
+  if (j.kind === "behave") bits.push(p.name || "behave", ...(Array.isArray(p.recipes) ? p.recipes.map((r) => `+${String(r).split("/").pop()}`) : []));
+  if (j.kind === "behave" && typeof p.prompts === "string") bits.push(String(p.prompts).split("/").pop());
   if (j.kind === "eval") bits.push(p.name || p.recipe || tr("{n} ユニット", { n: (p.units || []).length }), ...(p.when && p.when !== "all" ? [`@${p.when}`] : []));
   if (p.neurons) bits.push(/^\d/.test(p.neurons) ? `N${p.neurons.replace("-", "–")}` : tr("ニューロン {s}", { s: p.neurons }));
   if (p.random_controls !== undefined) bits.push(tr("+ 対照 {n}", { n: p.random_controls }));

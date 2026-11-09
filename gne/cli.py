@@ -1122,7 +1122,8 @@ def direction(c: Common, holder: dict,
     """対照集合から全層の方向 r_L(mean_A − mean_B)を作って保存し、--select auto で効果の大きい層を選ぶ(§6.17)。
     作った方向は L:dir:NAME:dose のユニットで足せる(gne steer / chat / eval / export-cvec)。
     gne direction score は、方向の分離度(層ごとの cohen_d)と介入の効き目を生成なしで測る(CHANGE-06 B)。
-    gne direction key / key-check / keys / key-verify / key-experts は鍵つきの書き込み(keyed、CHANGE-07)の鍵を作る・確かめる(key-experts は MoE の expert:e の鍵の専門家を選ぶ材料)。"""
+    gne direction key / key-check / keys / key-verify / key-experts は鍵つきの書き込み(keyed、CHANGE-07)の鍵を作る・確かめる(key-experts は MoE の expert:e の鍵の専門家を選ぶ材料)。
+    key-from-behave は CHiPS のレシピを当てても振る舞いが残った質問(gne behave の結果)から keyed の対照集合の JSON を作る。"""
     if contrast is None:
         raise GneError("BAD_ARGS", "--contrast が要ります", "方向を作る: gne direction --contrast <対照集合>、"
                                                           "測る: gne direction score --name <方向> --contrast <対照集合>")
@@ -2070,6 +2071,61 @@ def direction_key_experts(c: Common, holder: dict,
     return d, "\n".join(lines), 0
 
 
+@gne_command(direction_app, "key-from-behave", "direction key-from-behave")
+def direction_key_from_behave(c: Common, holder: dict,
+                              behave: str = typer.Option(..., "--behave", help="gne behave の結果の名前(<root>/behave/<model_id>/<名前>.json)かパス。CHiPS のレシピを当てて A 側の質問に答えさせたもの"),
+                              recipe: str = typer.Option(..., "--recipe", help="CHiPS のレシピ(保存したレシピの名前かパス)。鍵はこれを当てた状態で作るので、出力の keyed.iv に入れる"),
+                              direction: Optional[str] = typer.Option(None, "--direction", help="CHiPS の方向の名前(出力の keyed.direction)。--contrast を省くと、この方向を作った対照集合を使う"),
+                              contrast: Optional[str] = typer.Option(None, "--contrast", help="CHiPS の方向の対照集合(パスか configs/contrast/ の名前)。B 側の質問・validate.match・A 側の質問を取る。--direction を省くと方向の名前はこの name"),
+                              label: Optional[list[str]] = typer.Option(None, "--label", help="「残った」とみなす読み手の判定のラベル(例 --label P。複数可)。省くと正規表現で判定する"),
+                              match: Optional[str] = typer.Option(None, "--match", help="「残った」とみなす正規表現(大文字小文字を区別)。省くと behave の結果の --match、無ければ対照集合の validate.match(大文字小文字を無視)"),
+                              min_rate: float = typer.Option(1.0, "--min-rate", help="振る舞いが出た種の割合がこれ以上の質問を入れる(既定 1.0 = 全部の種。A 側には振る舞いが確実に出る質問だけを入れる)"),
+                              positions: Optional[str] = typer.Option(None, "--positions", help="書き込みたい位置 before:<正規表現>(既定は before:<validate.match>。大文字と小文字のある文字を含めば (?i) を付ける)。一致が広すぎると警告するので、振る舞いの書き始めに当たる正規表現を渡す"),
+                              name: Optional[str] = typer.Option(None, "--name", help="出力の名前(既定 <behave の名前>_keyed)。鍵の名前の既定にもなる"),
+                              out: Optional[Path] = typer.Option(None, "--out", "-o", help="書き出す JSON のパス(既定 <root>/keyed/<名前>.json。鍵のタブのひな形に出る)"),
+                              replies: bool = typer.Option(True, "--replies/--no-replies", help="抜き出した質問の behave の返事を出力の replies に入れる(既定。鍵の作成は返事を作らずにそれを読む)。--no-replies なら鍵の作成で返事を作る"),
+                              prompts: Optional[Path] = typer.Option(None, "--prompts", help="behave に渡した質問集(質問の記録が無い古い behave の結果のときだけ)"),
+                              strict: bool = typer.Option(False, "--strict", help="behave の結果が、そのレシピを当てて A 側の質問に答えたものでなければエラー(既定は警告)")):
+    """CHiPS のレシピを当てても消したい振る舞いが残った A 側の質問だけを集めて、keyed(鍵つきの書き込み)の対照集合の JSON を作る
+    (モデルは動かさない)。user_prompts = 抜き出した質問、dont_touch の ordinary = CHiPS の対照集合の B 側の質問、
+    keyed = {direction: CHiPS の方向, alpha: -1, iv: CHiPS のレシピ}。次に鍵のタブか gne direction key --contrast <出力> で鍵を作る。"""
+    s = holder["session"] = c.session()
+    d = s.direction_key_from_behave(behave, recipe=recipe, direction=direction, contrast=contrast, labels=label or None,
+                                    match=match, min_rate=min_rate, positions=positions, name=name, out=out, replies=replies,
+                                    prompts=prompts, strict=strict)
+    d.pop("warnings", None)                        # 警告はエンベロープの warnings に入っている
+    j = d["judge"]
+    how = (f"読み手のラベル {', '.join(j['labels'])}" if j["method"] == "label"
+           else f"正規表現 {j['match']}" + ("(大文字小文字を無視)" if j["ignore_case"] else "")
+           + {"behave": "(behave の --match)", "validate": "(対照集合の validate.match)", "match": ""}[j["source"]])
+    rate = "全部の種" if j["min_rate"] >= 1 else f"種の {j['min_rate']:g} 以上"
+    lines = [(f"{d['path']}(" if d["path"] else "書き出していません(") + f"behave {d['behave']}・{d['n_prompts']} 問・種 {d['n_seeds']} 個、"
+             f"レシピ {d['recipe']}、方向 {d['direction']}、対照集合 {d['contrast']})",
+             f"  残った質問: {len(d['extracted'])} 問({how} が{rate}で出たもの。一部の種だけ {d['n_partial']} 問、出なかった {d['n_none']} 問)",
+             f"  書き込みたい位置: {d['positions']}" + ("(validate.match から)" if d["positions_source"] == "validate" else ""),
+             ]
+    ps = d["position_share"]
+    if ps["share"] is not None:
+        lines.append(f"  一致の広さ: 返事のトークンの約 {ps['share'] * 100:.1f}% で一致の始まり(一致 {ps['starts']}・トークン {ps['tokens']:g}、"
+                     f"{ps['threshold'] * 100:.0f}% 以上は広すぎる)" + ("  ← 広すぎる" if ps["broad"] else ""))
+    h = d["halves"]
+    if d["extracted"]:
+        lines.append(f"  書き込みたい位置の見込み: 鍵の作成(偶数番目){h['even']['examples']} 例・{h['even']['positions']} 位置、"
+                     f"key-check(奇数番目){h['odd']['examples']} 例・{h['odd']['positions']} 位置、一致の無い質問 {d['no_match']} 問"
+                     + ("" if d["replies"] else "(返事を入れないので、鍵の作成では作り直した返事で変わります)"))
+    lines.append(f"  dont_touch の ordinary: B 側の質問 {d['ordinary']['n']} 問" + (f"(user_prompts と同じ {d['ordinary']['removed']} 問を外した)"
+                                                                                if d["ordinary"]["removed"] else ""))
+    for r in d["extracted"][:12]:
+        lines.append(f"    {r['i']:>3} {r['rate']:.2f} 一致 {r['starts']:>2}  {r['question']}" + ("  (繰り返し)" if r["loop"] else ""))
+    if len(d["extracted"]) > 12:
+        lines.append(f"    … ほか {len(d['extracted']) - 12} 問")
+    lines += [f"注: {t}" for t in d["notes"]]
+    if d["path"]:
+        lines.append(f"次: gne direction key --contrast {d['path']} --layers <層> --iv {d['iv']}"
+                     "(鍵のタブならひな形から選んで「方向から key-check まで」。方向は keyed.direction のものを使い回す)")
+    return d, "\n".join(lines), 0 if d["path"] else 1
+
+
 @gne_command(direction_app, "key-verify", "direction key-verify")
 def direction_key_verify(c: Common, holder: dict,
                          layer: int = typer.Option(..., "--layer", help="層 L"),
@@ -2256,7 +2312,7 @@ def heads_allocate(c: Common, holder: dict,
 
 @gne_command(app, "behave")
 def behave_cmd(c: Common, holder: dict,
-               prompts: Path = typer.Option(..., "--prompts", exists=True, help="質問集(JSON / YAML の、文字列か会話の履歴のリスト)"),
+               prompts: Path = typer.Option(..., "--prompts", exists=True, help="質問集(JSON / YAML の、文字列か会話の履歴のリスト。対照集合なら A 側の質問)"),
                recipe: Optional[list[Path]] = typer.Option(None, "--recipe", help="当てるレシピ(複数なら重ねる)"),
                match: Optional[str] = typer.Option(None, "--match", help="返事に一致を数える正規表現"),
                judge: Optional[Path] = typer.Option(None, "--judge", exists=True, help="読み手への文面のファイル({q} に質問、{a} に返事)"),

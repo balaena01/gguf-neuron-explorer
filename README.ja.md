@@ -359,6 +359,8 @@ keyed のユニットを持つレシピの `gne eval` は、生成せずに、�
 
 UI では、direction ビューの「鍵(keyed)」タブで、ボタン 1 つで最後まで回せます。対照集合(ファイルか、`configs/keyed/` の 3 つのひな形から始める JSON: 文末の言い方を変える・特定の場面の返事だけ変える・system で作った状態を使う)から、方向を作り、鍵を作り、作成に使っていない質問で確かめます。層ごとの反応の強さの分布を見て、作ったばかりの方向を選んだまま keyed のユニットをレシピに足し、行ごとに LoRA が式どおりに書くかも確かめられます。MoE のモデルでは専門家の選ばれ方の表も出て、表から選んだ専門家の鍵づくりに進めます。手法・例・MoE での使い方は [docs/keyed-write.md](docs/keyed-write.md) にあります。
 
+**CHiPS で残った場面を抑える。** CHiPS のレシピを当てても一部の質問で振る舞いが残るときは、`gne direction key-from-behave --behave B --recipe R --direction D` で、レシピを当てた `gne behave` の結果からその質問を集め、keyed の対照集合を `<root>/keyed/` に書きます(方向 D を α = −1 で書き、鍵はレシピ R を当てた状態で作る)。鍵のタブのひな形に出るので、そこから鍵を作り、keyed のユニットを R に足して 1 つの LoRA にします(docs/keyed-write.md §17)。鍵のタブの「CHiPS で残った場面から作る」なら、レシピを当てた behave を回すところから JSON を作って入力欄に入れるところまで、画面で進められます。
+
 ランク 1 の条件つき編集 `ΔW = α d kᵀ / (μᵀk)`、`k = μ − QQᵀμ`(`Q` は書き込みたくない位置の入力が張る部分空間の正規直交基底)の形は、nwn さんの Zenn の記事「[Weight-Space Programming でずんだもん語尾](https://zenn.dev/nwn/articles/cf9fe78aa33861)」(2026)によるものです。gne はこれを、対照集合から鍵を作り、`gne direction` の方向に沿って書き、作成に使っていない例でラベルをシャッフルした比較用の鍵と比べて確かめる道具にしました。
 
 ### 実地テスト: 本番と同じ動かし方で確かめる
@@ -418,7 +420,7 @@ gne serve -m models/Qwen3.5-4B-Q8_0.gguf      # http://127.0.0.1:8791
 主なビューは次のとおりです。
 - **map:** 全層をニューロンのシートで並べ、値を重ねます。
 - **layers:** 層ごとのまとめです。
-- **direction:** 保存した方向が、対照集合の両側を層ごとにどれだけ分けているか、基準層がどこか、選んだ層での例ごとの射影の値を見ます。もう 1 つのタブでは、対照集合を JSON で渡して（貼り付け、ファイル、用途別の 5 つのひな形から）、ボタン 1 つでヘッド探しを最後まで回せます。方向を作り、基準層を選び、層とヘッドを止めて効き目を測り、強さを配ります。結果には各段階の短い説明、外したヘッドとその理由、止めたときの順位と効率の順位がどう入れ替わったか、ヘッドを減らした組の比較が出ます。どの組もレシピのタブに読み込んだり、eval に回したりできます。比較表の下から強さの候補を作ると、3 つめのタブ「強さの候補」で返事を並べ、名前を伏せたまま採点して集計できます。4 つめのタブ「鍵(keyed)」では、対照集合をファイルか JSON(用途別の 3 つのひな形から)で渡し、ボタン 1 つで、方向を作り、鍵つきの書き込みの鍵を作り、作成に使っていない例で比較用の鍵(ラベルをシャッフルして作ったもの)と比べて確かめます。結果から keyed のユニットをレシピに足し、層ごとに LoRA が式どおりに書くか(key-verify)を確かめられます。MoE のモデルでは、専門家の選ばれ方の表から選んだ専門家の鍵づくりに進めます。
+- **direction:** 保存した方向が、対照集合の両側を層ごとにどれだけ分けているか、基準層がどこか、選んだ層での例ごとの射影の値を見ます。もう 1 つのタブでは、対照集合を JSON で渡して（貼り付け、ファイル、用途別の 5 つのひな形から）、ボタン 1 つでヘッド探しを最後まで回せます。方向を作り、基準層を選び、層とヘッドを止めて効き目を測り、強さを配ります。結果には各段階の短い説明、外したヘッドとその理由、止めたときの順位と効率の順位がどう入れ替わったか、ヘッドを減らした組の比較が出ます。どの組もレシピのタブに読み込んだり、eval に回したりできます。比較表の下から強さの候補を作ると、3 つめのタブ「強さの候補」で返事を並べ、名前を伏せたまま採点して集計できます。4 つめのタブ「鍵(keyed)」では、対照集合をファイルか JSON(用途別の 3 つのひな形から)で渡し、ボタン 1 つで、方向を作り、鍵つきの書き込みの鍵を作り、作成に使っていない例で比較用の鍵(ラベルをシャッフルして作ったもの)と比べて確かめます。結果から keyed のユニットをレシピに足し、層ごとに LoRA が式どおりに書くか(key-verify)を確かめられます。MoE のモデルでは、専門家の選ばれ方の表から選んだ専門家の鍵づくりに進めます。いちばん上の「CHiPS で残った場面から作る」では、CHiPS のレシピを当てても振る舞いが残った質問を集めます。レシピを当てた behave をジョブで回し(進み具合が出て、止められます)、その結果から keyed の対照集合を作り(警告は赤と黄色で出ます)、方向とレシピが入った状態で入力欄に入れます。
 - **eval:** 保存した eval を、倍率ごとのグラフと表、出力の例で見ます。今のレシピの eval もここから始められます。方式の比較や、ヘッドを減らした組の比較、keyed のユニットを持つレシピが書き込みたい位置とそうでない位置をどれだけ書き分けたか(選択性)もここに出ます。
 - **embed:** rollout の文の UMAP です。
 
@@ -485,7 +487,7 @@ r = client.chat.completions.create(
 claude mcp add gne -- gne mcp --model /path/to/model.gguf
 ```
 
-ツールは `model_overview`・`layer_summary`・`neuron`・`search`・`steer`・`steer_lens`・`fires`・`reverse`・`recipe_save`・`export_cvec`・`gain_export`・`bake`・`eval`・`direction`・`ablate_export`・`head`・`heads_contrast`・`attention`・`direction_score`・`heads_causal`・`heads_allocate`・`headproj_export`・`direction_key`・`direction_key_check`・`direction_key_experts`・`direction_key_verify`・`direction_key_pipeline`・`keys`・`keyed_export`・`set_name`・`job_start` / `job_status` / `job_cancel` です。
+ツールは `model_overview`・`layer_summary`・`neuron`・`search`・`steer`・`steer_lens`・`fires`・`reverse`・`recipe_save`・`export_cvec`・`gain_export`・`bake`・`eval`・`direction`・`ablate_export`・`head`・`heads_contrast`・`attention`・`direction_score`・`heads_causal`・`heads_allocate`・`headproj_export`・`direction_key`・`direction_key_check`・`direction_key_experts`・`direction_key_verify`・`direction_key_pipeline`・`direction_key_from_behave`・`behave`・`keys`・`keyed_export`・`set_name`・`job_start` / `job_status` / `job_cancel` です。
 
 Web UI を開いているなら `--ui-url http://127.0.0.1:8791` を付けます。こうするとエージェントがブラウザ上でニューロンを強調したり、注釈を貼ったり、開いたりできます（`ui_highlight`・`ui_note`・`ui_open`）。同じ GPU に UI がモデルを載せているときは、`--n-gpu-layers 0` も付けます。
 

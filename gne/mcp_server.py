@@ -74,6 +74,9 @@ direction で作った方向は "L:dir:NAME:dose"、attention ヘッドの gain 
    一通り回すだけなら direction_key_pipeline(contrast, layers)(方向 → 鍵 → 作成と反対側の subset での key-check を 1 回のジョブで。
    同じ名前の方向があれば使い回し、rebuild_direction=True で作り直す)。用途別のひな形は configs/keyed/(文末の言い方・特定の場面の返事・
    system で作った状態。about は説明だけで読むときに捨てる)。
+   CHiPS のレシピで消し切れなかった場面だけを keyed で抑えるなら、behave(ジョブ。CHiPS のレシピを当てて A 側の質問に答えさせる)の結果から
+   direction_key_from_behave(behave, recipe, direction) で JSON を作り(<root>/keyed/<name>.json。keyed.iv にレシピ、keyed.direction に
+   CHiPS の方向、alpha −1)、direction_key_pipeline(contrast=その名前, layers) で鍵を作る。
    MoE の層は direction_key(target="shared")で shared expert に、target="expert:e" で専門家 e に書く(ユニットは L:S / L:Ee:keyed:…)。
    専門家は direction_key_experts で書き込みたい位置でよく選ばれる(rate_a が大きく rate_b が小さい)ものを選ぶ。焼き込みは
    既定(auto)と requant="keep" なら、元が Q8_0 の専門家のテンソルは元の型のまま(f16 だとテンソル全体が F16 になって大きくなる)。
@@ -671,7 +674,10 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
                 try:
                     path = str(_contrast_path(session, contrast, None, None, None, None))
                 except GneError:
+                    # ひな形の名前: configs/keyed/ の次に、gne direction key-from-behave などで作った <root>/keyed/
                     tpl = CONFIGS / "keyed" / f"{contrast}.json"
+                    if not tpl.exists() and re.fullmatch(r"[\w.\-]+", str(contrast)) and getattr(session, "store", None) is not None:
+                        tpl = session.store.root / "keyed" / f"{contrast}.json"
                     if not tpl.exists():
                         raise
                     spec = json.loads(tpl.read_text(encoding="utf-8"))
@@ -683,6 +689,48 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
                  "subset": subset, "pseudo": pseudo, "replies_a": replies_a, "replies_b": replies_b, "iv": iv, "seed": seed,
                  "dont_touch_start": dont_touch_start, "check": None if check else False, "compact": True}
             return jobs.start("direction_key_pipeline", {k: v for k, v in p.items() if v is not None}).view()
+        except Exception as e:  # noqa: BLE001
+            return _err(e)
+
+    @srv.tool()
+    async def direction_key_from_behave(behave: str, recipe: str, direction: str | None = None, contrast: str | None = None,
+                                        labels: str | list[str] | None = None, match: str | None = None,
+                                        min_rate: float | None = None, positions: str | None = None, name: str | None = None,
+                                        out: str | None = None, replies: bool = True, prompts: str | list | None = None,
+                                        strict: bool = False) -> dict:
+        """CHiPS のレシピを当てても消したい振る舞いが残った A 側の質問を集めて、keyed の対照集合の JSON を作る(モデルは動かさない)。
+        behave は gne behave の結果の名前かパス(CHiPS のレシピ recipe を当てて A 側の質問に答えさせたもの)。direction は CHiPS の方向の名前、
+        contrast はその対照集合(どちらか。B 側の質問・validate.match・A 側の質問を取る)。判定は labels(読み手のラベル、例 "P")か
+        match(正規表現)。省くと behave の結果の match、無ければ validate.match。min_rate(既定 1.0 = 全部の種で出た質問だけ)。
+        positions の既定は before:<validate.match>(大文字と小文字のある文字を含めば (?i) を付ける)。出力は <root>/keyed/<name>.json
+        (out でパス): user_prompts = 抜き出した質問、replies = その behave の返事(replies=False なら入れない)、dont_touch の ordinary =
+        B 側の質問(user_prompts と同じものは外す)、validate、keyed = {direction, alpha: -1, iv: recipe}。direction_key_pipeline の
+        contrast にこの名前を渡せば鍵まで作れる。warnings: レシピ違い・A 側に無い質問(strict ならエラー)・少なすぎ・広すぎる正規表現
+        (position_share.share が 0.25 以上 = 返事のトークンの大部分で一致の始まりになる)・一致の無い質問(no_match)・B 側の重なり。"""
+        def fn():
+            d = session.direction_key_from_behave(behave, recipe=recipe, direction=direction, contrast=contrast, labels=labels,
+                                                  match=match, min_rate=min_rate, positions=positions, name=name, out=out,
+                                                  replies=replies, prompts=prompts, strict=strict)
+            for r in d.get("extracted") or []:                    # 返事の全文は JSON(replies)にある。ここでは頭だけ
+                if len(r.get("reply") or "") > 300:
+                    r["reply"] = r["reply"][:300] + "…"
+            return d
+        return await call(fn, gpu=False)
+
+    @srv.tool()
+    async def behave(prompts: str | list, recipes: list[str] | str | None = None, match: str | None = None,
+                     judge: str | None = None, labels: str = "R,P,C", max_tokens: int = 400, thinking: bool = False,
+                     temperature: float = 0.0, seeds: list[int] | str | None = None, name: str = "behave") -> dict:
+        """振る舞いを数えるジョブを投げる(gne behave と同じ、job_status で結果)。レシピ recipes(名前かパス、複数なら重ねる)を当てて
+        質問集 prompts(パス・configs/contrast/ の名前・質問のリスト。対照集合なら A 側の質問)に答えさせ、正規表現 match の一致と、
+        読み手(介入なしの同じモデル)の判定 judge(文面。{q} に質問、{a} に返事が入り、返事の最後に出てきた labels の文字を判定にする)を
+        数える。temperature > 0 なら seeds の種ごとに 1 回。返事は <root>/behave/<model_id>/<name>.json に残り(質問と当てたレシピの名前も)、
+        結果は数だけ(runs[].counts)。CHiPS で残った場面を keyed で抑えるときは、この結果を direction_key_from_behave に渡す。"""
+        try:
+            p = {"prompts": prompts, "recipes": recipes, "match": match, "judge": judge, "labels": labels,
+                 "max_tokens": max_tokens, "thinking": thinking or None, "temperature": temperature or None, "seeds": seeds,
+                 "name": name}
+            return jobs.start("behave", {k: v for k, v in p.items() if v is not None}).view()
         except Exception as e:  # noqa: BLE001
             return _err(e)
 

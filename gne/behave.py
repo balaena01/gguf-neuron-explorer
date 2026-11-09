@@ -15,12 +15,13 @@ from .steer import GneError
 
 
 def load_prompts(path: str | Path) -> list:
-    """JSON / YAML の質問の並び(文字列か会話の履歴)。{"prompts": [...]} の形も読む。"""
+    """JSON / YAML の質問の並び(文字列か会話の履歴)。{"prompts": [...]} の形も読む。対照集合なら A 側の質問
+    (prompts_a、無ければ user_prompts)。"""
     import yaml
     p = Path(path)
     d = json.loads(p.read_text(encoding="utf-8")) if p.suffix == ".json" else yaml.safe_load(p.read_text(encoding="utf-8"))
     if isinstance(d, dict):
-        d = d.get("prompts") or d.get("user_prompts")
+        d = d.get("prompts") or d.get("prompts_a") or d.get("user_prompts")
     if not isinstance(d, list) or not d:
         raise GneError("BAD_ARGS", f"{p}: 質問の並びが読めません(文字列か会話の履歴のリスト)")
     return d
@@ -50,12 +51,24 @@ def behave(session, prompts: list, *, lora=None, vectors=None, match: str | None
     if judge and ("{q}" not in judge or "{a}" not in judge):
         raise GneError("BAD_ARGS", "判定の文面には {q}(質問)と {a}(返事)が要ります")
     seeds = seeds or [0]
+    # 進み具合: 種ごとに質問の数だけ(判定があればその分も)進む。ジョブの取り消しは progress が例外を投げて止める
+    total = len(seeds) * len(prompts) * (2 if judge else 1)
+    done = 0
+
+    def tick(k: int, stage: str) -> None:
+        nonlocal done
+        done += k
+        if progress:
+            progress(min(done, total), total, stage)
+    if progress:
+        progress(0, total, "behave")
     runs = []
     for seed in seeds:
         sp = Sampling(temperature=temperature, seed=seed, presence_penalty=0.0, min_p=0.0) if temperature > 0 else None
         t0 = time.perf_counter()
-        outs = _generate(session, [(q, max_tokens) for q in prompts], vectors, lora, "all", lambda k: None, sampling=sp,
-                         thinking=thinking)
+        stage = f"behave: 種 {seed}" if len(seeds) > 1 else "behave"
+        outs = _generate(session, [(q, max_tokens) for q in prompts], vectors, lora, "all", lambda k, st=stage: tick(k, st),
+                         sampling=sp, thinking=thinking)
         replies = [{"i": i, "text": answer_of(o["text"], thinking), "full": o["text"] if thinking else None,
                     "finish": o["finish"], "n_tokens": len(o["token_ids"]), "loop": loop_like(o["token_ids"])} for i, o in enumerate(outs)]
         counts = {"n": len(replies), "empty": sum(not r["text"].strip() for r in replies), "loop": sum(r["loop"] for r in replies),
@@ -67,7 +80,8 @@ def behave(session, prompts: list, *, lora=None, vectors=None, match: str | None
             idx = [k for k, r in enumerate(replies) if r["text"].strip()]
             items = [(judge.replace("{q}", q if isinstance(q, str) else json.dumps(q, ensure_ascii=False))
                       .replace("{a}", replies[k]["text"][:6000]), judge_tokens) for k in idx for q in [prompts[replies[k]["i"]]]]
-            got = _generate(session, items, None, None, "all", lambda k: None)       # 読み手は介入なし・思考なし
+            got = _generate(session, items, None, None, "all", lambda k, st=stage: tick(k, f"{st}(判定)"))   # 読み手は介入なし・思考なし
+            tick(len(replies) - len(idx), f"{stage}(判定)")                       # 空の返事は判定しない
             pat = re.compile(r"\b(" + "|".join(map(re.escape, labs)) + r")\b")
             for r in replies:
                 r["label"] = "N"
@@ -76,7 +90,5 @@ def behave(session, prompts: list, *, lora=None, vectors=None, match: str | None
                 replies[k]["label"] = m[-1] if m else "?"
             counts["labels"] = {x: sum(r["label"] == x for r in replies) for x in labs + ["N", "?"]}
         runs.append({"seed": seed, "counts": counts, "replies": replies, "seconds": time.perf_counter() - t0})
-        if progress:
-            progress(len(runs), len(seeds), "behave")
     return {"runs": runs, "n_prompts": len(prompts), "max_tokens": max_tokens, "thinking": thinking, "temperature": temperature,
             "match": match, "judge": bool(judge), "labels": labs}

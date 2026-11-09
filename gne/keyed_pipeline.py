@@ -9,8 +9,11 @@ UI の鍵のタブの「方向から key-check まで」、ジョブ direction_k
 2. 鍵: gne direction key と同じ(Session.direction_key)。
 3. key-check: 作成と反対側の subset(even ↔ odd)で、同じ対照集合・同じ返事で測る(gne direction key-check と同じ)。
 
-表の最上位に任意で keyed: {layers, target, q_mode, subset, pseudo, max_tokens, alpha} を書ける(引数が優先)。alpha は
-UI が「+ レシピ」の α の欄に入れる値で、ここでは結果の alpha_hint に返すだけ。
+表の最上位に任意で keyed: {layers, target, q_mode, subset, pseudo, max_tokens, alpha, direction, iv} を書ける(引数が優先)。alpha は
+UI が「+ レシピ」の α の欄に入れる値で、ここでは結果の alpha_hint に返すだけ。direction は書き込む方向の名前(省くと対照集合の
+name)で、別の対照集合で作った方向(CHiPS の方向など)を使い回すときに書く。その方向が無くてもこの対照集合からは作らず、作り直しもしない。
+iv は鍵の作成と key-check で当てる介入(gne direction key --iv と同じ。保存したレシピの名前かパス、またはユニットの書き方のリスト)。
+gne direction key-from-behave が作る JSON は direction・alpha・iv を書く。
 """
 
 from __future__ import annotations
@@ -24,7 +27,8 @@ import yaml
 
 from .steer import GneError
 
-SETTINGS = ("layers", "target", "q_mode", "subset", "pseudo", "max_tokens", "alpha")   # 表の keyed に書ける設定
+SETTINGS = ("layers", "target", "q_mode", "subset", "pseudo", "max_tokens", "alpha", "direction", "iv")   # 表の keyed に書ける設定
+NOT_ARGS = ("alpha", "direction")        # 鍵の作成の引数にしない設定(alpha は「+ レシピ」の α、direction は run が読む)
 OPPOSITE = {"even": "odd", "odd": "even", "all": "all"}
 
 
@@ -36,6 +40,12 @@ def _settings(raw, where: str) -> dict:
     bad = sorted(set(raw) - set(SETTINGS))
     if bad:
         raise GneError("BAD_CONTRAST", f"{where}: keyed に {', '.join(bad)} は使えません({', '.join(SETTINGS)})")
+    d = raw.get("direction")
+    if d is not None and not (isinstance(d, str) and re.fullmatch(r"[\w.\-]+", d)):
+        raise GneError("BAD_CONTRAST", f"{where}: keyed.direction は方向の名前です(英数字・_・-・. だけ。{d!r})")
+    iv = raw.get("iv")
+    if iv is not None and not (isinstance(iv, str) and iv or isinstance(iv, list) and iv and all(isinstance(u, str) for u in iv)):
+        raise GneError("BAD_CONTRAST", f"{where}: keyed.iv は保存したレシピの名前かパス、またはユニットの書き方のリストです({iv!r})")
     return dict(raw)
 
 
@@ -93,10 +103,10 @@ def resolve(session, contrast) -> tuple[Path, dict]:
 
 
 def apply_settings(settings: dict, params: dict, keys=SETTINGS) -> dict:
-    """keyed の設定を、渡していない引数(None か無い)の既定にする。alpha は引数にしない。"""
+    """keyed の設定を、渡していない引数(None か無い)の既定にする。alpha・direction は引数にしない(NOT_ARGS)。"""
     out = dict(params)
     for k in keys:
-        if k != "alpha" and out.get(k) is None and settings.get(k) is not None:
+        if k not in NOT_ARGS and out.get(k) is None and settings.get(k) is not None:
             out[k] = settings[k]
     return out
 
@@ -124,7 +134,8 @@ def run(session, contrast, *, layers=None, name: str | None = None, direction: s
         rebuild_direction: bool = False, response_tokens: int = 96, check: bool = True, check_subset: str | None = None,
         compact: bool = False, progress: Callable | None = None, **build_kw) -> dict:
     """対照集合(表かパス)から、方向(positions response)→ 鍵 → 作成と反対側の subset での key-check を続けて回す。
-    layers は必須(引数か表の keyed.layers)。name は鍵の名前(省くと対照集合の name)、direction は方向の名前(省くと対照集合の name)。
+    layers は必須(引数か表の keyed.layers)。name は鍵の名前(省くと対照集合の name)、direction は方向の名前(省くと表の
+    keyed.direction、無ければ対照集合の name。keyed.direction の方向は作らず、作り直さない)。
     build_kw は Session.direction_key の引数(target・positions・q_mode・subset・pseudo・max_tokens・replies_a / replies_b・iv など)。
     compact なら key-check の例ごとの ρ・ヒストグラム・比較用の鍵ごとの値を落とす(MCP 向け)。"""
     from .direction import load_contrast
@@ -139,7 +150,8 @@ def run(session, contrast, *, layers=None, name: str | None = None, direction: s
         raise GneError("BAD_ARGS", "鍵の層(layers)を指定してください(例 [8, 14, 20] か \"8,14,20\"、または表の keyed.layers)")
     spec = read_key_spec(path)
     cname = spec.contrast.name
-    dname = direction or cname
+    fixed = not direction and bool(settings.get("direction"))           # 表の keyed.direction(別の対照集合で作った方向)
+    dname = direction or settings.get("direction") or cname
     kname = name or cname
     for nm, what in ((dname, "方向"), (kname, "鍵")):
         if not re.fullmatch(r"[\w.\-]+", nm):
@@ -150,6 +162,10 @@ def run(session, contrast, *, layers=None, name: str | None = None, direction: s
         existing = session.direction_set(dname)
     except (GneError, OSError, ValueError, KeyError):
         existing = None
+    if fixed and (existing is None or rebuild_direction):
+        raise GneError("BAD_ARGS", f"表の keyed.direction の方向 {dname} " + ("は作り直しません" if existing is not None else "がありません")
+                       + "(別の対照集合で作った方向なので、この対照集合からは作りません)",
+                       "その方向を作った対照集合で gne direction を回すか、keyed.direction を消して direction で方向を渡してください")
     build_dir = existing is None or bool(rebuild_direction)
     labels = (["方向"] if build_dir else []) + ["鍵"] + (["key-check"] if check else [])
     st = _Stages(progress, labels)
@@ -174,15 +190,15 @@ def run(session, contrast, *, layers=None, name: str | None = None, direction: s
         else:
             m = existing.meta
             pos = m.get("positions")
-            if m.get("contrast_sha") and m.get("contrast_sha") != spec.contrast.sha:
+            if not fixed and m.get("contrast_sha") and m.get("contrast_sha") != spec.contrast.sha:
                 warnings.append(f"方向 {dname} は、いまの対照集合とは中身の違うファイルから作られています(作り直すなら"
                                 "「方向を作り直す」、MCP は rebuild_direction=True)")
-            if pos and pos != "response":
+            if not fixed and pos and pos != "response":
                 warnings.append(f"方向 {dname} は positions {pos} で作られています(この一括は response で作ります。"
                                 "そろえるなら作り直す)")
             out["direction"] = {"name": dname, "reused": True, "rebuilt": False, "path": str(existing.path),
                                 "positions": pos, "n_rows": {"A": int(m.get("n_rows_A") or 0), "B": int(m.get("n_rows_B") or 0)},
-                                "seconds": 0.0}
+                                "seconds": 0.0, "from_settings": fixed}
         ts = time.perf_counter()                                          # 2. 鍵
         f = st.start(i)
         i += 1

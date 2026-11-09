@@ -15,6 +15,7 @@ import uuid
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from .steer import GneError
 
@@ -202,7 +203,7 @@ def _direction_key(s, contrast=None, layers=None, spec: dict | None = None, **p)
     """鍵つきの書き込みの鍵を作る(CHANGE-07、gne direction key)。contrast は対照集合のパスか、spec に対照集合の表(UI の入力欄)。
     layers は必須(リストか "8,14,20"。spec の keyed.layers でも可)。ほかの引数は Session.direction_key(keyed_build.build_keys)と同じ。"""
     contrast, p = _key_contrast(s, contrast, spec, {"layers": layers, **p},
-                                ("layers", "target", "q_mode", "subset", "pseudo", "max_tokens"))
+                                ("layers", "target", "q_mode", "subset", "pseudo", "max_tokens", "iv"))
     Ls = _layers(p.pop("layers", None))
     if not Ls:
         raise GneError("BAD_ARGS", "鍵の層(layers)を指定してください(例 [8, 14, 20] か \"8,14,20\")")
@@ -226,7 +227,7 @@ def _direction_key_experts(s, contrast=None, layers=None, spec: dict | None = No
     """expert:e の鍵の専門家を選ぶ材料(CHANGE-07 MoE、gne direction key-experts): 書き込みたい位置・書き込みたくない位置で各専門家が
     選ばれた割合と重み。contrast は対照集合のパスか、spec に対照集合の表(UI の入力欄)。layers は必須(リストか "6,12,18")。
     ほかの引数は keyed_build.expert_usage と同じ。"""
-    contrast, p = _key_contrast(s, contrast, spec, {"layers": layers, **p}, ("layers", "subset", "max_tokens"))
+    contrast, p = _key_contrast(s, contrast, spec, {"layers": layers, **p}, ("layers", "subset", "max_tokens", "iv"))
     Ls = _layers(p.pop("layers", None))
     if not Ls:
         raise GneError("BAD_ARGS", "調べる MoE の層(layers)を指定してください(例 [6, 12, 18] か \"6,12,18\")")
@@ -254,6 +255,25 @@ def _direction_key_verify(s, layer, key: str, direction: str, alphas=None, targe
         texts = [x for x in texts.splitlines() if x.strip()]
     return s.check_keyed(int(layer), key=str(key), direction=str(direction), alphas=tuple(float(a) for a in (alphas or (1.0, 2.0))),
                          kind=kind, expert=expert, direction_layer=direction_layer, texts=list(texts) if texts else None)
+
+
+def _behave(s, prompts, recipes=None, seeds=None, **p) -> dict:
+    """振る舞いを数える(gne behave、Session.behave)。prompts は質問集のパス(対照集合なら A 側の質問)、configs/contrast/ の名前、
+    または質問のリスト。recipes はレシピの名前かパス(1 つなら文字列でも可)。seeds はリストか "1,2,3"。進み具合は質問ごと・種ごと。"""
+    if isinstance(prompts, str) and not Path(prompts).exists():
+        prompts = s._contrast_file(prompts)                    # configs/contrast/ の名前(無ければ FILE_NOT_FOUND)
+    if isinstance(recipes, str):
+        recipes = [recipes]
+    if isinstance(p.get("labels"), (list, tuple)):
+        p["labels"] = ",".join(str(x) for x in p["labels"])
+    if p.get("judge") is not None and not str(p["judge"]).strip():
+        p["judge"] = None
+    if isinstance(seeds, str):
+        try:
+            seeds = [int(x) for x in seeds.replace(" ", "").split(",") if x]
+        except ValueError as e:
+            raise GneError("BAD_ARGS", f"seeds は 1,2,3 のように書きます({seeds!r})") from e
+    return s.behave(prompts, recipes=list(recipes or []), seeds=list(seeds) if seeds else None, **p)
 
 
 def standard_kinds() -> dict[str, Callable[..., dict]]:
@@ -289,6 +309,7 @@ def standard_kinds() -> dict[str, Callable[..., dict]]:
         "direction_key_experts": _direction_key_experts,                                # CHANGE-07 MoE: 専門家の選ばれ方
         "direction_key_pipeline": _direction_key_pipeline,                              # CHANGE-07: 方向 → 鍵 → key-check
         "direction_key_verify": _direction_key_verify,                                  # CHANGE-07 V30: LoRA が式どおりか
+        "behave": _behave,                                                              # 振る舞いを数える(gne behave)
     }
 
 

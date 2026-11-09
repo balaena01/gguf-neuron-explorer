@@ -642,6 +642,63 @@ class UIData:
                     "default_key": None if d.get("default_key") in (None, "") else str(d["default_key"])}
         return self._get(("recipe_extras", name), [p], build)
 
+    # --- CHiPS で残った場面から keyed の JSON を作る(鍵のタブの「CHiPS で残った場面から作る」) --------------------------------
+    def behave_list(self) -> list[dict]:
+        """保存した behave の結果(<root>/behave/<model_id>/*.json、新しい順)の要約: 名前・質問の数・種・長さ・判定の正規表現と
+        ラベル・当てたレシピの名前・種ごとの数(一致・ラベル・空・繰り返し)・質問の記録があるか。返事は返さない。"""
+        import time
+        d = self.s.store.root / "behave" / self.s.meta.model_id
+        files = sorted(d.glob("*.json"), key=lambda q: -(_mtime(q) or 0.0)) if d.is_dir() else []
+        out = []
+        for p in files:
+            def build(p=p):
+                try:
+                    x = json.loads(p.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    return None
+                if not isinstance(x, dict) or not isinstance(x.get("runs"), list):
+                    return None
+                rec = x.get("recipe") if isinstance(x.get("recipe"), dict) else None
+                return {"name": str(x.get("name") or p.stem), "n_prompts": x.get("n_prompts"),
+                        "seeds": [r.get("seed") for r in x["runs"]], "max_tokens": x.get("max_tokens"),
+                        "temperature": x.get("temperature"), "thinking": bool(x.get("thinking")), "match": x.get("match"),
+                        "judge": bool(x.get("judge")), "labels": x.get("labels") or [],
+                        "recipe_names": x.get("recipe_names"), "n_units": len((rec or {}).get("units") or []) if rec else 0,
+                        "has_recipe": rec is not None, "has_prompts": isinstance(x.get("prompts"), list),
+                        "counts": [r.get("counts") or {} for r in x["runs"]]}
+            it = self._get(("behave", str(p)), [p], build)
+            if it is not None:
+                out.append({**it, "file": p.stem,
+                            "updated": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(_mtime(p) or 0))})
+        return out
+
+    def chips_source(self, direction: str | None = None, contrast: str | None = None) -> dict:
+        """CHiPS の方向と対照集合の要約(鍵のタブの「CHiPS で残った場面から作る」の既定に使う): 対照集合のパスと名前、A 側・B 側の
+        質問の数、validate.match、positions の既定(before:<validate.match>、大文字と小文字のある文字を含めば (?i) を付ける)、A 側を
+        system_a・recipe_a で作ったか、方向があるか。contrast を省くと方向を作った対照集合。モデルは使わない。"""
+        from ..direction import load_contrast
+        from ..keyed_from_behave import ignore_case
+        ds = None
+        if direction:
+            if not re.fullmatch(r"[\w.\-]+", direction):
+                raise GneError("BAD_ARGS", f"方向の名前 {direction!r} が不正です")
+            try:
+                ds = self.s.direction_set(direction)
+            except (GneError, OSError, ValueError, KeyError):
+                ds = None
+        if contrast:
+            path = self.s._contrast_file(contrast)
+        elif ds is not None and ds.meta.get("source") and Path(str(ds.meta["source"])).exists():
+            path = Path(str(ds.meta["source"]))
+        else:
+            raise GneError("BAD_ARGS", "対照集合がわかりません(方向を作った対照集合が見つからないので、対照集合を選んでください)")
+        cs, val = load_contrast(path)
+        return {"direction": direction, "direction_exists": ds is not None, "contrast": cs.name, "contrast_path": str(Path(path).resolve()),
+                "n_a": len(cs.prompts("A")), "n_b": len(cs.prompts("B")), "match": val.match,
+                "positions": ("before:" + ignore_case(val.match)) if val.match else None,
+                "system_a": cs.system_a is not None or cs.recipe_a is not None,
+                "same_sha": None if ds is None or not ds.meta.get("contrast_sha") else ds.meta.get("contrast_sha") == cs.sha}
+
     # --- CHANGE-07 G: 鍵つきの書き込み(direction ビューの「鍵」、recipe タブの keyed の鍵の選択) ----------------------------
     def keys_list(self) -> list[dict]:
         """<root>/keys/<model_id>/ の鍵の要約(Session.keys、パスなし)。ファイルの更新時刻が変わるまで覚えておく。"""
@@ -752,11 +809,24 @@ class UIData:
         中身の keyed(UI の欄の既定と、「+ レシピ」の α)はそのまま残す(ジョブが対照集合に書くときに捨てる)。"""
         return UIData._templates("keyed")
 
+    def keyed_templates_all(self) -> list[dict]:
+        """鍵のタブの「ひな形」の一覧: configs/keyed/ のひな形(src "configs"、order の順)の後に、<root>/keyed/ の JSON
+        (gne direction key-from-behave などで作ったもの。src "root"、新しい順)。形は keyed_templates と同じ。"""
+        out = [{**x, "src": "configs"} for x in self.keyed_templates()]
+        d = self.s.store.root / "keyed"
+        files = sorted(d.glob("*.json"), key=lambda q: -(_mtime(q) or 0.0)) if d.is_dir() else []
+        return out + [{**x, "src": "root"} for x in self._read_templates(files)]
+
     @staticmethod
     def _templates(sub: str) -> list[dict]:
         from ..store import CONFIGS
+        return sorted(UIData._read_templates(sorted((CONFIGS / sub).glob("*.json"))), key=lambda x: (x["order"], x["file"]))
+
+    @staticmethod
+    def _read_templates(files) -> list[dict]:
+        """ひな形の JSON → {file, order, ja, en, spec(about を除いた中身)}。読めないファイルは飛ばす。"""
         out = []
-        for p in sorted((CONFIGS / sub).glob("*.json")):
+        for p in files:
             try:
                 d = json.loads(p.read_text(encoding="utf-8"))
             except (OSError, ValueError):
@@ -764,9 +834,11 @@ class UIData:
             if not isinstance(d, dict):
                 continue
             about = d.pop("about", None) or {}
+            if not isinstance(about, dict):
+                about = {}
             out.append({"file": p.name, "order": about.get("order", 99), "ja": about.get("ja") or {}, "en": about.get("en") or {},
                         "spec": d})
-        return sorted(out, key=lambda x: (x["order"], x["file"]))
+        return out
 
     def pipeline_one(self, name: str) -> dict:
         """一括の結果 1 件。入力に使った対照集合(<root>/contrasts/ に保存したもの)が読めれば spec として添える
