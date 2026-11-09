@@ -231,6 +231,7 @@ export class KeyPanel {
     this.jobs = { build: null, check: null, pipe: null, exp: null, verify: null };   // 投げたジョブの id
     this.handled = new Set();                       // 結果を出し終えたジョブ(SSE と onJobFinished の両方から来る)
     this.built = null;                              // 最後に作った鍵の結果(direction_key)か、一覧で開いた鍵(/api/keys/<名前>)
+    this.viewSeq = 0;                               // 一覧の「見る」の通し番号(view の説明)
     this.checked = null;                            // 最後の key-check の結果
     this.experts = null;                            // 最後の専門家の選ばれ方(direction_key_experts)
     this.verified = null;                           // 最後の key-verify(direction_key_verify)
@@ -907,13 +908,17 @@ export class KeyPanel {
     el.innerHTML = `<div class="evx-scroll"><table class="evx mono kx-keys"><thead><tr><th class="l">${t("名前")}</th><th>${t("書き込み先")}</th><th class="l">${t("層")}</th><th class="l">kn</th><th>q_mode</th><th class="l">positions</th><th>subset</th><th>${t("比較用の鍵")}</th><th>${t("例(書き込みたい側 / 書き込みたくない側)")}</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
   }
 
+  // 待つ間に別の鍵を開いたか、鍵の表が替わった(作ったばかりの鍵の結果など)なら、遅れて届いた結果は捨てる
   async view(name) {
+    const seq = ++this.viewSeq, before = this.built;
+    const stale = () => seq !== this.viewSeq || this.built !== before;
     try {
       const k = await getJSON(`/api/keys/${encodeURIComponent(name)}`);
+      if (stale()) return;
       this.built = { kind: "saved", r: { ...k, n_pseudo: k.n_pseudo } };
       this.renderBuilt();
       this.$("#kx-build").scrollIntoView({ block: "nearest" });
-    } catch (e) { this.status("build", `${t("エラー")}: ${e.message}`, true); }
+    } catch (e) { if (!stale()) this.status("build", `${t("エラー")}: ${e.message}`, true); }
   }
 
   // 鍵を key-check の欄に入れる: 作ったときの対照集合(作った直後なら分かる)と反対側の subset、同じ返事のファイル

@@ -36,6 +36,7 @@ export class CandidatesPanel {
     this.onChatCandidate = onChatCandidate || (async () => null);   // 同じ引数 → 読み込んで 1 列チャットで開く
     this.list = [];
     this.data = null;                  // /api/candidates/<name>
+    this.openSeq = 0;                  // open の通し番号(後から別の結果を開いたら、先に始めた読み込みの結果は捨てる)
     this.mode = "summary";             // summary / grid / score
     this.side = "A";                   // 返事を並べる側
     this.named = false;                // 返事を並べるとき、候補の名前を出すか
@@ -71,10 +72,14 @@ export class CandidatesPanel {
   }
 
   async open(name, mode = "summary") {
+    const tok = ++this.openSeq;
     const out = this.$("#cd-result");
     out.innerHTML = `<p class="muted">${t("読み込み中…")}</p>`;
-    try { this.data = await getJSON(`/api/candidates/${encodeURIComponent(name)}`); }
-    catch (e) { out.innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+    let d;
+    try { d = await getJSON(`/api/candidates/${encodeURIComponent(name)}`); }
+    catch (e) { if (tok === this.openSeq) out.innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+    if (tok !== this.openSeq) return;              // 待つ間に別の結果を開いた
+    this.data = d;
     this.blind = null;
     this.mode = mode;
     const sides = new Set(this.data.candidates.flatMap((c) => [...(c.judge_sides || "")]));
@@ -173,8 +178,11 @@ export class CandidatesPanel {
   // --- 名前を伏せて採点する ---------------------------------------------------------------------------
   async startScoring() {
     const d = this.data;
-    try { this.blind = await getJSON(`/api/candidates/${encodeURIComponent(d.name)}/blind`); }
-    catch (e) { this.$("#cd-result").insertAdjacentHTML("beforeend", `<p class="err">${esc(e.message)}</p>`); return; }
+    let blind;
+    try { blind = await getJSON(`/api/candidates/${encodeURIComponent(d.name)}/blind`); }
+    catch (e) { if (this.data === d) this.$("#cd-result").insertAdjacentHTML("beforeend", `<p class="err">${esc(e.message)}</p>`); return; }
+    if (this.data !== d) return;                   // 待つ間に別の結果を開いた
+    this.blind = blind;
     this.mode = "score";
     const first = this.blind.items.findIndex((it) => !this.blind.scores[String(it.id)]);
     this.pos = first >= 0 ? first : 0;

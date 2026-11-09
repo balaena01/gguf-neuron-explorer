@@ -60,6 +60,11 @@ export class EvalView {
     this.list = [];
     this.data = null;
     this.dose = null;                  // 下に出力の例を出す倍率
+    // 読み込みの順番: 後から始めた読み込みがあるか、待つ間に表示が替わった(ほかの eval を選んだなど)なら、先に始めた読み込みの
+    // 結果は捨てる(遅れて届いた古い結果で、選び直した表示を上書きしないように)
+    this.loadSeq = 0;                  // load の通し番号
+    this.refreshSeq = 0;               // refresh の通し番号
+    this.want = null;                  // 最後に読み込みを始めた eval の名前
     root.innerHTML = `<div class="evx-tools">
         <label class="muted">${t("保存した eval")} <select id="evx-pick"></select></label>
         <span class="evx-run"><span class="muted" id="evx-rc"></span>
@@ -107,22 +112,40 @@ export class EvalView {
         }
       }).catch(() => { this.contrastsLoaded = false; });
     }
-    try { this.list = await getJSON("/api/evals"); } catch { this.list = []; }
+    const rseq = ++this.refreshSeq, lseq = this.loadSeq, before = this.data;
+    let list;
+    try { list = await getJSON("/api/evals"); } catch { list = []; }
+    if (rseq !== this.refreshSeq) return;                             // 後から始めた refresh に任せる
+    this.list = list;
     const pick = this.$("#evx-pick");
     const tag = (k) => ({ "compare-methods": ` · ${t("方式の比較")}`, nheads: ` · ${t("ヘッド数の曲線")}`, "compare-ablation": ` · ${t("消去の比較")}`,
                           other: ` · ${t("その他")}` }[k] || "");
     pick.innerHTML = this.list.length
       ? this.list.map((x) => `<option value="${esc(x.name)}">${esc(x.name)}(${esc((x.created || "").replace("T", " ").slice(0, 16))}${tag(x.kind)})</option>`).join("")
       : `<option value="">${t("(なし)")}</option>`;
+    if (this.loadSeq !== lseq || this.data !== before) {             // 一覧を待つ間に別の eval を選んだか、表示が替わった: それを残す
+      const cur = this.loadSeq !== lseq ? this.want : this.data && this.data.name;
+      if (cur && this.list.some((x) => x.name === cur)) pick.value = cur;
+      return;
+    }
     const name = select || (this.data && this.data.name) || (this.list[0] && this.list[0].name);
     if (name && this.list.some((x) => x.name === name)) { pick.value = name; await this.load(name); }
     else this.render();
   }
 
   async load(name) {
+    const seq = ++this.loadSeq, before = this.data;
+    this.want = name || null;
     if (!name) { this.data = null; this.render(); return; }
-    try { this.data = await getJSON(`/api/evals/${encodeURIComponent(name)}`); }
-    catch (e) { this.data = null; this.$("#evx-body").innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+    const stale = () => seq !== this.loadSeq || this.data !== before;   // 古い読み込み(上の this.loadSeq の説明)
+    let d;
+    try { d = await getJSON(`/api/evals/${encodeURIComponent(name)}`); }
+    catch (e) {
+      if (stale()) return;
+      this.data = null; this.$("#evx-body").innerHTML = `<p class="err">${esc(e.message)}</p>`; return;
+    }
+    if (stale()) return;
+    this.data = d;
     if (kindOf(this.data) === "eval") {
       const ds = this.data.rows.map((r) => r.dose);
       if (!ds.includes(this.dose)) this.dose = ds[ds.length - 1];

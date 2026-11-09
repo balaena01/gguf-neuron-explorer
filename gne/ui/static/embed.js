@@ -25,6 +25,7 @@ export class EmbedView {
     this.runs = [];
     this.run = null;
     this.data = null;
+    this.loadSeq = 0;                            // load の通し番号(load の説明)
     this.color = "kind";
     this.view = { s: 1, x: 0, y: 0 };            // 0〜1 の座標 → 画面: 拡大 s、平行移動 (x, y)
     this.hover = -1;
@@ -72,7 +73,10 @@ export class EmbedView {
     sel.value = this.run || "";
   }
 
+  // 読み込みの通し番号: 待つ間に別の run を選んだ(load をもう一度呼んだ)なら、先に始めた読み込みの結果は捨てる
+  // (開いたときに読み込む一覧の先頭の run が遅れて届いても、選び直した run の表示を上書きしないように)
   async load(run) {
+    const seq = ++this.loadSeq;
     this.run = run;
     this.data = null;
     this.hover = -1;
@@ -100,7 +104,9 @@ export class EmbedView {
     }
     st.textContent = t("読み込み中…");
     try {
-      this.data = await getJSON("/api/embeddings", { run });
+      const data = await getJSON("/api/embeddings", { run });
+      if (seq !== this.loadSeq) return;
+      this.data = data;
       const m = this.data.meta;
       st.textContent = t("{n} rollout · {model} · {dim} 次元 → UMAP", { n: m.n.toLocaleString(), model: m.model, dim: m.dim });
       btn.classList.add("hidden");
@@ -111,6 +117,7 @@ export class EmbedView {
         if (r && this.run === run) { this.top = r.units.filter((x) => x.kind === "neuron").slice(0, 8).map((x) => x.neuron); this.draw(); }
       }).catch(() => {});
     } catch {
+      if (seq !== this.loadSeq) return;
       st.textContent = "";
       btn.classList.remove("hidden");
       msg.textContent = t("この run の埋め込みはまだありません");

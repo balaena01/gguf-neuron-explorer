@@ -1007,6 +1007,9 @@ def test_i18n_english_and_switch_back(server, browser):
     pg = browser.new_page(viewport={"width": 1500, "height": 860})                  # locale は ja-JP のまま(?lang が勝つ)
     errors = []
     pg.on("pageerror", lambda e: errors.append(str(e)))
+    # 保存済みの eval は空に見せる。前のテスト(test_eval_view_and_job)が同じ作業フォルダに残した eval があると、eval ビューに
+    # モデルが書いた日本語の返事(出力の例)が出て、下の「画面に日本語が残らない」の確かめに数えられる(回す順番で落ちる)
+    pg.route("**/api/evals", lambda route, req: route.fulfill(status=200, content_type="application/json", body="[]"))
     pg.goto(server + "/?lang=en")
     pg.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
     assert pg.evaluate("document.documentElement.lang") == "en"
@@ -1117,6 +1120,244 @@ def test_eval_view_and_job(server, browser, tmp_path):
     pg.close()
 
 
+def _fake_eval(name, neuron):
+    """eval ビューに出せる最小の eval の結果(ページの側で /api/evals/<名前> の応答として返す)。ユニットのニューロンで見分ける。"""
+    def row(dose):
+        return {"dose": dose, "capability": 0.9, "capability_drop_pt": 0, "ppl_mean": 5, "ppl_worse_pct": 0, "mix_zh": 0, "mix_other": 0,
+                "persona": {"novelty": 0.1 * dose, "distinct4": 0.9, "capped": 0, "top_words": []}, "shippable": True, "ok": {},
+                "failed": {"exact": [], "format": []}}
+    return {"name": name, "when": "all", "seconds": 1, "created": "2026-01-01T00:00:00",
+            "suite": {"n_tasks": 3, "thresholds": {"capability_drop_pt": 5, "ppl_worse_pct": 10}},
+            "recipe": {"units": [{"layer": 14, "kind": "neuron", "neuron": neuron, "mode": "add", "dose": 1.0}]},
+            "rows": [row(0), row(1)], "samples": {"1": {"persona": [], "failed": []}}}
+
+
+@pytest.mark.model
+def test_eval_view_late_load_does_not_overwrite(server, browser):
+    """eval ビュー: 開いたときに読み込む先頭の eval の中身が遅れて届いても、その間に選び直した eval や、差し替えた表示を
+    上書きしない(遅れて届いた古い読み込みは捨てる)。一覧と中身はページの側で返し、先頭の eval の中身だけ止めておく。"""
+    evs = {"late_a": _fake_eval("late_a", 100), "late_b": _fake_eval("late_b", 200)}
+    held = []
+
+    def on_evals(route, req):
+        name = req.url.split("/api/evals", 1)[1].lstrip("/")
+        if not name:
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps([{"name": n, "kind": "eval", "created": "2026-01-01T00:00:00"} for n in evs]))
+        elif name == "late_a" and len(held) < 2:                                     # 先頭の eval の中身は止めておく(ページごとに 1 回)
+            held.append(route)
+        else:
+            route.fulfill(status=200, content_type="application/json", body=json.dumps(evs[name]))
+
+    def open_eval(n_held):
+        pg = browser.new_page(viewport={"width": 1500, "height": 860})
+        pg.on("pageerror", lambda er: errors.append(str(er)))
+        pg.route("**/api/evals**", on_evals)
+        pg.goto(server + "/")
+        pg.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
+        pg.click("#views button[data-view=eval]")
+        for _ in range(400):
+            if len(held) == n_held:
+                break
+            pg.wait_for_timeout(25)
+        assert len(held) == n_held
+        return pg
+
+    def release(pg, i):
+        with pg.expect_response("**/api/evals/late_a"):
+            held[i].fulfill(status=200, content_type="application/json", body=json.dumps(evs["late_a"]))
+        pg.wait_for_timeout(300)                                                     # 届いた中身をページが読み終えるまで
+    errors = []
+    # 1. 先頭(late_a)を待つ間に late_b を選ぶ → late_a が後から届いても late_b のまま
+    pg = open_eval(1)
+    pg.wait_for_function("document.querySelector('#evx-pick').options.length === 2", timeout=10000)
+    pg.select_option("#evx-pick", "late_b")
+    pg.wait_for_function("window.gne.evalView.data && window.gne.evalView.data.name === 'late_b'", timeout=10000)
+    release(pg, 0)
+    assert pg.evaluate("window.gne.evalView.data.name") == "late_b"
+    assert pg.evaluate("document.querySelector('#evx-pick').value") == "late_b"
+    body = pg.evaluate("document.querySelector('#evx-body').textContent")
+    assert "L14 N200" in body and "L14 N100" not in body
+    pg.close()
+    # 2. 先頭を待つ間に表示を差し替える(test_head_panel_in_browser の eval の段と同じ形)→ 後から届いても差し替えたまま
+    pg = open_eval(2)
+    pg.evaluate("""(() => { const ev = window.gne.evalView; ev.data = Object.assign(%s, { name: "mine" }); ev.dose = 1; ev.render(); })()"""
+                % json.dumps(_fake_eval("mine", 300)))
+    release(pg, 1)
+    assert pg.evaluate("window.gne.evalView.data.name") == "mine"
+    assert "L14 N300" in pg.evaluate("document.querySelector('#evx-body').textContent")
+    assert not errors, errors
+    pg.close()
+
+
+class _Late:
+    """ページの側で JSON の応答を返し、決めた 1 つだけ止めておいて後から返す(遅れて届く読み込みを作る)。
+    key(url) で応答を選ぶ名前を取り出す。bodies: 名前 → JSON(無い名前は本物のサーバへ)。hold の名前は最初の 1 回だけ止める。"""
+
+    def __init__(self, key, bodies, hold):
+        self.key, self.bodies, self.hold, self.held = key, bodies, hold, None
+
+    def __call__(self, route, req):
+        k = self.key(req.url)
+        if k == self.hold and self.held is None:
+            self.held = route
+        elif k in self.bodies:
+            route.fulfill(status=200, content_type="application/json", body=json.dumps(self.bodies[k]))
+        else:
+            route.continue_()
+
+    def wait_held(self, pg):
+        for _ in range(400):
+            if self.held is not None:
+                return
+            pg.wait_for_timeout(25)
+        raise AssertionError(f"{self.hold} の読み込みが来ません")
+
+    def release(self, pg, pattern):
+        """止めていた応答を返し(bodies に無ければ本物のサーバへ流す)、ページが読み終えるまで待つ。"""
+        with pg.expect_response(pattern):
+            if self.hold in self.bodies:
+                self.held.fulfill(status=200, content_type="application/json", body=json.dumps(self.bodies[self.hold]))
+            else:
+                self.held.continue_()
+        pg.wait_for_timeout(300)
+
+
+def _path_key(base):
+    """URL の base より後ろの名前(一覧なら "")。"""
+    return lambda url: url.split(base, 1)[1].split("?")[0].lstrip("/")
+
+
+def _open_page(browser, errors):
+    pg = browser.new_page(viewport={"width": 1500, "height": 900})
+    pg.on("pageerror", lambda er: errors.append(str(er)))
+    return pg
+
+
+@pytest.mark.model
+def test_writers_view_late_load_does_not_overwrite(server, browser):
+    """writers ビュー: 開いたときに読み込む先頭の分析の中身が遅れて届いても、その間に選び直した分析を上書きしない
+    (eval ビューと同じ。一覧と中身はページの側で返し、保存してある wseed を 2 つの名前で見せる)。"""
+    import urllib.request
+    ls = json.loads(urllib.request.urlopen(server + "/api/writers").read())
+    one = json.loads(urllib.request.urlopen(server + "/api/writers/wseed").read())
+    item = next(x for x in ls if x["name"] == "wseed")
+    late = _Late(_path_key("/api/writers"), {"": [{**item, "name": "wr_a"}, {**item, "name": "wr_b"}],
+                                              "wr_a": {**one, "name": "wr_a"}, "wr_b": {**one, "name": "wr_b"}}, hold="wr_a")
+    errors = []
+    pg = _open_page(browser, errors)
+    pg.route("**/api/writers**", late)
+    pg.goto(server + "/")
+    pg.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
+    pg.click("#views button[data-view=writers]")
+    late.wait_held(pg)                                                               # 先頭の wr_a の中身を止めている
+    pg.wait_for_function("document.querySelector('#wrx-pick').options.length === 2", timeout=10000)
+    pg.select_option("#wrx-pick", "wr_b")
+    pg.wait_for_function("window.gne.writersView.data && window.gne.writersView.data.name === 'wr_b'", timeout=10000)
+    late.release(pg, "**/api/writers/wr_a")
+    assert pg.evaluate("window.gne.writersView.data.name") == "wr_b"
+    assert pg.evaluate("document.querySelector('#wrx-pick').value") == "wr_b"
+    assert not errors, errors
+    pg.close()
+
+
+@pytest.mark.model
+def test_embed_view_late_load_does_not_overwrite(server, browser):
+    """embed ビュー: 開いたときに読み込む先頭の run の埋め込みが遅れて届いても、その間に選び直した run を上書きしない。
+    run の一覧(/api/model の runs)と埋め込みはページの側で返す。"""
+    def emb(model):
+        return {"meta": {"n": 2, "model": model, "dim": 8, "layer": 14, "prompts": ["p0"]},
+                "points": [[0.2, 0.3, 0, 100, "p0", 1.0, 0], [0.6, 0.7, 2, 0, "p0", 0, 1]], "texts": ["a", "b"]}
+    late = _Late(lambda url: url.split("run=", 1)[1].split("&")[0] if "run=" in url else "",
+                 {"ea": emb("fake-a"), "eb": emb("fake-b")}, hold="ea")
+
+    def on_model(route, req):
+        r = route.fetch()
+        m = r.json()
+        m["runs"] = [{"run": "ea", "embedded": True, "size": 1000}, {"run": "eb", "embedded": True, "size": 1000}]
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(m))
+    errors = []
+    pg = _open_page(browser, errors)
+    pg.route("**/api/model", on_model)
+    pg.route("**/api/embeddings*", late)
+    pg.goto(server + "/")
+    pg.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
+    pg.click("#views button[data-view=embed]")
+    late.wait_held(pg)                                                               # 先頭の ea の埋め込みを止めている
+    pg.select_option("#ev-run", "eb")
+    pg.wait_for_function("window.gne.embedView.data && window.gne.embedView.data.meta.model === 'fake-b'", timeout=10000)
+    late.release(pg, "**/api/embeddings?run=ea")
+    assert pg.evaluate("window.gne.embedView.run") == "eb"
+    assert pg.evaluate("window.gne.embedView.data.meta.model") == "fake-b"
+    assert "fake-b" in pg.evaluate("document.querySelector('#ev-status').textContent")
+    assert not errors, errors
+    pg.close()
+
+
+@pytest.mark.model
+def test_fieldtest_late_open_does_not_overwrite(server, browser):
+    """eval ビューの「実地テスト」: 結果を開く読み込みが遅れて届いても、その間に開き直した結果を上書きしない
+    (ジョブの終わりに開く結果と行のクリックが重なったときなど)。一覧と中身はページの側で返す。"""
+    late = _Late(_path_key("/api/fieldtests"), {"": [_fieldtest_list_row("ft_a"), _fieldtest_list_row("ft_b")],
+                                                 "ft_a": _fieldtest_row("ft_a"), "ft_b": _fieldtest_row("ft_b")}, hold="ft_a")
+    errors = []
+    pg = _open_page(browser, errors)
+    pg.route("**/api/fieldtests**", late)
+    pg.goto(server + "/")
+    pg.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
+    pg.click("#views button[data-view=eval]")
+    pg.wait_for_function("window.gne.evalView && window.gne.evalView.ft", timeout=30000)
+    pg.evaluate("document.querySelector('#evx-ft-wrap').open = true")
+    pg.wait_for_selector("#ft-list tr[data-ft=ft_b]", timeout=10000)
+    pg.click("#ft-list tr[data-ft=ft_a]")
+    late.wait_held(pg)
+    pg.click("#ft-list tr[data-ft=ft_b]")
+    pg.wait_for_function("window.gne.evalView.ft.data && window.gne.evalView.ft.data.name === 'ft_b'", timeout=10000)
+    late.release(pg, "**/api/fieldtests/ft_a")
+    assert pg.evaluate("window.gne.evalView.ft.data.name") == "ft_b"
+    assert pg.evaluate("document.querySelector('#ft-list tr.on').dataset.ft") == "ft_b"
+    assert not errors, errors
+    pg.close()
+
+
+@pytest.mark.model
+def test_recipe_name_kept_when_saved_list_arrives(server, browser):
+    """recipe タブを開いた直後(保存済みのレシピの一覧が届く前)に入れた名前が、一覧が届いた後も消えず、そのまま保存できる。
+    一覧の応答をページの側で止めておき、名前を入れてから返す(欄から出ていないので change はまだ起きていない)。"""
+    import urllib.request
+    pg = browser.new_page(viewport={"width": 1500, "height": 860})
+    errors = []
+    pg.on("pageerror", lambda er: errors.append(str(er)))
+    pg.goto(server + "/")
+    pg.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
+    pg.evaluate("window.gne.recipe.clear(); window.gne.recipe.add(14, 100, 1.0)")
+    held = []
+
+    def on_list(route, req):
+        if req.method == "GET" and not held:                                         # 最初の一覧だけ止める
+            held.append(route)
+        else:
+            route.continue_()
+    pg.route("**/api/recipes", on_list)
+    pg.click("#list-tabs button[data-tab=recipe]")
+    for _ in range(400):
+        if held:
+            break
+        pg.wait_for_timeout(25)
+    assert held
+    pg.fill("#rc-name", "ui_early")
+    held[0].fulfill(status=200, content_type="application/json",
+                    body=json.dumps([{"name": "ui_marker", "this_model": True, "units": [{"layer": 14, "neuron": 100, "dose": 1.0}]}]))
+    pg.wait_for_function("[...document.querySelectorAll('#rc-load option')].some((o) => o.value === 'ui_marker')", timeout=10000)
+    assert pg.evaluate("document.querySelector('#rc-name').value") == "ui_early"
+    assert pg.evaluate("window.gne.recipe.name") == "ui_early"                     # 欄から出る前でもレシピに入っている
+    pg.click("#rc-save")
+    pg.wait_for_function("document.querySelector('#rc-result').textContent.includes('ui_early')", timeout=10000)
+    assert any(x["name"] == "ui_early" for x in json.loads(urllib.request.urlopen(server + "/api/recipes").read()))
+    assert not errors, errors
+    pg.close()
+
+
 @pytest.mark.model
 def test_recipe_ablate_row(server, browser, tmp_path):
     """recipe タブの ablate の行(CHANGE-02 C): 方向を選ぶと 3 列チャットの列に ablate が入り(− の列は倍率を反転)、保存したレシピにも残る。"""
@@ -1194,8 +1435,7 @@ def test_recipe_ablate_row(server, browser, tmp_path):
     assert pg.evaluate("window.gne.chat.spPreset") == "recipe"
     pg.click("#list-tabs button[data-tab=recipe]")
     pg.wait_for_function("document.querySelector('.rc-sampling')", timeout=10000)
-    pg.wait_for_load_state("networkidle")                                           # 保存一覧を読み直して描き直すまで待つ
-    pg.fill("#rc-name", "ui_sp")
+    pg.fill("#rc-name", "ui_sp")                                                    # 保存一覧が後から届いても名前の欄は消えない
     pg.dispatch_event("#rc-name", "change")
     pg.click("#rc-save")
     pg.wait_for_function("document.querySelector('#rc-result').textContent.includes('ui_sp')", timeout=10000)
@@ -1343,7 +1583,6 @@ def test_head_panel_in_browser(server, browser):
     assert pg.evaluate("document.querySelectorAll('#overlay span.mk-h.minus').length") == 1
     pg.click("#list-tabs button[data-tab=recipe]")
     assert "L12 H3" in pg.evaluate("document.querySelector('#recipe-list table.rc').innerText")
-    pg.wait_for_load_state("networkidle")                             # タブを開いた直後の描き直しが入力を消さないように
     pg.fill("#recipe-list tr.rc-head input.num", "0.5")
     pg.dispatch_event("#recipe-list tr.rc-head input.num", "input")
     assert pg.evaluate("window.gne.recipe.specs()") == ["12:H3:x0.5"] and pg.evaluate("window.gne.recipe.specs(-1)") == ["12:H3:x1.5"]
@@ -1371,7 +1610,8 @@ def test_head_panel_in_browser(server, browser):
     # eval ビュー: 反応性の列(保存済みの eval の形をそのまま渡す)
     pg.click("#views button[data-view=eval]")
     pg.wait_for_function("window.gne.evalView", timeout=30000)
-    pg.wait_for_load_state("networkidle")                                           # 保存済みの eval を読み終えてから差し替える
+    # 開いたときに読み込む保存済みの eval が差し替えの後に届いても、差し替えた表示は上書きされない(eval.js が古い読み込みを捨てる。
+    # test_eval_view_late_load_does_not_overwrite)
     pg.evaluate("""(() => {
       const row = (dose, w, wo, ctrl) => ({ dose, capability: 0.9, capability_drop_pt: 0, ppl_mean: 5, ppl_worse_pct: 0, mix_zh: 0, mix_other: 0,
         persona: { novelty: 0.1, distinct4: 0.9, capped: 0, top_words: [] }, shippable: true, ok: {}, failed: { exact: [], format: [] },
@@ -2341,6 +2581,62 @@ def test_candidates_api(cand_server):
 
 
 @pytest.mark.model
+def test_pipeline_late_open_does_not_overwrite(pipe_server, browser):
+    """「JSON から方向とヘッドを作る」のこれまでの実行: 結果を開く読み込みが遅れて届いても、その間に開き直した結果を上書きしない
+    (ジョブの終わりに開く結果と行のクリックが重なったときなど)。保存してある ppx と、その中身を別の名前にしたものを並べる。"""
+    import urllib.request
+    url = pipe_server
+    item = next(x for x in json.loads(urllib.request.urlopen(url + "/api/pipelines").read()) if x["name"] == "ppx")
+    one = json.loads(urllib.request.urlopen(url + "/api/pipelines/ppx").read())
+    late = _Late(_path_key("/api/pipelines"), {"": [item, {**item, "name": "ppx2"}], "ppx2": {**one, "name": "ppx2"}}, hold="ppx")
+    errors = []
+    pg = _open_page(browser, errors)
+    pg.route("**/api/pipelines**", late)
+    pg.goto(url + "/")
+    pg.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
+    pg.click("#views button[data-view=direction]")
+    pg.wait_for_function("window.gne.directionView && window.gne.directionView.mode === 'pipe'", timeout=60000)
+    pg.wait_for_selector("#pp-past tr[data-pp=ppx2]", timeout=30000)
+    pg.click("#pp-past tr[data-pp=ppx]")
+    late.wait_held(pg)                                                               # ppx の中身を止めている(返すときは本物のサーバへ)
+    pg.click("#pp-past tr[data-pp=ppx2]")
+    pg.wait_for_function("window.gne.directionView.pipe.data && window.gne.directionView.pipe.data.name === 'ppx2'", timeout=30000)
+    late.release(pg, "**/api/pipelines/ppx")
+    assert pg.evaluate("window.gne.directionView.pipe.data.name") == "ppx2"
+    assert "ppx2" in pg.evaluate("document.querySelector('#pp-result h3').textContent")
+    assert pg.evaluate("document.querySelector('#pp-past tr.on').dataset.pp") == "ppx2"
+    assert not errors, errors
+    pg.close()
+
+
+@pytest.mark.model
+def test_candidates_late_open_does_not_overwrite(cand_server, browser):
+    """「強さの候補」: 結果を開く読み込みが遅れて届いても、その間に開き直した結果を上書きしない。保存してある cand_api と cand_ui を使い、
+    cand_api の中身だけ止めておいて、cand_ui を開いた後に本物のサーバへ流す。"""
+    url = cand_server
+    late = _Late(_path_key("/api/candidates"), {}, hold="cand_api")
+    errors = []
+    pg = _open_page(browser, errors)
+    pg.route("**/api/candidates/*", late)
+    pg.goto(url + "/")
+    pg.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
+    pg.click("#views button[data-view=direction]")
+    pg.wait_for_function("window.gne.directionView && window.gne.directionView.mode === 'pipe'", timeout=60000)
+    pg.click("#dv-mode button[data-m=cand]")
+    pg.wait_for_selector("#cd-list tr[data-cd=cand_ui]", timeout=30000)
+    pg.click("#cd-list tr[data-cd=cand_api]")
+    late.wait_held(pg)
+    pg.click("#cd-list tr[data-cd=cand_ui]")
+    pg.wait_for_function("window.gne.directionView.cand.data && window.gne.directionView.cand.data.name === 'cand_ui'", timeout=30000)
+    late.release(pg, "**/api/candidates/cand_api")
+    assert pg.evaluate("window.gne.directionView.cand.data.name") == "cand_ui"
+    assert "cand_ui" in pg.evaluate("document.querySelector('#cd-result h3').textContent")
+    assert pg.evaluate("document.querySelector('#cd-list tr.on').dataset.cd") == "cand_ui"
+    assert not errors, errors
+    pg.close()
+
+
+@pytest.mark.model
 def test_candidates_blind_scoring_in_browser(cand_server, browser):
     """direction ビューの「強さの候補」: 要約の表、返事を並べる(名前を伏せると番号だけ)、名前を伏せて採点する(ボタンとキー、
     戻る、保存して続きから)、全部付けると集計といちばん良い候補、そのレシピの読み込みと 1 列チャット。パイプラインの結果の
@@ -2805,21 +3101,31 @@ def test_eval_tab_direction_metric_options(refine_server, browser):
         pg.close()
 
 
+def _fieldtest_list_row(name):
+    """/api/fieldtests の一覧の 1 行の形。"""
+    return {"name": name, "target": "a.gguf", "reference": "b.gguf", "same_level": False, "n_worse": 1, "updated": "2026-11-02T12:00:00"}
+
+
+def _fieldtest_row(name):
+    """/api/fieldtests/<名前> の形(比較の表つき)。"""
+    return {"name": name, "target": {"model": "/m/a.gguf", "file": "a.gguf", "lora": None}, "reference": {"model": "/m/b.gguf", "file": "b.gguf", "lora": None},
+            "settings": {"n_long": 24, "n_tools": 40, "long_tokens": 3072, "prompts": {"mine": 100}, "bench": {"gsm8k": 250}},
+            "runs": [], "same_level": False, "worse": ["long.loop"], "updated": "2026-11-02T12:00:00", "seconds": 600,
+            "compare": [{"section": "long", "metric": "loop", "label": "短い周期のループ", "reference": 0.0, "target": 0.125, "delta": 0.125, "worse": True},
+                        {"section": "tools", "metric": "called", "label": "呼ぶべきときに呼んだ", "reference": 1.0, "target": 1.0, "delta": 0.0, "worse": False},
+                        {"section": "prompts:mine", "metric": "empty", "label": "本文が空", "reference": 0.02, "target": 0.02, "delta": 0.0, "worse": False},
+                        {"section": "bench:gsm8k", "metric": "accuracy", "label": "正答率", "reference": 0.97, "target": 0.96, "delta": -0.01, "worse": False,
+                         "only_reference": 4, "only_target": 2, "p": 0.688},
+                        {"section": "ppl", "metric": "mean", "label": "全体(幾何平均)", "reference": 6.77, "target": 6.78, "delta": 0.01, "worse": False}]}
+
+
 def test_fieldtest_panel(refine_server, browser, tmp_path):
     """eval ビューの「実地テスト」: 入力を fieldtest のジョブにして投げ、終わると比較の表を出す。悪化の行に印。文章は出さない。英語の文言もある。"""
     import urllib.error
     import urllib.request
     url = refine_server
     from gne.store import Store  # noqa: F401
-    done_row = {"name": "ftx", "target": {"model": "/m/a.gguf", "file": "a.gguf", "lora": None}, "reference": {"model": "/m/b.gguf", "file": "b.gguf", "lora": None},
-                "settings": {"n_long": 24, "n_tools": 40, "long_tokens": 3072, "prompts": {"mine": 100}, "bench": {"gsm8k": 250}},
-                "runs": [], "same_level": False, "worse": ["long.loop"], "updated": "2026-11-02T12:00:00", "seconds": 600,
-                "compare": [{"section": "long", "metric": "loop", "label": "短い周期のループ", "reference": 0.0, "target": 0.125, "delta": 0.125, "worse": True},
-                            {"section": "tools", "metric": "called", "label": "呼ぶべきときに呼んだ", "reference": 1.0, "target": 1.0, "delta": 0.0, "worse": False},
-                            {"section": "prompts:mine", "metric": "empty", "label": "本文が空", "reference": 0.02, "target": 0.02, "delta": 0.0, "worse": False},
-                            {"section": "bench:gsm8k", "metric": "accuracy", "label": "正答率", "reference": 0.97, "target": 0.96, "delta": -0.01, "worse": False,
-                             "only_reference": 4, "only_target": 2, "p": 0.688},
-                            {"section": "ppl", "metric": "mean", "label": "全体(幾何平均)", "reference": 6.77, "target": 6.78, "delta": 0.01, "worse": False}]}
+    done_row = _fieldtest_row("ftx")
     for bad in ("nope", "x.replies"):
         with pytest.raises(urllib.error.HTTPError) as ei:
             urllib.request.urlopen(url + f"/api/fieldtests/{bad}")
@@ -2843,7 +3149,7 @@ def test_fieldtest_panel(refine_server, browser, tmp_path):
                 "seconds": 600.0, "result": {"name": "ftx"}, "error": None}
         pg.route("**/api/jobs/fake-ft/events", lambda route, req: route.fulfill(status=200, content_type="text/event-stream", body=f"data: {json.dumps(done)}\n\n"))
         pg.route("**/api/fieldtests", lambda route, req: route.fulfill(status=200, content_type="application/json", body=json.dumps(
-            [{"name": "ftx", "target": "a.gguf", "reference": "b.gguf", "same_level": False, "n_worse": 1, "updated": "2026-11-02T12:00:00"}])))
+            [_fieldtest_list_row("ftx")])))
         pg.route("**/api/fieldtests/ftx", lambda route, req: route.fulfill(status=200, content_type="application/json", body=json.dumps(done_row)))
         pg.goto(url + f"/?lang={lang}")
         pg.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)

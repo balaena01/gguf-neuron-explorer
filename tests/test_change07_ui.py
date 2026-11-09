@@ -10,6 +10,7 @@
 鍵のタブの「JSON を書く」: ひな形(configs/keyed/)を選ぶと入力欄に入り、書き換えた入力欄を置き換える前に確かめる。「方向から key-check
 まで」(direction_key_pipeline のジョブ)で方向・鍵・key-check を続けて回し、書き込む方向に作ったばかりの方向が選ばれる。行の
 「key-verify」(direction_key_verify のジョブ)。専門家の選ばれ方の表から専門家の鍵づくりの欄に入る(MoE の層は与えて描く)。
+保存した鍵の一覧の「見る」は、先に押した鍵の読み込みが遅れて届いても、後から開いた鍵の表を上書きしない。
 """
 
 import json
@@ -730,3 +731,49 @@ def test_key_check_start_rho_cell_and_matched_label(ui_server, browser):
             assert missing == [], missing
         assert not errors, errors
         pg.close()
+
+
+def _saved_key(name):
+    """/api/keys/<名前> の形の、小さな保存した鍵(層 8・14)。"""
+    return {"name": name, "target": "ffn", "layers": [8, 14], "kn": {"8": 0.3, "14": 0.4}, "gain": {"8": 3.3, "14": 2.5},
+            "q_rank": {"8": 5, "14": 6}, "positions": "before:(です|ます)。", "q_mode": "examples", "subset": "even",
+            "counts": {"a": 10, "b": 100}, "n_pseudo": 16, "info": {"mode": "same", "build_auc": {"8": 0.9, "14": 0.95}, "weak": [], "dropped": {}}}
+
+
+@pytest.mark.model
+def test_key_view_late_load_does_not_overwrite(ui_server, browser):
+    """保存した鍵の一覧の「見る」: 先に押した鍵の読み込みが遅れて届いても、その間に開いた別の鍵の表を上書きしない
+    (eval ビューと同じく、遅れて届いた古い読み込みは捨てる)。鍵の一覧と中身はページの側で返し、先に押した鍵の中身だけ止めておく。"""
+    url = ui_server["url"]
+    keys = {"kview_a": _saved_key("kview_a"), "kview_b": _saved_key("kview_b")}
+    listing = [{k: v for k, v in x.items() if k not in ("gain", "q_rank", "info")} for x in keys.values()]
+    held = []
+
+    def on_keys(route, req):
+        name = req.url.split("/api/keys", 1)[1].split("?")[0].lstrip("/")
+        if not name:
+            route.fulfill(status=200, content_type="application/json", body=json.dumps(listing))
+        elif name == "kview_a" and not held:
+            held.append(route)
+        else:
+            route.fulfill(status=200, content_type="application/json", body=json.dumps(keys[name]))
+    pg, errors = _open(browser, url, "ja")
+    pg.route("**/api/keys**", on_keys)
+    _key_tab(pg)
+    pg.wait_for_selector("#kx-keys [data-kview=kview_b]", timeout=10000)
+    pg.click("#kx-keys [data-kview=kview_a]")
+    for _ in range(400):
+        if held:
+            break
+        pg.wait_for_timeout(25)
+    assert held
+    pg.click("#kx-keys [data-kview=kview_b]")
+    pg.wait_for_function("window.gne.directionView.key.built && window.gne.directionView.key.built.r.name === 'kview_b'", timeout=10000)
+    with pg.expect_response("**/api/keys/kview_a"):
+        held[0].fulfill(status=200, content_type="application/json", body=json.dumps(keys["kview_a"]))
+    pg.wait_for_timeout(300)                                                         # 届いた中身をページが読み終えるまで
+    assert pg.evaluate("window.gne.directionView.key.built.r.name") == "kview_b"
+    head = pg.evaluate("document.querySelector('#kx-build .kx-res p.note').textContent")
+    assert "kview_b" in head and "kview_a" not in head
+    assert not errors, errors
+    pg.close()

@@ -124,6 +124,7 @@ export class PipelinePanel {
     this.onOpenCandidates = onOpenCandidates || (() => {});   // (名前) → 「強さの候補」で開く
     this.list = [];
     this.data = null;                            // 開いている結果(/api/pipelines/<name>)
+    this.openSeq = 0;                            // open の通し番号(後から別の結果を開いたら、先に始めた読み込みの結果は捨てる)
     this.causal = null;                          // その因果スクリーニングの全部の行(/api/causal/<name>)
     this.jobId = null;
     this.candJobId = null;                       // 「候補を作る」で投げた heads_candidates のジョブ
@@ -312,16 +313,17 @@ export class PipelinePanel {
   }
 
   async open(name) {
+    const tok = ++this.openSeq;
     const out = this.$("#pp-result");
     out.innerHTML = `<p class="muted">${t("読み込み中…")}</p>`;
-    let d, c = null;
+    let d, c = null, cl;
     try {
-      let cl;
       [d, c, cl] = await Promise.all([getJSON(`/api/pipelines/${encodeURIComponent(name)}`),
                                       getJSON(`/api/causal/${encodeURIComponent(name)}`).catch(() => null),
                                       getJSON("/api/candidates").catch(() => [])]);
-      this.candSaved = cl.some((x) => x.name === name);
-    } catch (e) { out.innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+    } catch (e) { if (tok === this.openSeq) out.innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+    if (tok !== this.openSeq) return;              // 待つ間に別の結果を開いた(ジョブの終わりに開く結果と、行のクリックなど)
+    this.candSaved = cl.some((x) => x.name === name);
     this.data = d;
     this.causal = c;
     for (const tr of this.$("#pp-past").querySelectorAll("tr[data-pp]")) tr.classList.toggle("on", tr.dataset.pp === name);

@@ -18,6 +18,11 @@ export class WritersView {
     this.onOverlay = onOverlay;        // (name) → 地図に writers:<name> を重ねる
     this.list = [];
     this.data = null;
+    // 読み込みの順番(eval.js と同じ): 後から始めた読み込みがあるか、待つ間に表示が替わった(ほかの分析を選んだなど)なら、
+    // 先に始めた読み込みの結果は捨てる(遅れて届いた古い結果で、選び直した表示を上書きしないように)
+    this.loadSeq = 0;                  // load の通し番号
+    this.refreshSeq = 0;               // refresh の通し番号
+    this.want = null;                  // 最後に読み込みを始めた分析の名前
     root.innerHTML = `<div class="evx-tools">
         <label class="muted">${t("保存した分析")} <select id="wrx-pick"></select></label>
         <button id="wrx-map" title="${t("地図の色を、この分析の寄与にする")}">${t("地図に重ねる")}</button>
@@ -36,21 +41,39 @@ export class WritersView {
   }
 
   async refresh(select) {
-    try { this.list = await getJSON("/api/writers"); } catch { this.list = []; }
+    const rseq = ++this.refreshSeq, lseq = this.loadSeq, before = this.data;
+    let list;
+    try { list = await getJSON("/api/writers"); } catch { list = []; }
+    if (rseq !== this.refreshSeq) return;                             // 後から始めた refresh に任せる
+    this.list = list;
     const pick = this.$("#wrx-pick");
     pick.innerHTML = this.list.length
       ? this.list.map((x) => `<option value="${esc(x.name)}">${esc(x.name)}(L${x.ref_layer}、MLP ${pct(x.totals.mlp, 0)})</option>`).join("")
       : `<option value="">${t("(なし)")}</option>`;
     this.$("#wrx-map").disabled = !this.list.length;
+    if (this.loadSeq !== lseq || this.data !== before) {             // 一覧を待つ間に別の分析を選んだか、表示が替わった: それを残す
+      const cur = this.loadSeq !== lseq ? this.want : this.data && this.data.name;
+      if (cur && this.list.some((x) => x.name === cur)) pick.value = cur;
+      return;
+    }
     const name = select || (this.data && this.data.name) || (this.list[0] && this.list[0].name);
     if (name && this.list.some((x) => x.name === name)) { pick.value = name; await this.load(name); }
     else this.render();
   }
 
   async load(name) {
+    const seq = ++this.loadSeq, before = this.data;
+    this.want = name || null;
     if (!name) { this.data = null; this.render(); return; }
-    try { this.data = await getJSON(`/api/writers/${encodeURIComponent(name)}`); }
-    catch (e) { this.data = null; this.$("#wrx-body").innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+    const stale = () => seq !== this.loadSeq || this.data !== before;   // 古い読み込み(上の this.loadSeq の説明)
+    let d;
+    try { d = await getJSON(`/api/writers/${encodeURIComponent(name)}`); }
+    catch (e) {
+      if (stale()) return;
+      this.data = null; this.$("#wrx-body").innerHTML = `<p class="err">${esc(e.message)}</p>`; return;
+    }
+    if (stale()) return;
+    this.data = d;
     this.render();
   }
 

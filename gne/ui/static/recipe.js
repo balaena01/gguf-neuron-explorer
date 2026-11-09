@@ -119,14 +119,17 @@ export class Recipe {
     } catch { /* 下書きが読めなくても空から始める */ }
   }
 
-  _save() {
+  // notify = false なら下書きに置くだけで知らせない(名前のように地図の印などに関わらない値)
+  _save(notify = true) {
     try {
       localStorage.setItem(this.key, JSON.stringify({ name: this.name, units: this.units, ablate: this.ablate, sampling: this.sampling,
                                                       direction_layer: this.directionLayer, default_direction: this.defaultDirection,
                                                       default_key: this.defaultKey }));
     } catch { /* 置けなくても使える */ }
-    this.onChange(this);
+    if (notify) this.onChange(this);
   }
+  // 名前の欄は打つたびに入れる(欄から出る前に描き直しても、入れかけの名前が消えないように)
+  setName(name) { this.name = name; this._save(false); }
 
   empty() { return !this.units.length && !this.ablate; }
   // ablate を倍率 s で(− の列は s < 0 = その方向を強める)。無ければ undefined
@@ -280,6 +283,7 @@ export class RecipePanel {
     this.keys = keys || (() => []);               // 保存した鍵の要約(/api/keys: name・target・layers、CHANGE-07)
     this.nLayer = nLayer || 0;
     this.kaOpen = false;                          // 「鍵つきの書き込みを足す」の欄を開いているか
+    this.kexpDraft = null;                        // keyed の行の専門家の番号の、入れかけの値 { u: 行のユニット, v }(欄から出るまで)
     this.onOpen = onOpen;
     this.onOpenHead = onOpenHead || (() => {});   // ({ layer, head }) → HEAD パネルで開く
     this.onOpenExpert = onOpenExpert || (() => {});   // ({ layer, expert }) → EXPERT パネルで開く(CHANGE-05 G)
@@ -298,14 +302,26 @@ export class RecipePanel {
     this.lxMsg = null;                 // { html } 書き出しの結果か進み具合
   }
 
+  // 先に今の中身を出し、保存済みの一覧は読めてから「保存したレシピを読む…」の選択欄にだけ足す
+  // (全体を描き直すと、一覧を待つ間に入れた欄の値・開いた欄が消える)
   async refreshSaved() {
-    this.render();                     // 先に今の中身を出し、保存済みの一覧は読めてから足す
-    try { this.saved = (await getJSON("/api/recipes")).filter((x) => x.this_model); } catch { this.saved = []; }
     this.render();
+    try { this.saved = (await getJSON("/api/recipes")).filter((x) => x.this_model); } catch { this.saved = []; }
+    const el = this.root.querySelector("#rc-load");
+    if (el) el.innerHTML = this.savedOptions();
+  }
+
+  savedOptions() {
+    return `<option value="">${t("保存したレシピを読む…")}</option>${
+      this.saved.map((x) => `<option value="${esc(x.name)}">${esc(x.name)}(${x.units.length})</option>`).join("")}`;
   }
 
   render() {
     const r = this.r;
+    // 入力中の欄(id のある文字・数の欄)は、描き直した後も入力を続けられるようにフォーカスとカーソルの位置を戻す
+    const fe = document.activeElement;
+    const focus = fe && fe.id && this.root.contains(fe) && (fe.tagName === "TEXTAREA" || (fe.tagName === "INPUT" && !["range", "checkbox", "radio"].includes(fe.type)))
+      ? { id: fe.id, a: fe.selectionStart, b: fe.selectionEnd } : null;
     const rows = r.units.map((u, i) => {
       if (isKeyed(u)) return this.keyedRow(u, i);
       if (isProj(u)) return this.projRow(u, i);
@@ -324,8 +340,7 @@ export class RecipePanel {
     this.root.innerHTML = `
       <div class="list-tools"><input id="rc-name" placeholder="${t("レシピ名(英数字・_・-)")}" value="${esc(r.name)}" spellcheck="false">
         <button class="small" id="rc-save" title="${t("保存先の recipes フォルダに保存(既定は ~/.gne/recipes、--root を指定していればその下)")}">${t("保存")}</button></div>
-      <div class="list-tools"><select id="rc-load"><option value="">${t("保存したレシピを読む…")}</option>${
-        this.saved.map((x) => `<option value="${esc(x.name)}">${esc(x.name)}(${x.units.length})</option>`).join("")}</select></div>
+      <div class="list-tools"><select id="rc-load">${this.savedOptions()}</select></div>
       ${r.units.length ? `<table class="rc mono"><tbody>${rows}</tbody></table>`
         : `<p class="muted note">${t("ユニットがありません。NEURON の「+ レシピ」「− レシピ」で足します。")}</p>`}
       ${r.skipped ? `<p class="muted note">${t("UI では扱えないユニット(ニューロンの gain・ヘッドの query・ランダム方向など){n} 個を外しました", { n: r.skipped })}</p>` : ""}
@@ -348,7 +363,8 @@ export class RecipePanel {
       ${r.units.length ? `<div class="rc-actions"><button class="small" id="rc-clear" title="${t("すべてのユニットを外す")}">${t("レシピを空にする")}</button></div>` : ""}
       <div id="rc-result"></div>`;
     const $ = (s) => this.root.querySelector(s);
-    $("#rc-name").addEventListener("change", (ev) => { r.name = ev.target.value.trim(); r._save(); });
+    $("#rc-name").addEventListener("input", (ev) => r.setName(ev.target.value));
+    $("#rc-name").addEventListener("change", (ev) => r.setName(ev.target.value.trim()));
     $("#rc-save").addEventListener("click", () => this.save());
     const clr = $("#rc-clear");
     if (clr) clr.addEventListener("click", () => { if (confirm(t("レシピの {n} ユニットをすべて外しますか", { n: r.units.length }))) { r.clear(); this.render(); } });
@@ -406,6 +422,11 @@ export class RecipePanel {
     $("#rc-export").addEventListener("click", () => this.export());
     $("#rc-lora").addEventListener("click", () => { this.lxOpen = !this.lxOpen; this.render(); });
     if (this.lxOpen) this.wireLx();
+    const el = focus && this.root.querySelector(`#${CSS.escape(focus.id)}`);
+    if (el) {
+      el.focus();
+      try { el.setSelectionRange(focus.a, focus.b); } catch { /* 数の欄はカーソルの位置を持たない */ }
+    }
   }
 
   // MoE の単位の名前(CHANGE-05 G)。add には「方向押し」の印、専門家全体は EXPERT パネルへ
@@ -467,7 +488,7 @@ export class RecipePanel {
     return `
       <tr data-i="${i}" class="rc-keyed"><td class="id"><span class="mono">L${u.layer}</span>
         <select class="rc-kkind" data-kkind="${i}" title="${t("書き込み先: ffn = ffn_down、attn = attn_output、S = shared expert、E = 専門家 e(鍵を作った書き込み先と同じにする)")}">${kinds}</select>${
-          u.kind === "expert" ? `<input type="number" class="num rc-kexp" data-kexp="${i}" min="0" value="${u.expert ?? 0}" title="${t("専門家の番号")}">` : ""}
+          u.kind === "expert" ? `<input type="number" class="num rc-kexp" data-kexp="${i}" min="0" value="${esc(String(this.kexpDraft && this.kexpDraft.u === u ? this.kexpDraft.v : u.expert ?? 0))}" title="${t("専門家の番号")}">` : ""}
         <span class="badge keyed" title="${t("鍵つきの書き込み: 入力の活性に鍵が反応するときだけ方向を書く(LoRA)")}">keyed</span>
         <button class="small rm" data-rm="${i}" title="${t("外す")}">×</button>
         <div class="rc-kx"><span class="mono">@</span><select data-kdir="${i}" title="${t("書き込む方向(gne direction の方向セットの r_L)")}">${opts(dirs, u.direction, r.defaultDirection)}</select>
@@ -513,7 +534,10 @@ export class RecipePanel {
     const r = this.r, $ = (s) => this.root.querySelector(s);
     const each = (sel, ev, fn) => { for (const el of this.root.querySelectorAll(sel)) el.addEventListener(ev, () => fn(el)); };
     each("select[data-kkind]", "change", (el) => { r.setKeyed(+el.dataset.kkind, { kind: el.value }); this.render(); });
+    // 専門家の番号は欄から出たとき(change)に入れる(打つたびに並べ替えると行の番号がずれる)。入れかけの値は描き直しても残す
+    each("input[data-kexp]", "input", (el) => { this.kexpDraft = { u: r.units[+el.dataset.kexp], v: el.value }; });
     each("input[data-kexp]", "change", (el) => {
+      this.kexpDraft = null;
       const v = Number(el.value);
       if (Number.isInteger(v) && v >= 0) { r.setKeyed(+el.dataset.kexp, { expert: v }); this.render(); }
     });
@@ -571,8 +595,9 @@ export class RecipePanel {
     const sl = $("#rc-ab-scale");
     if (!sl) return;
     sl.addEventListener("input", (ev) => { this.r.setAblate({ ...cur(), scale: +ev.target.value }); $("#rc-ab-scale-v").textContent = `×${fmt(+ev.target.value, 2)}`; });
-    $("#rc-ab-layers").addEventListener("change", (ev) => this.r.setAblate({ ...cur(), layers: ev.target.value.trim() || "all" }));
-    $("#rc-ab-from").addEventListener("change", (ev) => {
+    // 層・測った層は打つたびに入れる(欄から出る前に描き直しても消えないように)
+    $("#rc-ab-layers").addEventListener("input", (ev) => this.r.setAblate({ ...cur(), layers: ev.target.value.trim() || "all" }));
+    $("#rc-ab-from").addEventListener("input", (ev) => {
       const v = ev.target.value.trim();
       this.r.setAblate({ ...cur(), from_layer: v === "" ? null : +v });
     });
@@ -675,6 +700,7 @@ export class RecipePanel {
     on("#lx-contrast", "input", (ev) => { f.contrast = ev.target.value; });
     on("#lx-strip", "change", (ev) => { f.strip = ev.target.checked; });
     on("#lx-file", "input", (ev) => { f.file = ev.target.value; });
+    on("#lx-into", "input", (ev) => { f.into = ev.target.value; });   // 打つたびに入れる(描き直しても消えないように)
     on("#lx-into", "change", (ev) => {                   // 量子化していないモデルへ: 型は元のまま(keep)にし、比較はしない
       f.into = ev.target.value;
       if (f.into.trim() && f.requant !== "f16") f.requant = "keep";

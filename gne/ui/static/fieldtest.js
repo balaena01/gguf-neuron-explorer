@@ -20,6 +20,7 @@ export class FieldtestPanel {
     this.onRun = onRun || (async () => null);       // (kind, params) → ジョブ(見積もりの確認つき)
     this.jobId = null;
     this.data = null;
+    this.openSeq = 0;                                 // open の通し番号(後から別の結果を開いたら、先に始めた読み込みの結果は捨てる)
     root.innerHTML = `
       <p class="muted note">${t("本番と同じ動かし方(llama-server、思考あり、サンプリングあり)で、長い作業・ツール呼び出し・質問集・perplexity を測り、ファイルどうしを比べます。eval で見えない、長い思考の途中のループや、ツール呼び出しの崩れを見ます。焼き込んだファイルもそのまま測れます。走っている間は読み込んでいるモデルを GPU から下ろすので、チャットなどは待たされます。27B で質問集 200 問を足して 1 ファイル 30〜45 分かかります。")}</p>
       <div class="ft-form">
@@ -97,8 +98,12 @@ export class FieldtestPanel {
   }
 
   async open(name) {
-    try { this.data = await getJSON(`/api/fieldtests/${encodeURIComponent(name)}`); }
-    catch (e) { this.$("#ft-result").innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+    const tok = ++this.openSeq;
+    let d;
+    try { d = await getJSON(`/api/fieldtests/${encodeURIComponent(name)}`); }
+    catch (e) { if (tok === this.openSeq) this.$("#ft-result").innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+    if (tok !== this.openSeq) return;                 // 待つ間に別の結果を開いた(ジョブの終わりに開く結果と、行のクリックなど)
+    this.data = d;
     this.render();
     for (const tr of this.root.querySelectorAll("tr[data-ft]")) tr.classList.toggle("on", tr.dataset.ft === name);
   }
