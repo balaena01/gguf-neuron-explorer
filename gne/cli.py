@@ -1123,7 +1123,8 @@ def direction(c: Common, holder: dict,
     作った方向は L:dir:NAME:dose のユニットで足せる(gne steer / chat / eval / export-cvec)。
     gne direction score は、方向の分離度(層ごとの cohen_d)と介入の効き目を生成なしで測る(CHANGE-06 B)。
     gne direction key / key-check / keys / key-verify / key-experts は鍵つきの書き込み(keyed、CHANGE-07)の鍵を作る・確かめる(key-experts は MoE の expert:e の鍵の専門家を選ぶ材料)。
-    key-from-behave は CHiPS のレシピを当てても振る舞いが残った質問(gne behave の結果)から keyed の対照集合の JSON を作る。"""
+    key-from-behave は CHiPS のレシピを当てても振る舞いが残った質問(gne behave の結果)から keyed の対照集合の JSON を作る。
+    key-causal / key-causal-verify は keyed の効く場所(層・書き込み先・α)を、生成なしのふるい分けと生成での確かめの 2 段で探す。"""
     if contrast is None:
         raise GneError("BAD_ARGS", "--contrast が要ります", "方向を作る: gne direction --contrast <対照集合>、"
                                                           "測る: gne direction score --name <方向> --contrast <対照集合>")
@@ -1978,6 +1979,13 @@ def direction_key_check(c: Common, holder: dict,
         why = ([f"同じ対照集合で subset が重なる(作成 {ov.get('built_subset')}・確認 {ov.get('subset')})"] if ov.get("subset_overlap") else []) \
             + ([f"作成と同じ (system, 質問) が {ov['hash_overlap']} 個"] if ov.get("hash_overlap") else [])
         lines.append("保留集合: いいえ(" + "、".join(why or ["作成に使った例"]) + ")。AUC・選択性は甘い値です")
+    dts = d.get("dont_touch_start") or {}
+    has_dt = any(g.startswith("dt:") for g in d.get("counts") or {})
+    if dts.get("on"):
+        grp = "・".join(f"{g} {n} 位置" for g, n in dts["groups"].items())
+        lines.append(f"dont_touch の返事を書き始める直前の位置: 鍵の作成と同じく測りました({grp or 'なし'}。返事の冒頭の ρ の位置 0 に入ります)")
+    elif has_dt and dts.get("recorded") is False:
+        lines.append("dont_touch の返事を書き始める直前の位置: 記録の無い古い鍵なので、dont_touch の群の positions に入るときだけ測りました")
     lines.append(f"  {'層':>4} {'AUC':>6} {'AUC(tok)':>8} {'選択性':>7} {'比較用p95':>7} {'比較用AUCp95':>10} {'2分割AUC':>7}  判定")
     for r in d["layers"]:
         pa = (r["pseudo_auc_token"] if r["auc_token"] is not None else r["pseudo_auc"])["p95"]
@@ -1997,7 +2005,8 @@ def direction_key_check(c: Common, holder: dict,
                  "比較用p95・比較用AUCp95 = 比較用の鍵の選択性・AUC の p95(AUC はトークン単位の AUC があればトークン単位)。"
                  "判定 ○ = 選択性が比較用の鍵の p95 を超え、AUC > 0.5。2分割AUC = 書き込みたくない位置を 2 つに分けて作った鍵の"
                  "AUC(参考値)。返事の冒頭の ρ = 書き込みたくない側・dont_touch の、返事を書き始める直前の位置での ρ の中央値"
-                 "(0.4 以上で警告)")
+                 "(0.4 以上で警告。dont_touch のこの位置は、鍵の作成で Q に入れた鍵なら、返事の冒頭が positions の正規表現に"
+                 "一致しても測る)")
     ab = d["all_beat_pseudo"]
     lines.append("全層で比較用の鍵を超えた: " + {True: "はい", False: "いいえ"}.get(ab, "判定なし(比較用の鍵か書き込みたくない位置が無い)"))
     lines += [f"注: {t}" for t in d["notes"]]
@@ -2160,6 +2169,249 @@ def direction_key_verify(c: Common, holder: dict,
                  + ("、書き込みたくない側への漏れ < 0.1" if d["judged_leak"] else "、書き込みたくない側への漏れは判定なし")
                  + ("、ほかの専門家の枠の差 < 1e-3、選ばれ方の変化 0" if kind == "expert" else "") + ")")
     return d, "\n".join(lines), 0 if d["v30"] else 1
+
+
+def _kc_e(e: dict | None, w: int = 13) -> str:
+    """key-causal の効き目の列: 平均±95% の幅(無ければ —)。"""
+    if not e:
+        return format("—", f">{w}")
+    ci = e.get("ci")
+    return format(f"{e['mean']:+.3f}" + (f"±{ci:.3f}" if ci is not None else ""), f">{w}")
+
+
+def _kc_range(r: dict | None, w: int = 15) -> str:
+    return format("—", f">{w}") if not r else format(f"{r['min']:+.3f}〜{r['max']:+.3f}", f">{w}")
+
+
+KC_SORTS = ("place", "effect", "ratio", "side")
+
+
+def _kc_eff_short(e: dict | None, mark, w: int = 9) -> str:
+    """1 か所 1 行の表の効き目の欄: 平均(印が付けば ★)。"""
+    if not e:
+        return format("—", f">{w}")
+    return format(f"{e['mean']:+.2f}" + ("★" if mark else ""), f">{w}")
+
+
+def kc_ratio_alpha(d: dict, ratio_alpha: float | None = None) -> float:
+    """「確率の下がり方 ÷ 副作用」と副作用を出す α(既定は |α| が最大のもの)。"""
+    alphas = [float(a) for a in d["alphas"]]
+    if ratio_alpha is None:
+        return max(alphas, key=abs)
+    for a in alphas:
+        if abs(a - float(ratio_alpha)) < 1e-9:
+            return a
+    raise GneError("BAD_ARGS", f"--ratio-alpha {ratio_alpha:g} は測った α({', '.join(f'{a:g}' for a in alphas)})のどれかです")
+
+
+def kc_sorted(cands: list[dict], sort: str, a: float) -> list[dict]:
+    """1 か所 1 行の候補の並べ替え: place(書き込み先・層の順)/ effect(α での確率の下がり方の大きい順)/ ratio(下がり方 ÷ 副作用の
+    大きい順)/ side(副作用の小さい順)。値の無い候補は後ろ。"""
+    if sort not in KC_SORTS:
+        raise GneError("BAD_ARGS", f"--sort は {' / '.join(KC_SORTS)} です({sort!r})")
+    key = f"{a:g}"
+    if sort == "place":
+        return list(cands)
+
+    def val(c):
+        b = (c.get("by_alpha") or {}).get(key) or {}
+        e = b.get("reply") or b.get("probe")
+        if sort == "effect":
+            return None if not e else e["mean"]
+        if sort == "ratio":
+            return None if b.get("ratio") is None else -b["ratio"]
+        sb = b.get("side_b")
+        return None if not sb else -sb["mean"]
+    return sorted(cands, key=lambda c: (val(c) is None, val(c) if val(c) is not None else 0.0))
+
+
+def key_causal_lines(d: dict, *, only_marked: bool = False, ratio_alpha: float | None = None, sort: str = "place") -> list[str]:
+    """第 1 段(key-causal)の結果の表(CLI と MCP の説明用)。1 か所(書き込み先 × 層)につき 1 行で、強さ(α)ごとの確率の下がり方と
+    印、全部の強さで印が付いたか、ratio_alpha での「確率の下がり方 ÷ 副作用」と副作用を並べる。"""
+    from .keyed_causal import with_candidates
+    d = with_candidates(d)
+    has_reply = d["measure"]["regex"] is not None
+    has_probe = any(r.get("probe") for r in d["rows"])
+    alphas = [float(a) for a in d["alphas"]]
+    ra = kc_ratio_alpha(d, ratio_alpha)
+    iv = d.get("iv_spec")
+    lines = [f"効く場所のふるい分け(生成なし。対照集合 {d['contrast']}、方向 {d['direction']}、"
+             + (f"介入 {iv if isinstance(iv, str) else ' '.join(iv)}、" if iv else "介入なし、")
+             + f"書き込み先 {','.join(d['targets'])}、候補 {d['n_candidates']} か所、強さ(α){','.join(f'{a:g}' for a in alphas)}、"
+             f"候補ごとの比較用の鍵 {d['pseudo']} 本、{d['seconds']:.1f} 秒)",
+             f"注: {d['notes'][0]}"]
+    c = d.get("counts") or {}
+    ca = c.get("a") or {}
+    if has_reply:
+        src = "positions の正規表現" if d["measure"]["source"] == "positions" else "--measure-match"
+        lines.append(f"確率の下がり方(効き目、返事): 作成に使っていない {ca.get('examples', 0)} 問のうち、{d['measure']['regex']}({src})に"
+                     f"一致した {ca.get('matched', 0)} 問の返事で、一致した文字の対数確率の変化(負 = 振る舞いが出にくくなる)")
+    if has_probe:
+        pc = c.get("probe") or {}
+        lines.append(f"効き目(probe): {pc.get('a', 0)} 行で、log p(振る舞いの答え) − log p(望む答え) の変化(負 = 望む答えに寄る)")
+    for a, mk in d["marks"].items():
+        for m, v in mk.items():
+            pl = d["pool"][a][m]
+            lines.append(f"α {a}({'返事' if m == 'reply' else 'probe'}): 印 {v['marked']} / 候補 {v['candidates']}"
+                         f"(偶然でも {v['candidates']} × {d['chance'] * 100:.0f}% = {v['expected']:g} 個は印が付く)、"
+                         f"比較用の鍵の 5% 点 {pl['p5']:+.3f}({pl['n']} 本)")
+    head = f"  {'書込':>4} {'層':>3} |"
+    if has_reply:
+        head += "".join(f" {'α ' + format(a, 'g'):>9}" for a in alphas) + f" {'全部有意':>4} |"
+    if has_probe:
+        head += "".join(f" {'probe ' + format(a, 'g'):>9}" for a in alphas) + f" {'全部有意':>4} |"
+    head += f" {'下がり方÷副作用':>8} {'副作用':>7} {'dt最小':>7} | {'kc余裕':>7} {'比例':>6}  (右の 4 列は α {ra:g})"
+    lines.append(head)
+    key = f"{ra:g}"
+    for cd in kc_sorted(d["candidates"], sort, ra):
+        ba = cd["by_alpha"]
+        marked = any(b.get("mark") or b.get("probe_mark") for b in ba.values())
+        if only_marked and not marked:
+            continue
+        ln = f"  {_target_who(cd['target']):>4} {cd['layer']:>3} |"
+        if has_reply:
+            ln += "".join(" " + _kc_eff_short((ba.get(f"{a:g}") or {}).get("reply"), (ba.get(f"{a:g}") or {}).get("mark")) for a in alphas)
+            ln += f" {('○' if cd.get('all_marked') else ''):>4} |"
+        if has_probe:
+            ln += "".join(" " + _kc_eff_short((ba.get(f"{a:g}") or {}).get("probe"), (ba.get(f"{a:g}") or {}).get("probe_mark")) for a in alphas)
+            ln += f" {('○' if cd.get('all_marked_probe') else ''):>4} |"
+        b = ba.get(key) or {}
+        lin = cd.get("linear") or {}
+        lr = lin.get("ratio")
+        lin_s = "向き×" if lin and not lin.get("consistent") else (f"×{lr:.2f}" if lr is not None else "—")
+        ln += (f" {_fc(b.get('ratio'), '>8.1f')} {_fc((b.get('side_b') or {}).get('mean'), '>+7.3f')} {_fc(b.get('dt_min'), '>+7.3f')} |"
+               f" {_fc((cd.get('key_check') or {}).get('margin'), '>+7.3f')} {lin_s:>6}")
+        lines.append(ln)
+    floor = d.get("ratio_floor") or 0.01
+    lines.append("  α ごとの列 = 確率の下がり方(keyed を当てたときの、振る舞いの部分の対数確率の変化。iv だけの状態との差の例ごとの平均。"
+                 "負 = 下がった)。★ = その強さで有意(全部の候補の比較用の鍵の 5% 点より大きく下がった)。比較用の鍵 = 書き込みたい場面と"
+                 "書き込みたくない場面のラベルをでたらめに入れ替えて、同じ手順で作った鍵(偶然でどれくらい変わるかの基準)。"
+                 "全部有意 = どの強さでも ★。副作用 = 書き込みたくない位置の返事の 1 トークンあたりの対数確率の変化(負 = 下がった)。"
+                 f"下がり方÷副作用 = (−確率の下がり方)÷(−副作用)。副作用が {floor:g} より小さいとき(上がったときも)は {floor:g} で割り、"
+                 "確率が下がっていなければ —。大きいほど、書き込みたくない場面を変えずに振る舞いを下げる。dt最小 = dont_touch の群の返事の"
+                 "1 トークンあたりの変化のうち最も下がった群。kc余裕 = key-check の選択性 − 比較用の鍵の p95(参考)。比例 = 最大の |α| での"
+                 "効き目 ÷ 最小の |α| での効き目を |α| の比で割った値(1 = 比例、向き× = 強さで符号がそろわない、— = 最小の |α| での効き目が"
+                 "95% の幅の中)")
+    lines.append("  選び方の目安: 確率の下がり方・副作用・全部の強さで有意か、の 3 つを並べて自分で選ぶ。確率の下がり方だけで選ぶと、返事を"
+                 "壊して確率を下げている候補を拾うことがある(副作用も比較用の鍵並みに大きい)。--sort ratio / effect / side で並べ替えられる")
+    for x in d.get("dropped") or []:
+        lines.append(f"  {x['target']} L{x['layer']}: 外しました({x['error']})")
+    lines += [f"注: {t}" for t in d["notes"][1:]]
+    marked = [r for r in d["rows"] if r.get("mark") or r.get("probe_mark")]
+    pick = marked[0]["unit"] if marked else (d["rows"][0]["unit"] if d["rows"] else "<ユニット>")
+    lines.append(f"次: gne direction key-causal-verify --from {d['name']} --unit {pick}(選んだ候補を生成で確かめる。--unit は複数可。"
+                 "複数の層をまとめて 1 つの候補にするなら --combo \"<ユニット>,<ユニット>\")")
+    return lines
+
+
+@gne_command(direction_app, "key-causal", "direction key-causal")
+def direction_key_causal(c: Common, holder: dict,
+                         contrast: Path = typer.Option(..., "--contrast", help="鍵の対照集合(YAML か JSON。configs/keyed/ のひな形や gne direction key-from-behave の JSON)"),
+                         layers: Optional[str] = typer.Option(None, "--layers", help="候補の層(既定は全層。例 4-20 / 8,14,20。最終層と MTP の層は除く)"),
+                         target: str = typer.Option("ffn,attn", "--target", help="書き込み先(カンマ区切り): ffn / attn / shared / expert:e。既定 ffn,attn(書けない書き込み先は外す)"),
+                         alphas: Optional[str] = typer.Option(None, "--alphas", help="α の段(例 --alphas=-1,-2,-4)。既定は 1,2,4 に対照集合の keyed.alpha の符号を掛けたもの"),
+                         pseudo: int = typer.Option(3, "--pseudo", help="候補ごとに測る比較用の鍵(ラベルをシャッフルして作った鍵)の本数"),
+                         iv: Optional[list[str]] = typer.Option(None, "--iv", help="当てておく介入(既定は対照集合の keyed.iv)。" + _KEY_IV),
+                         no_iv: bool = typer.Option(False, "--no-iv", help="対照集合の keyed.iv も当てない"),
+                         direction: Optional[str] = typer.Option(None, "--direction", help="書き込む方向(既定は対照集合の keyed.direction、無ければ対照集合の name。無ければ作る)"),
+                         measure_match: Optional[str] = typer.Option(None, "--measure-match", help="効き目を測る振る舞いの部分の正規表現(既定は positions の before: の正規表現)"),
+                         probe: Optional[Path] = typer.Option(None, "--probe", help="選択式の振る舞い向け: 1 行 1 問の JSONL({\"prompt\", \"prefix\": \"Answer:\", \"behavior\": \" B\", \"desired\": \" C\"}、書き込みたくない場面の行は \"group\": \"<群>\")"),
+                         max_tokens: Optional[int] = typer.Option(None, "--max-tokens", help="返事を作るときの長さ(既定は対照集合の keyed.max_tokens、無ければ 96)"),
+                         side_tokens: int = typer.Option(32, "--side-tokens", help="副作用を測る返事のトークンの数(返事の最初から)"),
+                         name: Optional[str] = typer.Option(None, "--name", help="結果と鍵の名前(既定 <対照集合の名前>-causal。鍵は <名前>-ffn などで保存)"),
+                         only_marked: bool = typer.Option(False, "--only-marked", help="表には印の付いた行だけを出す(結果の JSON には全部入る)"),
+                         ratio_alpha: Optional[float] = typer.Option(None, "--ratio-alpha", help="「確率の下がり方 ÷ 副作用」と副作用を出す強さ(既定は |α| が最大のもの)"),
+                         sort: str = typer.Option("place", "--sort", help="表の並べ方: place(書き込み先・層の順、既定)/ effect(確率の下がり方の大きい順)/ ratio(下がり方 ÷ 副作用の大きい順)/ side(副作用の小さい順)。--ratio-alpha の強さで"),
+                         yes: bool = _YES):
+    """keyed の効く場所を探す第 1 段(生成なしのふるい分け)。候補(層 × 書き込み先)ごとに鍵を作り(偶数番目)、作成に使っていない
+    奇数番目の返事で、keyed を当てたときに振る舞いの部分の対数確率がどれだけ下がるか、dont_touch の返事がどれだけ変わるかを、
+    比較用の鍵と並べて測る。比較用の鍵の 5% 点より下がった候補に印を付け、偶然でも印が付く数(候補の数 × 5%)を並べる。
+    生成なしの目安なので、効くかどうかは gne direction key-causal-verify の生成で数える。"""
+    s = holder["session"] = c.session()
+    _gate(s, "direction_key_causal", {"contrast": str(contrast), "layers": layers, "targets": target, "alphas": alphas,
+                                      "pseudo": pseudo, "probe": str(probe) if probe else None, "max_tokens": max_tokens}, yes, None)
+    d = s.direction_key_causal(contrast, layers=layers, targets=target, alphas=alphas, pseudo=pseudo, iv=_iv_arg(iv), no_iv=no_iv,
+                               direction=direction, measure_match=measure_match, probe=probe, max_tokens=max_tokens,
+                               side_tokens=side_tokens, name=name, seed=c.seed, progress=s.progress)
+    d.pop("warnings", None)
+    if sort not in KC_SORTS:
+        raise GneError("BAD_ARGS", f"--sort は {' / '.join(KC_SORTS)} です({sort!r})")
+    return d, "\n".join(key_causal_lines(d, only_marked=only_marked, ratio_alpha=ratio_alpha, sort=sort)), 0
+
+
+def _kcv_count(x: dict | None, key: str = "behavior") -> str:
+    if not x:
+        return "—"
+    v = x.get(key)
+    return "—" if v is None else f"{v}/{x['n']}"
+
+
+def key_causal_verify_lines(d: dict) -> list[str]:
+    """第 2 段(key-causal-verify)の結果の表。"""
+    j = d["judge"]
+    how = (f"読み手のラベル {', '.join(j['labels'])}" if j["method"] == "label" else f"正規表現 {j['match']}")
+    dts = "、".join(f"{g} {n} 問" for g, n in d["n_dt"].items())
+    lines = [f"生成での確かめ(書き込みたい場面 {d['n_a']} 問(作成に使っていない奇数番目)" + (f"、dont_touch {dts}" if dts else "")
+             + f"、返事 {d['max_tokens']} トークン、" + ("greedy" if d["greedy"] else f"温度 {d['temperature']:g}・種 {len(d['seeds'])} 個")
+             + f"、{d['seconds']:.1f} 秒)", f"  判定: {how}"]
+    b = d["base"]
+    lines.append(f"  iv のみ: 振る舞い {_kcv_count(b['a'])}、繰り返し {b['a']['loop']}、空 {b['a']['empty']}、上限 {b['a']['at_limit']}"
+                 + ("" if "hits" not in b["a"] else f"、一致の総数 {b['a']['hits']}"))
+    for r in d["rows"]:
+        k, p = r["a"]["keyed"], r["a"]["pseudo"]
+        lines.append(f"  組 {r.get('label') or ''}: {r['unit']}" if r.get("combo") else f"  {r['unit']}")
+        lines.append(f"    書き込みたい場面: 振る舞い keyed {_kcv_count(k)} / 比較用の鍵 {_kcv_count(p)}(iv のみ {_kcv_count(b['a'])})"
+                     + ("" if "hits" not in k else f"、一致の総数 {k['hits']} / {p['hits']}(iv のみ {b['a']['hits']})")
+                     + ("" if k.get("changed") is None else f"、返事が変わった {k['changed']}/{k['n']} / {p['changed']}/{p['n']}"))
+        lines.append(f"    繰り返し・空・上限: keyed {k['loop']}・{k['empty']}・{k['at_limit']} / 比較用の鍵 {p['loop']}・{p['empty']}・{p['at_limit']}")
+        for g, v in r["dt"].items():
+            kk, pp = v["keyed"], v["pseudo"]
+            lines.append(f"    dont_touch {g}: 返事が変わった " + ("—" if kk.get("changed") is None else
+                                                          f"{kk['changed']}/{kk['n']} / {pp['changed']}/{pp['n']}"
+                                                          f"(先頭から同じ部分 {kk['same_prefix'] * 100:.0f}% / {pp['same_prefix'] * 100:.0f}%)")
+                         + f"、振る舞い {_kcv_count(kk)} / {_kcv_count(pp)}(iv のみ {_kcv_count(b['dt'].get(g))})"
+                         + f"、繰り返し・空・上限 {kk['loop']}・{kk['empty']}・{kk['at_limit']} / {pp['loop']}・{pp['empty']}・{pp['at_limit']}")
+    lines += [f"注: {t}" for t in d["notes"]]
+    lines.append(f"返事: {d['path']}")
+    return lines
+
+
+@gne_command(direction_app, "key-causal-verify", "direction key-causal-verify")
+def direction_key_causal_verify(c: Common, holder: dict,
+                                unit: Optional[list[str]] = typer.Option(None, "--unit", help="確かめる候補の keyed のユニット(key-causal の表の行。例 14:ffn:keyed:a-2@方向#鍵。複数可)。1 つずつ別の候補になる"),
+                                combo: Optional[list[str]] = typer.Option(None, "--combo", help="複数の層をまとめて 1 つの候補として確かめる組(ユニットをカンマで区切る。例 \"11:attn:keyed:a2,18:attn:keyed:a2,23:attn:keyed:a2\"。強さは行ごとに違ってよい。複数可、--unit と併用可)"),
+                                result: Optional[str] = typer.Option(None, "--from", help="第 1 段(gne direction key-causal)の結果の名前。対照集合・介入・方向・鍵・正規表現の既定になる"),
+                                contrast: Optional[Path] = typer.Option(None, "--contrast", help="鍵の対照集合(既定は --from の結果のもの)"),
+                                iv: Optional[list[str]] = typer.Option(None, "--iv", help="当てておく介入(既定は --from の結果のもの)。" + _KEY_IV),
+                                no_iv: bool = typer.Option(False, "--no-iv", help="介入を当てない"),
+                                pseudo_index: int = typer.Option(0, "--pseudo-index", help="比べる比較用の鍵の番号(NAME~j の j)"),
+                                match: Optional[str] = typer.Option(None, "--match", help="振る舞いを数える正規表現(既定は第 1 段で測った正規表現、無ければ対照集合の validate.match)"),
+                                judge: Optional[str] = typer.Option(None, "--judge", help="読み手の判定の文面({q} に質問、{a} に返事。gne behave と同じ)"),
+                                labels: str = typer.Option("R,P,C", "--labels", help="判定のラベル(gne behave と同じ)"),
+                                label: Optional[list[str]] = typer.Option(None, "--label", help="振る舞いとみなすラベル(--judge のとき。例 --label P)"),
+                                max_tokens: int = typer.Option(256, "--max-tokens", help="返事の長さ"),
+                                temperature: float = typer.Option(0.0, "--temperature", help="温度(0 = greedy)"),
+                                seeds: Optional[str] = typer.Option(None, "--seeds", help="種(カンマ区切り。温度があるとき)"),
+                                no_dont_touch: bool = typer.Option(False, "--no-dont-touch", help="dont_touch の質問は答えさせない"),
+                                name: Optional[str] = typer.Option(None, "--name", help="結果の名前(既定は --from の名前。<名前>.verify.json に返事も保存)"),
+                                yes: bool = _YES):
+    """keyed の効く場所を探す第 2 段(生成での確かめ)。選んだ候補と、それぞれの比較用の鍵 1 本で、作成に使っていない質問
+    (と dont_touch の質問)に gne behave と同じ生成をさせ、振る舞いが出た数を介入(iv)だけのときと比べる。dont_touch では
+    返事が変わった数、どれも繰り返し・空の返事・上限で切れた数を出す。--combo の組は、複数のユニットを一緒に当てて 1 つの候補に
+    し、比較用の鍵も組の各ユニットを同じ番号の比較用の鍵に替えた組にする。"""
+    if not unit and not combo:
+        raise GneError("BAD_ARGS", "--unit か --combo で確かめる候補を渡してください")
+    s = holder["session"] = c.session()
+    sd = [int(x) for x in seeds.split(",") if x.strip()] if seeds else None
+    _gate(s, "direction_key_causal_verify", {"units": list(unit or []), "combos": list(combo or []), "result": result,
+                                             "contrast": str(contrast) if contrast else None,
+                                             "max_tokens": max_tokens, "seeds": sd, "judge": judge}, yes, None)
+    d = s.direction_key_causal_verify(list(unit or []), result=result, contrast=contrast, iv=_iv_arg(iv), no_iv=no_iv,
+                                      pseudo_index=pseudo_index, match=match, judge=judge, labels=labels, label=label or None,
+                                      max_tokens=max_tokens, temperature=temperature, seeds=sd, dont_touch=not no_dont_touch,
+                                      name=name, combos=list(combo or []) or None, progress=s.progress)
+    d.pop("warnings", None)
+    return d, "\n".join(key_causal_verify_lines(d)), 0
 
 
 @gne_command(heads_app, "causal", "heads causal")

@@ -111,12 +111,12 @@ class ContrastSet:
             return session.recipe(units=[str(x) for x in spec], name=f"{self.name}-{side}")
         if isinstance(spec, dict):
             import tempfile
-            with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False, encoding="utf-8") as f:
-                yaml.safe_dump({"name": f"{self.name}-{side}", **spec}, f, allow_unicode=True)
-            try:
-                return session.recipe(path=f.name)
-            finally:
-                Path(f.name).unlink(missing_ok=True)
+
+            from .yamlio import write_yaml
+            with tempfile.TemporaryDirectory() as td:          # 読み戻して同じ文字になるか確かめて書く(U+0085 なども)
+                p = Path(td) / "recipe.yaml"
+                write_yaml(p, {"name": f"{self.name}-{side}", **spec}, code="BAD_RECIPE")
+                return session.recipe(path=p)
         q = Path(str(spec))
         for cand in ([q] if q.is_absolute() else [self.base_dir / q if self.base_dir else q, q]):
             if cand.suffix in (".yaml", ".yml") and cand.exists():

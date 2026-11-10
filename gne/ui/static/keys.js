@@ -18,8 +18,11 @@
 // 3. 保存した鍵の一覧(<root>/keys/<model_id>/)。「見る」で作成の記録、「確かめる」で key-check の欄に入れる。
 // 0. いちばん上の「CHiPS で残った場面から作る」(chips_left.js): CHiPS のレシピを当てた behave の結果から、振る舞いが残った質問の
 //    JSON を作って入力欄に入れる(方向は keyed.direction、介入は keyed.iv)。
+// 1.5 「効く層を探す」(keys_causal.js): 入力欄の対照集合で、候補(層 × 書き込み先)の効き目を生成なしで比較用の鍵と並べて測り
+//    (direction_key_causal)、選んだ行を生成で確かめる(direction_key_causal_verify)。
 import { getJSON } from "./api.js";
 import { ChipsLeft } from "./chips_left.js";
+import { KeyCausal } from "./keys_causal.js";
 import { LANG, t } from "./i18n.js";
 import { esc } from "./panels.js";
 
@@ -313,6 +316,7 @@ export class KeyPanel {
           <details><summary class="muted note">${t("流す文")}</summary><textarea id="kx-vtexts" class="mono" rows="3" spellcheck="false" placeholder="${t("1 行に 1 文。空なら既定の 2 文(語尾の違う日本語と英語)。専門家の鍵は、その専門家が選ばれる文を")}"></textarea></details>
           <div id="kx-vprog" class="note mono"></div><div id="kx-vres"></div></div>
       </section>
+      <section class="kx-sec" id="kz-wrap"></section>
       <section class="kx-sec"><h4>${t("鍵の分離を確かめる(key-check)")}</h4>
         <div class="pp-set">
           <label class="muted">${t("鍵")} <select id="kc-key"></select></label>
@@ -338,6 +342,16 @@ export class KeyPanel {
         return ok;
       },
       runPipeline: () => { this.$("#kx-pipe-go").scrollIntoView({ block: "nearest" }); this.runPipeline(); },
+    });
+    this.causal = new KeyCausal(this.$("#kz-wrap"), {
+      onRun: (kind, p) => this.onRun(kind, p), onAddKeyed: (u) => this.onAddKeyed(u), moe: this.moe.size > 0,
+      source: () => this.currentSource(),
+      defaults: () => {                                      // 介入(iv)と返事の長さは「鍵を作る」の欄のもの
+        const iv = this.$("#kx-iv").value.trim(), mt = +this.$("#kx-mt").value;
+        const kd = this.src === "json" && this.jspec.spec && this.jspec.spec.keyed && typeof this.jspec.spec.keyed === "object" ? this.jspec.spec.keyed : {};
+        return { iv: iv ? (iv.includes(":") ? iv.split(/[\s,]+/).filter(Boolean) : iv) : null, specIv: !!kd.iv,   // 欄を空にしたら表の keyed.iv も当てない
+                 max_tokens: Number.isInteger(mt) && mt > 0 ? mt : null };
+      },
     });
     this.$("#kx-contrast").addEventListener("change", () => this.contrastChanged());
     this.$("#kx-cpath").addEventListener("input", () => this.contrastChanged());
@@ -396,6 +410,7 @@ export class KeyPanel {
     this.fillKeys();
     this.renderKeys();
     await this.chips.refresh();
+    await this.causal.refresh();
     this.loaded = true;
   }
 
@@ -544,6 +559,11 @@ export class KeyPanel {
   dirInfo() {
     const el = this.$("#kx-dirinfo");
     if (!el) return;
+    if (this.causal) {                                       // 「効く層を探す」の欄の既定(名前と α の段)
+      const sp = this.src === "json" ? this.jspec.spec : null;
+      const kd = sp && sp.keyed && typeof sp.keyed === "object" && !Array.isArray(sp.keyed) ? sp.keyed : {};
+      this.causal.hints({ name: this.contrastName(), alpha: kd.alpha });
+    }
     const fixed = this.src === "json" ? specDirection(this.jspec.spec) : null;
     const name = fixed || this.contrastName();
     if (!name) { el.textContent = ""; return; }
@@ -568,16 +588,23 @@ export class KeyPanel {
 
   // --- 欄 → ジョブの引数 -----------------------------------------------------------------------------------
   // 対照集合: ファイル(contrast)か入力欄の表(spec、head_pipeline と同じく表のまま渡す)
-  sourceParams(which) {
+  // いまの対照集合 → { params: {spec} | {contrast} } か { error }(「効く層を探す」も使う)
+  currentSource() {
     if (this.src === "json") {
       const c = this.jspec;
-      if (!c.spec) { this.status(which, t("入力欄に対照集合の JSON を入れてください(「ひな形」で例を選べます)"), true); return null; }
-      if (c.errors.length) { this.status(which, t("入力欄の JSON に直すところがあります: {e}", { e: c.errors[0] }), true); return null; }
-      return { spec: c.spec };
+      if (!c.spec) return { error: t("入力欄に対照集合の JSON を入れてください(「ひな形」で例を選べます)") };
+      if (c.errors.length) return { error: t("入力欄の JSON に直すところがあります: {e}", { e: c.errors[0] }) };
+      return { params: { spec: c.spec } };
     }
     const contrast = this.$("#kx-cpath").value.trim() || this.$("#kx-contrast").value;
-    if (!contrast) { this.status(which, t("対照集合を選んでください"), true); return null; }
-    return { contrast };
+    if (!contrast) return { error: t("対照集合を選んでください") };
+    return { params: { contrast } };
+  }
+
+  sourceParams(which) {
+    const s = this.currentSource();
+    if (s.error) { this.status(which, s.error, true); return null; }
+    return s.params;
   }
 
   // 鍵の作成・一括・専門家の選ばれ方に共通の欄(層・位置・返事など)。expertsOnly なら専門家の選ばれ方に要るものだけ
@@ -717,6 +744,7 @@ export class KeyPanel {
 
   // app.js の onJobFinished(と上の SSE)から。同じジョブは 1 回だけ
   async jobEnded(j) {
+    if (String(j.kind).startsWith("direction_key_causal")) return this.causal.jobEnded(j);   // 効く層を探す(keys_causal.js)
     const which = Object.keys(this.jobs).find((k) => this.jobs[k] === j.id) || null;
     if (!which) {
       if ((j.kind === "direction_key" || j.kind === "direction_key_pipeline") && j.status === "done" && this.loaded) await this.refresh();   // 別のところで作った鍵も一覧に
@@ -906,11 +934,21 @@ export class KeyPanel {
     const held = r.held_out ? `<p class="note kx-held"><span class="kx-ok">✓</span> ${t("保留した例で測りました(作成 {a}・確認 {b}、重なり 0)", { a: ov.built_subset ?? "—", b: ov.subset ?? "—" })}</p>`
       : `<p class="note err kx-held">⚠ ${t("作成に使った例と重なっています。AUC は甘い値です")}${why.length ? `: ${why.map(esc).join("、")}` : r.contrast ? "" : `: ${t("対照集合を渡していないので、作成時の例ごとの平均で測りました")}`}</p>`;
     const counts = r.counts || {};
-    const cnt = Object.entries(counts).map(([g, c]) => `${esc(g === "A" || g === "B" ? groupLabel(g) : g.replace(/^dt:/, "dt "))} ${c.examples}/${c.of}`).join(" · ");
+    // dts:<名前> は dont_touch の群の、返事を書き始める直前の位置(鍵の作成でこの位置を Q に入れた鍵だけ測る)
+    const cntLabel = (g) => (g === "A" || g === "B" ? groupLabel(g) : g.startsWith("dts:") ? t("dt {g}(書き始める直前)", { g: g.slice(4) }) : g.replace(/^dt:/, "dt "));
+    const cnt = Object.entries(counts).map(([g, c]) => `${esc(cntLabel(g))} ${c.examples}/${c.of}`).join(" · ");
     const beat = r.all_beat_pseudo === true ? `<span class="kx-ok">○</span> ${t("どの層も比較用の鍵を超えました")}`
       : r.all_beat_pseudo === false ? `<span class="kx-ng">×</span> ${t("比較用の鍵を超えない層があります(鍵が本文を拾っているかもしれません。対照集合の本文をそろえる)")}` : "";
     const rows = (r.layers || []).map((x) => {
-      const dt = Object.entries(x.dont_touch_median || {}).map(([g, v]) => `${esc(g)} ${fmt(v, 2)}`).join(" · ");
+      // dont_touch の群の ρ の中央値と、返事を書き始める直前の位置での ρ の中央値(鍵の作成でこの位置を Q に入れた鍵だけ。
+      // 0.4 以上(例 2 つ以上)は赤: 返事の冒頭の警告と同じ決まり)
+      const dts = x.dont_touch_start_median || {}, dtsN = ((x.rho || {}).dont_touch_start) || {};
+      const dt = Object.entries(x.dont_touch_median || {}).map(([g, v]) => {
+        const s = dts[g];
+        if (s === null || s === undefined) return `${esc(g)} ${fmt(v, 2)}`;
+        const hot = +s >= START_RHO_WARN && ((dtsN[g] || {}).n || 0) >= 2;
+        return `${esc(g)} ${fmt(v, 2)}<span class="muted">${t("(書き始める直前 {v})", { v: `<span class="${hot ? "kx-ng" : ""}">${fmt(s, 2)}</span>` })}</span>`;
+      }).join(" · ");
       // 返事の冒頭(返事の最初の 3 トークンを決める位置 0〜2)での ρ: 書き込みたくない位置と dont_touch の群ごとに、位置ごとの
       // 中央値が最大の位置。サーバの key-check の警告(keyed_build._start_hot)と同じ選び方で、0.4 以上(例 2 つ以上)は赤
       const sr = x.start_rho || {};
@@ -938,7 +976,7 @@ export class KeyPanel {
         <th title="${t("key-check の選択性: 例ごとの鍵の反応の強さ ρ の平均の差(書き込みたい位置 − 書き込みたくない位置)。書き込む量 α(κᵀx)d の両者の差にあたる。eval の選択性(残差の変化)とは別の量")}">${t("選択性")}</th><th title="${t("比較用の鍵の選択性の 95 パーセンタイル")}">${t("比較用の鍵の p95")}</th>
         <th title="${t("選択性が比較用の鍵の p95 を超え、例の AUC が 0.5 を超えるか(beats_pseudo)")}">${t("比較用の鍵を超える")}</th>
         <th title="${t("参考: 書き込みたくない位置を 2 つに分け、その差から作った鍵の AUC(0.5 付近なら、鍵が書き込みたくない位置の中の差を拾っていない)")}">${t("書き込みたくない位置の 2 分割")}</th>
-        <th class="l" title="${t("dont_touch の群の ρ の中央値(0 に近いほど書き込まない)。下の段は、書き込みたくない位置と dont_touch の群の、返事の冒頭(返事の最初の 3 トークンを決める位置 0〜2。位置 0 は返事を書き始める直前の位置)での ρ の、位置ごとの中央値のうち最大のものとその位置(0.4 以上は赤: 返事の冒頭で鍵が反応している。下の警告と同じ決まり)")}">${t("dont_touch 中央値")}</th><th>kn</th></tr></thead><tbody>${rows}</tbody></table></div>
+        <th class="l" title="${t("dont_touch の群の ρ の中央値(0 に近いほど書き込まない)。括弧の「書き始める直前」は、その群の返事を書き始める直前の位置での ρ の中央値(鍵の作成でこの位置を Q に入れた鍵だけ。返事の冒頭が positions の正規表現に一致しても測る)。下の段は、書き込みたくない位置と dont_touch の群の、返事の冒頭(返事の最初の 3 トークンを決める位置 0〜2。位置 0 は返事を書き始める直前の位置)での ρ の、位置ごとの中央値のうち最大のものとその位置(0.4 以上は赤: 返事の冒頭で鍵が反応している。下の警告と同じ決まり)")}">${t("dont_touch 中央値")}</th><th>kn</th></tr></thead><tbody>${rows}</tbody></table></div>
       <h4 class="note">${t("層ごとの鍵の反応の強さ ρ = κᵀx の分布(群ごとの割合。縦の点線: 0 = 何も足さない、1 = 書き込みたい位置の平均)")}</h4>
       <div class="evx-legend note kx-legend">${legend}</div>
       <div class="kx-hists">${hists}</div>

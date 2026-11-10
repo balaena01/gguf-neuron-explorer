@@ -77,6 +77,10 @@ direction で作った方向は "L:dir:NAME:dose"、attention ヘッドの gain 
    CHiPS のレシピで消し切れなかった場面だけを keyed で抑えるなら、behave(ジョブ。CHiPS のレシピを当てて A 側の質問に答えさせる)の結果から
    direction_key_from_behave(behave, recipe, direction) で JSON を作り(<root>/keyed/<name>.json。keyed.iv にレシピ、keyed.direction に
    CHiPS の方向、alpha −1)、direction_key_pipeline(contrast=その名前, layers) で鍵を作る。
+   どの層・書き込み先に書けば効くかは key-check では分からない(鍵が場面を分けるかしか見ない)。direction_key_causal(contrast) が
+   全層 × ffn,attn の候補で、生成なしで振る舞いの部分の対数確率の下がり方を比較用の鍵と並べて測る(第 1 段、ふるい分け。
+   印の数を「偶然でも印が付く数」と比べる)。生成なしの値は保証ではないので、使う人が候補を数個選び、direction_key_causal_verify
+   (units, result) の生成で振る舞いの数を iv だけ・比較用の鍵と比べる(第 2 段)。自動で 1 つに決めない。
    MoE の層は direction_key(target="shared")で shared expert に、target="expert:e" で専門家 e に書く(ユニットは L:S / L:Ee:keyed:…)。
    専門家は direction_key_experts で書き込みたい位置でよく選ばれる(rate_a が大きく rate_b が小さい)ものを選ぶ。焼き込みは
    既定(auto)と requant="keep" なら、元が Q8_0 の専門家のテンソルは元の型のまま(f16 だとテンソル全体が F16 になって大きくなる)。
@@ -595,7 +599,10 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
         層ごとの start_rho は書き込みたくない位置と dont_touch の、返事の冒頭(位置 0 = 返事を書き始める直前の位置、1・2 = 返事の
         最初の 2 トークンを読んだ位置)での ρ の中央値。dont_touch の ρ の中央値は返事の全位置の中央値なので、返事の冒頭の
         1 位置で反応しても見えない。中央値が 0.4 以上なら warnings に出る(dont_touch なら書き込みたくない場面への漏れ。
-        ふつうの質問を dont_touch に足して鍵を作り直す。dont_touch の質問の、返事を書き始める直前の位置は鍵の作成で自動で Q に入る)。保留集合の書き込みたい位置を含む例が
+        ふつうの質問を dont_touch に足して鍵を作り直す。dont_touch の質問の、返事を書き始める直前の位置は鍵の作成で自動で Q に入る)。
+        この位置を Q に入れて作った鍵では、key-check も dont_touch の各群のこの位置を測り(返事の冒頭が positions の正規表現に
+        一致しても)、start_rho の位置 0 と層ごとの dont_touch_start_median、counts の dts:<群>、dont_touch_start に入れる
+        (AUC・選択性には入れない)。保留集合の書き込みたい位置を含む例が
         2 未満か、書き込みたい位置が 8 未満でも warnings に出る(選択性が揺れる)。"""
         try:
             p = {"key": key, "subset": subset, "layers": layers, "positions": positions, "positions_b": positions_b,
@@ -689,6 +696,81 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
                  "subset": subset, "pseudo": pseudo, "replies_a": replies_a, "replies_b": replies_b, "iv": iv, "seed": seed,
                  "dont_touch_start": dont_touch_start, "check": None if check else False, "compact": True}
             return jobs.start("direction_key_pipeline", {k: v for k, v in p.items() if v is not None}).view()
+        except Exception as e:  # noqa: BLE001
+            return _err(e)
+
+    @srv.tool()
+    async def direction_key_causal(contrast: dict[str, Any] | str, layers: list[int] | str | None = None,
+                                   targets: list[str] | str | None = None, alphas: list[float] | str | None = None,
+                                   pseudo: int = 3, iv: str | list[str] | None = None, no_iv: bool = False,
+                                   direction: str | None = None, measure_match: str | None = None,
+                                   probe: str | list[dict[str, Any]] | None = None, max_tokens: int | None = None,
+                                   side_tokens: int = 32, name: str | None = None) -> dict:
+        """keyed の効く場所(層・書き込み先・α)を探す第 1 段: 生成なしのふるい分け(ジョブ、job_status で結果)。
+        key-check は鍵が場面を分けるか(鍵の反応の強さ)しか見ないので、どこに書けば振る舞いが変わるかはこれで測る。
+        候補(layers の層 × targets の書き込み先。既定は全層 × ffn,attn)ごとに、対照集合の偶数番目で鍵を作り(<name>-ffn などで保存)、
+        作成に使っていない奇数番目の返事で、介入 iv(既定は対照集合の keyed.iv)を当てた状態に keyed のユニット(alphas の段ごと、
+        既定は 1,2,4 に keyed.alpha の符号)を足したときの変化を測る: rows[].reply = 振る舞いの部分(既定は positions の正規表現に
+        一致した文字、measure_match で別に)の対数確率の変化(負 = 出にくくなる)、rows[].probe = probe(JSONL のパスか行のリスト。
+        1 行 {prompt, prefix(例 "Answer:"), behavior(振る舞いの答え), desired(望む答え), group?(書き込みたくない場面の行)})の
+        log p(振る舞いの答え) − log p(望む答え) の変化、rows[].side = dont_touch の群と書き込みたくない位置の 1 トークンあたりの
+        対数確率の変化、rows[].pseudo = 候補ごとの比較用の鍵(pseudo 本)の値。mark = 全候補の比較用の鍵の 5% 点より下がった
+        (marks[α] に候補の数・印の数・偶然でも印が付く数 expected = 候補の数 × 5%)。key_check は参考、linear.ratio は比例の目安。
+        candidates は 1 か所(書き込み先 × 層)につき 1 つ: by_alpha[α] に reply(下がり方)・mark・side_b(副作用)・ratio(下がり方 ÷ 副作用、
+        副作用の下限 ratio_floor = 0.01)・unit、all_marked(全部の強さで有意)。下がり方・副作用・all_marked の 3 つを並べて候補を選ぶ
+        (根拠は Qwen3.5-4B の語尾の 1 例。下がり方だけで選ぶと、副作用も大きい=返事を壊している候補を拾う)。
+        notes[0] のとおり、これは生成なしの目安で、比較用の鍵と見分けがつかない候補を外すためのもの。印の数が expected と
+        同じくらいなら、印だけでは比較用の鍵と見分けがつかない(それでも、いくつかの α で続けて印が付き、効き目に比べて
+        side.b(書き込みたくない位置の変化)が小さい候補は試す価値がある。効き目が最大でも side.b が比較用の鍵並みに大きい候補は、
+        返事を壊しているだけのことがある)。効くかどうかは direction_key_causal_verify の生成で数える。
+        contrast は対照集合の表かパス・configs/keyed/ のひな形の名前・<root>/keyed/ の名前。"""
+        from .jobs import _layers
+        try:
+            spec, path = None, None
+            if isinstance(contrast, dict):
+                spec = contrast
+            else:
+                try:
+                    path = str(_contrast_path(session, contrast, None, None, None, None))
+                except GneError:
+                    tpl = CONFIGS / "keyed" / f"{contrast}.json"
+                    if not tpl.exists() and re.fullmatch(r"[\w.\-]+", str(contrast)) and getattr(session, "store", None) is not None:
+                        tpl = session.store.root / "keyed" / f"{contrast}.json"
+                    if not tpl.exists():
+                        raise
+                    spec = json.loads(tpl.read_text(encoding="utf-8"))
+            if layers is not None and layers != "all" and not _layers(layers):
+                raise GneError("BAD_ARGS", "layers は層のリストか \"8-20\"・\"all\" です")
+            p = {"spec": spec, "contrast": path, "layers": layers, "targets": targets, "alphas": alphas, "pseudo": pseudo,
+                 "iv": iv, "no_iv": no_iv or None, "direction": direction, "measure_match": measure_match, "probe": probe,
+                 "max_tokens": max_tokens, "side_tokens": side_tokens, "name": name, "compact": True}
+            return jobs.start("direction_key_causal", {k: v for k, v in p.items() if v is not None}).view()
+        except Exception as e:  # noqa: BLE001
+            return _err(e)
+
+    @srv.tool()
+    async def direction_key_causal_verify(units: list[str] | str | None = None, result: str | None = None, contrast: str | None = None,
+                                          iv: str | list[str] | None = None, no_iv: bool = False, pseudo_index: int = 0,
+                                          match: str | None = None, judge: str | None = None, labels: str = "R,P,C",
+                                          label: list[str] | str | None = None, max_tokens: int = 256,
+                                          temperature: float = 0.0, seeds: list[int] | str | None = None,
+                                          dont_touch: bool = True, name: str | None = None,
+                                          combos: list[list[str]] | list[str] | None = None) -> dict:
+        """keyed の効く場所の第 2 段: 選んだ候補を生成で確かめる(ジョブ、job_status で結果)。units は direction_key_causal の
+        rows[].unit(例 "14:ffn:keyed:a-2@方向#鍵")を数個。result はその結果の名前(対照集合・iv・方向・鍵・測った正規表現の既定)。
+        候補ごとに比較用の鍵 1 本(#鍵~pseudo_index)も足し、作成に使っていない奇数番目の質問(と dont_touch の奇数番目)に
+        behave と同じ生成をさせる(返事の長さ max_tokens、温度と種も behave と同じ)。結果: base(iv だけ)と rows[] の a(書き込みたい場面)・
+        dt(群ごと)の keyed・pseudo それぞれの n・behavior(振る舞いが出た数。match の正規表現か、judge の label)・hits(一致の総数)・
+        changed(iv だけのときから返事が変わった数、greedy のとき)・loop・empty・at_limit。比較用の鍵でも同じくらい変わるなら、
+        その変化は鍵が場面を分けたからではない。返事は path のファイルに。combos は複数の層の組を 1 つの候補として確かめる
+        (組ごとにユニットのリストか "11:attn:keyed:a2,18:attn:keyed:a2" の文字列。強さはユニットの書き方どおり。比較用の鍵は、
+        組の各ユニットを同じ番号の比較用の鍵に替えた組)。units と一緒に渡せば、1 か所の候補と組が結果の rows に並ぶ(組は combo: true)。"""
+        try:
+            p = {"units": units, "combos": combos, "result": result, "contrast": None if contrast is None else str(_contrast_path(session, contrast, None, None, None, None)),
+                 "iv": iv, "no_iv": no_iv or None, "pseudo_index": pseudo_index or None, "match": match, "judge": judge,
+                 "labels": labels, "label": label, "max_tokens": max_tokens, "temperature": temperature or None,
+                 "seeds": seeds, "dont_touch": None if dont_touch else False, "name": name}
+            return jobs.start("direction_key_causal_verify", {k: v for k, v in p.items() if v is not None}).view()
         except Exception as e:  # noqa: BLE001
             return _err(e)
 
@@ -820,7 +902,7 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
 
     @srv.tool()
     async def job_start(kind: str, params: dict[str, Any] | None = None, workers: str | None = None) -> dict:
-        """長時間の処理を投げる。kind: stats_resid / stats_act / lens_logit / lens_steer / sweep / rank / reverse / eval / direction / ablate / heads_contrast / heads_causal / heads_allocate / head_pipeline / heads_candidates / heads_refine / headproj_export / fieldtest / direction_key / direction_key_check / direction_key_experts / direction_key_pipeline / direction_key_verify。
+        """長時間の処理を投げる。kind: stats_resid / stats_act / lens_logit / lens_steer / sweep / rank / reverse / eval / direction / ablate / heads_contrast / heads_causal / heads_allocate / head_pipeline / heads_candidates / heads_refine / headproj_export / fieldtest / direction_key / direction_key_check / direction_key_experts / direction_key_pipeline / direction_key_verify / direction_key_causal / direction_key_causal_verify / behave。
         params は gne.api の同名メソッドの引数(例 sweep: {"layer": 22, "neurons": "random:64", "design": "quick"})。
         見積もりが 30 分を超えるジョブは走らせずに NEEDS_CONFIRM と見積もりを返す。params に budget("30m" など)を入れると
         予算に収まるように絞る(lens_steer は方向に近いニューロンの上位、sweep は quick 設計で steer lens の上位、reverse は
@@ -887,14 +969,13 @@ def _contrast_path(session, contrast, system_a, system_b, user_prompts, name) ->
         return p
     if not (system_a and system_b and user_prompts):
         raise GneError("BAD_ARGS", "contrast か、system_a・system_b・user_prompts の 3 つを渡してください")
-    import yaml
+    from .yamlio import write_yaml
     nm = name or "contrast"
     if not re.fullmatch(r"[\w.\-]+", nm):
         raise GneError("BAD_ARGS", "name は英数字・_・-・. だけにしてください")
     p = session.store.root / "contrast" / f"{nm}.yaml"
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(yaml.safe_dump({"name": nm, "system_a": system_a, "system_b": system_b,
-                                 "user_prompts": list(user_prompts)}, allow_unicode=True), encoding="utf-8")
+    write_yaml(p, {"name": nm, "system_a": system_a, "system_b": system_b, "user_prompts": list(user_prompts)})
     return p
 
 

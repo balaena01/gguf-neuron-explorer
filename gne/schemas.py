@@ -1242,6 +1242,8 @@ class KeyCheckLayer(_Strict):                   # gne direction key-check の 1 
     gain: float | None = None
     start_rho: dict[str, Any] | None = None     # 書き込みたくない位置・dont_touch の、返事の冒頭での ρ(冒頭の位置ごとの median・max・n)
                                                 # {"B": {...}, "dont_touch": {名前: {...}}}
+    dont_touch_start_median: dict[str, float | None] | None = None   # dont_touch の群の、返事を書き始める直前の位置での ρ の中央値
+                                                # (鍵の作成でこの位置を Q に入れた鍵だけ。rho.dont_touch_start に要約)
 
 
 class DirectionKeyCheckOut(Envelope):           # CHANGE-07 C(gne direction key-check)
@@ -1263,7 +1265,8 @@ class DirectionKeyCheckOut(Envelope):           # CHANGE-07 C(gne direction key-
     best_layer: int | None
     all_beat_pseudo: bool | None
     n_pseudo: int
-    counts: dict[str, Any]
+    counts: dict[str, Any]                      # 群 → {examples, rows, of}(dts:<名前> は dont_touch の返事を書き始める直前の位置)
+    dont_touch_start: dict[str, Any] | None = None   # dont_touch の返事を書き始める直前の位置を測ったか {on, recorded, positions, groups, rows}
     replies: dict[str, str | None] | None
     iv: dict[str, Any] | None
     notes: list[str]
@@ -1380,6 +1383,70 @@ class DirectionKeyFromBehaveOut(Envelope):      # gne direction key-from-behave(
     notes: list[str]
 
 
+class DirectionKeyCausalOut(Envelope):          # gne direction key-causal(keyed の効く場所の第 1 段、生成なしのふるい分け)
+    name: str
+    path: str                                   # <root>/keys/<model_id>/causal/<名前>.json
+    contrast: str
+    contrast_path: str
+    contrast_sha: str
+    mode: Literal["same", "system"]
+    positions: str
+    positions_b: str
+    measure: dict[str, Any]                     # regex(効き目を測る正規表現、無ければ None)・source(positions / measure_match / none)
+    alphas: list[float]
+    targets: list[str]
+    pseudo: int                                 # 候補ごとに測った比較用の鍵の本数
+    side_tokens: int
+    max_tokens: int
+    iv: dict[str, Any] | None
+    iv_spec: str | list[str] | None
+    q_mode: str
+    stages: list[str]
+    direction: str
+    direction_info: dict[str, Any]
+    replies: dict[str, str]                     # 組 → given / generated
+    keys: dict[str, str]                        # 書き込み先 → 鍵の名前
+    key_check: dict[str, Any]                   # 書き込み先 → held_out・層ごとの選択性・比較用の鍵の p95(参考)
+    counts: dict[str, Any]
+    base: dict[str, Any]                        # iv だけのときの値
+    n_candidates: int
+    n_runs: int
+    rows: list[dict[str, Any]]                  # 候補 × α: reply・probe(効き目)・pseudo・mark・side・key_check・linear・unit
+    candidates: list[dict[str, Any]] = []       # 1 か所(書き込み先 × 層)につき 1 つ: by_alpha(α ごとの効き目・印・副作用・ratio)・all_marked
+    ratio_floor: float | None = None            # 「確率の下がり方 ÷ 副作用」の副作用の下限
+    pool: dict[str, Any]                        # α → reply / probe → 全候補の比較用の鍵の分布(n・p5・p50・p95)
+    marks: dict[str, Any]                       # α → reply / probe → candidates・marked・expected(候補の数 × 5%)
+    chance: float
+    dropped: list[dict[str, Any]]
+    notes: list[str]                            # notes[0] は「生成なしの目安」の注
+    timing: dict[str, Any]
+    rows_read: int
+    seconds: float
+
+
+class DirectionKeyCausalVerifyOut(Envelope):    # gne direction key-causal-verify(第 2 段、生成での確かめ)
+    name: str
+    path: str                                   # <root>/keys/<model_id>/causal/<名前>.verify.json(返事も)
+    result: str | None
+    contrast: str
+    contrast_path: str
+    mode: Literal["same", "system"]
+    direction: str
+    iv: dict[str, Any] | None
+    iv_spec: str | list[str] | None
+    judge: dict[str, Any]
+    n_a: int
+    n_dt: dict[str, int]
+    seeds: list[int]
+    temperature: float
+    max_tokens: int
+    greedy: bool
+    base: dict[str, Any]                        # iv だけ: a(書き込みたい場面)・dt(群ごと)の数
+    rows: list[dict[str, Any]]                  # 候補ごと(1 か所か組): unit・units・pseudo_units・combo・a / dt の keyed・pseudo の数・samples
+    notes: list[str]
+    seconds: float
+
+
 COMMAND_SCHEMAS: dict[str, type[Envelope]] = {
     "chat": ChatOut, "neuron": NeuronOut,
     "sweep": SweepOut, "rank": RankOut,
@@ -1399,4 +1466,5 @@ COMMAND_SCHEMAS: dict[str, type[Envelope]] = {
     "direction key": DirectionKeyOut, "direction key-check": DirectionKeyCheckOut, "direction keys": DirectionKeysOut,
     "direction key-verify": DirectionKeyVerifyOut, "direction key-experts": DirectionKeyExpertsOut,
     "direction key-from-behave": DirectionKeyFromBehaveOut,
+    "direction key-causal": DirectionKeyCausalOut, "direction key-causal-verify": DirectionKeyCausalVerifyOut,
 }

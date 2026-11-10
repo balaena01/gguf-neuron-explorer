@@ -257,6 +257,50 @@ def _direction_key_verify(s, layer, key: str, direction: str, alphas=None, targe
                          kind=kind, expert=expert, direction_layer=direction_layer, texts=list(texts) if texts else None)
 
 
+def compact_key_causal(d: dict) -> dict:
+    """key-causal の結果を MCP 向けに小さくする: 比較用の鍵ごとの値(values)と、副作用の群ごとの細目を落とす(要約は残す)。"""
+    for r in d.get("rows") or []:
+        for k in ("pseudo", "probe_pseudo"):
+            if isinstance(r.get(k), dict):
+                r[k].pop("values", None)
+        ps = r.get("pseudo_side") or {}
+        for k in list(ps):
+            if isinstance(ps[k], dict):
+                ps[k].pop("values", None)
+    for c in d.get("candidates") or []:
+        for b in (c.get("by_alpha") or {}).values():
+            for k in ("pseudo", "probe_pseudo", "pseudo_side_b"):
+                if isinstance(b.get(k), dict):
+                    b[k].pop("values", None)
+    return d
+
+
+def _direction_key_causal(s, contrast=None, spec: dict | None = None, compact: bool = False, **p) -> dict:
+    """keyed の効く場所を探す第 1 段(gne direction key-causal、keyed_causal.key_causal): 候補(層 × 書き込み先)ごとに鍵を作り、
+    生成なしで効き目・副作用・比較用の鍵の値を測る。contrast は対照集合のパスか、spec に対照集合の表(UI の入力欄。
+    <root>/contrasts/<name>.yaml に書く)。compact なら比較用の鍵ごとの値を落とす(MCP 向け)。"""
+    if (contrast is None) == (spec is None):
+        raise GneError("BAD_ARGS", "対照集合は contrast(パス)か spec(表)のどちらかで渡してください")
+    d = s.direction_key_causal(spec if spec is not None else contrast, progress=s.progress, **p)
+    return compact_key_causal(d) if compact else d
+
+
+def _direction_key_causal_verify(s, units=None, seeds=None, **p) -> dict:
+    """第 2 段(gne direction key-causal-verify、keyed_causal.key_causal_verify): 選んだ候補(keyed のユニットのリストか、空白・
+    改行区切りの文字列)と比較用の鍵 1 本ずつで、作成に使っていない質問に生成させて振る舞いを数える。seeds はリストか "1,2,3"。
+    combos は複数のユニットを 1 つの候補として確かめる組(組ごとにユニットのリストか、カンマ区切りの文字列)。"""
+    if isinstance(seeds, str):
+        try:
+            seeds = [int(x) for x in seeds.replace(" ", "").split(",") if x]
+        except ValueError as e:
+            raise GneError("BAD_ARGS", f"seeds は 1,2,3 のように書きます({seeds!r})") from e
+    if isinstance(p.get("label"), str):
+        p["label"] = [x for x in p["label"].split(",") if x.strip()]
+    if p.get("judge") is not None and not str(p["judge"]).strip():
+        p["judge"] = None
+    return s.direction_key_causal_verify(units or [], seeds=list(seeds) if seeds else None, progress=s.progress, **p)
+
+
 def _behave(s, prompts, recipes=None, seeds=None, **p) -> dict:
     """振る舞いを数える(gne behave、Session.behave)。prompts は質問集のパス(対照集合なら A 側の質問)、configs/contrast/ の名前、
     または質問のリスト。recipes はレシピの名前かパス(1 つなら文字列でも可)。seeds はリストか "1,2,3"。進み具合は質問ごと・種ごと。"""
@@ -309,6 +353,8 @@ def standard_kinds() -> dict[str, Callable[..., dict]]:
         "direction_key_experts": _direction_key_experts,                                # CHANGE-07 MoE: 専門家の選ばれ方
         "direction_key_pipeline": _direction_key_pipeline,                              # CHANGE-07: 方向 → 鍵 → key-check
         "direction_key_verify": _direction_key_verify,                                  # CHANGE-07 V30: LoRA が式どおりか
+        "direction_key_causal": _direction_key_causal,                                  # keyed の効く場所: 生成なしのふるい分け
+        "direction_key_causal_verify": _direction_key_causal_verify,                    # keyed の効く場所: 生成での確かめ
         "behave": _behave,                                                              # 振る舞いを数える(gne behave)
     }
 

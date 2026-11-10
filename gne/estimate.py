@@ -187,6 +187,14 @@ def estimate(session, kind: str, params: dict) -> dict:
         n_a = len(p.get("alphas") or (1.0, 2.0))
         sec = (1 + n_a) * n_t * sp.setprefill / 1000 + 1.0       # + LoRA を作る分
         detail = {"texts": n_t, "alphas": n_a}
+    elif kind == "direction_key_causal":                       # keyed の効く場所の第 1 段: 返事 + 鍵と key-check(書き込み先ごと)+ 測る回数ぶんの prefill
+        kd = _key_causal_cost(session, sp, p)
+        sec = kd["seconds"]
+        detail = kd
+    elif kind == "direction_key_causal_verify":                # 第 2 段: (iv のみ + 候補 + 比較用の鍵)× 質問の生成
+        kd = _key_causal_verify_cost(session, sp, p)
+        sec = kd["seconds"]
+        detail = kd
     elif kind == "behave":                                     # 種ごとに質問を max_tokens まで生成 + 判定(読み手、8 トークン)
         kd = _behave_cost(session, sp, p)
         sec = kd["seconds"]
@@ -394,15 +402,14 @@ def _spec_of(p: dict):
     読む(本番は <root>/contrasts/ に書く。見積もりでは置き場所を変えない)。"""
     import tempfile
 
-    import yaml
-
     from .keyed_build import _as_spec, read_key_spec
     from .keyed_pipeline import clean_spec, file_settings
+    from .yamlio import write_yaml
     if p.get("spec") is not None:
         d, settings = clean_spec(p["spec"])
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / f"{d['name']}.yaml"
-            path.write_text(yaml.safe_dump(d, allow_unicode=True, sort_keys=False), encoding="utf-8")
+            write_yaml(path, d)
             return read_key_spec(path), settings
     c = p["contrast"]
     return _as_spec(c), (file_settings(c) if isinstance(c, str | Path) else {})
@@ -466,6 +473,97 @@ def _keyed_job(session, sp: Speed, kind: str, p: dict) -> dict:
         return _plan_cost(sp, sets, int(mt))
     except Exception:  # noqa: BLE001  対照集合が読めなくても見積もりで止めない(本番がエラーを返す)
         return {"conversations": None, "seconds": 32 * sp.setprefill / 1000, "guess": True}
+
+
+# keyed の効く場所(keyed_causal)。測る 1 回は、作成に使っていない奇数番目の返事(書き込みたい場面・dont_touch)と probe の列を
+# まとめて読む prefill。実測(Qwen3-0.6B Q8_0、GPU、configs/keyed/sentence_endings.json の奇数番目 8 問 + 英語 2 問、返事 48 トークン)で
+# 1 回 0.15 秒 = 列 1 本あたり set_cvec + prefill(4 本 × 20 トークン)の 0.7 倍ほど。KC_PER_SEQ はその倍率。
+KC_PER_SEQ = 0.8
+
+
+def _key_causal_cost(session, sp: Speed, p: dict) -> dict:
+    """direction_key_causal の見積もり: 方向(無ければ)+ 返事(無いところだけ 1 回)+ 書き込み先ごとの鍵の作成と key-check
+    (返事を与えた prefill)+ 測る回数(1 + 候補 × α の段 × (1 + 比較用の鍵))× 奇数番目の列の prefill。"""
+    try:
+        from .direction import _subset
+        from .keyed_build import _resolve_mode, parse_positions
+        from .keyed_causal import DEFAULT_ALPHAS, DEFAULT_PSEUDO, _n_replies_to_make, parse_alphas, parse_targets, read_probe
+        spec, settings = _spec_of(p)
+        cs = spec.contrast
+        mode, _ = _resolve_mode(parse_positions(spec.positions or "response"), spec.positions_b)
+        mt = int(p.get("max_tokens") or settings.get("max_tokens") or 96)
+        dname = p.get("direction") or settings.get("direction") or cs.name
+        try:
+            session.direction_set(dname)
+            dir_s = 0.0
+        except Exception:  # noqa: BLE001
+            dir_s = len(cs.prompts("A")) * sp.setprefill / 1000 * 2 + sp.gen(len(cs.prompts("A")), 96) + sp.gen(len(cs.prompts("B")), 96)
+        gen_s = sp.gen(_n_replies_to_make(spec, mode), mt)
+        n_conv = (len(cs.prompts("B")) if mode == "same" else len(cs.prompts("A")) + len(cs.prompts("B"))) \
+            + sum(len(dt.prompts) for dt in spec.dont_touch)
+        targets = parse_targets(p.get("targets")) if p.get("targets") else ["ffn", "attn"]
+        layers = p.get("layers")
+        from .jobs import _layers
+        Ls = _layers(layers) if layers not in (None, "", "all") else None
+        n_l = len(Ls) if Ls else max(1, session.meta.n_layer - 1)
+        keys_s = len(targets) * n_conv * sp.setprefill / 1000              # 偶数番目で作成 + 奇数番目で key-check = 全部の会話 1 回
+        alphas = parse_alphas(p.get("alphas")) or list(DEFAULT_ALPHAS)
+        pseudo = int(p.get("pseudo") or DEFAULT_PSEUDO)
+        side = "B" if mode == "same" else "A"
+        n_seq = len(_subset(len(cs.prompts(side)), "odd")) + (len(_subset(len(cs.prompts("B")), "odd")) if mode == "system" else 0) \
+            + sum(len(_subset(len(dt.prompts), "odd")) for dt in spec.dont_touch)
+        if p.get("probe") is not None:
+            try:
+                n_seq += 2 * len(read_probe(p["probe"]))
+            except Exception:  # noqa: BLE001
+                pass
+        n_cand = len(targets) * n_l
+        n_runs = 1 + n_cand * len(alphas) * (1 + pseudo)
+        per = n_seq * KC_PER_SEQ * sp.setprefill / 1000
+        return {"candidates": n_cand, "runs": n_runs, "seqs_per_run": n_seq, "seconds_per_run": round(per, 3),
+                "direction_seconds": dir_s, "replies_seconds": gen_s, "keys_seconds": keys_s,
+                "seconds": dir_s + gen_s + keys_s + n_runs * per + 2.0}
+    except Exception:  # noqa: BLE001  対照集合が読めなくても見積もりで止めない(本番がエラーを返す)
+        return {"seconds": 60 * sp.setprefill / 1000, "guess": True}
+
+
+def _key_causal_verify_cost(session, sp: Speed, p: dict) -> dict:
+    """direction_key_causal_verify の見積もり: 条件(iv のみ + 候補 + 候補ごとの比較用の鍵)ごとに、書き込みたい場面と dont_touch の
+    奇数番目の質問を max_tokens まで生成する(種ごと)。判定があれば読み手の分も。"""
+    try:
+        from .direction import _subset
+        from .keyed_build import _resolve_mode, parse_positions
+        c = p.get("contrast") or p.get("spec")
+        if c is None and p.get("result"):
+            from .keyed_causal import load_result
+            c = load_result(session, p["result"])["contrast_path"]
+        spec, _ = _spec_of({"spec": c} if isinstance(c, dict) else {"contrast": c})
+        cs = spec.contrast
+        mode, _ = _resolve_mode(parse_positions(spec.positions or "response"), spec.positions_b)
+        side = "B" if mode == "same" else "A"
+        n_a = len(_subset(len(cs.prompts(side)), "odd"))
+        n_dt = 0 if p.get("dont_touch") is False else sum(len(_subset(len(dt.prompts), "odd")) for dt in spec.dont_touch)
+        units = p.get("units") or []
+        if isinstance(units, str):
+            units = [u for u in units.split() if u]
+        from .keyed_causal import parse_combos
+        try:
+            n_combo = len(parse_combos(p.get("combos")))
+        except Exception:  # noqa: BLE001
+            n_combo = 0
+        n_c = 1 + 2 * (len(units) + n_combo)
+        seeds = p.get("seeds")
+        if isinstance(seeds, str):
+            seeds = [x for x in seeds.split(",") if x.strip()]
+        n_s = max(1, len(seeds or [0]))
+        mt = int(p.get("max_tokens") or 256)
+        k = session._engine_kw.get("n_seq_max", 8) or 8
+        per = sp.gen(n_a, mt, k) + (sp.gen(n_dt, mt, k) if n_dt else 0.0)
+        judge = (sp.gen(n_a + n_dt, 8) + (n_a + n_dt) * sp.setprefill / 1000) if p.get("judge") else 0.0
+        return {"conditions": n_c, "combos": n_combo, "questions": n_a, "dont_touch": n_dt, "seeds": n_s, "max_tokens": mt,
+                "seconds": n_c * n_s * (per + judge) + 1.0 * n_c}
+    except Exception:  # noqa: BLE001
+        return {"seconds": 3 * 32 * sp.step(8) / 1000 * 256, "guess": True}
 
 
 def _eval_recipe(session, p: dict):

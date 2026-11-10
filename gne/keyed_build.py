@@ -1552,7 +1552,12 @@ def key_check(session, key, *, contrast=None, subset: str = "odd", layers=None, 
     擬似鍵の p95)、側 B を 2 分した擬似差の鍵の AUC(参考値)を出す。位置・skip・max_tokens・mode の既定は鍵のファイルから。
     鍵の作成に使った例と重なる(同じ対照集合で subset が重なる、または例のハッシュが重なる)と警告して held_out: false に
     する(strict なら BAD_ARGS)。contrast を省くと、鍵に保存した例ごとの平均(作成に使った例)で測る(捕捉なし、甘い値)。
-    key は鍵の名前(NAME~j なら擬似鍵 j を主に測る)か KeySet。iv を渡すとその介入を当てた状態で測る。"""
+    key は鍵の名前(NAME~j なら擬似鍵 j を主に測る)か KeySet。iv を渡すとその介入を当てた状態で測る。
+    dont_touch の質問の返事を書き始める直前の位置: 鍵のファイルの記録(info の dont_touch_start.on)が真なら、鍵の作成と同じ
+    決まり(_plan の dt_start)で、dont_touch の各群のこの位置を群 "dts:<名前>" として測る。群の positions の行とは別に数え
+    (counts の dts:<名前>、結果の dont_touch_start)、AUC・選択性・dont_touch の ρ の中央値には入れず(作成でも Q に入れる
+    だけ)、層ごとの rho.dont_touch_start・dont_touch_start_median と、start_rho の dont_touch の位置 0 に入れる(返事の冒頭が
+    positions の正規表現に一致して、群の positions がこの位置を外すときも)。記録の無い古い鍵と、切って作った鍵では測らない。"""
     t0 = time.perf_counter()
     warnings: list[str] = []
     notes: list[str] = []
@@ -1605,7 +1610,9 @@ def key_check(session, key, *, contrast=None, subset: str = "odd", layers=None, 
     skip = int(ks.skip if skip is None else skip)
     max_tokens = int(ks.max_tokens if max_tokens is None else max_tokens)
     vecs0, lora0, iv_desc = intervention(session, iv, warn)
-    sets, pinfo = _plan(session, spec, mode, pos_a, pos_b, subset, replies_a, replies_b, vecs0, lora0, warn)
+    dt_rec = ks.info.get("dont_touch_start")             # 鍵の作成で dont_touch の質問の返事を書き始める直前の位置を Q に入れたか
+    dt_on = bool((dt_rec or {}).get("on"))               # 記録の無い古い鍵は入れていない
+    sets, pinfo = _plan(session, spec, mode, pos_a, pos_b, subset, replies_a, replies_b, vecs0, lora0, warn, dt_start=dt_on)
     ov = held_out_info(ks, cs.sha, subset, [h for s in sets for h in s.hashes])
     if not ov["held_out"]:
         why = []
@@ -1621,16 +1628,24 @@ def key_check(session, key, *, contrast=None, subset: str = "odd", layers=None, 
     run = _run_plan(session, sets, layers=Ls, target=ks.target, skip=skip, max_tokens=max_tokens, samples=0,
                     project=M, rms_groups=(), progress=progress, start=START_TOKENS)
     G = run["groups"]
+    dts_keys = [g for g in G if g.startswith("dts:")]   # dont_touch の質問の返事を書き始める直前の位置(dt_on のときだけ)
     layers_out = []
     for L in Ls:
         ex = {g: (np.stack([p.mean(axis=0) for p in G[g]["proj"][L]]) if G[g]["proj"][L] else np.zeros((0, M[L].shape[0])))
               for g in G}
         tok = {g: (np.concatenate(G[g]["proj"][L], axis=0) if G[g]["proj"][L] else np.zeros((0, M[L].shape[0])))
                for g in G}
-        res = _layer_result(ks, L, ex, tok, n_ps)
+        res = _layer_result(ks, L, {g: v for g, v in ex.items() if g not in dts_keys},
+                            {g: v for g, v in tok.items() if g not in dts_keys}, n_ps)
+        if dt_on:                                        # 1 例 1 位置なので例ごとの値 = その位置の ρ
+            st = {g[4:]: _stats(ex[g][:, 0]) for g in dts_keys}
+            res["rho"]["dont_touch_start"] = st
+            res["dont_touch_start_median"] = {g: (s["median"] if s else None) for g, s in st.items()}
         res["start_rho"] = _start_rho(G, L)
         layers_out.append(res)
     counts = {g: {"examples": len(G[g]["index"]), "rows": int(G[g]["rows"]), "of": int(G[g]["n_examples"])} for g in G}
+    dt_start = {"on": dt_on, "recorded": dt_rec is not None, "positions": DT_START_POSITIONS if dt_on else None,
+                "groups": {g[4:]: int(G[g]["rows"]) for g in dts_keys}, "rows": sum(int(G[g]["rows"]) for g in dts_keys)}
     ga = G.get("A")
     if ks.target.startswith("expert"):                      # 専門家の鍵は層ごとの行(専門家 e が選ばれた位置だけ)
         for L in Ls:
@@ -1646,13 +1661,16 @@ def key_check(session, key, *, contrast=None, subset: str = "odd", layers=None, 
     if hot:
         warn(_start_hot_message(hot))
     return _check_summary(ks, Ls, layers_out, ov, cs.name, cs.sha, pos_a.text, pos_b.text, skip, max_tokens, mode, counts,
-                          pinfo["notes"] + notes, warnings, t0, run["replies"], iv_desc)
+                          pinfo["notes"] + notes, warnings, t0, run["replies"], iv_desc, dt_start)
 
 
 def _start_rho(G: dict, L: int) -> dict | None:
     """key-check の層 L の、側 B と dont_touch の群の返事の書き出しでの ρ(主の鍵): 書き出しの位置 j(返事の j 番目のトークンを
     決める位置、0 = 生成プロンプトの最後のトークン)ごとの中央値・最大・例の数。{"B": {...}, "dont_touch": {名前: {...}}}。
-    dont_touch の ρ の中央値(dont_touch_median)は返事の全位置の中央値なので、書き出しの 1 位置で合っても目立たない(F138)。"""
+    dont_touch の ρ の中央値(dont_touch_median)は返事の全位置の中央値なので、書き出しの 1 位置で合っても目立たない(F138)。
+    dont_touch の群に、返事を書き始める直前の位置の群 "dts:<名前>"(鍵の作成で Q に入れた鍵の key-check)があれば、群の
+    書き出しの位置に位置 0 が無い例(返事の冒頭が positions の正規表現に一致して not-before が外した例など)の位置 0 に、その値を
+    入れる(同じ位置なので、位置 0 がある例は重ねない)。"""
     out: dict = {}
     for g, d in G.items():
         st = d.get("start")
@@ -1660,10 +1678,20 @@ def _start_rho(G: dict, L: int) -> dict | None:
             continue
         k = int(st["k"])
         per: list[list[float]] = [[] for _ in range(k)]
-        for offs, pj in st["proj"].get(L) or []:
+        rows = st["proj"].get(L) or []
+        exs = (d.get("index_l") or {}).get(L) or [None] * len(rows)       # 書き出しの行は index_l[L] の例の順に並ぶ
+        have0 = set()
+        for ex, (offs, pj) in zip(exs, rows):
             for j, v in zip(offs, pj[:, 0]):
                 if 0 <= int(j) < k:
                     per[int(j)].append(float(v))
+                    if int(j) == 0:
+                        have0.add(ex)
+        ds = G.get("dts:" + g[3:]) if g.startswith("dt:") else None
+        if ds is not None and ds.get("proj") and k:
+            for ex, pj in zip(ds["index_l"][L], ds["proj"][L]):
+                if ex not in have0 and pj.shape[0]:
+                    per[0].append(float(pj[0, 0]))
         row = {"median": [float(np.median(v)) if v else None for v in per],
                "max": [float(np.max(v)) if v else None for v in per], "n": [len(v) for v in per]}
         if g == "B":
@@ -1763,7 +1791,9 @@ def _layer_result(ks, L: int, ex: dict[str, np.ndarray], tok: dict[str, np.ndarr
 
 
 def _check_summary(ks, Ls, layers_out, ov, cname, csha, pos_a, pos_b, skip, max_tokens, mode, counts, notes, warnings,
-                   t0, replies, iv_desc=None) -> dict:
+                   t0, replies, iv_desc=None, dt_start=None) -> dict:
+    """key-check の結果。dt_start は dont_touch の質問の返事を書き始める直前の位置を測ったか({on, recorded(鍵に記録が
+    あるか), positions, groups: {群: 行}, rows}。対照集合なしで測ったときは None)。"""
     def rank(r):                       # 例単位の AUC、トークン単位の AUC、選択性の擬似鍵 p95 からの余裕の順(AUC は 1 に張り付くことがある)
         ps = r["pseudo_selectivity"]["p95"]
         return (r["auc"], r["auc_token"] or 0.0, (r["selectivity"] or 0.0) - (ps or 0.0), r["layer"])
@@ -1775,7 +1805,7 @@ def _check_summary(ks, Ls, layers_out, ov, cname, csha, pos_a, pos_b, skip, max_
             "built_on": {"contrast_sha": ks.contrast_sha, "subset": ks.subset, "q_mode": ks.q_mode},
             "layers": layers_out, "best_layer": max(aucs)[1] if aucs else None,
             "all_beat_pseudo": (all(beats) if beats else None), "n_pseudo": ks.n_pseudo, "counts": counts,
-            "replies": replies, "iv": iv_desc, "notes": notes, "warnings": warnings,
+            "dont_touch_start": dt_start, "replies": replies, "iv": iv_desc, "notes": notes, "warnings": warnings,
             "seconds": time.perf_counter() - t0}
 
 

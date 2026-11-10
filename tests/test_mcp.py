@@ -74,3 +74,39 @@ def test_mcp_acceptance_sequence(tmp_path):
                 assert ui["error"]["code"] == "UI_NOT_RUNNING"
 
     anyio.run(main)
+
+
+def test_mcp_contrast_from_systems_keeps_c1_and_line_separators(tmp_path, monkeypatch):
+    """MCP の reverse に system_a・system_b・user_prompts を直接渡すと <root>/contrast/ に対照集合を書く。C1 制御文字(MMLU の
+    問題文によくある U+0080〜U+009F)・U+0085・U+2028・絵文字を含んでも、書いた対照集合を読むと文字が変わらない
+    (yaml.safe_dump で書くと U+0085 が空白になった)。heads_pipeline の表はジョブ head_pipeline に渡る(一括の書き方は
+    tests/test_change06.py)。Session は見立てたもので、モデルは読まない。"""
+    from types import SimpleNamespace
+
+    import gne.api
+    import gne.mcp_server as ms
+    from gne.reverse import ContrastSet
+    qs = ["\x93善と悪\x94についてどう思う？", "ありがとう\x85助かった。", "それは\u2028本当？", "誕生日🎂おめでとう"]
+    seen, started = [], []
+
+    class FakeRunner:
+        def __init__(self, *a, **k):
+            pass
+
+        def start(self, kind, params, **k):
+            started.append((kind, params))
+            return SimpleNamespace(view=lambda: {"id": "j1", "kind": kind})
+    fake = SimpleNamespace(warnings=[], store=SimpleNamespace(root=tmp_path),
+                           reverse=lambda contrast, **kw: seen.append(contrast) or {"name": "x"})
+    monkeypatch.setattr(gne.api, "Session", lambda *a, **k: fake)
+    monkeypatch.setattr(ms, "JobRunner", FakeRunner)
+    srv = ms.build_server("m.gguf")
+    spec = {"name": "c1_mcp", "system_a": "悪役\x85として", "system_b": "ふつうに\u2028", "user_prompts": qs}
+
+    async def go():
+        await srv.call_tool("reverse", dict(spec))
+        await srv.call_tool("heads_pipeline", {"spec": dict(spec)})
+    anyio.run(go)
+    cs = ContrastSet.load(seen[-1])
+    assert cs.prompts("A") == qs and (cs.system_a, cs.system_b) == (spec["system_a"], spec["system_b"])
+    assert started[-1] == ("head_pipeline", {"spec": spec})

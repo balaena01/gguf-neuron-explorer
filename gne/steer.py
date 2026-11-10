@@ -21,6 +21,7 @@ import yaml
 from gguf import GGMLQuantizationType, GGUFReader, GGUFValueType, GGUFWriter
 
 from .store import CONFIGS
+from .yamlio import write_yaml
 
 DoseUnit = Literal["rel", "absmax", "raw"]
 
@@ -187,7 +188,7 @@ class Recipe:
              **({"direction_layer": self.direction_layer} if self.direction_layer != "own" else {}),
              **({"default_key": self.default_key} if self.default_key else {}),
              "units": [_unit_yaml(u) for u in self.units]}
-        Path(path).write_text(yaml.safe_dump(d, allow_unicode=True, sort_keys=False), encoding="utf-8")
+        write_yaml(path, d, code="BAD_RECIPE")           # 読み戻して同じ文字になるか確かめてから書く(U+0085 なども)
 
     def to_dict(self) -> dict:
         return {"name": self.name, "model_id": self.model_id, "dose_unit": self.dose_unit, "when": self.when,

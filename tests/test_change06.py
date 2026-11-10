@@ -534,6 +534,81 @@ def test_pipeline_spec_checks(tmp_path):
     assert est["seconds"] and est["detail"]["prompts"] == 300 and est["detail"]["screened"] == 32
 
 
+# YAML(PyYAML)がそのままでは読めない文字・別の文字に読む文字を含む質問と system: MMLU の問題文によくある C1 制御文字
+# (U+0080〜U+009F)、DEL、行の区切りとして読まれる U+0085・U+2028・U+2029。絵文字はそのまま書けば読める
+C1_QS = ["\x93善と悪\x94についてどう思う？", "ありがとう\x85助かった。", "それは\u2028本当？", "誕生日🎂おめでとう",
+         "嘘\x7fをついてもいい？", "\x96どちらが\u2029正しい？"]
+
+
+def test_pipeline_contrast_keeps_c1_and_line_separators(tmp_path, monkeypatch):
+    """一括(heads_pipeline。UI の pipeline タブの入力欄の表をそのまま渡すジョブ head_pipeline も同じ)が <root>/contrasts/ に書く
+    対照集合を読み直しても、質問・system・validate の文字が変わらない(yaml.safe_dump で書くと U+0085 が空白になった)。
+    書いた対照集合を読むところ(load_contrast)で止め、モデルは流さない。"""
+    import gne.direction as dr
+    from gne.jobs import standard_kinds
+    s, _ = _store_session(tmp_path)
+
+    class Stop(Exception):
+        pass
+    seen = []
+    real = dr.load_contrast
+
+    def spy(p):
+        seen.append(real(p)[0])
+        raise Stop
+    monkeypatch.setattr(dr, "load_contrast", spy)
+    spec = {"name": "c1_pipe", "system_a": "悪役\x85として答える", "system_b": "ふつうに\u2028答える", "user_prompts": C1_QS,
+            "validate": {"match": "悪\x93", "target": "a villain\x92s answer"}}
+    path = s.store.contrast_dir() / "c1_pipe.yaml"
+    for run in (lambda: s.heads_pipeline(dict(spec)),                                    # API・MCP の heads_pipeline
+                lambda: standard_kinds()["head_pipeline"](s, spec=json.loads(json.dumps(spec)), max_examples=8)):  # UI の入力欄
+        with pytest.raises(Stop):
+            run()
+        cs = seen[-1]
+        assert cs.prompts("A") == C1_QS and cs.prompts("B") == C1_QS
+        assert (cs.system_a, cs.system_b) == (spec["system_a"], spec["system_b"])
+        assert yaml.safe_load(path.read_text(encoding="utf-8"))["validate"] == spec["validate"]
+        path.unlink()
+
+
+def test_recipe_save_keeps_c1_and_line_separators(tmp_path):
+    """レシピ(名前・when の after:<文字>)も、書いて読み直すと同じ文字。"""
+    r = Recipe([parse_unit("1:H0:s1@d1")], name="悪役\x85レシピ", when="after:\u2028答え\x93")
+    p = tmp_path / "r.yaml"
+    r.save(p)
+    back = Recipe.load(p)
+    assert (back.name, back.when) == (r.name, r.when)
+
+
+def test_contrast_recipe_table_keeps_c1_and_line_separators(tmp_path):
+    """対照集合の recipe_a に書いた表から作るレシピ(一時ファイルに書いて読む)も、同じ文字になる。"""
+    from gne.reverse import ContrastSet
+    s, _ = _store_session(tmp_path)
+    cp = tmp_path / "c.yaml"
+    unit = {"layer": 1, "kind": "head", "head": 0, "mode": "proj", "s": 1, "direction": "d1"}
+    cp.write_text(json.dumps({"name": "c", "recipe_a": {"when": "after:\x85答え", "units": [unit]}, "user_prompts": ["a", "b"]},
+                             ensure_ascii=True), encoding="utf-8")       # 対照集合の YAML としてそのまま読める書き方
+    ra = ContrastSet.load(cp).recipe(s, "A")
+    assert ra.when == "after:\x85答え"
+
+
+
+def test_write_yaml_checks_before_writing(tmp_path, monkeypatch):
+    """yamlio: ふつうの表は yaml.safe_dump と同じ見た目。書く中身を読み直して元の表と違えば、書かずにエラー(前のファイルはそのまま)。
+    NaN は NaN と同じとみなし、タプルはリストとして比べる。"""
+    import gne.yamlio as yio
+    plain = {"name": "p", "user_prompts": ["今日は？", "yes", "1e-6", ""], "n": 3, "x": 0.25, "z": None}
+    assert yio.dump_yaml(plain) == yaml.safe_dump(plain, allow_unicode=True, sort_keys=False)
+    assert yio.same({"a": float("nan"), "b": (1, 2)}, {"a": float("nan"), "b": [1, 2]})
+    assert not yio.same({"a": "1"}, {"a": 1}) and not yio.same({"a": True}, {"a": 1})
+    p = tmp_path / "c.yaml"
+    p.write_text("name: old\n", encoding="utf-8")
+    monkeypatch.setattr(yio, "dump_yaml", lambda d, sort_keys=False: yaml.safe_dump(d, allow_unicode=True, sort_keys=sort_keys))
+    with pytest.raises(GneError) as ei:
+        yio.write_yaml(p, {"name": "c", "user_prompts": ["ありがとう\x85助かった。"]})
+    assert ei.value.code == "BAD_CONTRAST" and "c.yaml" in ei.value.message
+    assert p.read_text(encoding="utf-8") == "name: old\n"
+
 @pytest.mark.model
 def test_contexts_fit_the_questions_and_steer_is_freed(session):
     """短い会話しか読まない処理(方向の点数・因果・配分)は、内部を測るコンテキストを最長の会話に合わせて小さく作り、

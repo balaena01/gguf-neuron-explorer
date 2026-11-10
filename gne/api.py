@@ -2014,7 +2014,8 @@ class Session:
         for key in ("user_prompts", "prompts_a", "prompts_b"):
             check_questions(spec.get(key), key)
         path = self.store.contrast_dir() / f"{name}.yaml"
-        path.write_text(yaml.safe_dump(spec, allow_unicode=True, sort_keys=False), encoding="utf-8")
+        from .yamlio import write_yaml
+        write_yaml(path, spec)                     # 読み戻して同じ文字になるか確かめてから書く(U+0085 なども)
         from .direction import load_contrast
         try:
             cs, _ = load_contrast(path)
@@ -2628,6 +2629,25 @@ round_01.scores.txt に「番号 P C」を 1 行ずつ書く(例: 17 3 4)。全�
         同じ名前の方向があれば使い回し、rebuild_direction=True で作り直す。中身は gne/keyed_pipeline.py の run。"""
         from .keyed_pipeline import run
         return run(self, contrast, **kw)
+
+    def direction_key_causal(self, contrast: str | Path | dict, **kw) -> dict:
+        """keyed の効く場所を探す第 1 段(gne direction key-causal): 候補(層 × 書き込み先)ごとに鍵を作り(subset even)、
+        作成に使っていない奇数番目の返事で、keyed を当てたときの振る舞いの部分の対数確率の下がり方(と probe の答えの差の変化)・
+        副作用・比較用の鍵の値を生成なしで測る。比較用の鍵の 5% 点より下がった候補に印を付け、偶然でも印が付く数を並べる。
+        生成なしの目安なので、効くかどうかは第 2 段(direction_key_causal_verify)で数える。中身は gne/keyed_causal.py の key_causal。"""
+        from .keyed_causal import key_causal
+        return key_causal(self, contrast, **kw)
+
+    def direction_key_causal_verify(self, units: list[str] | str, **kw) -> dict:
+        """第 2 段(gne direction key-causal-verify): 選んだ候補(keyed のユニット)と、それぞれの比較用の鍵 1 本で、作成に使って
+        いない質問に behave と同じ生成をさせ、振る舞いが出た数を iv だけのときと比べる。中身は keyed_causal.key_causal_verify。"""
+        from .keyed_causal import key_causal_verify
+        return key_causal_verify(self, units, **kw)
+
+    def key_causal_results(self) -> list[dict]:
+        """保存した key-causal の結果(<root>/keys/<model_id>/causal/)の要約。"""
+        from .keyed_causal import list_results
+        return list_results(self)
 
     def keys(self) -> list[dict]:
         """<root>/keys/<model_id>/ の鍵の一覧と要約(層・書き込み先・kn・作成の条件、パスなし)。読めないファイルは error だけ。"""

@@ -613,3 +613,12 @@ input.rc-kexp { width: 44px; }
 table.evx-kx-tab th, table.kx-check th, table.evx th.wrap { white-space: normal; max-width: 8em; vertical-align: bottom; }
 .evx-kx span.ok, .kx-res span.ok { color: var(--kx-ok); }
 .evx-kx span.ng, .kx-res span.ng { color: var(--kx-ng); }
+/* 鍵のタブの「効く層を探す」(keys_causal.js) */
+#kz-wrap .kz-note { max-width: 980px; margin: 4px 0; }
+#kz-wrap .kz-marks { margin: 4px 0; }
+#kz-vwrap { margin-top: 6px; }
+#kz-vwrap textarea { font-size: 12px; vertical-align: top; }
+#kz-wrap th.kz-sort { cursor: pointer; user-select: none; }
+#kz-wrap th.kz-sort:hover { color: var(--text); }
+#kz-wrap .kz-legend { max-width: 980px; }
+#kz-wrap .kz-combo { color: var(--kx-a); font-weight: 600; }

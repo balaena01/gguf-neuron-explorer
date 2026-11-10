@@ -733,6 +733,48 @@ def test_key_check_start_rho_cell_and_matched_label(ui_server, browser):
         pg.close()
 
 
+# 返事を書き始める直前の位置を Q に入れて作った鍵の key-check(dont_touch の群のこの位置を測ったもの)
+DTS_CHECK = {**START_CHECK, "mode": "same", "positions": "before:(?s)\\A.",
+             "counts": {"A": {"examples": 4, "rows": 4, "of": 4}, "B": {"examples": 4, "rows": 60, "of": 4},
+                        "dt:english": {"examples": 2, "rows": 30, "of": 2}, "dts:english": {"examples": 2, "rows": 2, "of": 2},
+                        "dt:tasks": {"examples": 1, "rows": 9, "of": 1}, "dts:tasks": {"examples": 1, "rows": 1, "of": 1}},
+             "dont_touch_start": {"on": True, "recorded": True, "positions": "last", "groups": {"english": 2, "tasks": 1}, "rows": 3},
+             "layers": [{**START_CHECK["layers"][0], "dont_touch_median": {"english": 0.19, "tasks": 0.02},
+                         "dont_touch_start_median": {"english": 0.62, "tasks": 0.9},
+                         "rho": {"dont_touch_start": {"english": {"n": 2, "median": 0.62}, "tasks": {"n": 1, "median": 0.9}}}}]}
+
+
+@pytest.mark.model
+def test_key_check_dont_touch_reply_start_cell(ui_server, browser):
+    """key-check の表の dont_touch の中央値の欄に、返事を書き始める直前の位置での ρ の中央値(鍵の作成でこの位置を Q に入れた鍵
+    だけ)を括弧で出し、例 2 つ以上で 0.4 以上なら赤(返事の冒頭の警告と同じ決まり)。数の行では dts:<群> を「書き始める直前」と
+    書く。この位置を測っていない結果(START_CHECK)には出さない。英語の文言もある。"""
+    url = ui_server["url"]
+    for lang in ("ja", "en"):
+        pg, errors = _open(browser, url, lang)
+        _key_tab(pg)
+        pg.evaluate(f"(() => {{ const k = window.gne.directionView.key; k.checked = {json.dumps(DTS_CHECK)}; k.renderCheck(); }})()")
+        cell = "document.querySelectorAll('#kc-res table.kx-check tbody tr')[0].cells[9]"
+        full = pg.evaluate(f"{cell}.textContent")
+        text = full.split("返事の冒頭" if lang == "ja" else "start of the reply")[0]       # 下の段(返事の冒頭)の前まで
+        reds = pg.evaluate(f"[...{cell}.querySelectorAll('.kx-ng')].map(s => s.textContent)")
+        head = pg.evaluate("document.querySelector('#kc-res .kx-res p.note').textContent")
+        if lang == "ja":
+            assert text == "english 0.19(書き始める直前 0.62) · tasks 0.02(書き始める直前 0.90)", full
+            assert "dt english(書き始める直前) 2/2" in head and "dt english 2/2" in head
+        else:
+            assert text == "english 0.19 (just before the reply 0.62) · tasks 0.02 (just before the reply 0.90)", text
+            assert "dt english (just before the reply) 2/2" in head
+        assert "0.62" in reds and "0.90" not in reds                                # tasks は例が 1 つなので赤にしない
+        pg.evaluate(f"(() => {{ const k = window.gne.directionView.key; k.checked = {json.dumps(START_CHECK)}; k.renderCheck(); }})()")
+        assert "書き始める直前" not in pg.evaluate(f"{cell}.textContent") and "just before" not in pg.evaluate(f"{cell}.textContent")
+        if lang == "en":
+            missing = pg.evaluate("[...window.gneI18n.missing]")
+            assert missing == [], missing
+        assert not errors, errors
+        pg.close()
+
+
 def _saved_key(name):
     """/api/keys/<名前> の形の、小さな保存した鍵(層 8・14)。"""
     return {"name": name, "target": "ffn", "layers": [8, 14], "kn": {"8": 0.3, "14": 0.4}, "gain": {"8": 3.3, "14": 2.5},

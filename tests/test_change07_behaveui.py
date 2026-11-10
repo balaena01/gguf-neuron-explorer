@@ -285,6 +285,33 @@ def test_server_endpoints(env):
     assert r["path"] is None and r["spec"] is None and any(x["kind"] == "empty" and x["level"] == "error" for x in r["issues"])
 
 
+@pytest.mark.model
+def test_server_c1_json_to_pipeline(env):
+    """質問と返事に C1 制御文字(MMLU の問題文によくある U+0080〜U+009F)・U+0085・U+2028 などを含む behave の結果: POST
+    /api/keyed-from-behave の spec を入力欄に入れて(about を除き、JSON を通す)「方向から key-check まで」(direction_key_pipeline の
+    ジョブ)に渡すと、鍵と key-check まで回る。<root>/contrasts/ に書いた対照集合を読み戻しても質問と返事の文字は変わらない。"""
+    from tests.test_change07_frombehave import C1_A, C1_B, _behave, _rec_dict
+    c, s = env.c, env.s
+    cp = s.store.contrast_dir() / "polite_c1.yaml"
+    cp.write_text(yaml.safe_dump({**POLITE, "name": "polite_c1", "prompts_a": C1_A, "prompts_b": C1_B}, allow_unicode=True,
+                                 default_style='"'), encoding="utf-8")
+    texts = ["ありがとうございます。とても嬉しいです。"] * 7 + ["\x93ありがとう\x94ございます\x85嬉しいです\u2028。"]
+    _behave(s, "syn_c1", [texts], prompts=C1_A, recipe=_rec_dict(s.store.recipes_dir() / "chips.yaml", "syn_c1"), n_tokens=30)
+    r = c.post("/api/keyed-from-behave", json={"behave": "syn_c1", "recipe": "chips", "direction": "polite_left",
+                                               "contrast": str(cp)})
+    assert r.status_code == 200, r.text
+    r = r.json()
+    assert r["path"] and r["spec"]["user_prompts"] == C1_A and r["spec"]["replies"] == texts
+    spec = json.loads(json.dumps({k: v for k, v in r["spec"].items() if k != "about"}))    # 入力欄(JSON.stringify → JSON.parse)
+    v = _run_job(c, "direction_key_pipeline", {"spec": spec, "layers": "8", "subset": "even", "max_tokens": 16, "pseudo": 2})
+    out = v["result"]
+    assert out["key"]["name"] == "syn_c1_keyed" and out["key"]["matched"] == {"A": 4, "of": 4} and out["check"]["held_out"]
+    assert out["direction"]["reused"] and out["key"]["iv"]["units"][0]["mode"] == "proj"
+    from gne.keyed_build import read_key_spec
+    back = read_key_spec(out["contrast_path"])
+    assert back.contrast.prompts("B") == C1_A and back.dont_touch[0].prompts == C1_B and back.replies["same"] == texts
+
+
 def _free_port() -> int:
     with socket.socket() as so:
         so.bind(("127.0.0.1", 0))

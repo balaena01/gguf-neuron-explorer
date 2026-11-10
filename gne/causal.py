@@ -42,9 +42,9 @@ BIG_LORA = 4_000_000                     # これより大きい一時 LoRA は 
 class TmpLora:
     """一時的な LoRA を書いて当て、使い終わったら解放してファイルも消す(何百個も当てるので)。"""
 
-    def __init__(self, session):
+    def __init__(self, session, dir: Path | None = None):
         self.s = session
-        self.dir = session.store.heads_dir(session.meta.model_id) / "tmp"
+        self.dir = Path(dir) if dir is not None else session.store.heads_dir(session.meta.model_id) / "tmp"
         self.dir.mkdir(parents=True, exist_ok=True)
         self.n = 0
 

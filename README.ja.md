@@ -361,6 +361,8 @@ UI では、direction ビューの「鍵(keyed)」タブで、ボタン 1 つで
 
 **CHiPS で残った場面を抑える。** CHiPS のレシピを当てても一部の質問で振る舞いが残るときは、`gne direction key-from-behave --behave B --recipe R --direction D` で、レシピを当てた `gne behave` の結果からその質問を集め、keyed の対照集合を `<root>/keyed/` に書きます(方向 D を α = −1 で書き、鍵はレシピ R を当てた状態で作る)。鍵のタブのひな形に出るので、そこから鍵を作り、keyed のユニットを R に足して 1 つの LoRA にします(docs/keyed-write.md §17)。鍵のタブの「CHiPS で残った場面から作る」なら、レシピを当てた behave を回すところから JSON を作って入力欄に入れるところまで、画面で進められます。
 
+**効く場所を探す。** key-check は鍵が場面を分けるかを見るだけで、key-check の余裕が大きい層に書いても振る舞いが変わらないことがあります。`gne direction key-causal --contrast C` は、候補(既定は全層 × `ffn`・`attn`)ごとに鍵を作り、作成に使っていない返事で、keyed のユニットを足すと振る舞いの部分(`positions` の正規表現に一致した文字。選択式の振る舞いなら `--probe` の答えの組)の対数確率がどれだけ下がるかを、生成なしで、ラベルをシャッフルして作った比較用の鍵と `dont_touch` の返事の変化と並べて測ります。全部の比較用の鍵の 5% 点より下がった候補に印を付け、偶然でも印が付く数(候補の数 × 5%)も出します。表は 1 か所(書き込み先 × 層)につき 1 行で、強さごとの確率の下がり方(有意なら印)・書き込みたくない位置の返事の副作用・全部の強さで有意か、の 3 つと、下がり方 ÷ 副作用を並べ、どの列でも並べ替えられます。この 3 つで選ぶ根拠はまだ 1 例(Qwen3.5-4B の語尾)だけで、確率の下がり方だけで選ぶと、返事を壊して確率を下げている場所を拾うことがあります。これはふるい分けで、生成なしの確率の変化は、生成した返事が変わることを保証しません。選んだ候補を `gne direction key-causal-verify --from NAME --unit U …` で、作成に使っていない質問に生成させ、比較用の鍵 1 本と並べて、介入だけのときと振る舞いの数を比べます。複数の層を一緒に書く組は `--combo` で 1 つの候補にできます。層を自動で 1 つに決めることはしません。鍵のタブの「効く層を探す」でも同じ 2 段を回せます(docs/keyed-write.md §18)。
+
 ランク 1 の条件つき編集 `ΔW = α d kᵀ / (μᵀk)`、`k = μ − QQᵀμ`(`Q` は書き込みたくない位置の入力が張る部分空間の正規直交基底)の形は、nwn さんの Zenn の記事「[Weight-Space Programming でずんだもん語尾](https://zenn.dev/nwn/articles/cf9fe78aa33861)」(2026)によるものです。gne はこれを、対照集合から鍵を作り、`gne direction` の方向に沿って書き、作成に使っていない例でラベルをシャッフルした比較用の鍵と比べて確かめる道具にしました。
 
 ### 実地テスト: 本番と同じ動かし方で確かめる
@@ -487,7 +489,7 @@ r = client.chat.completions.create(
 claude mcp add gne -- gne mcp --model /path/to/model.gguf
 ```
 
-ツールは `model_overview`・`layer_summary`・`neuron`・`search`・`steer`・`steer_lens`・`fires`・`reverse`・`recipe_save`・`export_cvec`・`gain_export`・`bake`・`eval`・`direction`・`ablate_export`・`head`・`heads_contrast`・`attention`・`direction_score`・`heads_causal`・`heads_allocate`・`headproj_export`・`direction_key`・`direction_key_check`・`direction_key_experts`・`direction_key_verify`・`direction_key_pipeline`・`direction_key_from_behave`・`behave`・`keys`・`keyed_export`・`set_name`・`job_start` / `job_status` / `job_cancel` です。
+ツールは `model_overview`・`layer_summary`・`neuron`・`search`・`steer`・`steer_lens`・`fires`・`reverse`・`recipe_save`・`export_cvec`・`gain_export`・`bake`・`eval`・`direction`・`ablate_export`・`head`・`heads_contrast`・`attention`・`direction_score`・`heads_causal`・`heads_allocate`・`headproj_export`・`direction_key`・`direction_key_check`・`direction_key_experts`・`direction_key_verify`・`direction_key_pipeline`・`direction_key_from_behave`・`direction_key_causal`・`direction_key_causal_verify`・`behave`・`keys`・`keyed_export`・`set_name`・`job_start` / `job_status` / `job_cancel` です。
 
 Web UI を開いているなら `--ui-url http://127.0.0.1:8791` を付けます。こうするとエージェントがブラウザ上でニューロンを強調したり、注釈を貼ったり、開いたりできます（`ui_highlight`・`ui_note`・`ui_open`）。同じ GPU に UI がモデルを載せているときは、`--n-gpu-layers 0` も付けます。
 
@@ -517,7 +519,7 @@ python -m pytest -q
 - [CHiPS: 知っているのに答えられない、を数本のヘッドで減らす](https://balaena01.github.io/chips-steering/#ja): CHiPS の記事。実測とデータつき
 - [docs/qwen4exp.md](docs/qwen4exp.md): Qwen3.8-Flash-Next(`qwen4exp`)。分割ファイルの GGUF、4 本の残差ストリーム、control vector なしで使えるもの
 - [docs/head-component-steering.md](docs/head-component-steering.md): CHiPS。因果で選んだ数個の attention ヘッドの、方向に沿った成分だけを変える手法(`mode: proj`、`gne direction score`、`gne heads causal`、`gne heads allocate`、`gne eval --compare-methods`)と、全層の射影消去との関係
-- [docs/keyed-write.md](docs/keyed-write.md): 鍵つきの書き込み。残差に書き込む重み行列の入力に、対照集合から作った鍵が反応するときだけ効くランク 1 の書き込み(`mode: keyed`、`gne direction key`、`gne direction key-check`)と、語尾の例、CHiPS との使い分け
+- [docs/keyed-write.md](docs/keyed-write.md): 鍵つきの書き込み。残差に書き込む重み行列の入力に、対照集合から作った鍵が反応するときだけ効くランク 1 の書き込み(`mode: keyed`、`gne direction key`、`gne direction key-check`)と、語尾の例、CHiPS との使い分け、効く場所の探し方(`gne direction key-causal`)
 - [docs/persona_workflow.md](docs/persona_workflow.md): 性格をニューロンで作る手順（`examples/persona_neurons/` のスクリプトと、ヤンデレでたどった道）と、お手本の会話から attention ヘッドとニューロンを導く手順
 
 ## ライセンス

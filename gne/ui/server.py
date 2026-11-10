@@ -12,6 +12,7 @@ CHANGE-06 G: 因果スクリーニングと強さの配分(/api/causal)、方向
 CHANGE-07 G: 鍵つきの書き込み(keyed)の鍵の一覧(/api/keys)、対照集合の候補(/api/contrasts)とひな形(/api/keyed-templates)。
 鍵の作成・確認・専門家の選ばれ方・LoRA の確かめ・方向から key-check までの一括は direction_key・direction_key_check・
 direction_key_experts・direction_key_verify・direction_key_pipeline のジョブ、keyed のレシピの書き出しは headproj_export のジョブ。
+keyed の効く場所を探す 2 段は direction_key_causal・direction_key_causal_verify のジョブで、保存した結果は /api/key-causal。
 ローカル専用なので、Host が 127.0.0.1 / localhost 以外の要求(DNS rebinding)と、別のオリジンからの書き込み(POST / DELETE)は断る。
 大きい配列は JSON にせず octet-stream で返し、形は X-Shape、付帯情報は X-Meta(JSON)に入れる(§8.2)。
 """
@@ -224,6 +225,17 @@ def create_app(session, *, warm: bool = True, openai: bool = False) -> FastAPI:
     @app.get("/api/keys/{name}")
     def key_one(name: str):
         return data.key_one(name)
+
+    # keyed の効く場所(鍵のタブの「効く層を探す」)。回すのはジョブ direction_key_causal・direction_key_causal_verify
+    @app.get("/api/key-causal")
+    def key_causal_list():
+        """保存した key-causal の結果の要約(新しい順)。"""
+        return data.key_causal_list()
+
+    @app.get("/api/key-causal/{name}")
+    def key_causal_one(name: str):
+        """key-causal の第 1 段の結果(候補 × α の行)と、あれば第 2 段の結果(返事は除く)。"""
+        return data.key_causal_one(name)
 
     # CHiPS で残った場面から keyed の JSON を作る(鍵のタブ)。behave を回すのはジョブ behave
     @app.get("/api/behave")

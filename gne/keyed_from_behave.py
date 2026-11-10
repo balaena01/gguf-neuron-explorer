@@ -13,6 +13,9 @@ configs/keyed/one_scene.json と同じ形の JSON を <root>/keyed/<name>.json �
   (書き込みたくない位置と同じ not-before:<正規表現> = 返事のうち一致の直前以外の全部)。返事を書き始める直前の位置は鍵の作成が
   自動で Q に入れる。
 - validate: CHiPS の対照集合のものを写す。keyed: {direction: CHiPS の方向, alpha: −1, iv: CHiPS のレシピ}。
+- 書き方: 鍵の作成・key-check・一括は対照集合を YAML として読むので、JSON は日本語・絵文字のまま書き、YAML がそのまま読めない
+  文字(MMLU の問題文によくある C1 制御文字など)だけを \\uXXXX にする(yamlio.dump_json)。書いたファイルを
+  read_key_spec で読めることを確かめてから置く(write_checked)。
 
 モデルは動かさない(behave の結果の返事の文字と、記録されたトークンの数だけを読む)。広すぎる正規表現の見分けは、返事の
 トークンのうち書き込みたい位置(一致の始まりの文字を含むトークン)になる割合の見込みで行う(reply_positions・BROAD_SHARE)。
@@ -21,8 +24,8 @@ configs/keyed/one_scene.json と同じ形の JSON を <root>/keyed/<name>.json �
 from __future__ import annotations
 
 import json
+import os
 import re
-import tempfile
 from pathlib import Path
 
 import yaml
@@ -221,6 +224,31 @@ def check_recipe(behave_recipe: dict | None, rec, names: list | None = None) -> 
     return f"behave の結果に記録されたレシピが、レシピ {rn} と違います(ユニット {len(got_u)} 個 対 {len(want_u)} 個){named}"
 
 
+# --- 書き出し ----------------------------------------------------------------------------------------------
+
+def write_checked(path: Path, spec: dict) -> None:
+    """spec を path に JSON で書く(yamlio.dump_json: 日本語・絵文字はそのまま、YAML がそのまま読めない C1 制御文字
+    などだけを \\uXXXX にする)。先に同じフォルダの一時ファイルに書き、その書いたファイルを鍵の対照集合として読めるか
+    (read_key_spec。gne direction key・key-check・一括と同じ読み方)と、YAML として読んだ中身が spec と同じかを確かめてから
+    置き換える。確かめに外れたら BAD_CONTRAST で、path は書き換えず、一時ファイルも残さない。"""
+    from .keyed_build import read_key_spec
+    from .yamlio import dump_json
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(dump_json(spec), encoding="utf-8")
+        try:
+            read_key_spec(tmp)
+            same = yaml.safe_load(tmp.read_text(encoding="utf-8")) == spec
+        except (GneError, yaml.YAMLError) as e:
+            raise GneError("BAD_CONTRAST", f"{path.name}: 書いた JSON を鍵の対照集合として読めません({getattr(e, 'message', e)})。"
+                           "書きませんでした") from e
+        if not same:
+            raise GneError("BAD_CONTRAST", f"{path.name}: 書いた JSON を YAML として読むと中身が変わります。書きませんでした")
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 # --- 本体 --------------------------------------------------------------------------------------------------
 
 def _short(q, n: int = 60) -> str:
@@ -283,7 +311,7 @@ def from_behave(session, behave, *, recipe, direction: str | None = None, contra
     - replies: 抜き出した質問の behave の返事を出力の replies に入れる(既定)。False なら鍵の作成で返事を作る(keyed.max_tokens に
       behave の長さ)。思考ありの behave の結果では入れない。
     - prompts: 質問の記録が無い古い behave の結果のときの質問集。strict: レシピ・質問の確かめに外れたらエラー。"""
-    from .keyed_build import MIN_A_EXAMPLES, MIN_A_ROWS, few_side_a, parse_positions, read_key_spec
+    from .keyed_build import MIN_A_EXAMPLES, MIN_A_ROWS, few_side_a, parse_positions
     from .keyed_pipeline import clean_spec
     from .reverse import question_text
     warnings: list[str] = []
@@ -482,16 +510,13 @@ def from_behave(session, behave, *, recipe, direction: str | None = None, contra
 
     path = None
     if rows:
-        d, _ = clean_spec(spec)                                   # 鍵の対照集合として読めるか(読めなければ書かない)
-        with tempfile.TemporaryDirectory() as td:
-            tp = Path(td) / f"{name}.yaml"
-            tp.write_text(yaml.safe_dump(d, allow_unicode=True, sort_keys=False), encoding="utf-8")
-            read_key_spec(tp)
+        clean_spec(spec)                                          # keyed の設定と名前(読めなければ書かない)
         path = Path(out) if out else session.store._dir("keyed") / f"{name}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
-        if path.exists():
+        existed = path.exists()
+        write_checked(path, spec)
+        if existed:
             notes.append(f"{path.name} を書き換えました")
-        path.write_text(json.dumps(spec, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return {"name": name, "path": None if path is None else str(path), "behave": bname, "behave_path": str(bpath),
             "recipe": rname, "iv": iv_ref, "direction": dname, "contrast": cs.name, "contrast_path": str(cpath),
             "n_prompts": len(qs), "n_seeds": n_runs,

@@ -11,7 +11,8 @@ export const KIND = { embed: tr("埋め込み"), connections: "connections", lay
                heads_candidates: tr("強さの候補"), heads_refine: tr("残りから追加"), headproj_export: tr("LoRA・焼き込み"), fieldtest: tr("実地テスト"),
                direction_key: tr("鍵の作成"), direction_key_check: tr("鍵の確認"), direction_key_experts: tr("専門家の選ばれ方"),
                direction_key_verify: tr("LoRA の確かめ(key-verify)"), direction_key_pipeline: tr("方向から key-check まで"),
-               behave: tr("振る舞いを数える(behave)") };
+               behave: tr("振る舞いを数える(behave)"), direction_key_causal: tr("効く層を探す(生成なし)"),
+               direction_key_causal_verify: tr("効く層を確かめる(生成)") };
 
 function eta(s) {
   if (s === null || s === undefined || !Number.isFinite(s)) return "";
@@ -32,6 +33,7 @@ function what(j) {
   if (p.spec && typeof p.spec === "object" && p.spec.name) bits.push(p.spec.name);            // head_pipeline(JSON の name)
   if (j.kind === "heads_candidates" && p.alloc) bits.push(String(p.alloc).split("/").pop());
   if ((j.kind === "direction_key_check" || j.kind === "direction_key_verify") && p.key) bits.push(`#${p.key}`);   // CHANGE-07: 確かめる鍵
+  if (j.kind === "direction_key_causal_verify") bits.push(p.result || "", tr("{n} 候補", { n: [].concat(p.units || []).length + [].concat(p.combos || []).length }));   // 効く層を確かめる(組も 1 候補)
   if (j.kind === "behave") bits.push(p.name || "behave", ...(Array.isArray(p.recipes) ? p.recipes.map((r) => `+${String(r).split("/").pop()}`) : []));
   if (j.kind === "behave" && typeof p.prompts === "string") bits.push(String(p.prompts).split("/").pop());
   if (j.kind === "eval") bits.push(p.name || p.recipe || tr("{n} ユニット", { n: (p.units || []).length }), ...(p.when && p.when !== "all" ? [`@${p.when}`] : []));

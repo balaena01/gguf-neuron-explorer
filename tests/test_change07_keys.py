@@ -518,6 +518,35 @@ def test_start_rho_hot_and_messages():
     assert _start_hot([{"layer": 14, "start_rho": None}], pos) == []
 
 
+def test_start_rho_adds_dont_touch_reply_start():
+    """返事を書き始める直前の位置を Q に入れて作った鍵の key-check: dont_touch の群 dts:<名前> の値を、その群の書き出しに位置 0 が
+    無い例(返事の冒頭が positions の正規表現に一致して not-before が外した例と、not-before の位置が 1 つも無い例)の位置 0 に
+    入れる。位置 0 がある例は同じ位置なので重ねない。dts の群の書き出し(返事の最初の 3 トークン)は使わない。dts の群が無ければ
+    (古い鍵・切って作った鍵)今のまま。"""
+    from gne.keyed_build import _start_hot, _start_hot_message, _start_rho
+
+    def grp(rows, pos, idx):
+        return {"positions": pos, "index_l": {14: idx},
+                "start": {"k": 3, "proj": {14: [(np.asarray(o, dtype=np.int64), np.asarray([[v, 0.0] for v in vs])) for o, vs in rows]}}}
+    # 例 0・1 は返事の冒頭が一致(位置 0 が無い)、例 2 は一致しない(位置 0 がある)、例 3 は not-before の位置が無い
+    G = {"B": grp([([1], [0.0]), ([1], [0.1])], "not-before:x", [0, 1]),
+         "dt:english": grp([([1, 2], [0.0, 0.1]), ([1], [0.05]), ([0, 1, 2], [0.2, 0.0, 0.0])], "not-before:x", [0, 1, 2])}
+    old = _start_rho(G, 14)
+    assert old["dont_touch"]["english"]["n"] == [1, 3, 2] and old["dont_touch"]["english"]["median"][0] == pytest.approx(0.2)
+    assert _start_hot([{"layer": 14, "start_rho": old}], {"dt:english": "not-before:x"}, auto={"english": 2}) == []
+    G["dts:english"] = {**grp([([0, 1, 2], [5.0, 5.0, 5.0])] * 4, "last", [0, 1, 2, 3]),   # 書き出しは使わない
+                        "proj": {14: [np.asarray([[v, 0.0]]) for v in (0.7, 0.9, 0.2, 0.6)]}}
+    new = _start_rho(G, 14)
+    e = new["dont_touch"]["english"]
+    assert set(new["dont_touch"]) == {"english"} and new["B"] == old["B"]
+    assert e["n"] == [4, 3, 2] and e["median"][0] == pytest.approx(0.65) and e["max"][0] == pytest.approx(0.9)   # 0.2・0.7・0.9・0.6
+    assert e["median"][1:] == old["dont_touch"]["english"]["median"][1:]
+    hot = _start_hot([{"layer": 14, "start_rho": new}], {"dt:english": "not-before:x"}, auto={"english": 2})
+    assert hot == [{"layer": 14, "group": "english", "j": 0, "median": pytest.approx(0.65), "starts": True}]
+    msg = _start_hot_message(hot)
+    assert "english +0.65(位置 0)" in msg and "その群の質問を増やして" in msg
+
+
 def test_plan_adds_dont_touch_reply_start(tmp_path):
     """鍵の作成は、dont_touch の各群に、その質問の返事の冒頭(生成プロンプトの最後のトークン)の群 dts:<名前> を同じ捕捉で
     足す。群の positions が生成プロンプトの位置(last など)なら重ねず、側 B の返事の冒頭は足さない。対照集合の
@@ -538,7 +567,7 @@ def test_plan_adds_dont_touch_reply_start(tmp_path):
     assert g["dt:starts"] == {"dt:starts": "last"}                              # もう返事の冒頭の状態なので重ねない
     assert [(d["name"], d["start"]) for d in info["dont_touch"]] == [("tasks", "last"), ("starts", None)]
     sets0, info0 = _plan(None, spec, mode, pos_a, pos_b, "all", None, None, None, None, lambda m: None)
-    assert {x.label: x.groups for x in sets0}["dt:tasks"] == {"dt:tasks": "not-before:です。"}   # key-check・eval は足さない
+    assert {x.label: x.groups for x in sets0}["dt:tasks"] == {"dt:tasks": "not-before:です。"}   # eval・切った鍵の key-check は足さない
     assert all("start" not in d for d in info0["dont_touch"])
     off = _write(tmp_path / "off.yaml", {**yaml.safe_load(p.read_text(encoding="utf-8")), "dont_touch_start": False})
     assert read_key_spec(off).dont_touch_start is False
@@ -627,3 +656,82 @@ def test_few_side_a_warns_on_rows(session, tmp_path):
     assert any("書き込みたい位置が 2 例の 2 位置だけ" in w for w in r["warnings"]), r["warnings"]
     c = key_check(session, "few_a", contrast=p)
     assert any("key-check の書き込みたい位置が 2 例の 2 位置だけ" in w for w in c["warnings"]), c["warnings"]
+
+
+HEAD_POS = "before:(?s)\\A."            # 返事の最初の文字: どの返事でも返事の冒頭が一致する(書き込みたい位置 = 返事を書き始める直前の位置)
+
+
+@pytest.mark.model
+def test_key_check_measures_dont_touch_reply_start(session, tmp_path):
+    """positions が返事の冒頭に一致するとき、鍵の作成は dont_touch の質問の返事を書き始める直前の位置を Q に入れるが、群の
+    positions(not-before)はこの位置を外す。key-check も鍵の記録(dont_touch_start)に従ってこの位置を測る: counts の
+    dts:<群>、結果の dont_touch_start、層ごとの rho.dont_touch_start・dont_touch_start_median、start_rho の位置 0。AUC・選択性・
+    dont_touch の ρ の中央値・ヒストグラムには入れない。漏れていれば start_rho の警告が出る。記録の無い古い鍵と、切って作った
+    鍵では今のまま(この位置を測らない)。CLI の表にも出る。"""
+    from typer.testing import CliRunner
+
+    from gne.cli import app
+    from gne.keyed import KeySet, key_dir
+    from gne.keyed_build import build_keys, key_check
+    from gne.schemas import DirectionKeyCheckOut
+    base = {"name": "head_start", "positions": HEAD_POS, "user_prompts": PROMPTS, "replies": REPLIES, "dont_touch": [EN]}
+    p = _write(tmp_path / "head_start.yaml", base)
+    r = build_keys(session, p, name="head_start", layers=[14], q_energy=1.0, pseudo=4)
+    assert r["dont_touch_start"] == {"on": True, "positions": "last", "groups": {"english": 2}, "rows": 2}
+    assert r["reply_start"]["share"] == 1.0 and r["counts"]["rows_a"] == 8
+    c = key_check(session, "head_start", contrast=p)                         # subset odd: 保留した日本語 8 問・英語 2 問
+    assert c["held_out"] and c["counts"]["dts:english"] == {"examples": 2, "rows": 2, "of": 2}
+    assert c["dont_touch_start"] == {"on": True, "recorded": True, "positions": "last", "groups": {"english": 2}, "rows": 2}
+    row = c["layers"][0]
+    e = row["start_rho"]["dont_touch"]["english"]
+    assert e["n"][0] == 2                                                    # 返事の冒頭が一致しても位置 0 を測る
+    assert row["dont_touch_start_median"]["english"] == pytest.approx(e["median"][0])
+    assert row["rho"]["dont_touch_start"]["english"]["n"] == 2
+    assert set(row["values"]) == {"A", "B", "dt:english"} and "dts:english" not in row["hist"]
+    env = {"schema_version": "1", "command": "x", "model_id": "m", "llama_cpp_version": "0", "seed": 0,
+           "generated_at": "2026-11-09T00:00:00+00:00", "warnings": []}
+    DirectionKeyCheckOut.model_validate({**env, **{k: v for k, v in c.items() if k != "warnings"}})
+    # 記録の無い古い鍵と、切って作った鍵: この位置は測らず、ほかの値は同じ
+    old = KeySet.load(key_dir(session) / "head_start.npz")                  # load_key のキャッシュの鍵は書き換えない
+    old.info.pop("dont_touch_start")
+    old.counts.pop("rows_dt_start")
+    old.name = "head_old"
+    old.save(key_dir(session) / "head_old.npz")
+    build_keys(session, p, name="head_off", layers=[14], q_energy=1.0, pseudo=4, dont_touch_start=False)
+    for nm, rec in (("head_old", False), ("head_off", True)):
+        co = key_check(session, nm, contrast=p)
+        assert not any(g.startswith("dts:") for g in co["counts"]), nm
+        assert co["dont_touch_start"] == {"on": False, "recorded": rec, "positions": None, "groups": {}, "rows": 0}
+        ro = co["layers"][0]
+        assert ro["start_rho"]["dont_touch"]["english"]["n"][0] == 0 and ro["start_rho"]["dont_touch"]["english"]["median"][0] is None
+        assert "dont_touch_start_median" not in ro and "dont_touch_start" not in ro["rho"]
+        if nm == "head_old":                                                 # 同じ κ: 位置 0 のほかは同じ値
+            for k in ("auc", "auc_token", "selectivity", "dont_touch_median", "values", "hist"):
+                assert ro[k] == row[k], k
+            assert ro["start_rho"]["B"] == row["start_rho"]["B"] and ro["start_rho"]["dont_touch"]["english"]["n"][1:] == e["n"][1:]
+            assert ro["rho"] == {k: v for k, v in row["rho"].items() if k != "dont_touch_start"}
+    # 漏れの警告: 確かめる対照集合の dont_touch を、鍵を作った場面の質問と返事そのものにする(返事を書き始める直前の状態が、作成に
+    # 使った書き込みたい位置と同じ。subset even なら、その位置での ρ の平均は κᵀμ = 1)
+    same = _write(tmp_path / "head_same.yaml", {**base, "dont_touch": [{"name": "same", "prompts": PROMPTS, "replies": REPLIES}]})
+    cs = key_check(session, "head_start", contrast=same, subset="even")
+    rs = cs["layers"][0]
+    a = np.asarray(rs["values"]["A"])
+    s0 = rs["start_rho"]["dont_touch"]["same"]
+    assert len(a) == 8 and float(a.mean()) == pytest.approx(1.0, abs=1e-3)
+    assert s0["n"][0] == 8 and s0["median"][0] == pytest.approx(float(np.median(a)), abs=1e-4)
+    assert s0["median"][0] >= 0.4, s0
+    assert any(w.startswith("dont_touch の返事の冒頭で鍵が反応しています") and "same" in w and "(位置 0)" in w
+               for w in cs["warnings"]), cs["warnings"]
+    co = key_check(session, "head_old", contrast=same, subset="even")      # 古い鍵では測らないので、この警告は出ない
+    assert co["layers"][0]["start_rho"]["dont_touch"]["same"]["n"][0] == 0
+    assert not any("same" in w and "(位置 0)" in w for w in co["warnings"]), co["warnings"]
+    # CLI の表: 返事の冒頭の ρ に english の位置 0 が入り、測ったことを 1 行で知らせる
+    cli = CliRunner().invoke(app, ["direction", "key-check", "--key", "head_start", "--contrast", str(p), "--model", str(MODEL),
+                                   "--root", str(session.store.root), "--n-gpu-layers", str(NGL), "--n-ctx", "1024"])
+    assert cli.exit_code == 0, cli.output
+    assert "dont_touch の返事を書き始める直前の位置: 鍵の作成と同じく測りました(english 2 位置" in cli.output
+    line = next(ln for ln in cli.output.splitlines() if ln.strip().startswith("14 "))
+    assert f"english {e['median'][0]:+.2f}" in line.split("返事の冒頭の ρ")[1]
+    cli = CliRunner().invoke(app, ["direction", "key-check", "--key", "head_old", "--contrast", str(p), "--model", str(MODEL),
+                                   "--root", str(session.store.root), "--n-gpu-layers", str(NGL), "--n-ctx", "1024"])
+    assert cli.exit_code == 0 and "記録の無い古い鍵なので" in cli.output

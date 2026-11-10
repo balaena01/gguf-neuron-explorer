@@ -724,6 +724,26 @@ class UIData:
             return {**ks.summary(), "model_id": ks.model_id, "info": {k: info[k] for k in keep if k in info}}
         return self._get(("key", name), [p], build)
 
+    def key_causal_list(self) -> list[dict]:
+        """保存した keyed の効く場所の結果(<root>/keys/<model_id>/causal/、gne direction key-causal)の要約(新しい順)。"""
+        from ..keyed_causal import list_results
+        return list_results(self.s)
+
+    def key_causal_one(self, name: str) -> dict:
+        """keyed の効く場所の第 1 段の結果 1 つ(候補 × α の行を含む)と、あれば第 2 段の結果(返事は除く)。モデルは使わない。"""
+        from ..keyed_causal import causal_dir, with_candidates
+        if not re.fullmatch(r"[\w.][\w.\-]*", name or ""):
+            raise GneError("BAD_ARGS", f"名前 {name!r} が不正です")
+        p = causal_dir(self.s) / f"{name}.json"
+        if not p.exists():
+            raise GneError("NOT_FOUND", f"key-causal の結果 {name} がありません", "鍵のタブの「効く層を探す」か gne direction key-causal で作れます")
+        d = with_candidates(json.loads(p.read_text(encoding="utf-8")))
+        v = causal_dir(self.s) / f"{name}.verify.json"
+        if v.exists():
+            x = json.loads(v.read_text(encoding="utf-8"))
+            d["verify"] = {k: val for k, val in x.items() if k not in ("replies", "conditions", "dt_group")}
+        return d
+
     def contrasts_list(self) -> list[dict]:
         """鍵を作る対照集合の候補: リポジトリの configs/contrast/*.yaml と、<root>/contrasts/*.yaml(UI や JSON から受け取った
         もの)。中身は YAML を読んで要約だけ(名前・質問の数・positions・dont_touch の群の名前・返事を持つか・mode)。

@@ -44,6 +44,17 @@ TSUN = {"name": "tsun", "prompts_a": PROMPTS_A, "prompts_b": PROMPTS_B,
 LEFT = "そんなこと言われても、ふん、知らないんだから。でも、ふん、まあいいわ。ほんとに、ふん。"
 LEFT_EN = "Well, if you say so. Hmph, it is nothing. Hmph, do not mention it. Really, hmph."
 PLAIN = "ありがとう、とても嬉しいです。これからもよろしくお願いします。"
+# YAML(PyYAML)がそのままでは読めない文字を含む質問: MMLU の問題文によくある C1 制御文字(U+0080〜U+009F。cp1252 の引用符・
+# ダッシュ・「…」(0x85)を Latin-1 で読み違えたもの)、DEL、YAML が行の区切りとして読む U+0085・U+2028・U+2029、U+FFFE。
+# 絵文字(BMP の外)はそのまま書けば読める
+C1_A = ["\x93今日なんか可愛いね。\x94", "昨日は手伝ってくれてありがとう\x85助かった。", "髪切った？似合ってるね\x7f。",
+        "誕生日おめでとう！🎂", "君の料理、すごく\u2028おいしかったよ。", "いつもありがとう、頼りにしてるよ\x9f。",
+        "君の歌、とても上手だったよ\x96本当に。", "傘を貸してくれてありがとう\u2029\ufffe。"]
+C1_B = ["今日の天気はどう\x96晴れ？", "おすすめの本は？", "カレーの作り方を教えて\x92。", "朝ごはんに何を食べればいい？",
+        "好きな季節は？", "疲れたときはどうすればいい？\x80\x85"]
+TSUN_C1 = {**TSUN, "name": "tsun_c1", "prompts_a": C1_A, "prompts_b": C1_B,
+           "validate": {**TSUN["validate"], "target": "a tsundere girl\x92s harsh words \x93hmph\x94"}}
+YAML_RAW_BAD = set(map(chr, range(0x7f, 0xa0))) | {"\u2028", "\u2029", "\ufffe", "\uffff"}
 
 
 def _store_session(tmp_path, model_id="m1"):
@@ -59,9 +70,12 @@ def _store_session(tmp_path, model_id="m1"):
     return s
 
 
-def _write_contrast(tmp_path, d, name=None):
+def _write_contrast(tmp_path, d, name=None, quoted=False):
+    """対照集合の YAML。quoted なら文字列をすべて二重引用符で書く(safe_dump は U+0085 をそのまま書き、読むと空白になるので、
+    TSUN_C1 は quoted で書く。中身が文字列だけの表に使う)。"""
     p = tmp_path / f"{name or d['name']}.yaml"
-    p.write_text(yaml.safe_dump(d, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    p.write_text(yaml.safe_dump(d, allow_unicode=True, sort_keys=False, **({"default_style": '"'} if quoted else {})),
+                 encoding="utf-8")
     return p
 
 
@@ -204,6 +218,86 @@ def test_extract_by_regex_and_output(world):
     assert [r["i"] for r in d2["extracted"]] == [0, 1, 2, 5, 6, 7] and d2["path"] == str(out) and out.exists()
     assert json.loads(out.read_text(encoding="utf-8"))["name"] == "left2" and not (s.store.root / "keyed" / "left2.json").exists()
     assert d2["extracted"][2]["rate"] == pytest.approx(2 / 3)
+
+
+def _c1_world(world, tmp_path, name="left_c1"):
+    """TSUN_C1(質問と validate に YAML がそのまま読めない文字)・方向 tsun_c1・behave の結果(8 問とも照れ隠しが残り、返事の
+    1 つにも C1 制御文字)。"""
+    cp = _write_contrast(tmp_path, TSUN_C1, quoted=True)
+    assert yaml.safe_load(cp.read_text(encoding="utf-8"))["prompts_a"] == C1_A
+    _fake_direction(world.s, "tsun_c1", cp)
+    texts = [LEFT] * 7 + [LEFT.replace("知らない", "\x93知らない\x94\x85")]
+    _behave(world.s, name, [texts] * 2, prompts=C1_A, recipe=_rec_dict(world.recipe, name))
+    return cp, texts
+
+
+def test_c1_control_chars_json_reads_as_key_spec(world, tmp_path):
+    """質問・返事・validate に C1 制御文字(MMLU の問題文によくある U+0080〜U+009F)・DEL・U+0085・U+2028 などを含む behave の結果
+    から作った JSON も、鍵の対照集合として読める(read_key_spec・一括の keyed の設定。どちらも YAML として読む)。JSON は
+    ensure_ascii=False のまま、YAML がそのまま読めない文字・読むと別の文字になる文字だけを \\uXXXX で書く(日本語と絵文字は
+    そのまま)ので、YAML として読んでも JSON として読んでも同じ中身になる。"""
+    from gne.keyed_build import read_key_spec
+    from gne.keyed_from_behave import from_behave
+    from gne.keyed_pipeline import file_settings
+    _, texts = _c1_world(world, tmp_path)
+    d = from_behave(world.s, "left_c1", recipe="chips", direction="tsun_c1")
+    assert len(d["extracted"]) == 8 and d["checks"]["questions_in_a"] == 8, d["warnings"]
+    path = Path(d["path"])
+    text = path.read_text(encoding="utf-8")
+    assert not (set(text) & YAML_RAW_BAD), sorted(set(text) & YAML_RAW_BAD)
+    assert "\\u0093今日なんか可愛いね。\\u0094" in text and "🎂" in text and "\\u0085" in text   # 日本語と絵文字はそのまま
+    j = json.loads(text)
+    assert j["user_prompts"] == C1_A and j["dont_touch"][0]["prompts"] == C1_B and j["replies"] == texts
+    assert j["validate"] == TSUN_C1["validate"]
+    assert yaml.safe_load(text) == j                                       # YAML として読んでも同じ中身
+    spec = read_key_spec(path)
+    assert spec.contrast.prompts("B") == C1_A and spec.dont_touch[0].prompts == C1_B and spec.replies["same"] == texts
+    assert file_settings(path) == {"direction": "tsun_c1", "alpha": -1, "iv": "chips"}
+
+
+def test_from_behave_checks_the_written_file(world, tmp_path, monkeypatch):
+    """from_behave の確かめは、書いたファイルそのもの(同じ場所の一時ファイルに書いた、置き換える前の中身)を read_key_spec で読む。
+    読めなければエラーで、前のファイルは書き換えず、一時ファイルも残さない。"""
+    import gne.keyed_build as kb
+    import gne.keyed_from_behave as fb
+    import gne.yamlio as yamlio
+    _c1_world(world, tmp_path)
+    seen = []
+    real_read = kb.read_key_spec
+
+    def spy(p):
+        seen.append((Path(p).parent, Path(p).read_text(encoding="utf-8")))
+        return real_read(p)
+    monkeypatch.setattr(kb, "read_key_spec", spy)
+    d = fb.from_behave(world.s, "left_c1", recipe="chips", direction="tsun_c1")
+    path = Path(d["path"])
+    good = path.read_text(encoding="utf-8")
+    assert seen and seen[-1] == (path.parent, good)                        # 置き換える前に、同じ場所・同じ中身で読んだ
+    assert sorted(p.name for p in path.parent.iterdir()) == [path.name]
+    # YAML がそのまま読めない文字をそのまま書く(0.2.3 までの書き方)と、確かめで止まる
+    monkeypatch.setattr(yamlio, "dump_json", lambda spec: json.dumps(spec, ensure_ascii=False, indent=2) + "\n")
+    with pytest.raises(GneError) as ei:
+        fb.from_behave(world.s, "left_c1", recipe="chips", direction="tsun_c1")
+    assert ei.value.code == "BAD_CONTRAST" and "left_c1_keyed.json" in ei.value.message
+    assert path.read_text(encoding="utf-8") == good and sorted(p.name for p in path.parent.iterdir()) == [path.name]
+
+
+def test_save_spec_keeps_c1_and_line_separators(tmp_path):
+    """一括・鍵のジョブが入力欄の表を <root>/contrasts/<name>.yaml に書くとき(save_spec)、YAML が行の区切りとして読む U+0085 なども
+    そのまま読み戻せる(yaml.safe_dump は U+0085 をそのまま書き、読むと空白になる)。"""
+    from gne.keyed_build import read_key_spec
+    from gne.keyed_pipeline import save_spec
+    d = tmp_path / "contrasts"
+    d.mkdir()
+    s = SimpleNamespace(store=SimpleNamespace(contrast_dir=lambda: d))
+    spec = {"name": "c1_spec", "positions": "before:ふん", "user_prompts": C1_A, "replies": [LEFT] * 7 + ["\x85ふん\u2028"],
+            "dont_touch": [{"name": "ordinary", "prompts": C1_B}], "keyed": {"direction": "tsun", "alpha": -1}}
+    path, settings = save_spec(s, json.loads(json.dumps(spec)))           # 入力欄の JSON を通したもの
+    r = read_key_spec(path)
+    assert r.contrast.prompts("B") == C1_A and r.dont_touch[0].prompts == C1_B and r.replies["same"][-1] == "\x85ふん\u2028"
+    assert settings == {"direction": "tsun", "alpha": -1}
+    text = path.read_text(encoding="utf-8")
+    assert text.startswith("name: c1_spec\npositions: before:ふん\n") and "- name: ordinary\n" in text   # ふつうの YAML の見た目のまま
 
 
 def test_judge_sources_regex(world, tmp_path):
@@ -624,6 +718,34 @@ def test_cli_key_from_behave_json(real):
     r = CliRunner().invoke(app, ["direction", "key-from-behave", "--behave", "left", "--recipe", "chips", "--direction", "tsun",
                                  "--name", "cli_h", "--model", str(MODEL), "--root", str(s.store.root)])
     assert r.exit_code == 0 and "残った質問: 8 問" in r.output and "次: gne direction key --contrast" in r.output
+
+
+@pytest.mark.model
+def test_c1_json_cli_key_and_pipeline(real):
+    """質問に C1 制御文字などを含む JSON を、そのまま gne direction key(CLI)と direction_key_pipeline に渡せる(0.2.3 では YAML として
+    読むところで ReaderError になった)。鍵は与えた返事の照れ隠しの直前を書き込みたい位置にし、質問の文字は変わらない。"""
+    from gne.cli import app
+    from gne.keyed import load_key
+    from gne.keyed_build import read_key_spec
+    from gne.keyed_from_behave import from_behave
+    s = real.s
+    cp = _write_contrast(real.dir, TSUN_C1, quoted=True)
+    _behave(s, "left_c1", [_left_texts()] * 2, prompts=C1_A, recipe=_rec_dict(real.recipe, "left_c1"))
+    fb = from_behave(s, "left_c1", recipe="chips", direction="tsun", contrast=cp)
+    path = Path(fb["path"])
+    assert len(fb["extracted"]) == 8 and read_key_spec(path).contrast.prompts("B") == C1_A
+    r = CliRunner().invoke(app, ["direction", "key", "--contrast", str(path), "--layers", "8", "--pseudo", "2", "--max-tokens", "16",
+                                 "--iv", "chips", "--name", "c1_cli", "--model", str(MODEL), "--root", str(s.store.root),
+                                 "--n-gpu-layers", str(NGL), "--json"])
+    assert r.exit_code == 0, r.output
+    d = json.loads(r.stdout.strip().splitlines()[-1])
+    assert d["name"] == "c1_cli" and d["matched"] == {"A": 4, "of": 4} and d["replies"]["AB"] == "given"
+    assert d["iv"]["units"][0]["head"] == 2
+    p = s.direction_key_pipeline(str(path), layers=[8], pseudo=2, max_tokens=16)
+    assert p["key"]["name"] == "left_c1_keyed" and p["key"]["matched"] == {"A": 4, "of": 4} and p["alpha_hint"] == -1
+    assert p["check"]["held_out"] is True and p["check"]["counts"]["A"]["examples"] == 4
+    from gne.keyed import example_hash
+    assert load_key(s, "left_c1_keyed").hashes_a == [example_hash(None, q) for q in C1_A[0::2]]   # 質問の文字は変わらない
 
 
 def _free_port() -> int:

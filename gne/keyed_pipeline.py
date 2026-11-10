@@ -26,6 +26,7 @@ from pathlib import Path
 import yaml
 
 from .steer import GneError
+from .yamlio import write_yaml
 
 SETTINGS = ("layers", "target", "q_mode", "subset", "pseudo", "max_tokens", "alpha", "direction", "iv")   # 表の keyed に書ける設定
 NOT_ARGS = ("alpha", "direction")        # 鍵の作成の引数にしない設定(alpha は「+ レシピ」の α、direction は run が読む)
@@ -65,14 +66,16 @@ def clean_spec(spec: dict) -> tuple[dict, dict]:
 
 def save_spec(session, spec: dict) -> tuple[Path, dict]:
     """表を <root>/contrasts/<name>.yaml に書き、鍵の対照集合として読めるか確かめる(読めなければ消してエラー)。
-    戻り値 (パス, keyed の設定)。同じ名前のファイルは書き換える(heads_pipeline と同じ)。"""
+    戻り値 (パス, keyed の設定)。同じ名前のファイルは書き換える(heads_pipeline と同じ)。YAML は yaml.safe_dump と同じ見た目で、
+    行の区切りとして読まれる文字(U+0085 など。MMLU の問題文によくある)を含む文字列も読み戻すと同じ文字になるように書く
+    (yamlio.write_yaml。書く中身を読み直して同じか確かめてから書く)。"""
     from .keyed_build import read_key_spec
     from .reverse import check_questions
     d, settings = clean_spec(spec)
     for key in ("user_prompts", "prompts_a", "prompts_b"):
         check_questions(d.get(key), key)
     path = session.store.contrast_dir() / f"{d['name']}.yaml"
-    path.write_text(yaml.safe_dump(d, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    write_yaml(path, d)
     try:
         read_key_spec(path)
     except GneError:
@@ -130,6 +133,58 @@ class _Stages:
         return f
 
 
+def direction_plan(session, spec, settings: dict, direction: str | None = None,
+                   rebuild_direction: bool = False) -> tuple[str, bool, object | None, bool]:
+    """書き込む方向の決め方: (方向の名前, 表の keyed.direction の方向か, もうある方向(無ければ None), 作るか)。
+    direction(引数)> 表の keyed.direction > 対照集合の name。表の keyed.direction の方向は別の対照集合で作ったものなので、
+    無ければ作らずにエラー、作り直しもしない。"""
+    cname = spec.contrast.name
+    fixed = not direction and bool(settings.get("direction"))           # 表の keyed.direction(別の対照集合で作った方向)
+    dname = direction or settings.get("direction") or cname
+    if not re.fullmatch(r"[\w.\-]+", dname):
+        raise GneError("BAD_ARGS", f"方向の名前 {dname!r} は英数字・_・-・. だけにしてください")
+    try:
+        existing = session.direction_set(dname)
+    except (GneError, OSError, ValueError, KeyError):
+        existing = None
+    if fixed and (existing is None or rebuild_direction):
+        raise GneError("BAD_ARGS", f"表の keyed.direction の方向 {dname} " + ("は作り直しません" if existing is not None else "がありません")
+                       + "(別の対照集合で作った方向なので、この対照集合からは作りません)",
+                       "その方向を作った対照集合で gne direction を回すか、keyed.direction を消して direction で方向を渡してください")
+    return dname, fixed, existing, existing is None or bool(rebuild_direction)
+
+
+def make_direction(session, path: Path, dname: str, existing, response_tokens: int = 96) -> dict:
+    """方向を作る(gne direction --contrast C --positions response と同じ)。結果の direction の記録。"""
+    from .direction import load_contrast
+    ts = time.perf_counter()
+    try:
+        load_contrast(path)                                       # 方向を作れない対照集合(A と B が同じ)は先に断る
+    except GneError as e:
+        raise GneError(e.code, f"方向を作れません: {e.message}",
+                       "方向は A 側(system_a か recipe_a)と B 側の返事の差で作ります。書き込みたい振る舞いを頼む system_a を"
+                       "対照集合に書くか、同じ名前の方向を先に作ってください") from e
+    d = session.direction(contrast=path, name=dname, positions="response", response_tokens=int(response_tokens))
+    return {"name": dname, "reused": False, "rebuilt": existing is not None, "path": d["path"],
+            "positions": d["positions"], "n_rows": d["n_rows"], "seconds": time.perf_counter() - ts}
+
+
+def reused_direction(existing, spec, dname: str, fixed: bool) -> tuple[dict, list[str]]:
+    """もうある方向を使い回すときの記録と警告(中身の違う対照集合・positions response 以外で作った方向)。"""
+    warnings: list[str] = []
+    m = existing.meta
+    pos = m.get("positions")
+    if not fixed and m.get("contrast_sha") and m.get("contrast_sha") != spec.contrast.sha:
+        warnings.append(f"方向 {dname} は、いまの対照集合とは中身の違うファイルから作られています(作り直すなら"
+                        "「方向を作り直す」、MCP は rebuild_direction=True)")
+    if not fixed and pos and pos != "response":
+        warnings.append(f"方向 {dname} は positions {pos} で作られています(この一括は response で作ります。"
+                        "そろえるなら作り直す)")
+    return ({"name": dname, "reused": True, "rebuilt": False, "path": str(existing.path),
+             "positions": pos, "n_rows": {"A": int(m.get("n_rows_A") or 0), "B": int(m.get("n_rows_B") or 0)},
+             "seconds": 0.0, "from_settings": fixed}, warnings)
+
+
 def run(session, contrast, *, layers=None, name: str | None = None, direction: str | None = None,
         rebuild_direction: bool = False, response_tokens: int = 96, check: bool = True, check_subset: str | None = None,
         compact: bool = False, progress: Callable | None = None, **build_kw) -> dict:
@@ -138,7 +193,6 @@ def run(session, contrast, *, layers=None, name: str | None = None, direction: s
     keyed.direction、無ければ対照集合の name。keyed.direction の方向は作らず、作り直さない)。
     build_kw は Session.direction_key の引数(target・positions・q_mode・subset・pseudo・max_tokens・replies_a / replies_b・iv など)。
     compact なら key-check の例ごとの ρ・ヒストグラム・比較用の鍵ごとの値を落とす(MCP 向け)。"""
-    from .direction import load_contrast
     from .jobs import _layers
     from .keyed_build import read_key_spec
     t0 = time.perf_counter()
@@ -150,23 +204,11 @@ def run(session, contrast, *, layers=None, name: str | None = None, direction: s
         raise GneError("BAD_ARGS", "鍵の層(layers)を指定してください(例 [8, 14, 20] か \"8,14,20\"、または表の keyed.layers)")
     spec = read_key_spec(path)
     cname = spec.contrast.name
-    fixed = not direction and bool(settings.get("direction"))           # 表の keyed.direction(別の対照集合で作った方向)
-    dname = direction or settings.get("direction") or cname
     kname = name or cname
-    for nm, what in ((dname, "方向"), (kname, "鍵")):
-        if not re.fullmatch(r"[\w.\-]+", nm):
-            raise GneError("BAD_ARGS", f"{what}の名前 {nm!r} は英数字・_・-・. だけにしてください")
+    if not re.fullmatch(r"[\w.\-]+", kname):
+        raise GneError("BAD_ARGS", f"鍵の名前 {kname!r} は英数字・_・-・. だけにしてください")
+    dname, fixed, existing, build_dir = direction_plan(session, spec, settings, direction, rebuild_direction)
     warnings: list[str] = []
-    existing = None
-    try:
-        existing = session.direction_set(dname)
-    except (GneError, OSError, ValueError, KeyError):
-        existing = None
-    if fixed and (existing is None or rebuild_direction):
-        raise GneError("BAD_ARGS", f"表の keyed.direction の方向 {dname} " + ("は作り直しません" if existing is not None else "がありません")
-                       + "(別の対照集合で作った方向なので、この対照集合からは作りません)",
-                       "その方向を作った対照集合で gne direction を回すか、keyed.direction を消して direction で方向を渡してください")
-    build_dir = existing is None or bool(rebuild_direction)
     labels = (["方向"] if build_dir else []) + ["鍵"] + (["key-check"] if check else [])
     st = _Stages(progress, labels)
     i = 0
@@ -174,31 +216,13 @@ def run(session, contrast, *, layers=None, name: str | None = None, direction: s
                  "alpha_hint": settings.get("alpha"), "stages": labels}
     prev = session.progress
     try:
-        ts = time.perf_counter()
         if build_dir:                                                     # 1. 方向(gne direction --positions response と同じ)
-            try:
-                load_contrast(path)                                       # 方向を作れない対照集合(A と B が同じ)は先に断る
-            except GneError as e:
-                raise GneError(e.code, f"方向を作れません: {e.message}",
-                               "方向は A 側(system_a か recipe_a)と B 側の返事の差で作ります。書き込みたい振る舞いを頼む system_a を"
-                               "対照集合に書くか、同じ名前の方向を先に作ってください") from e
             session.progress = st.start(i)
             i += 1
-            d = session.direction(contrast=path, name=dname, positions="response", response_tokens=int(response_tokens))
-            out["direction"] = {"name": dname, "reused": False, "rebuilt": existing is not None, "path": d["path"],
-                                "positions": d["positions"], "n_rows": d["n_rows"], "seconds": time.perf_counter() - ts}
+            out["direction"] = make_direction(session, path, dname, existing, response_tokens)
         else:
-            m = existing.meta
-            pos = m.get("positions")
-            if not fixed and m.get("contrast_sha") and m.get("contrast_sha") != spec.contrast.sha:
-                warnings.append(f"方向 {dname} は、いまの対照集合とは中身の違うファイルから作られています(作り直すなら"
-                                "「方向を作り直す」、MCP は rebuild_direction=True)")
-            if not fixed and pos and pos != "response":
-                warnings.append(f"方向 {dname} は positions {pos} で作られています(この一括は response で作ります。"
-                                "そろえるなら作り直す)")
-            out["direction"] = {"name": dname, "reused": True, "rebuilt": False, "path": str(existing.path),
-                                "positions": pos, "n_rows": {"A": int(m.get("n_rows_A") or 0), "B": int(m.get("n_rows_B") or 0)},
-                                "seconds": 0.0, "from_settings": fixed}
+            out["direction"], w = reused_direction(existing, spec, dname, fixed)
+            warnings += w
         ts = time.perf_counter()                                          # 2. 鍵
         f = st.start(i)
         i += 1
