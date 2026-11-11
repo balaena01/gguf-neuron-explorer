@@ -1,6 +1,6 @@
 [project]
 name = "gguf-neuron-explorer"
-version = "0.3.0"
+version = "0.3.1"
 description = "Sweep, reverse-lookup and steer MLP neurons of GGUF models on llama.cpp"
 requires-python = ">=3.11"
 license = "MIT"

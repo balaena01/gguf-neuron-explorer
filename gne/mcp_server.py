@@ -96,6 +96,10 @@ direction で作った方向は "L:dir:NAME:dose"、attention ヘッドの gain 
    足した量。狙う場面で 1 前後、書き込みたくない場面で 0 前後か)→ steer / behave で返事を読む → nw_export(LoRA。焼き込みは無い)。
    対応するのはゲートつきの MLP(SiLU のゲート × 入力、バイアスなし)の dense の層だけ(MoE の層・ほかの形は ARCH_UNSUPPORTED)。
    口調を変えるには返事の間ずっと書き続ける必要があった(最初の数トークンだけでは足りない)。強さの幅は狭く、返事を読んで決める。
+   まとめて作るなら fish_pipeline(contrast, layers, alpha)。強さは区切りごとに変えられる(segments "0,1-3,4-" に alpha [1, 1, 0.8])。
+   作る前に、nw_try(direction, contrast, layers, alpha)で、同じ方向を層の出力に直接足した返事を見て、層と強さを比べられる。
+   Qwen3.5-4B の 1 例では、離れた 3 層より続いた 13 層(11〜23)・強さ 1 / 1 / 0.8 のほうが良かった(口調らしい返事 27〜29% → 53%)。
+   層の番号はモデルで違う。同じ語句から抜けられなくなる返事(繰り返し)が質問によって 1〜8% 出る(docs/fish.md §8)。
 """
 
 
@@ -659,6 +663,69 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
         except Exception as e:  # noqa: BLE001
             return _err(e)
 
+    def _fish_contrast(contrast) -> dict:
+        """FiSH のジョブの対照集合: 表(spec)、configs/contrast/ の名前・パス、configs/fish/ のひな形の名前。"""
+        if isinstance(contrast, dict):
+            return {"spec": {k: v for k, v in contrast.items() if k != "about"}}
+        try:
+            return {"contrast": str(_contrast_path(session, contrast, None, None, None, None))}
+        except GneError:
+            tpl = CONFIGS / "fish" / f"{str(contrast).removesuffix('.json')}.json"
+            if not tpl.exists():
+                raise
+            d = json.loads(tpl.read_text(encoding="utf-8"))
+            d.pop("about", None)
+            return {"spec": d}
+
+    @srv.tool()
+    async def fish_pipeline(contrast: dict[str, Any] | str, layers: list[int] | str, alpha: float | list[float] | str | None = None,
+                            segments: str | None = None, form: str | None = None, name: str | None = None,
+                            same_reply: bool | None = None, stack: bool | None = None, rekey: bool | None = None,
+                            pseudo: int | None = None, max_tokens: int | None = None, response_tokens: int | None = None,
+                            iv: str | list[str] | None = None, neurons: dict[str, list[int]] | None = None, top: int = 20) -> dict:
+        """FiSH を最初から最後まで 1 回のジョブで作る(job_status で結果。UI の FiSH のタブの「まとめて作る」と同じ): 方向 → ニューロンの表 →
+        鍵 → ユニット → そのユニットを当てた状態で鍵を作り直す → 式どおりか → 足した量。contrast は対照集合の表(name・system_a・
+        user_prompts・dont_touch と、設定の fish)か、configs/contrast/ の名前・パス、configs/fish/ のひな形の名前。
+        layers は必須で、使う人が決める(リストか "11-23"・"11,18,23"。モデルで違う)。alpha は強さで、数 1 つなら全部の区切りに同じ値、
+        区切りごとに変えるなら区切りの順に [1, 1, 0.8] か "1,1,0.8"(segments "0,1-3,4-" に対して)。form は cap(上限つきの 2 個組、既定)/
+        two / one。渡していない引数は、表の fish の設定、その次に既定(segments "0,1-3,4-"、form cap、alpha 0.9、same_reply・stack・rekey あり)。
+        層を増やすと、要るニューロンの数(層 × 区切り × 形の個数)と作成時間が増える(Qwen3.5-4B の 13 層で 78 個、方向と鍵に 16 分ほど)。
+        結果: units(レシピのユニットの書き方)、direction・usage・neurons・keys・rekeyed・verify(ok)・check(groups.scene と
+        dont_touch:<名前> の、位置ごとの足した量)、stage_seconds。作る前に層と強さを比べるなら nw_try。"""
+        from .jobs import _layers
+        try:
+            if not _layers(layers):
+                raise GneError("BAD_ARGS", "layers に書く層を指定してください(例 [11, 18, 23] か \"11-23\")")
+            p = {**_fish_contrast(contrast), "layers": layers, "alpha": alpha, "segments": segments, "form": form, "name": name,
+                 "same_reply": same_reply, "stack": stack, "rekey": rekey, "pseudo": pseudo, "max_tokens": max_tokens,
+                 "response_tokens": response_tokens, "iv": iv, "neurons": neurons, "top": top}
+            return jobs.start("fish_pipeline", {k: v for k, v in p.items() if v is not None}).view()
+        except Exception as e:  # noqa: BLE001
+            return _err(e)
+
+    @srv.tool()
+    async def nw_try(direction: str, contrast: dict[str, Any] | str, layers: list[int] | str | None = None,
+                     alpha: float | list[float] | str | None = None, prompts: list[str] | None = None, n: int = 12,
+                     max_tokens: int = 120, match: str | None = None, temperature: float = 0.0, seed: int = 0,
+                     others: bool = True, baseline: bool = True, name: str | None = None, iv: str | list[str] | None = None) -> dict:
+        """FiSH を重みに入れる前に試すジョブを投げる(job_status で結果。gne nw try)。区切りつきの方向 direction
+        (direction(positions="response", same_reply=True, segments="0,1-3,4-", stack_layers=…) で作ったもの)を、ニューロンにも鍵にも
+        入れずに、層 layers の出力へ直接足して返事を作る(返事の位置の区切りが変わるところで control vector を付け替える)。
+        足すのは狙う場面の質問(prompts か、対照集合の質問の先頭 n 問)の返事だけ(場面は質問の群で決める。重みに入れたときの場面の鍵の
+        代わり)。alpha は区切りごとの強さ([1, 1, 0.8] か "1,1,0.8"。数 1 つなら全部の区切りに同じ値)。layers を省くと、方向を作った
+        ときの重ねる層。結果: scene(足した返事)・baseline(同じ質問に何も足さない返事)・others(dont_touch の質問に何も足さない返事)の
+        それぞれに counts(n・loop = 繰り返しに落ちた返事・empty・at_limit・tokens・match = 正規表現の一致)と replies。層の組・区切り
+        ごとの強さを変えて数回投げ、返事を読んで比べてから fish_pipeline に進む。temperature > 0 でサンプリング。
+        制約: 足せるのは層 1 〜 最終層の 1 つ手前。狙う場面は 1 問ずつ生成する(付け替えは 1 本の列ごと)。数は機械的に数えたもので、
+        口調が出たか・相手の発言に合っているかは返事を読んで確かめる。"""
+        try:
+            p = {**_fish_contrast(contrast), "direction": direction, "layers": layers, "alpha": alpha, "prompts": prompts, "n": n,
+                 "max_tokens": max_tokens, "match": match, "temperature": temperature, "seed": seed, "others": others,
+                 "baseline": baseline, "name": name, "iv": iv}
+            return jobs.start("fish_try", {k: v for k, v in p.items() if v is not None}).view()
+        except Exception as e:  # noqa: BLE001
+            return _err(e)
+
     @srv.tool()
     async def nw_export(recipe: str | None = None, units: list[str] | None = None, name: str | None = None,
                         strip_meta: bool = False) -> dict:
@@ -814,11 +881,11 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
         (marks[α] に候補の数・印の数・偶然でも印が付く数 expected = 候補の数 × 5%)。key_check は参考、linear.ratio は比例の目安。
         candidates は 1 か所(書き込み先 × 層)につき 1 つ: by_alpha[α] に reply(下がり方)・mark・side_b(副作用)・ratio(下がり方 ÷ 副作用、
         副作用の下限 ratio_floor = 0.01)・unit、all_marked(全部の強さで有意)。下がり方・副作用・all_marked の 3 つを並べて候補を選ぶ
-        (根拠は Qwen3.5-4B の語尾の 1 例。下がり方だけで選ぶと、副作用も大きい=返事を壊している候補を拾う)。
+        (根拠は Qwen3.5-4B の語尾の 1 例。下がり方だけで選ぶと、副作用も大きい=返事を繰り返しに落としている候補を拾う)。
         notes[0] のとおり、これは生成なしの目安で、比較用の鍵と見分けがつかない候補を外すためのもの。印の数が expected と
         同じくらいなら、印だけでは比較用の鍵と見分けがつかない(それでも、いくつかの α で続けて印が付き、効き目に比べて
         side.b(書き込みたくない位置の変化)が小さい候補は試す価値がある。効き目が最大でも side.b が比較用の鍵並みに大きい候補は、
-        返事を壊しているだけのことがある)。効くかどうかは direction_key_causal_verify の生成で数える。
+        返事を繰り返しに落としているだけのことがある)。効くかどうかは direction_key_causal_verify の生成で数える。
         contrast は対照集合の表かパス・configs/keyed/ のひな形の名前・<root>/keyed/ の名前。"""
         from .jobs import _layers
         try:

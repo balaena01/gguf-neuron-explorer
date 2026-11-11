@@ -128,7 +128,7 @@ def test_direction_set_without_segments_is_unchanged(tmp_path):
 def test_help_lists_new_commands():
     from gne.cli import app
     r = CliRunner().invoke(app, ["nw", "--help"])
-    assert r.exit_code == 0 and all(x in r.output for x in ("neurons", "key", "verify", "check", "export"))
+    assert r.exit_code == 0 and all(x in r.output for x in ("neurons", "key", "verify", "check", "try", "export"))
     r = CliRunner().invoke(app, ["direction", "--help"])
     assert "--same-reply" in r.output and "--segments" in r.output and "--stack-layers" in r.output
 
@@ -376,6 +376,15 @@ def test_cli_and_jobs(built):
                                  "--response-tokens", "8", "--same-reply", "--segments", "0,1-", *common])
     d = json.loads(r.output.strip().splitlines()[-1])
     assert r.exit_code == 0 and d["same_reply"] is True and [x["name"] for x in d["segments"]] == ["cli_dir.seg0", "cli_dir.seg1"]
+    # 重みに入れる前に試す(gne nw try): 区切り 0 / 1- の方向を、層 8 の出力に区切りごとの強さで直接足す
+    r = CliRunner().invoke(app, ["nw", "try", "--direction", "cli_dir", "--contrast", str(built["contrast"]), "--layers", "8", "--alpha", "1,0.5",
+                                 "-n", "2", "--max-tokens", "8", *common])
+    d = json.loads(r.output.strip().splitlines()[-1])
+    assert r.exit_code == 0 and d["command"] == "nw try" and d["alphas"] == [1.0, 0.5] and d["layers"] == [8], r.output
+    assert d["scene"]["counts"]["n"] == 2 and d["baseline"]["counts"]["n"] == 2 and d["others"]["counts"]["n"] == 2 and Path(d["path"]).exists()
+    r = CliRunner().invoke(app, ["nw", "try", "--direction", "cli_dir", "--contrast", str(built["contrast"]), "--layers", "8", "--alpha", "1,1,1",
+                                 "-n", "1", "--max-tokens", "4", *common])                # 強さの数が区切りの数と合わない
+    assert r.exit_code != 0 and json.loads(r.output.strip().splitlines()[-1])["error"]["code"] == "BAD_ARGS"
     runner = JobRunner(s, GpuArbiter(), standard_kinds())
 
     def run(kind, params):
@@ -389,6 +398,8 @@ def test_cli_and_jobs(built):
     assert len(run("nw_neurons", {"layers": "8", "top": 3, "max_tokens": 8, "corpus_tokens": 256})["layers"][0]["rows"]) == 3
     assert "scene" in run("nw_check", {"recipe": str(s.recipe_path("nw_t")), "contrast": str(built["contrast"]), "subset": "all",
                                        "max_tokens": 8, "n_pos": 2})["groups"]
+    t = run("fish_try", {"contrast": str(built["contrast"]), "direction": "nw_scene", "alpha": "1,1,0.8", "n": 2, "max_tokens": 8, "others": False})
+    assert t["layers"] == [8, 12] and t["alphas"] == [1.0, 1.0, 0.8] and "others" not in t and t["scene"]["counts"]["n"] == 2
     assert run("direction_key", {"contrast": str(built["contrast"]), "layers": [8], "role": "scene", "name": "job_scene",
                                  "subset": "all", "max_tokens": 8, "pseudo": 2})["role"] == "scene"
     # 方向 → 鍵の一括でも方向の作り方を選べる
@@ -415,7 +426,13 @@ def test_mcp_tools(tmp_path):
                 init = await c.initialize()
                 assert "nw" in (init.instructions or "") and "same_reply" in (init.instructions or "")
                 tools = {t.name: t for t in (await c.list_tools()).tools}
-                assert {"nw_neurons", "nw_verify", "nw_check", "nw_export"} <= set(tools)
+                assert {"nw_neurons", "nw_verify", "nw_check", "nw_export", "nw_try", "fish_pipeline"} <= set(tools)
+                assert {"direction", "layers", "alpha", "temperature"} <= set(tools["nw_try"].input_schema["properties"])
+                assert "alpha" in tools["fish_pipeline"].input_schema["properties"]
+                r = await c.call_tool("fish_pipeline", {"contrast": "tone_in_scene", "layers": []})       # 層は必須
+                sc = getattr(r, "structured_content", None)
+                d = (sc.get("result", sc) if isinstance(sc, dict) else None) or json.loads(r.content[0].text)
+                assert d["error"]["code"] == "BAD_ARGS"
                 assert {"same_reply", "segments", "stack_layers"} <= set(tools["direction"].input_schema["properties"])
                 assert "role" in tools["direction_key"].input_schema["properties"]
                 assert "same_reply" in tools["direction_key_pipeline"].input_schema["properties"]
@@ -424,6 +441,69 @@ def test_mcp_tools(tmp_path):
                 d = (sc.get("result", sc) if isinstance(sc, dict) else None) or json.loads(r.content[0].text)
                 assert d["error"]["code"] in ("FILE_NOT_FOUND", "BAD_RECIPE", "BAD_KEY")
     anyio.run(main)
+
+
+@pytest.mark.model
+def test_try_before_writing(built, monkeypatch):
+    """重みに入れる前に試す(Session.nw_try): 区切りつきの方向を、狙う場面の質問の返事の位置どおりに層の出力へ直接足す。
+    どの位置を読ませるときにどのベクトルが付いているかを、エンジンの呼び出しを見て確かめる。"""
+    s, e = built["s"], built["s"].engine
+    ds = s.direction_set("nw_scene")
+    al = [1.0, 0.5, 0.25]
+    log, cur = [], {"v": None}                       # (読ませた位置, そのとき付いていたベクトル)
+    set_cvec, prefill, decode = e.set_cvec, e.prefill, e._decode
+
+    def spy_cvec(ctx, vecs, **kw):
+        cur["v"] = None if not vecs else {int(L): np.array(v, dtype=np.float32) for L, v in vecs.items()}
+        return set_cvec(ctx, vecs, **kw)
+
+    def spy_prefill(ctx, seqs, **kw):
+        if len(seqs) == 1:
+            log.extend((kw.get("pos0", 0) + i, cur["v"]) for i in range(len(seqs[0])))
+        return prefill(ctx, seqs, **kw)
+
+    def spy_decode(ctx, items, *a, **kw):
+        if len(items) == 1:
+            log.append((items[0][1], cur["v"]))
+        return decode(ctx, items, *a, **kw)
+    monkeypatch.setattr(e, "set_cvec", spy_cvec)
+    monkeypatch.setattr(e, "prefill", spy_prefill)
+    monkeypatch.setattr(e, "_decode", spy_decode)
+    q = CONTRAST["user_prompts"][0]
+    r = s.nw_try("nw_scene", built["contrast"], alpha=al, prompts=[q], max_tokens=10, others=False, baseline=False)
+    monkeypatch.undo()
+    P = len(e.tokenize_prompt(e.render_chat([{"role": "user", "content": q}])))
+    assert r["layers"] == [8, 12] and r["stack_layers"] == [8, 12] and r["alphas"] == al and r["segments"] == ["0", "1-3", "4-"]
+    seen = dict(log)
+    assert sorted(seen) == list(range(max(seen) + 1)) and max(seen) >= P + 4          # 質問の全部の位置と、返事の位置 5 以上まで読ませた
+    for pos, v in seen.items():
+        k = pos - (P - 1)                            # 返事の位置(0 = 質問の最後のトークン = 返事を書き始める直前)
+        if k < 0:
+            assert v is None, pos                    # 質問の文には足さない
+            continue
+        i = 0 if k == 0 else (1 if k <= 3 else 2)
+        assert set(v) == {8, 12} and all(np.allclose(v[L], al[i] * ds.seg[i][L], atol=1e-6) for L in (8, 12)), (pos, k)
+    assert r["added"][2]["norm"][12] == pytest.approx(0.25 * float(np.linalg.norm(ds.seg[2][12])), rel=1e-5)
+    # 強さ 0 は、何も足さない返事と同じ。強く足すと返事が変わる。数は behave と同じ項目
+    z = s.nw_try("nw_scene", built["contrast"], alpha=0, n=3, max_tokens=12)
+    assert [x["text"] for x in z["scene"]["replies"]] == [x["text"] for x in z["baseline"]["replies"]]
+    assert set(z["scene"]["counts"]) == {"n", "empty", "loop", "at_limit", "tokens"} and z["others"]["counts"]["n"] == 3      # validate.match が無いので一致は数えない
+    big = s.nw_try("nw_scene", built["contrast"], alpha=6, n=3, max_tokens=12, match="[a-z]", others=False)
+    assert [x["text"] for x in big["scene"]["replies"]] != [x["text"] for x in big["baseline"]["replies"]]
+    assert "match" in big["scene"]["counts"] and big["match"] == "[a-z]" and not big["own_prompts"]
+    # 層を方向の前提(重ねる層)と変えると注が出る。サンプリングは種で変わる
+    one = s.nw_try("nw_scene", built["contrast"], layers="8", alpha="1,1,0.8", n=2, max_tokens=12, temperature=0.9, seed=1, others=False, baseline=False)
+    two = s.nw_try("nw_scene", built["contrast"], layers="8", alpha="1,1,0.8", n=2, max_tokens=12, temperature=0.9, seed=2, others=False, baseline=False)
+    assert any("重ねて書く前提" in n for n in one["notes"]) and one["temperature"] == 0.9
+    assert [x["text"] for x in one["scene"]["replies"]] != [x["text"] for x in two["scene"]["replies"]]
+    # 区切りの無い方向は、返事の全部の位置に同じベクトル。層は自分で渡す
+    old = s.nw_try("nw_old", built["contrast"], layers=[8], alpha=0.5, n=1, max_tokens=6, others=False, baseline=False)
+    assert old["segments"] == ["0-"] and any("区切りつきで作られていない" in n for n in old["notes"])
+    for kw in ({"layers": "0,8"}, {"layers": [e.n_layer - 1]}, {"alpha": [1, 1]}, {"alpha": "x"}):
+        with pytest.raises(GneError):
+            s.nw_try("nw_scene", built["contrast"], n=1, max_tokens=4, **kw)
+    with pytest.raises(GneError):
+        s.nw_try("nw_old", built["contrast"], n=1, max_tokens=4)                          # 重ねる層の無い方向で、層を省いた
 
 
 @pytest.mark.model

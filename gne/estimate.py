@@ -195,7 +195,7 @@ def estimate(session, kind: str, params: dict) -> dict:
         kd = _key_causal_verify_cost(session, sp, p)
         sec = kd["seconds"]
         detail = kd
-    elif kind in ("fish_direction", "fish_keys", "fish_check", "fish_pipeline", "nw_neurons", "fish_verify", "fish_behave"):   # FiSH(gne/fish.py)
+    elif kind in ("fish_direction", "fish_keys", "fish_check", "fish_pipeline", "nw_neurons", "fish_verify", "fish_behave", "fish_try"):   # FiSH(gne/fish.py)
         kd = _fish_cost(session, sp, kind, p)
         sec = kd["seconds"]
         detail = kd
@@ -477,11 +477,14 @@ def _fish_cost(session, sp: Speed, kind: str, p: dict) -> dict:
         n_seg = len(fish._segments(get("segments")))
         form = get("form")
         n_keys = n_seg + (1 if form in ("two", "cap") else 0)
-        # 下の層に書いた後の残りを使うときは、層ごとに返事を 1 トークンずつ流し直す(実測で、生成 1 回ぶんの 2 倍ほど × 層の数。
-        # Qwen3.5-4B Q8_0・32 問・120 トークン・3 層で、方向 244 秒のうち約 170 秒)
-        dir_s = 2 * sp.gen(n_a, rt) + 2 * n_a * read + (2 * len(Ls) * sp.gen(n_a, rt) if get("stack") else 0.0) \
+        # 下の層に書いた後の残りを使うときは、いちばん下の層を除く層ごとに、返事を 1 本ずつ・1 トークンずつ流し直す
+        # (質問の数 × 返事の長さ × (層の数 − 1) 回の 1 本の評価で、1 回は生成の 1 step の 2 倍ほど。Qwen3.5-4B Q8_0 の実測:
+        # 32 問・120 トークン・3 層で方向 244 秒のうち約 170 秒、40 問・96 トークン・13 層で方向 906 秒のうち約 800 秒)
+        dir_s = 2 * sp.gen(n_a, rt) + 2 * n_a * read + ((len(Ls) - 1) * n_a * rt * 2 * sp.step(1) / 1000 if get("stack") else 0.0) \
             + (sp.gen(n_a, rt) + 2 * n_a * read if p.get("compare", True) else 0.0)
-        keys_s = n_keys * (sp.gen(n_all, mt) + n_all * read)
+        # 鍵: 鍵 1 本ごとに全部の質問の返事を作って読む分と、層ごとに鍵と比較用の鍵を計算する分(層の数と質問の数に比例)。
+        # 係数は Qwen3.5-4B Q8_0 の 2 つの実測に合わせた(44 問・3 層・4 本で 96 秒、76 問・13 層・4 本で 271 秒)
+        keys_s = 1.4 * n_keys * (sp.gen(n_all, mt) + n_all * read) + n_keys * len(Ls) * 0.035 * n_all
         check_s = sp.gen(n_all, mt) + n_all * read
         neur_s = sp.gen(44, 96) + 88 * read
         if kind == "fish_behave":
@@ -490,6 +493,13 @@ def _fish_cost(session, sp: Speed, kind: str, p: dict) -> dict:
             n_s = len([x for x in pr.splitlines() if x.strip()]) if isinstance(pr, str) and pr.strip() else (len(pr) if pr else min(n, n_a))
             n_q = n_s + (min(n, n_dt) if p.get("others", True) else 0)
             return {"questions": n_q, "seconds": sp.gen(n_q, int(p.get("max_tokens") or 120))}
+        if kind == "fish_try":                     # 狙う場面は 1 問ずつ(付け替えは 1 本の列ごと)、何も足さない返事と dont_touch はまとめて
+            n = int(p.get("n") or 12)
+            pr = p.get("prompts")
+            n_s = len([x for x in pr.splitlines() if x.strip()]) if isinstance(pr, str) and pr.strip() else (len(pr) if pr else min(n, n_a))
+            n_o = min(n, n_dt) if p.get("others", True) else 0
+            tk = int(p.get("max_tokens") or 120)
+            return {"questions": n_s + n_o, "seconds": n_s * sp.gen(1, tk) + sp.gen((n_s if p.get("baseline", True) else 0) + n_o, tk)}
         if kind == "fish_direction":
             return {"questions": n_a, "seconds": dir_s}
         if kind == "fish_keys":

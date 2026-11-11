@@ -164,11 +164,12 @@ gne headproj export --recipe R --bake --into F16.gguf --requant keep   # 別の 
 
 ### FiSH: 計算で作るニューロン(mode nw、`docs/fish.md`)
 
-FiSH = Formula-instantiated Scene-gated Hidden units。すでにあるニューロンを、式から計算した重みで書き換える。実測(Qwen3.5-4B のツンデレ、100 問、`docs/fish.md` §8): ほかの場面(計算・事実・ふつうの質問・英語)の正答と口調は無介入と区別できないが、口調そのものは弱い(ツンデレらしい返事 27%・繰り返し 10%。system プロンプトは 86%)。最初の小さい確かめでは 12 問中 5〜7 問・壊れ 0 だったが、100 問ではこのとおりだった。
+FiSH = Formula-instantiated Scene-gated Hidden units。すでにあるニューロンを、式から計算した重みで書き換える。実測(Qwen3.5-4B のツンデレ、100 問ずつの質問集、`docs/fish.md` §8): ほかの場面(計算・事実・ふつうの質問・英語)の正答と口調は無介入と区別できない。口調は、離れた 3 層(11・18・23)・一律 0.9 でツンデレらしい返事 27〜29%、続いた 13 層(11-23)・区切りごとの強さ 1 / 1 / 0.8 で 53%(別々の 2 組で同じ値。system プロンプトは 78〜87%)。同じ語句から抜けられなくなる返事(繰り返しに落ちた返事)が質問によって 1〜8%、読めるが相手の発言に合っていない返事(話がかみ合わない返事)が 11〜19%。最初の 12 問の確かめは実際より良く出た。層の番号はモデルで違う。
 
 ```
-gne direction --contrast C --positions response --same-reply [--segments 0,1-3,4-] [--stack-layers 11,18,23]   # 方向(同じ返事を両方の条件で読ませた差。区切り i は NAME.seg<i>)
-gne nw neurons --layers 11,18,23 [--top 20] [--sort sum|max|mean] [--iv R]              # ふだんの働きの小さい順の表(上書きするニューロンを選ぶ)
+gne direction --contrast C --positions response --same-reply [--segments 0,1-3,4-] [--stack-layers 11-23]      # 方向(同じ返事を両方の条件で読ませた差。区切り i は NAME.seg<i>)
+gne nw try --direction NAME --contrast C [--layers 11-23] [--alpha 1,1,0.8] [--prompts F] [-n 12] [--temperature 0.7]   # 重みに入れる前に試す(方向を層の出力に直接足した返事と数)
+gne nw neurons --layers 11-23 [--top 20] [--sort sum|max|mean] [--iv R]                 # ふだんの働きの小さい順の表(上書きするニューロンを選ぶ)
 gne direction key --contrast C --target mlpin --layers L --positions pos:1-3 --name K   # 位置の鍵(この場面の返事の位置 1〜3。pos:0、pos:4- も)
 gne nw key --contrast C --layers L --role scene|one [--iv R]                             # 場面の鍵 / ほぼ 1 を返す鍵
 gne nw verify --recipe R | --unit 11:N2045:nw:a1@NAME.seg1#SCENE&POS [--iv R]            # LoRA が式どおりか(数秒)
@@ -178,11 +179,12 @@ gne headproj export --recipe R                                                  
 ```
 
 - ユニット: `L:Nn:nw:aα@方向#鍵`(鍵 1 つ)、`L:Nn:nw:aα@方向#ゲートの鍵&入力の鍵`(鍵 2 つ)、`L:Nn+Nm:nw:aα@方向#鍵&ほぼ1を返す鍵`(上限つき)。`!s8`・`!cap0.4-0.8` を後ろに付けられる。YAML は `{layer, neuron, mode: nw, direction, key, key2, pair, s, cap, alpha}`。
-- 時間の目安(Qwen3.5-4B、GPU): 方向(32 問、返事 120 トークン、区切りつき)約 30 秒、`--stack-layers` に 3 層で + 2〜3 分(1 トークンずつ読む)。`nw neurons` 1〜2 分、鍵 1 本 20〜40 秒、verify 数秒、check 30〜60 秒。
+- 時間の目安(Qwen3.5-4B、GPU): 方向(32 問、返事 120 トークン、区切りつき)約 30 秒、`--stack-layers` に 3 層で + 2〜3 分(1 トークンずつ読む)。`nw neurons` 1〜2 分、鍵 1 本 20〜40 秒、verify 数秒、check 30〜60 秒。層の数で伸びる: 13 層(11-23)・40 問では、方向と鍵に 16 分、まとめて作ると 20〜30 分。`nw try` は狙う場面を 1 問ずつ生成する(30 問・120 トークンで 1〜2 分)。
+- **層と強さ**: 層は範囲(`11-23`)でも並び(`11,18,23`)でも書ける。強さは区切りごとに書ける(`--alpha 1,1,0.8`、ジョブ・MCP は `alpha: [1, 1, 0.8]`。1 つだけなら全部の区切りに同じ値)。Qwen3.5-4B の 1 例では、離れた 3 層より続いた 13 層が良く、生成なしの指標の上位の数層に絞ると悪くなった。作る前に `gne nw try` で、層の組と強さを返事で比べる(足すのは狙う場面の質問の返事だけ。層 0 と最終層には足せない。数は繰り返し・空・正規表現の一致で、口調と話のかみ合いは読んで確かめる)。
 - 見るところ: verify の「ほかのニューロンの変化」が 0、check の狙う場面の量が 1 前後・dont_touch が 0 前後・負が小さいこと。最後は返事を読む。
-- MCP: `direction(same_reply, segments, stack_layers)`、`direction_key(target="mlpin", positions="pos:1-3" | role="scene"|"one", iv)`、`nw_neurons`・`nw_check`(ジョブ)、`nw_verify`、`nw_export`、`direction_key_pipeline(same_reply)`。
+- MCP: `direction(same_reply, segments, stack_layers)`、`direction_key(target="mlpin", positions="pos:1-3" | role="scene"|"one", iv)`、`nw_neurons`・`nw_check`・`nw_try(direction, contrast, layers, alpha)`(ジョブ)、`nw_verify`、`nw_export`、`fish_pipeline(contrast, layers, alpha)`(まとめて作るジョブ)、`direction_key_pipeline(same_reply)`。
 
-Web UI(direction ビューの「FiSH」タブ)と同じ段は、ジョブとしても使える(MCP の `job_start`): `fish_pipeline`(spec か contrast、layers 必須、segments・form・alpha・same_reply・stack・rekey・neurons・iv)、`fish_direction`、`nw_neurons`、`fish_keys`(with_units でユニットを当てた状態)、`fish_verify`(units)、`fish_check`(units)、`fish_behave`(units、prompts・n・match)。ひな形は `configs/fish/`。
+Web UI(direction ビューの「FiSH」タブ)と同じ段は、ジョブとしても使える(MCP の `job_start`): `fish_pipeline`(spec か contrast、layers 必須、segments・form・alpha(数 1 つか区切りごとの並び)・same_reply・stack・rekey・neurons・iv)、`fish_direction`、`fish_try`(direction・layers・alpha・prompts・n・temperature)、`nw_neurons`、`fish_keys`(with_units でユニットを当てた状態)、`fish_verify`(units)、`fish_check`(units)、`fish_behave`(units、prompts・n・match)。ひな形は `configs/fish/`。
 
 ### 鍵つきの書き込み(keyed write、CHANGE-07、`docs/keyed-write.md`)
 

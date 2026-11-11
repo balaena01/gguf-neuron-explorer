@@ -3,11 +3,11 @@
     "order": 2,
     "ja": {
       "title": "いつでも口調を変える(例: 元気でくだけた口調)",
-      "text": "場面を絞らず、すべての返事で口調を変える例です。dont_touch(変えたくない場面)は書きません。system_a に出したい口調の指示を、user_prompts にいろいろな質問(相談・雑談・計算・事実を混ぜて 30 問ほど)を書きます。形は上限つきの 2 個組、位置の区切りは 0,1-3,4- です。試した範囲: Qwen3.5-4B(Q8_0)で 1 回。層 11,18,23・強さ 0.9。流れは最後まで通り、式どおりかも合格。作成に使っていない 12 問のうち、相談・おすすめを聞く 6 問では 5 問がくだけた明るい口調(「〜だよ！」)になり、計算・事実の 6 問は敬体のまま短くなっただけでした。繰り返しや空の返事は 0。関西弁の指示でも試しましたが、口調がくだけただけで、関西弁の言い回しは 12 問中 0 問でした(決まった言い回しを出すのには向いていません)。 返事は数問〜12 問を読んだだけなので、1〜2 問の差は誤差です。ほかのモデルでは確かめていません。"
+      "text": "場面を絞らず、すべての返事で口調を変える例です。dont_touch(変えたくない場面)は書きません。system_a に出したい口調の指示を、user_prompts にいろいろな質問(相談・雑談・計算・事実を混ぜて 30 問ほど)を書きます。形は上限つきの 2 個組、位置の区切りは 0,1-3,4- です。ひな形の強さは区切りごとに 1 / 1 / 0.8 にしてあります(場面の口調の例で、続いた層と一緒に使って良かった値。この例では確かめていません)。層は、離れた 3 層より続いた層(Qwen3.5-4B の場面の口調の例では 11-23)のほうが良かったので、まずそちらを試してください。試した範囲: Qwen3.5-4B(Q8_0)で 1 回。試したときの形は、層 11,18,23・強さは一律 0.9 です。流れは最後まで通り、式どおりかも合格。作成に使っていない 12 問のうち、相談・おすすめを聞く 6 問では 5 問がくだけた明るい口調(「〜だよ！」)になり、計算・事実の 6 問は敬体のまま短くなっただけでした。繰り返しや空の返事は 0。関西弁の指示でも試しましたが、口調がくだけただけで、関西弁の言い回しは 12 問中 0 問でした(決まった言い回しを出すのには向いていません)。 返事は数問〜12 問を読んだだけなので、1〜2 問の差は誤差です。ほかのモデルでは確かめていません。"
     },
     "en": {
       "title": "Change the tone everywhere (example: cheerful and casual)",
-      "text": "An example that changes the tone in every reply, without narrowing to a scene. There is no dont_touch. Put the instruction for the tone in system_a and about 30 varied questions (advice, small talk, calculations, facts) in user_prompts. The form is the capped pair and the position segments are 0,1-3,4-. Tried on: Qwen3.5-4B (Q8_0), one run. Layers 11,18,23, strength 0.9. The whole flow ran and the formula check passed. Of 12 questions not used for building, 5 of the 6 that ask for advice or recommendations came out casual and cheerful, while the 6 calculation and fact questions stayed polite and only got shorter. No repetition, no empty replies. With a Kansai-dialect instruction the tone only became casual and no dialect phrases appeared in any of 12 replies, so this is not suited to producing fixed phrases. Only a handful to 12 replies were read, so a difference of one or two means nothing. Not checked on other models."
+      "text": "An example that changes the tone in every reply, without narrowing to a scene. There is no dont_touch. Put the instruction for the tone in system_a and about 30 varied questions (advice, small talk, calculations, facts) in user_prompts. The form is the capped pair and the position segments are 0,1-3,4-. The template's strength is 1 / 1 / 0.8 per segment (the values that worked well, together with consecutive layers, in the scene-tone example; not checked for this example). Consecutive layers (11-23 in the scene-tone example on Qwen3.5-4B) did better than three separate layers, so try those first. Tried on: Qwen3.5-4B (Q8_0), one run, with layers 11,18,23 and strength 0.9 everywhere. The whole flow ran and the formula check passed. Of 12 questions not used for building, 5 of the 6 that ask for advice or recommendations came out casual and cheerful, while the 6 calculation and fact questions stayed polite and only got shorter. No repetition, no empty replies. With a Kansai-dialect instruction the tone only became casual and no dialect phrases appeared in any of 12 replies, so this is not suited to producing fixed phrases. Only a handful to 12 replies were read, so a difference of one or two means nothing. Not checked on other models."
     }
   },
   "name": "fish_cheerful_always",
@@ -53,7 +53,11 @@
   "fish": {
     "segments": "0,1-3,4-",
     "form": "cap",
-    "alpha": 0.9,
+    "alpha": [
+      1,
+      1,
+      0.8
+    ],
     "same_reply": true,
     "stack": true,
     "pseudo": 4,

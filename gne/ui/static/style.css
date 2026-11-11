@@ -634,5 +634,7 @@ table.fx-tab tr.fx-sel td { color: #dfe6ee; background: rgba(232, 176, 74, 0.08)
 .fx-chip.fx-bad { background: rgba(255, 138, 138, 0.30); }
 #dv-fish textarea { width: 100%; box-sizing: border-box; }
 #dv-fish { padding: 0 2px 24px; }
-table.fx-behave-tab td.fx-q { max-width: 260px; white-space: normal; vertical-align: top; color: #9fb3cf; }
-table.fx-behave-tab td.fx-a { max-width: 760px; white-space: pre-wrap; vertical-align: top; color: #dfe6ee; }
+table.fx-behave-tab td.fx-q, table.fx-try-tab td.fx-q { max-width: 260px; white-space: normal; vertical-align: top; color: #9fb3cf; }
+table.fx-behave-tab td.fx-a, table.fx-try-tab td.fx-a { max-width: 760px; white-space: pre-wrap; vertical-align: top; color: #dfe6ee; }
+.fx-al { margin-right: 4px; white-space: nowrap; }
+.fx-al .mono { color: #9fb3cf; }

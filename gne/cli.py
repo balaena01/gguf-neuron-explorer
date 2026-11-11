@@ -1122,7 +1122,7 @@ def direction(c: Common, holder: dict,
               random_controls: int = typer.Option(16, "--random-controls", help="--select auto: 層ごとの同じ大きさのランダムな向きの対照の本数(0 で対照なし)"),
               same_reply: bool = typer.Option(False, "--same-reply", help="--positions response: B 側も A 側の返事を読む(同じ返事を両方の条件で読ませた差。読んでいる語の違いから来る成分が入らない)。既定は今までどおり、それぞれ自分の返事を読んだ差"),
               segments: Optional[str] = typer.Option(None, "--segments", help="--positions response: 返事の位置で分けた方向も作る(例 0,1-3,4-。位置 0 = 返事を書き始める直前)。区切り i の方向は NAME.seg<i> という名前で使える"),
-              stack_layers: Optional[str] = typer.Option(None, "--stack-layers", help="--same-reply と --segments と一緒に: 区切りつきの方向を、これらの層(例 11,18,23)に重ねて書く前提の値にする(上の層は、下の層に足した後の残り)。1 トークンずつ読むので時間がかかる"),
+              stack_layers: Optional[str] = typer.Option(None, "--stack-layers", help="--same-reply と --segments と一緒に: 区切りつきの方向を、これらの層(例 11-23 か 11,18,23)に重ねて書く前提の値にする(上の層は、下の層に足した後の残り)。1 トークンずつ読むので時間がかかる"),
               yes: bool = _YES):
     """対照集合から全層の方向 r_L(mean_A − mean_B)を作って保存し、--select auto で効果の大きい層を選ぶ(§6.17)。
     作った方向は L:dir:NAME:dose のユニットで足せる(gne steer / chat / eval / export-cvec)。
@@ -2303,7 +2303,7 @@ def key_causal_lines(d: dict, *, only_marked: bool = False, ratio_alpha: float |
                  "効き目 ÷ 最小の |α| での効き目を |α| の比で割った値(1 = 比例、向き× = 強さで符号がそろわない、— = 最小の |α| での効き目が"
                  "95% の幅の中)")
     lines.append("  選び方の目安: 確率の下がり方・副作用・全部の強さで有意か、の 3 つを並べて自分で選ぶ。確率の下がり方だけで選ぶと、返事を"
-                 "壊して確率を下げている候補を拾うことがある(副作用も比較用の鍵並みに大きい)。--sort ratio / effect / side で並べ替えられる")
+                 "繰り返しに落として確率を下げている候補を拾うことがある(副作用も比較用の鍵並みに大きい)。--sort ratio / effect / side で並べ替えられる")
     for x in d.get("dropped") or []:
         lines.append(f"  {x['target']} L{x['layer']}: 外しました({x['error']})")
     lines += [f"注: {t}" for t in d["notes"][1:]]
@@ -2991,7 +2991,7 @@ def fieldtest_cmd(c: Common, holder: dict,
 
 @gne_command(nw_app, "neurons", "nw neurons")
 def nw_neurons(c: Common, holder: dict,
-               layers: str = typer.Option(..., "--layers", help="測る層(例 11,18,23)"),
+               layers: str = typer.Option(..., "--layers", help="測る層(例 11-23 か 11,18,23)"),
                top: int = typer.Option(20, "--top", help="層ごとに出す数(働きの小さい順)"),
                sort: str = typer.Option("sum", "--sort", help="並べ方: sum(最大の順位 + 平均の順位、既定)/ max / mean"),
                max_tokens: int = typer.Option(96, "--max-tokens", help="ふつうの質問への返事を生成する長さ"),
@@ -3001,7 +3001,7 @@ def nw_neurons(c: Common, holder: dict,
     上書きするニューロンは、この表を見て選ぶ(番号を nw のユニットに書く)。上書きすると、そのニューロンの元の働きは無くなる。"""
     Ls = parse_layers(layers)
     if not Ls:
-        raise GneError("BAD_ARGS", "--layers に層を指定してください", "例 --layers 11,18,23")
+        raise GneError("BAD_ARGS", "--layers に層を指定してください", "例 --layers 11-23")
     s = holder["session"] = c.session()
     d = s.nw_neurons(Ls, top=top, sort=sort, max_tokens=max_tokens, corpus_tokens=corpus_tokens, iv=_iv_arg(iv))
     lines = [f"ふだんの働き({d['n_prompts']} 問の返事 + コーパス {d['corpus_tokens']} トークン、{d['seconds']:.0f} 秒)。並べ方: {d['sort']}"]
@@ -3019,7 +3019,7 @@ def nw_neurons(c: Common, holder: dict,
 @gne_command(nw_app, "key", "nw key")
 def nw_key(c: Common, holder: dict,
            contrast: Path = typer.Option(..., "--contrast", help="対照集合(user_prompts = 狙う場面の質問、dont_touch = 反応させたくない質問の群)"),
-           layers: str = typer.Option(..., "--layers", help="鍵を作る層(例 11,18,23)"),
+           layers: str = typer.Option(..., "--layers", help="鍵を作る層(例 11-23 か 11,18,23)"),
            role: str = typer.Option("scene", "--role", help="scene(狙う場面の質問への返事の間ずっと反応する鍵)/ one(どの位置でもほぼ 1 を返す鍵。上限つきの形で使う)"),
            name: Optional[str] = typer.Option(None, "--name", help="鍵の名前(既定 <対照集合の name>_<role>)"),
            subset: str = typer.Option("even", "--subset", help="使う質問: even(既定)/ odd / all"),
@@ -3030,7 +3030,7 @@ def nw_key(c: Common, holder: dict,
     返事の位置の区切りで反応する「位置の鍵」は gne direction key --target mlpin --positions pos:1-3 で作る。"""
     Ls = parse_layers(layers)
     if not Ls:
-        raise GneError("BAD_ARGS", "--layers に層を指定してください", "例 --layers 11,18,23")
+        raise GneError("BAD_ARGS", "--layers に層を指定してください", "例 --layers 11-23")
     s = holder["session"] = c.session()
     d = s.direction_key(contrast, role=role, name=name, layers=Ls, subset=subset, max_tokens=max_tokens, pseudo=pseudo,
                         iv=_iv_arg(iv), seed=c.seed, progress=s.progress)
@@ -3091,6 +3091,49 @@ def nw_check(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Op
                 cells.append(f"{b}: " + ("—" if a is None else f"{a['mean']:+.2f}({a['min']:+.2f}〜{a['max']:+.2f})"))
             lines.append(f"  {u['unit']}\n    " + "  ".join(cells))
     lines += [f"注: {n}" for n in d["notes"]]
+    return d, "\n".join(lines), 0
+
+
+@gne_command(nw_app, "try", "nw try")
+def nw_try(c: Common, holder: dict,
+           direction: str = typer.Option(..., "--direction", help="区切りつきの方向の名前(gne direction --positions response --segments 0,1-3,4- で作ったもの)"),
+           contrast: Path = typer.Option(..., "--contrast", help="対照集合(user_prompts = 狙う場面の質問、dont_touch = 書き込みたくない場面の質問)"),
+           layers: Optional[str] = typer.Option(None, "--layers", help="足す層(例 11-23 か 11,18,23)。省くと、方向を作ったときの重ねる層(--stack-layers)"),
+           alpha: str = typer.Option("0.9", "--alpha", help="強さ。1 つなら全部の区切りに同じ値、区切りごとに変えるなら 1,1,0.8(区切りの順)"),
+           prompts: Optional[Path] = typer.Option(None, "--prompts", help="狙う場面の質問のファイル(JSON / YAML の並び)。省くと対照集合の質問の先頭 -n 問"),
+           n: int = typer.Option(12, "-n", "--n", help="質問の数(狙う場面・書き込みたくない場面それぞれ)"),
+           max_tokens: int = typer.Option(120, "--max-tokens", help="返事を生成する長さ"),
+           match: Optional[str] = typer.Option(None, "--match", help="一致した返事を数える正規表現(省くと対照集合の validate.match)"),
+           temperature: float = typer.Option(0.0, "--temperature", help="0 より大きいとサンプリング(種は --seed。質問ごとにずらす)。既定は greedy"),
+           others: bool = typer.Option(True, "--others/--no-others", help="書き込みたくない場面の質問にも(何も足さずに)答えさせる"),
+           baseline: bool = typer.Option(True, "--baseline/--no-baseline", help="狙う場面の質問に、何も足さないときの返事も作る"),
+           name: Optional[str] = typer.Option(None, "--name", help="結果のファイルの名前(<root>/behave/<model_id>/<名前>_try.json。既定は方向の名前)"),
+           iv: Optional[list[str]] = typer.Option(None, "--iv", help="この介入(レシピの名前かパス、またはユニットの書き方)を先に当てた状態で試す")):
+    """重みに入れる前に試す。区切りつきの方向を、ニューロンにも鍵にも入れずに、層の出力へ直接足して返事を作る(返事の位置の区切りが
+    変わるところで control vector を付け替える)。足すのは狙う場面の質問の返事だけ(場面は質問の群で決める。重みに入れたときの
+    場面の鍵の代わり)。層・区切りごとの強さを変えて、返事と、機械的に数えられるもの(繰り返し・空・正規表現の一致)を比べてから、
+    gne nw neurons 以降に進む。足せるのは層 1 〜 最終層の 1 つ手前。"""
+    from .behave import load_prompts
+    s = holder["session"] = c.session()
+    d = s.nw_try(direction, contrast, layers=layers, alpha=alpha, prompts=load_prompts(prompts) if prompts else None, n=n,
+                 max_tokens=max_tokens, match=match, temperature=temperature, seed=c.seed, others=others, baseline=baseline,
+                 name=name, iv=_iv_arg(iv))
+    lines = [f"方向 {d['direction']}、層 {','.join(map(str, d['layers']))}、区切り {','.join(d['segments'])} に強さ {','.join(f'{a:g}' for a in d['alphas'])}"
+             f"({'greedy' if not d['temperature'] else '温度 ' + format(d['temperature'], 'g') + '・種 ' + str(d['seed'])}、{d['seconds']:.0f} 秒)"]
+    lab = {"scene": "狙う場面(足した)", "baseline": "狙う場面(何も足さない)", "others": "書き込みたくない場面(何も足さない)"}
+    for k in ("scene", "baseline", "others"):
+        if k not in d:
+            continue
+        x = d[k]["counts"]
+        lines.append(f"[{lab[k]}] {x['n']} 問: 繰り返しに落ちた返事 {x['loop']}、空 {x['empty']}、長さの上限で切れた {x['at_limit']}、平均 {x['tokens']} トークン"
+                     + (f"、正規表現に一致 {x['match']}" if "match" in x else ""))
+    for k in ("scene", "others"):
+        if k not in d:
+            continue
+        lines.append(f"--- {lab[k]} ---")
+        for r in d[k]["replies"]:
+            lines.append(f"Q: {r['prompt']}\nA: {r['text']}" + ("  [繰り返し]" if r["loop"] else ""))
+    lines += [f"注: {x}" for x in d["notes"]] + [f"結果: {d['path']}"]
     return d, "\n".join(lines), 0
 
 

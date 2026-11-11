@@ -7,6 +7,7 @@
 ニューロン・鍵・ユニット・式どおりか・足した量の表 → 「レシピに足す」→ レシピのタブの nw の行(表示・α の変更・保存・読み込み・
 LoRA の書き出し)。ニューロンをチェックで選び直すとユニットが組み直され、手で選んだ層は表を取り直しても残る。後から投げた
 ジョブがある欄には、先のジョブの結果を入れない。英語の画面で未翻訳が無い。
+強さは区切りごと(ひな形は 1 / 1 / 0.8。欄も区切りごと)。「重みに入れる前に試す」(ジョブ fish_try): 方向を層の出力に直接足した返事と数。
 """
 
 import json
@@ -154,7 +155,7 @@ def test_template_file():
     d = json.loads(TEMPLATE.read_text(encoding="utf-8"))
     assert d["about"]["ja"]["title"] and d["about"]["en"]["title"] and d["about"]["ja"]["text"] and d["about"]["en"]["text"]
     assert len(d["user_prompts"]) >= 24 and d["system_a"] and {g["name"] for g in d["dont_touch"]} == {"tasks", "ordinary"}
-    assert d["fish"]["form"] == "cap" and d["fish"]["segments"] == "0,1-3,4-" and d["fish"]["alpha"] == 0.9
+    assert d["fish"]["form"] == "cap" and d["fish"]["segments"] == "0,1-3,4-" and d["fish"]["alpha"] == [1, 1, 0.8]
     assert "layers" not in d["fish"]                                       # 層は使う人が入れる
 
 
@@ -168,6 +169,18 @@ def test_units_and_names_without_model():
     assert fish.units([8], 2, {"8": [1, 2]}, "two", "d", "b", 1) == ["8:N1:nw:a1@d.seg0#b_scene&b_p0", "8:N2:nw:a1@d.seg1#b_scene&b_p1"]
     assert fish.units([8], 1, {8: [9]}, "one", "d", "b", -0.5) == ["8:N9:nw:a-0.5@d.seg0#b_p0"]
     from gne.steer import GneError
+    # 区切りごとの強さ: 並びか "1,1,0.8"。1 つだけなら全部の区切りに同じ値。数が区切りと合わなければエラー
+    assert fish.alphas_of(0.9, 3) == [0.9, 0.9, 0.9] and fish.alphas_of("0.9", 2) == [0.9, 0.9] and fish.alphas_of([0.7], 2) == [0.7, 0.7]
+    assert fish.alphas_of("1,1,0.8", 3) == [1.0, 1.0, 0.8] and fish.alphas_of([1, 1, 0.8], 3) == [1.0, 1.0, 0.8] and fish.alphas_of("1 / 0.5", 2) == [1.0, 0.5]
+    assert fish.alphas_of(None, 2) == [0.9, 0.9] and fish.alpha_out([1.0, 1.0]) == 1.0 and fish.alpha_out([1.0, 0.8]) == [1.0, 0.8]
+    for bad in ("1,1", [1, 1, 1, 1], "x", [], float("nan")):
+        with pytest.raises(GneError):
+            fish.alphas_of(bad, 3)
+    u3 = fish.units("8,12", 3, {8: [1, 2, 3, 4, 5, 6], 12: [7, 8, 9, 10, 11, 12]}, "cap", "d", "b", "1,1,0.8")
+    assert [x.split(":nw:")[1].split("@")[0] for x in u3] == ["a1", "a1", "a0.8", "a1", "a1", "a0.8"] and u3[2] == "8:N5+N6:nw:a0.8@d.seg2#b_p2&b_one"
+    assert fish.units([8], 2, {8: [1, 2]}, "one", "d", "b", [1, -0.5]) == ["8:N1:nw:a1@d.seg0#b_p0", "8:N2:nw:a-0.5@d.seg1#b_p1"]
+    with pytest.raises(GneError):
+        fish.units([8], 2, {8: [1, 2]}, "one", "d", "b", [1, 1, 0.8])       # 強さ 3 つに区切り 2 つ
     with pytest.raises(GneError):
         fish.units([8], 2, {8: [1, 1]}, "one", "d", "b")                    # 重なったニューロン
     with pytest.raises(GneError):
@@ -192,6 +205,13 @@ def test_templates_and_units_api(served):
     assert r["units"][0] == {"layer": 8, "neuron": 1, "pair": 2, "mode": "nw", "alpha": 0.9, "direction": "d.seg0", "key": "b_p0",
                              "key2": "b_one", "s": None, "cap": None}
     assert r["names"] == {"position": ["b_p0", "b_p1", "b_p2"], "scene": None, "one": "b_one"}
+    r = c.post("/api/fish/units", json={"layers": "8-9", "segments": "0,1-3,4-", "neurons": {"8": [1, 2, 3], "9": [4, 5, 6]},      # 層は範囲、強さは区切りごと
+                                        "form": "one", "direction": "d", "base": "b", "alpha": [1, 1, 0.8]}).json()
+    assert r["specs"] == ["8:N1:nw:a1@d.seg0#b_p0", "8:N2:nw:a1@d.seg1#b_p1", "8:N3:nw:a0.8@d.seg2#b_p2",
+                          "9:N4:nw:a1@d.seg0#b_p0", "9:N5:nw:a1@d.seg1#b_p1", "9:N6:nw:a0.8@d.seg2#b_p2"] and r["units"][2]["alpha"] == 0.8
+    bad = c.post("/api/fish/units", json={"layers": "8", "segments": "0,1-3", "neurons": {"8": [1, 2]}, "form": "one", "direction": "d", "base": "b",
+                                          "alpha": [1, 1, 0.8]})
+    assert bad.status_code == 400 and bad.json()["error"]["code"] == "BAD_ARGS"
     bad = c.post("/api/fish/units", json={"layers": "8", "segments": "0,1-3", "neurons": {"8": [1]}, "form": "cap", "direction": "d", "base": "b"})
     assert bad.status_code == 400 and bad.json()["error"]["code"] == "BAD_ARGS"
 
@@ -202,6 +222,7 @@ def test_pipeline_job(served, piped):
     r = piped["result"]
     assert piped["estimate_s"] and piped["estimate_s"] > 0                  # 見積もりが付く
     assert r["name"] == "fish_job" and r["layers"] == [8, 12] and r["segments"] == ["0", "1-3", "4-"] and r["form"] == "cap"
+    assert r["alphas"] == [1.0, 1.0, 0.8] and r["alpha"] == [1.0, 1.0, 0.8]             # ひな形の強さ(区切りごと)
     assert Path(r["contrast_path"]).name == "fish_job.yaml"
     assert "fish" not in yaml.safe_load(Path(r["contrast_path"]).read_text(encoding="utf-8"))
     d = r["direction"]
@@ -217,7 +238,10 @@ def test_pipeline_job(served, piped):
     pos = [x for x in k2["rows"] if x["kind"] == "position"]
     assert len(pos) == 6 and all(x["selectivity"] is not None and x["pseudo_p95"] is not None and x["beats"] is not None for x in pos)
     assert [x["kind"] for x in k2["rows"]].count("one") == 2
-    assert len(r["units"]) == 6 and all("#fish_job_r_p" in u and "&fish_job_r_one" in u and ":nw:a0.9@fish_job.seg" in u for u in r["units"])
+    assert len(r["units"]) == 6 and all("#fish_job_r_p" in u and "&fish_job_r_one" in u for u in r["units"])
+    for u in r["units"]:                                                    # 区切り 0・1 は 1、区切り 2 は 0.8(作り直した鍵のユニットにも)
+        assert (":nw:a0.8@fish_job.seg2" in u) if ".seg2" in u else (":nw:a1@fish_job.seg" in u), u
+    assert k2["iv"] and any(":nw:a0.8@fish_job.seg2" in x for x in k2["iv"])    # 鍵の作り直しは、区切りごとの強さのユニットを当てた状態で
     assert len(r["unit_rows"]) == 6 and r["unit_rows"][0]["pair"] is not None
     assert r["verify"]["ok"] and [x["layer"] for x in r["verify"]["layers"]] == [8, 12]
     g = r["check"]["groups"]
@@ -257,6 +281,17 @@ def test_step_jobs(served, piped):
     assert b["estimate_s"] and b["result"]["scene"]["counts"]["n"] == 2 and b["result"]["others"]["counts"]["n"] == 2
     assert len(b["result"]["scene"]["replies"]) == 2 and b["result"]["scene"]["replies"][0]["prompt"] == spec["user_prompts"][0]
     assert b["result"]["match"] == spec["validate"]["match"] and not b["result"]["own_prompts"]
+    # 重みに入れる前に試す: 方向を層の出力に直接足す(区切りごとの強さ)。見積もりが付く
+    tr = _run_job(c, "fish_try", {"spec": spec, "direction": "fish_step", "layers": "8-9", "alpha": [1, 1, 0.8], "n": 2, "max_tokens": 8})
+    t = tr["result"]
+    assert tr["estimate_s"] and t["layers"] == [8, 9] and t["alphas"] == [1.0, 1.0, 0.8] and t["segments"] == ["0", "1-3", "4-"]
+    assert t["scene"]["counts"]["n"] == 2 and t["baseline"]["counts"]["n"] == 2 and t["others"]["counts"]["n"] == 2
+    assert "match" in t["scene"]["counts"] and t["match"] == spec["validate"]["match"] and t["scene"]["replies"][0]["prompt"] == spec["user_prompts"][0]
+    assert Path(t["path"]).name == "fish_step_try.json"
+    e = _run_job(c, "fish_try", {"spec": spec, "direction": "fish_step", "layers": "8", "alpha": [1, 1]}, ok=False)
+    assert e["status"] == "error" and e["error"]["code"] == "BAD_ARGS" and "強さ" in e["error"]["message"]
+    e = _run_job(c, "fish_pipeline", {"spec": spec, "layers": LAYERS, "alpha": "1,1"}, ok=False)        # 強さの数が区切りと合わない(モデルを流す前に止まる)
+    assert e["status"] == "error" and e["error"]["code"] == "BAD_ARGS" and "強さ" in e["error"]["message"]
     # 層が無い・形が違うときははっきりしたエラー
     e = _run_job(c, "fish_pipeline", {"spec": spec}, ok=False)
     assert e["status"] == "error" and e["error"]["code"] == "BAD_ARGS" and "層" in e["error"]["message"]
@@ -279,10 +314,16 @@ def test_fish_tab_end_to_end_in_browser(served, browser):
     pg.select_option("#fx-tpl-sel", "tone_in_scene.json")
     pg.wait_for_function("document.querySelector('#fx-text').value.includes('fish_tsundere_thanks')", timeout=5000)
     assert pg.evaluate("document.querySelector('#fx-tpl-about').textContent").startswith("褒められたり")
-    assert pg.evaluate("document.querySelector('#fx-form').value") == "cap" and pg.evaluate("document.querySelector('#fx-alpha').value") == "0.9"
+    assert pg.evaluate("document.querySelector('#fx-form').value") == "cap"
+    assert pg.evaluate("[...document.querySelectorAll('#fx-alphas input')].map((x) => x.value)") == ["1", "1", "0.8"]      # 強さの欄は区切りごと
+    assert pg.evaluate("[...document.querySelectorAll('#fx-alphas .fx-al span')].map((x) => x.textContent)") == ["0", "1-3", "4-"]
     assert pg.evaluate("document.querySelector('#fx-layers').value") == ""
     assert "狙う場面の質問 32 問" in pg.evaluate("document.querySelector('#fx-jcheck').textContent")
     assert "層 1 つに 6 個" in pg.evaluate("document.querySelector('#fx-need').textContent")
+    pg.fill("#fx-layers", "11-23")                                          # 層は範囲で入れられ、要るニューロンの数と、時間がかかることが出る
+    need = pg.evaluate("document.querySelector('#fx-need').textContent")
+    assert "13 層で合わせて 78 個" in need and "時間がかかります" in need
+    pg.fill("#fx-layers", "")
     # 層を入れないと投げない
     pg.click("#fx-all")
     pg.wait_for_function("document.querySelector('#fx-status-all').classList.contains('err')", timeout=5000)
@@ -291,6 +332,7 @@ def test_fish_tab_end_to_end_in_browser(served, browser):
     _put_spec(pg, small_spec("fish_web"))
     assert pg.evaluate("document.querySelector('#fx-mt').value") == "16" and pg.evaluate("document.querySelector('#fx-pseudo').value") == "2"
     pg.fill("#fx-layers", LAYERS)
+    assert "2 層で合わせて 12 個" in pg.evaluate("document.querySelector('#fx-need').textContent")
     pg.fill("#fx-top", "8")
     _shot(pg, "fish_1_form.png")
     pg.click("#fx-all")
@@ -312,7 +354,15 @@ def test_fish_tab_end_to_end_in_browser(served, browser):
     assert "既定の候補" in pg.evaluate("document.querySelector('#fx-pipe').textContent")
     units = pg.evaluate(f"{f}.st.units")
     assert len(units) == 6 and all("#fish_web_r_p" in u for u in units)
+    assert [u.split(":nw:")[1].split("@")[0] for u in units] == ["a1", "a1", "a0.8", "a1", "a1", "a0.8"]          # 区切りごとの強さ
     _shot(pg, "fish_2_built.png")
+    # 区切り 2 の強さだけ変えると、その区切りのユニットだけ変わる
+    pg.fill("#fx-alpha-2", "0.6")
+    pg.wait_for_function(f"{f}.st.units.length === 6 && {f}.st.units[2].includes(':nw:a0.6@') && {f}.st.units[0].includes(':nw:a1@')", timeout=10000)
+    pg.fill("#fx-alpha-2", "")                                              # 空の欄があるとユニットを組まない
+    pg.wait_for_function("document.querySelector('#fx-add').disabled", timeout=5000)
+    pg.fill("#fx-alpha-2", "0.8")
+    pg.wait_for_function(f"{f}.st.units.length === 6 && {f}.st.units[2].includes(':nw:a0.8@')", timeout=10000)
     # 後から投げたジョブがある欄には、先のジョブの結果を入れない
     pg.evaluate(f"""(() => {{ const p = {f}; p.jobs.keys = 'newer';
         p.jobEnded({{ id: 'older', kind: 'fish_keys', status: 'done', result: {{ base: 'STALE', rows: [], segments: ['0'], form: 'one', layers: [8] }} }}); }})()""")
@@ -374,7 +424,8 @@ def test_fish_tab_end_to_end_in_browser(served, browser):
     pg.select_option("#rc-load", "fish_web_r")
     pg.wait_for_function("document.querySelectorAll('#recipe-list tr.rc-nw').length === 6", timeout=10000)
     got = pg.evaluate("window.gne.recipe.nws()")
-    assert got[0]["alpha"] == 0.6 and got[0]["key2"] == "fish_web_r_one" and got[0]["pair"] is not None and got[1]["alpha"] == 0.9
+    assert got[0]["alpha"] == 0.6 and got[0]["key2"] == "fish_web_r_one" and got[0]["pair"] is not None
+    assert sorted(x["alpha"] for x in got) == [0.6, 0.8, 0.8, 1, 1, 1]                                          # 区切りごとの強さが保存・読み込みで残る
     assert not errors, errors
     pg.close()
 
@@ -390,7 +441,10 @@ def test_fish_steps_in_browser(served, browser, piped):
     spec = small_spec("fish_steps")
     spec["fish"]["form"] = "one"
     spec["fish"]["segments"] = "0,1-"
+    spec["fish"]["alpha"] = 0.9                                             # 1 つだけ書くと、全部の区切りに同じ値
     _put_spec(pg, spec)
+    assert pg.evaluate("[...document.querySelectorAll('#fx-alphas input')].map((x) => x.value)") == ["0.9", "0.9"]
+    assert pg.evaluate("[...document.querySelectorAll('#fx-try-alphas input')].map((x) => x.value)") == ["0.9", "0.9"]
     assert pg.evaluate("document.querySelector('#fx-form').value") == "one" and pg.evaluate("document.querySelector('#fx-seg').value") == "0,1-"
     pg.fill("#fx-layers", "8")
     pg.fill("#fx-top", "6")
@@ -400,6 +454,35 @@ def test_fish_steps_in_browser(served, browser, piped):
     pg.click("#fx-dir-go")
     pg.wait_for_function("document.querySelectorAll('#fx-dir-tab tbody tr').length === 2", timeout=900000)
     assert "まだ無いもの" in pg.evaluate("document.querySelector('#fx-units').textContent")
+    # 重みに入れる前に試す: 方向を層 8 の出力に直接足して返事を作る。強さを変えてもう 1 回 → 回ごとの数が並ぶ
+    pg.fill("#fx-try-n", "2")
+    pg.fill("#fx-try-mt", "10")
+    pg.fill("#fx-try-layers", "0,8")                                        # 層 0 には足せない
+    pg.click("#fx-try-go")
+    pg.wait_for_function("document.querySelector('#fx-status-try').classList.contains('err')", timeout=5000)
+    assert "足す層を入れてください" in pg.evaluate("document.querySelector('#fx-status-try').textContent")
+    pg.fill("#fx-try-layers", "")                                           # 空なら上の欄の層
+    pg.click("#fx-try-go")
+    pg.wait_for_function("document.querySelectorAll('#fx-try-runs tbody tr').length === 1", timeout=900000)
+    assert "見積もり" in pg.evaluate("document.querySelector('#fx-status-try').textContent") or "できました" in pg.evaluate("document.querySelector('#fx-status-try').textContent")
+    assert pg.evaluate("document.querySelectorAll('#fx-try-scene tbody tr').length") == 2 and pg.evaluate("document.querySelectorAll('#fx-try-others tbody tr').length") == 2
+    assert pg.evaluate("document.querySelectorAll('#fx-try-scene thead th').length") == 3          # 質問・足した返事・何も足さない返事
+    row = pg.evaluate("[...document.querySelectorAll('#fx-try-runs tbody tr')[0].children].map((x) => x.textContent.trim())")
+    assert row[1] == "8" and row[2] == "0: 0.9 / 1-: 0.9" and row[3] == "greedy" and row[4] == "2"
+    pg.fill("#fx-try-alpha-1", "0.5")
+    pg.fill("#fx-try-temp", "0.8")
+    pg.click("#fx-try-go")
+    pg.wait_for_function("document.querySelectorAll('#fx-try-runs tbody tr').length === 2", timeout=900000)
+    row = pg.evaluate("[...document.querySelectorAll('#fx-try-runs tbody tr')[1].children].map((x) => x.textContent.trim())")
+    assert row[2] == "0: 0.9 / 1-: 0.5" and row[3].startswith("0.8")
+    assert pg.evaluate(f"{f}.st.tryShown") == 1
+    pg.click("#fx-try-runs button[data-fxtry=\"0\"]")                      # 前の回の返事を見る
+    pg.wait_for_function(f"{f}.st.tryShown === 0 && document.querySelector('#fx-try-runs tbody tr.fx-sel td').textContent === '1'", timeout=5000)
+    assert pg.evaluate(f"{f}.st.tries[1].alphas") == [0.9, 0.5] and pg.evaluate(f"{f}.st.tries[1].temperature") == 0.8
+    pg.click("#fx-try-use")                                                 # 試した強さを上の欄に入れる
+    assert pg.evaluate("[...document.querySelectorAll('#fx-alphas input')].map((x) => x.value)") == ["0.9", "0.5"]
+    pg.fill("#fx-alpha-1", "0.9")
+    _shot(pg, "fish_4a_try.png")
     pg.click("#fx-neu-go")
     pg.wait_for_function("document.querySelectorAll('.fx-neu-tab[data-l=\"8\"] input:checked').length === 2", timeout=900000)
     pg.click("#fx-keys-go")
@@ -407,9 +490,9 @@ def test_fish_steps_in_browser(served, browser, piped):
     pg.wait_for_function("document.querySelectorAll('#fx-unit-tab tbody tr').length === 2", timeout=10000)
     u = pg.evaluate(f"{f}.st.units")
     assert len(u) == 2 and u[0].endswith("@fish_steps.seg0#fish_steps_p0") and ":nw:a0.9" in u[0] and "+N" not in u[0]
-    # 強さを変えるとユニットが組み直される
+    # 強さを変えるとユニットが組み直される(変えた区切りだけ)
     pg.fill("#fx-alpha", "0.7")
-    pg.wait_for_function(f"{f}.st.units.length === 2 && {f}.st.units[0].includes(':nw:a0.7@')", timeout=10000)
+    pg.wait_for_function(f"{f}.st.units.length === 2 && {f}.st.units[0].includes(':nw:a0.7@') && {f}.st.units[1].includes(':nw:a0.9@')", timeout=10000)
     # 当てた状態で鍵を作り直す → 鍵の名前が _r に
     pg.click("#fx-rekey")
     pg.wait_for_function(f"{f}.st.keyBase === 'fish_steps_r' && {f}.st.units.length === 2 && {f}.st.units[0].includes('#fish_steps_r_p0')", timeout=900000)
@@ -477,6 +560,21 @@ def test_fish_tab_in_english(served, browser, piped):
                       "replies": [{"prompt": "q", "text": "a", "loop": False, "finish": "eog"}]}, "match": "x", "own_prompts": False}
     pg.evaluate(f"(r) => {{ const p = {f}; p.st.behave = r; p.renderBehave(); }}", beh)
     assert "Target-scene questions" in pg.evaluate("document.querySelector('#fx-behave').textContent")
+    assert "Try before writing into the weights" in pg.evaluate("document.querySelector('#fx-try-sec h4').textContent")
+    assert "13 layers: 78 neurons" in pg.evaluate("(() => { const l = document.querySelector('#fx-layers'); const was = l.value; l.value = '11-23'; l.dispatchEvent(new Event('input')); const s = document.querySelector('#fx-need').textContent; l.value = was; l.dispatchEvent(new Event('input')); return s; })()")
+    one = {"counts": {"n": 1, "match": 0, "loop": 1, "empty": 0, "at_limit": 0, "tokens": 5.0}, "replies": [{"prompt": "q", "text": "a", "loop": True, "finish": "eog", "n_tokens": 5}]}
+    tr = {"scene": one, "baseline": one, "others": one, "direction": "fish_job", "layers": [8, 12], "segments": ["0", "1-3", "4-"], "alphas": [1, 1, 0.8], "alpha": [1, 1, 0.8],
+          "match": "x", "temperature": 0.7, "seed": 1, "own_prompts": False, "notes": ["方向 fish_job は層 8,12 に重ねて書く前提で作ってあります。", "a", "b"]}
+    pg.evaluate(f"(r) => {{ const p = {f}; p.st.tries = [r]; p.st.tryShown = 0; p.renderTry(); }}", tr)
+    assert "Replies that fall into repetition (loops)" in pg.evaluate("document.querySelector('#fx-try-runs').textContent")
+    assert "Reply with the direction added" in pg.evaluate("document.querySelector('#fx-try-scene').textContent")
+    pg.fill("#fx-try-layers", "0")                                        # 足せない層の文
+    pg.click("#fx-try-go")
+    pg.fill("#fx-try-layers", "")
+    pg.fill("#fx-alpha-1", "")                                            # 強さが空の文
+    pg.click("#fx-all")
+    pg.fill("#fx-alpha-1", "1")
+    pg.click("#fx-try-use")
     pg.click("#fx-src button[data-src=file]")
     missing = pg.evaluate("[...window.gneI18n.missing]")
     assert missing == [], missing
@@ -506,8 +604,10 @@ def test_all_templates_are_readable(tmp_path):
         assert "誤差" in a["ja"]["text"] and "Qwen3.5-4B" in a["ja"]["text"] and "Qwen3.5-4B" in a["en"]["text"], name
         st = d.pop("fish")
         assert set(st) <= set(fish.SETTINGS) and "layers" not in st, name       # 層は使う人が入れる
-        assert st["form"] in fish.FORMS and isinstance(st["alpha"], (int, float)), name
+        assert st["form"] in fish.FORMS, name
         segs = fish._segments(st["segments"])
+        al = fish.alphas_of(st["alpha"], len(segs))                             # 数 1 つか、区切りごと
+        assert al == ([1.0, 1.0, 0.8] if not fish.before_mode(st["segments"]) else [4.0]), name
         if fish.before_mode(st["segments"]):
             assert len(segs) == 1 and st.get("rekey") is False and st["same_reply"] is False and st["form"] in ("one", "two"), name
         else:
@@ -588,19 +688,19 @@ def test_templates_in_browser(served, browser, piped_before):
         f = "window.gne.directionView.fish"
         pg.click("#fx-src button[data-src=json]")
         assert pg.evaluate("[...document.querySelectorAll('#fx-tpl-sel option')].map((o) => o.value).filter(Boolean)") == TEMPLATES
-        want = {"tone_in_scene.json": ("0,1-3,4-", "cap", "0.9", "same", True, True, 6),
-                "always_persona.json": ("0,1-3,4-", "cap", "0.9", "same", True, True, 6),
+        want = {"tone_in_scene.json": ("0,1-3,4-", "cap", "1,1,0.8", "same", True, True, 6),
+                "always_persona.json": ("0,1-3,4-", "cap", "1,1,0.8", "same", True, True, 6),
                 "sentence_end.json": ("before:(です|ます)。", "one", "4", "own", False, False, 1),
                 "scene_and_sentence_end.json": ("before:(です|ます)。", "two", "4", "own", False, False, 1),
-                "two_personas.json": ("0,1-3,4-", "cap", "0.9", "same", True, True, 6),
-                "after_chips.json": ("0,1-3,4-", "cap", "0.9", "same", True, True, 6)}
+                "two_personas.json": ("0,1-3,4-", "cap", "1,1,0.8", "same", True, True, 6),
+                "after_chips.json": ("0,1-3,4-", "cap", "1,1,0.8", "same", True, True, 6)}
         for name in ["sentence_end.json", "tone_in_scene.json", "always_persona.json", "scene_and_sentence_end.json", "two_personas.json", "after_chips.json"]:
             pg.select_option("#fx-tpl-sel", name)
             spec_name = json.loads((TEMPLATE.parent / name).read_text(encoding="utf-8"))["name"]
             pg.wait_for_function(f"document.querySelector('#fx-text').value.includes('\"{spec_name}\"')", timeout=5000)
             seg, form, alpha, method, stack, rekey, need = want[name]
             got = pg.evaluate("""({seg: document.querySelector('#fx-seg').value, form: document.querySelector('#fx-form').value,
-                alpha: document.querySelector('#fx-alpha').value, method: document.querySelector('#fx-method').value,
+                alpha: [...document.querySelectorAll('#fx-alphas input')].map((x) => x.value).join(','), method: document.querySelector('#fx-method').value,
                 stack: document.querySelector('#fx-stack').checked, rekey: document.querySelector('#fx-rekey-on').checked,
                 iv: document.querySelector('#fx-iv').value, errs: document.querySelectorAll('#fx-jcheck .err').length,
                 about: document.querySelector('#fx-tpl-about').textContent, layers: document.querySelector('#fx-layers').value})""")

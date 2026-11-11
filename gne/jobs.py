@@ -311,9 +311,18 @@ def _fish_behave(s, units, contrast=None, spec: dict | None = None, **p) -> dict
     return {**fish.behave_step(s, list(units), path, name=q.pop("name", None) or cname, **q), "contrast_path": path}
 
 
+def _fish_try(s, contrast=None, spec: dict | None = None, direction: str | None = None, **p) -> dict:
+    """重みに入れる前に試す(gne nw try、fish.try_step): 区切りつきの方向を、狙う場面の質問の返事の位置どおりに層の出力へ直接足して
+    返事を作る。direction を省くと対照集合の名前の方向。layers を省くと方向を作ったときの重ねる層。alpha は区切りごとの強さ。"""
+    from . import fish
+    path, q, cname = _fish_args(s, contrast, spec, p, ("iv", "alpha", "layers"))
+    return {**fish.try_step(s, path, direction=direction or q.get("name") or cname, **q), "contrast_path": path}
+
+
 def _fish_pipeline(s, contrast=None, spec: dict | None = None, **p) -> dict:
     """FiSH を最初から最後まで(方向 → ニューロンの表 → 鍵 → ユニット → 当てた状態で鍵を作り直す → 式どおりか → 足した量)。
-    層(layers)は必須。ニューロンは既定の候補(表の上から)か neurons({層: [番号…]})。強さ alpha は渡した値をそのまま使う。"""
+    層(layers)は必須("11-23" のような範囲でもよい)。ニューロンは既定の候補(表の上から)か neurons({層: [番号…]})。強さ alpha は
+    渡した値をそのまま使う(数 1 つなら全部の区切りに同じ値、"1,1,0.8" か [1, 1, 0.8] なら区切りごと)。"""
     from . import fish
     path, q, cname = _fish_args(s, contrast, spec, p, fish.SETTINGS)
     if isinstance(q.get("neurons"), dict):
@@ -427,6 +436,7 @@ def standard_kinds() -> dict[str, Callable[..., dict]]:
         "fish_verify": _fish_verify,                                                    # FiSH: 式どおりか
         "fish_check": _fish_check,                                                      # FiSH: 場面・位置ごとに足した量
         "fish_behave": _fish_behave,                                                    # FiSH: レシピを当てた返事を読む
+        "fish_try": _fish_try,                                                          # FiSH: 重みに入れる前に試す(層の出力に直接足す)
         "fish_pipeline": _fish_pipeline,                                                # FiSH: 最初から最後まで
     }
 

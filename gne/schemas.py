@@ -1480,5 +1480,5 @@ COMMAND_SCHEMAS: dict[str, type[Envelope]] = {
     "direction key-verify": DirectionKeyVerifyOut, "direction key-experts": DirectionKeyExpertsOut,
     "direction key-from-behave": DirectionKeyFromBehaveOut,
     "direction key-causal": DirectionKeyCausalOut, "direction key-causal-verify": DirectionKeyCausalVerifyOut,
-    "nw neurons": NwOut, "nw key": NwOut, "nw verify": NwOut, "nw check": NwOut, "nw export": NwOut,
+    "nw neurons": NwOut, "nw key": NwOut, "nw verify": NwOut, "nw check": NwOut, "nw try": NwOut, "nw export": NwOut,
 }
