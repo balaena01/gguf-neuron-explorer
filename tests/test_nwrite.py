@@ -484,9 +484,12 @@ def test_try_before_writing(built, monkeypatch):
         i = 0 if k == 0 else (1 if k <= 3 else 2)
         assert set(v) == {8, 12} and all(np.allclose(v[L], al[i] * ds.seg[i][L], atol=1e-6) for L in (8, 12)), (pos, k)
     assert r["added"][2]["norm"][12] == pytest.approx(0.25 * float(np.linalg.norm(ds.seg[2][12])), rel=1e-5)
-    # 強さ 0 は、何も足さない返事と同じ。強く足すと返事が変わる。数は behave と同じ項目
+    # 強さ 0 は、何も足さない返事と同じ(何も足さない返事も、足す側と同じ作り方で 1 問ずつ作る。まとめて生成すると、GPU では
+    # 組の作り方の違いだけで返事が分かれることがある)。サンプリングでも同じ種で引くので同じ。強く足すと返事が変わる。数は behave と同じ項目
     z = s.nw_try("nw_scene", built["contrast"], alpha=0, n=3, max_tokens=12)
     assert [x["text"] for x in z["scene"]["replies"]] == [x["text"] for x in z["baseline"]["replies"]]
+    zs = s.nw_try("nw_scene", built["contrast"], alpha=0, n=3, max_tokens=12, temperature=0.8, seed=3, others=False)
+    assert [x["text"] for x in zs["scene"]["replies"]] == [x["text"] for x in zs["baseline"]["replies"]]
     assert set(z["scene"]["counts"]) == {"n", "empty", "loop", "at_limit", "tokens"} and z["others"]["counts"]["n"] == 3      # validate.match が無いので一致は数えない
     big = s.nw_try("nw_scene", built["contrast"], alpha=6, n=3, max_tokens=12, match="[a-z]", others=False)
     assert [x["text"] for x in big["scene"]["replies"]] != [x["text"] for x in big["baseline"]["replies"]]

@@ -425,7 +425,7 @@ def try_step(session, contrast: str, *, direction: str, layers=None, alpha=None,
       (重みに入れたときの場面の鍵の代わり)。位置 0(返事を書き始める直前 = 生成プロンプトの最後のトークン)から足し、質問の文には足さない。
     - alpha は区切りごとの強さ(alphas_of。1 で、その区切りの方向をそのままの長さで足す)。layers を省くと、方向を作ったときの
       重ねる層(stack_layers)。
-    - baseline: 同じ質問に何も足さずに答えさせた返事。others: 書き込みたくない場面(dont_touch)の質問(n 問まで)に、何も足さずに
+    - baseline: 同じ質問に何も足さずに答えさせた返事(足す側とまったく同じ作り方で 1 問ずつ作る。違いは足したベクトルの分だけ)。others: 書き込みたくない場面(dont_touch)の質問(n 問まで)に、何も足さずに
       答えさせた返事(狙う場面にしか足さないので、何も足さない返事と同じ。並べて読むために出す)。
     - temperature > 0 でサンプリング(質問ごとに seed をずらす)。iv は先に当てておく介入(全部の位置に当てる)。
     - 返事と一緒に、機械的に数えられるもの(繰り返し・空・長さの上限で切れた数・正規表現の一致)を出す。
@@ -518,32 +518,41 @@ def try_step(session, contrast: str, *, direction: str, layers=None, alpha=None,
         return {"prompt": q if isinstance(q, str) else q[-1]["content"], "text": r_text, "loop": bool(loop_like(ids)), "finish": finish,
                 "n_tokens": len(ids)}
 
-    # 狙う場面: 1 問ずつ。質問の最後のトークン(位置 0)から足し、区切りが変わるところで付け替える
+    # 狙う場面: 1 問ずつ。質問の最後のトークン(位置 0)から足し、区切りが変わるところで付け替える。
+    # 「何も足さない返事」(add=False)も、まったく同じ作り方で作る(1 問ずつ、質問を同じ所で分けて読ませ、同じ関数で生成し、
+    # サンプリングなら同じ種)。まとめて生成すると、組の作り方で計算がわずかにずれて、僅差の所で選ぶトークンが入れ替わり、
+    # 何も足していなくても返事が途中から分かれる(GPU で起きた)。並べた 2 つの返事の違いを、足したベクトルの分だけにする。
     import dataclasses
     ctx = e.steer_ctx()
-    scene = []
-    e.set_lora(ctx, iv_lora)
-    try:
-        for i, q in enumerate(qs):
-            ids = e.tokenize_prompt(e.render_chat(_conv(sys_b, q), enable_thinking=False))
-            if len(ids) + int(max_tokens) > e.n_ctx:
-                raise GneError("CONTEXT_FULL", f"質問 {i} が n_ctx={e.n_ctx} に入りません")
-            e.set_cvec(ctx, V_out)
-            e.clear_memory(ctx)
-            e.prefill(ctx, [ids[:-1]])
-            e.set_cvec(ctx, at(0))
-            pf = e.prefill(ctx, [[ids[-1]]], pos0=len(ids) - 1)
 
-            def sched(step, outs):
-                # step 番目のトークンが決まった後、それを読ませる前に呼ばれる。読ませる位置 = 返事の位置 step + 1
-                return KEEP if seg_of(step) == seg_of(step + 1) else at(step + 1)
-            sp = None if sp0 is None else dataclasses.replace(sp0, seed=sp0.seed + 7919 * i)
-            r = e.generate_greedy(ctx, [ids], max_tokens=int(max_tokens), prefilled=pf, schedule=sched, sampling=sp)[0]
-            scene.append(row(q, r.text, r.token_ids, r.finish))
-            tick(1, "try: 狙う場面")
-    finally:
-        e.set_cvec(ctx, None)
-        e.set_lora(ctx, None)
+    def one_by_one(add: bool, stage: str) -> list[dict]:
+        vec_at = at if add else (lambda k: V_out)
+        rows = []
+        e.set_lora(ctx, iv_lora)
+        try:
+            for i, q in enumerate(qs):
+                ids = e.tokenize_prompt(e.render_chat(_conv(sys_b, q), enable_thinking=False))
+                if len(ids) + int(max_tokens) > e.n_ctx:
+                    raise GneError("CONTEXT_FULL", f"質問 {i} が n_ctx={e.n_ctx} に入りません")
+                e.set_cvec(ctx, V_out)
+                e.clear_memory(ctx)
+                e.prefill(ctx, [ids[:-1]])
+                e.set_cvec(ctx, vec_at(0))
+                pf = e.prefill(ctx, [[ids[-1]]], pos0=len(ids) - 1)
+
+                def sched(step, outs):
+                    # step 番目のトークンが決まった後、それを読ませる前に呼ばれる。読ませる位置 = 返事の位置 step + 1
+                    return KEEP if not add or seg_of(step) == seg_of(step + 1) else at(step + 1)
+                sp = None if sp0 is None else dataclasses.replace(sp0, seed=sp0.seed + 7919 * i)
+                r = e.generate_greedy(ctx, [ids], max_tokens=int(max_tokens), prefilled=pf, schedule=sched, sampling=sp)[0]
+                rows.append(row(q, r.text, r.token_ids, r.finish))
+                tick(1, stage)
+        finally:
+            e.set_cvec(ctx, None)
+            e.set_lora(ctx, None)
+        return rows
+
+    scene = one_by_one(True, "try: 狙う場面")
 
     def plain(questions, system, stage):
         asked = [_conv(system, q) for q in questions] if system is not None else list(questions)
@@ -552,7 +561,7 @@ def try_step(session, contrast: str, *, direction: str, layers=None, alpha=None,
 
     out = {"scene": {"counts": _counts(scene, rx), "replies": scene}}
     if baseline:
-        rows = plain(qs, sys_b, "try: 何も足さない")
+        rows = one_by_one(False, "try: 何も足さない")
         out["baseline"] = {"counts": _counts(rows, rx), "replies": rows}
     if dts:
         rows = plain(dts, None, "try: 書き込みたくない場面")

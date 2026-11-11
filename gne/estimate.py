@@ -493,13 +493,13 @@ def _fish_cost(session, sp: Speed, kind: str, p: dict) -> dict:
             n_s = len([x for x in pr.splitlines() if x.strip()]) if isinstance(pr, str) and pr.strip() else (len(pr) if pr else min(n, n_a))
             n_q = n_s + (min(n, n_dt) if p.get("others", True) else 0)
             return {"questions": n_q, "seconds": sp.gen(n_q, int(p.get("max_tokens") or 120))}
-        if kind == "fish_try":                     # 狙う場面は 1 問ずつ(付け替えは 1 本の列ごと)、何も足さない返事と dont_touch はまとめて
+        if kind == "fish_try":                     # 狙う場面は 1 問ずつ(付け替えは 1 本の列ごと)。何も足さない返事も同じ作り方で 1 問ずつ。dont_touch はまとめて
             n = int(p.get("n") or 12)
             pr = p.get("prompts")
             n_s = len([x for x in pr.splitlines() if x.strip()]) if isinstance(pr, str) and pr.strip() else (len(pr) if pr else min(n, n_a))
             n_o = min(n, n_dt) if p.get("others", True) else 0
             tk = int(p.get("max_tokens") or 120)
-            return {"questions": n_s + n_o, "seconds": n_s * sp.gen(1, tk) + sp.gen((n_s if p.get("baseline", True) else 0) + n_o, tk)}
+            return {"questions": n_s + n_o, "seconds": n_s * (2 if p.get("baseline", True) else 1) * sp.gen(1, tk) + sp.gen(n_o, tk)}
         if kind == "fish_direction":
             return {"questions": n_a, "seconds": dir_s}
         if kind == "fish_keys":
