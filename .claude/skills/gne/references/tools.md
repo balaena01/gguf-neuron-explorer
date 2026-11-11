@@ -164,7 +164,7 @@ gne headproj export --recipe R --bake --into F16.gguf --requant keep   # 別の 
 
 ### FiSH: 計算で作るニューロン(mode nw、`docs/fish.md`)
 
-FiSH = Formula-instantiated Scene-gated Hidden units。すでにあるニューロンを、式から計算した重みで書き換える。
+FiSH = Formula-instantiated Scene-gated Hidden units。すでにあるニューロンを、式から計算した重みで書き換える。実測(Qwen3.5-4B のツンデレ、100 問、`docs/fish.md` §8): ほかの場面(計算・事実・ふつうの質問・英語)の正答と口調は無介入と区別できないが、口調そのものは弱い(ツンデレらしい返事 27%・繰り返し 10%。system プロンプトは 86%)。最初の小さい確かめでは 12 問中 5〜7 問・壊れ 0 だったが、100 問ではこのとおりだった。
 
 ```
 gne direction --contrast C --positions response --same-reply [--segments 0,1-3,4-] [--stack-layers 11,18,23]   # 方向(同じ返事を両方の条件で読ませた差。区切り i は NAME.seg<i>)
