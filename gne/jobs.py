@@ -257,6 +257,70 @@ def _direction_key_verify(s, layer, key: str, direction: str, alphas=None, targe
                          kind=kind, expert=expert, direction_layer=direction_layer, texts=list(texts) if texts else None)
 
 
+def _fish_args(s, contrast, spec, p: dict, keys) -> tuple[str, dict, str]:
+    """FiSH のジョブの対照集合と引数: 渡していない引数(None)は、表の fish の設定、その次に既定で埋める。"""
+    from . import fish
+    path, settings, cname = fish.resolve(s, contrast, spec)
+    q = {k: v for k, v in p.items() if v is not None}
+    for k in keys:
+        if k not in q and (k in settings or k in fish.DEFAULTS):
+            q[k] = settings.get(k, fish.DEFAULTS.get(k))
+    iv = q.get("iv")
+    if isinstance(iv, str) and not iv.strip():
+        q.pop("iv")
+    return path, q, cname
+
+
+def _fish_direction(s, contrast=None, spec: dict | None = None, **p) -> dict:
+    """FiSH の方向(docs/fish.md): 返事の位置で分けた方向を作り、層 × 区切りごとの長さと、今までの作り方との向きの近さを返す。"""
+    from . import fish
+    path, q, cname = _fish_args(s, contrast, spec, p, ("layers", "segments", "same_reply", "stack", "response_tokens"))
+    q.pop("iv", None)
+    d = fish.direction_step(s, path, name=q.pop("name", None) or cname, **q)
+    return {**d, "contrast_path": path}
+
+
+def _fish_keys(s, contrast=None, spec: dict | None = None, with_units=None, **p) -> dict:
+    """FiSH の鍵をまとめて作る(区切りごとの位置の鍵、形に要る場面の鍵・ほぼ 1 を返す鍵)。with_units(ユニットのリスト)を渡すと、
+    それを当てた状態で作る(iv に足す。レシピを当てた状態で鍵を作り直すとき)。"""
+    from . import fish
+    path, q, cname = _fish_args(s, contrast, spec, p, ("layers", "segments", "form", "pseudo", "max_tokens", "iv"))
+    if with_units:
+        q["iv"] = fish.iv_units(s, q.get("iv"), [str(u) for u in with_units])
+    d = fish.keys_step(s, path, base=q.pop("base", None) or cname, **q)
+    return {**d, "contrast_path": path, "with_units": bool(with_units)}
+
+
+def _fish_verify(s, units, iv=None, texts=None) -> dict:
+    """FiSH のユニットの LoRA が式どおりか(gne nw verify)。"""
+    from . import fish
+    return fish.verify_step(s, list(units), iv=iv or None, texts=texts)
+
+
+def _fish_check(s, units, contrast=None, spec: dict | None = None, **p) -> dict:
+    """FiSH のユニットが、場面・返事の位置ごとに実際に足した量(gne nw check)。"""
+    from . import fish
+    path, q, _ = _fish_args(s, contrast, spec, p, ("max_tokens", "iv", "segments"))
+    return {**fish.check_step(s, list(units), path, **q), "contrast_path": path}
+
+
+def _fish_behave(s, units, contrast=None, spec: dict | None = None, **p) -> dict:
+    """FiSH のユニットを当てて返事を作り、読めるように返す(狙う場面の質問と、書き込みたくない場面の質問)。"""
+    from . import fish
+    path, q, cname = _fish_args(s, contrast, spec, p, ("iv",))
+    return {**fish.behave_step(s, list(units), path, name=q.pop("name", None) or cname, **q), "contrast_path": path}
+
+
+def _fish_pipeline(s, contrast=None, spec: dict | None = None, **p) -> dict:
+    """FiSH を最初から最後まで(方向 → ニューロンの表 → 鍵 → ユニット → 当てた状態で鍵を作り直す → 式どおりか → 足した量)。
+    層(layers)は必須。ニューロンは既定の候補(表の上から)か neurons({層: [番号…]})。強さ alpha は渡した値をそのまま使う。"""
+    from . import fish
+    path, q, cname = _fish_args(s, contrast, spec, p, fish.SETTINGS)
+    if isinstance(q.get("neurons"), dict):
+        q["neurons"] = {int(k): v for k, v in q["neurons"].items()}
+    return fish.pipeline(s, path, name=q.pop("name", None) or cname, **q)
+
+
 def compact_key_causal(d: dict) -> dict:
     """key-causal の結果を MCP 向けに小さくする: 比較用の鍵ごとの値(values)と、副作用の群ごとの細目を落とす(要約は残す)。"""
     for r in d.get("rows") or []:
@@ -356,6 +420,14 @@ def standard_kinds() -> dict[str, Callable[..., dict]]:
         "direction_key_causal": _direction_key_causal,                                  # keyed の効く場所: 生成なしのふるい分け
         "direction_key_causal_verify": _direction_key_causal_verify,                    # keyed の効く場所: 生成での確かめ
         "behave": _behave,                                                              # 振る舞いを数える(gne behave)
+        "nw_neurons": lambda s, layers, **p: s.nw_neurons(_layers(layers), **p),         # 計算で作るニューロン: ふだんの働きの表
+        "nw_check": lambda s, recipe, contrast, **p: s.nw_check(recipe, contrast, **p),  # 計算で作るニューロン: 位置ごとの鍵の反応と足した量
+        "fish_direction": _fish_direction,                                              # FiSH(Web UI): 方向
+        "fish_keys": _fish_keys,                                                        # FiSH: 鍵をまとめて作る
+        "fish_verify": _fish_verify,                                                    # FiSH: 式どおりか
+        "fish_check": _fish_check,                                                      # FiSH: 場面・位置ごとに足した量
+        "fish_behave": _fish_behave,                                                    # FiSH: レシピを当てた返事を読む
+        "fish_pipeline": _fish_pipeline,                                                # FiSH: 最初から最後まで
     }
 
 

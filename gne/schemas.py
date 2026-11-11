@@ -181,7 +181,7 @@ class UnitModel(_Strict):
     rho: float | None
     add: float | None
     down_norm: float | None
-    mode: Literal["add", "gain", "query", "route", "proj", "keyed"] = "add"     # §6.16、query は CHANGE-04 E、route は CHANGE-05、proj は CHANGE-06、keyed は CHANGE-07
+    mode: Literal["add", "gain", "query", "route", "proj", "keyed", "nw"] = "add"     # nw = 計算で作るニューロン。§6.16、query は CHANGE-04 E、route は CHANGE-05、proj は CHANGE-06、keyed は CHANGE-07
     k: float | None = None
     direction: str | None = None              # §6.17 方向のユニット
     diff_rel: float | None = None             # ‖平均差‖ / ρ_L
@@ -191,6 +191,10 @@ class UnitModel(_Strict):
     semantics: str | None = None              # CHANGE-05 MoE の add は "direction"(書き込み方向の押し)
     key: str | None = None                    # CHANGE-07 keyed の鍵(比較用の鍵は NAME~j)
     alpha: float | None = None                # CHANGE-07 keyed の強さ α(raw、k と同じ値)
+    key2: str | None = None                   # nw: 入力の行に入れる鍵
+    pair: int | None = None                   # nw: 上限つきの形で組にする 2 個目のニューロン
+    s: float | None = None                    # nw: ゲートの倍率
+    cap: str | None = None                    # nw: 上限つきの形のしきい値 a-b
 
 
 class RecipeModel(_Strict):
@@ -443,6 +447,15 @@ class DirectionOut(Envelope):                   # §6.17 gne direction
     select: dict[str, Any] | None
     seconds: float
     sides: dict[str, Any] | None = None        # レシピで A / B を作った対照集合のとき、側ごとの system とレシピ
+    # 方向の作り方: mean_diff(それぞれ自分の返事を読んだ差)/ mean_diff_same_reply(同じ返事を両方の条件で読ませた差)
+    method: str | None = None
+    same_reply: bool | None = None
+    segments: list[dict[str, Any]] | None = None   # 返事の位置で分けた方向(名前 NAME.seg<i>、位置、行の数)
+    stack_layers: list[int] | None = None          # 区切りつきの方向を「下の層に足した後の残り」にした層
+
+
+class NwOut(Envelope):                          # gne nw …(計算で作るニューロン。中身はコマンドごと、docs/fish.md)
+    model_config = ConfigDict(extra="allow")
 
 
 class AblateOut(Envelope):                      # §6.17 gne ablate
@@ -1467,4 +1480,5 @@ COMMAND_SCHEMAS: dict[str, type[Envelope]] = {
     "direction key-verify": DirectionKeyVerifyOut, "direction key-experts": DirectionKeyExpertsOut,
     "direction key-from-behave": DirectionKeyFromBehaveOut,
     "direction key-causal": DirectionKeyCausalOut, "direction key-causal-verify": DirectionKeyCausalVerifyOut,
+    "nw neurons": NwOut, "nw key": NwOut, "nw verify": NwOut, "nw check": NwOut, "nw export": NwOut,
 }

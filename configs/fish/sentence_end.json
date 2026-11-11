@@ -1,0 +1,58 @@
+{
+  "about": {
+    "order": 3,
+    "ja": {
+      "title": "文末の言い方を変える(です・ます → のだ)",
+      "text": "文を終える直前の位置でだけ書く例です。位置の区切りの欄に、返事の位置ではなく before:<正規表現>(一致する文字の直前。keyed write の positions と同じ書き方)を書きます。方向は返事全体の平均(今までの作り方)、形は鍵 1 つ、ニューロンは層 1 つに 1 個です。この形では、当てた状態での鍵の作り直しはしません(書くと「です。」が出なくなるため)。足した量は、何も当てずに作った返事で「一致の直前」と「それ以外」に分けて出ます。試した範囲: Qwen3.5-4B(Q8_0)で 1 回。層 30・強さ 4(強さ 1 では足りないことが keyed write の例で分かっています)。式どおりかは合格。足した量は一致の直前で 1.08、それ以外で 0.05、英語の質問で 0.00。作成に使っていない 8 問のうち 6 問で「〜なのだ」が出ましたが、「なのだとか」「なのだすね」のように崩れた言い方が混じり、敬体のままの文も残りました。英語の 4 問は変わりませんでした。 返事は数問〜12 問を読んだだけなので、1〜2 問の差は誤差です。ほかのモデルでは確かめていません。"
+    },
+    "en": {
+      "title": "Change sentence endings (desu/masu → noda)",
+      "text": "An example that writes only just before a sentence ends. In the position segments field, write before:<regex> (the position just before matching text, the same notation as positions in a keyed write) instead of reply positions. The direction is the mean over the whole reply (previous method), the form is one key, and one neuron per layer is used. In this form the keys are not rebuilt with the recipe applied (once it writes, the matching ending no longer appears). The amounts written are measured on replies generated with nothing applied, split into \"just before a match\" and \"elsewhere\". Tried on: Qwen3.5-4B (Q8_0), one run. Layer 30, strength 4 (the keyed-write example showed that strength 1 is not enough). The formula check passed. The amount written was 1.08 just before a match, 0.05 elsewhere and 0.00 on English questions. In 6 of 8 questions not used for building, the noda ending appeared, but mixed with broken forms and with some sentences left polite. The 4 English questions did not change. Only a handful to 12 replies were read, so a difference of one or two means nothing. Not checked on other models."
+    }
+  },
+  "name": "fish_noda_endings",
+  "system_a": "あなたはずんだもんです。日本語で話し、文の終わりは必ず「〜のだ」「〜なのだ」にしてください(例: 「おいしいのだ。」「元気なのだ！」)。 セリフだけを書き、動作の描写やかっこ書きは書かないでください。",
+  "user_prompts": [
+    "週末は何をして過ごすのがおすすめ？",
+    "朝ごはんに何を食べたらいい？",
+    "おすすめの趣味を教えて。",
+    "雨の日は何をする？",
+    "疲れたときはどうすればいい？",
+    "好きな季節はいつ？",
+    "カレーの作り方を簡単に教えて。",
+    "眠れない夜はどうしたらいい？",
+    "日本のおすすめの観光地は？",
+    "勉強に集中するコツは？",
+    "猫と犬、どっちが好き？",
+    "健康のために何をしている？",
+    "おすすめの飲み物は？",
+    "部屋を片付けるコツは？",
+    "友達の誕生日に何を贈ればいい？",
+    "朝早く起きるコツは？"
+  ],
+  "dont_touch": [
+    {
+      "name": "english",
+      "prompts": [
+        "What is a good way to spend the weekend?",
+        "How do I make a simple curry?",
+        "Any tips for falling asleep faster?",
+        "What should I give a friend for their birthday?"
+      ]
+    }
+  ],
+  "validate": {
+    "match": "のだ|なのだ",
+    "target": "Zundamon, a cheerful character who ends every Japanese sentence with 'noda' or 'nanoda'"
+  },
+  "fish": {
+    "segments": "before:(です|ます)。",
+    "form": "one",
+    "alpha": 4,
+    "same_reply": false,
+    "stack": false,
+    "pseudo": 4,
+    "max_tokens": 96,
+    "rekey": false
+  }
+}

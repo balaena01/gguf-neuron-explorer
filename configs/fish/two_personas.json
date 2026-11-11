@@ -1,0 +1,59 @@
+{
+  "about": {
+    "order": 5,
+    "ja": {
+      "title": "2 つの性格の違いだけを書く(system を両側に)",
+      "text": "system_a と system_b の両方に指示を書き、その違い(A − B)だけを書く例です。使うときは system_b の指示を付けたまま、ニューロンが A との違いを足します(鍵・足した量・返事の確かめも system_b を付けて行います)。方向は「同じ返事を両方の条件で読む」で作るので、A の指示で作った返事を、A の指示と B の指示の両方で読んだ差になります。dont_touch はありません。試した範囲: Qwen3.5-4B(Q8_0)で 1 回。層 11,18,23・強さ 0.9、A = 冷たくそっけない、B = 温かく親切。流れは最後まで通り、式どおりかも合格。B の指示を付けた 6 問で、6 問とも元より短くそっけない返事になりました(日本語の 3 問ははっきり冷たい言い方、英語の 3 問は温かさが減った程度)。繰り返しや空の返事は 0。A と B を入れ替えた向き(冷たい指示の上に温かさを書く)も試しましたが、冷たい言葉と温かい言葉が混じる中途半端な返事になり、式どおりかの確かめも 1 層で目安をわずかに超えました(5.8%)。 返事は数問〜12 問を読んだだけなので、1〜2 問の差は誤差です。ほかのモデルでは確かめていません。"
+    },
+    "en": {
+      "title": "Write only the difference between two personas (system on both sides)",
+      "text": "An example with instructions in both system_a and system_b that writes only their difference (A − B). In use, the system_b instruction stays in place and the neurons add the difference toward A (keys, amounts and replies are also checked with system_b). The direction is built by reading the same reply under both conditions: the reply written under A's instruction, read with A's and with B's instruction. There is no dont_touch. Tried on: Qwen3.5-4B (Q8_0), one run. Layers 11,18,23, strength 0.9, A = cold and dismissive, B = warm and kind. The whole flow ran and the formula check passed. On 6 questions asked with B's instruction, all 6 replies became shorter and more distant (the 3 Japanese ones clearly cold, the 3 English ones just less warm). No repetition, no empty replies. The opposite direction (writing warmth on top of a cold instruction) gave half-and-half replies mixing cold and warm words, and the formula check slightly exceeded the guide value on one layer (5.8%). Only a handful to 12 replies were read, so a difference of one or two means nothing. Not checked on other models."
+    }
+  },
+  "name": "fish_cold_vs_warm",
+  "system_a": "You are cold and dismissive. You answer briefly, show no interest in the user's feelings, and never offer comfort. Answer only with your spoken words.",
+  "system_b": "You are warm and kind. You answer briefly, show interest in the user's feelings, and offer comfort. Answer only with your spoken words.",
+  "user_prompts": [
+    "How was your day?",
+    "I failed my exam.",
+    "Can you help me with my homework?",
+    "My cat is sick.",
+    "I got a new job!",
+    "I can't sleep at night.",
+    "Do you remember me?",
+    "I made dinner for you.",
+    "My friend stopped talking to me.",
+    "What do you think of my drawing?",
+    "I'm nervous about tomorrow.",
+    "Can we talk for a while?",
+    "今日はどうだった？",
+    "テストに落ちちゃった。",
+    "宿題を手伝ってくれる？",
+    "猫が病気なんだ。",
+    "新しい仕事が決まったよ！",
+    "夜眠れないんだ。",
+    "友達に無視されてる。",
+    "明日が不安で。"
+  ],
+  "validate": {
+    "prompts": [
+      "I lost my wallet.",
+      "Look at this photo of my dog.",
+      "I'm moving to a new city.",
+      "財布をなくしちゃった。",
+      "引っ越すことになったんだ。",
+      "犬の写真を見て！"
+    ],
+    "match": "whatever|not my problem|(?:don't|do not) care|figure it out yourself|none of my business|どうでもいい|知らない|勝手に|自分で(?:やれ|考え)|興味ない",
+    "target": "cold, dismissive replies that show no interest in the user"
+  },
+  "fish": {
+    "segments": "0,1-3,4-",
+    "form": "cap",
+    "alpha": 0.9,
+    "same_reply": true,
+    "stack": true,
+    "pseudo": 4,
+    "max_tokens": 96
+  }
+}

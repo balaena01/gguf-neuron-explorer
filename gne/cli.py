@@ -37,6 +37,8 @@ app.add_typer(experts_app, name="experts")
 # gne direction(方向を作る)は、サブコマンドが無ければ従来どおり動くグループ。gne direction score は速い指標(CHANGE-06 B)
 direction_app = typer.Typer(no_args_is_help=False, invoke_without_command=True)
 app.add_typer(direction_app, name="direction")
+nw_app = typer.Typer(no_args_is_help=True, help="FiSH(Formula-instantiated Scene-gated Hidden units): 計算で作るニューロン(mode: nw。ニューロンを学習なしで計算した重みで上書きする、docs/fish.md)")
+app.add_typer(nw_app, name="nw")
 from .modal_cli import modal_app  # noqa: E402
 app.add_typer(modal_app, name="modal")
 headproj_app = typer.Typer(no_args_is_help=True, help="ヘッドの方向成分の射影(mode: proj)の書き出し(CHANGE-06 E)")
@@ -1118,6 +1120,9 @@ def direction(c: Common, holder: dict,
               judge_model: Optional[Path] = typer.Option(None, "--judge-model", help="判定に使う別の GGUF(validate.match の代わり)"),
               judge_target: Optional[str] = typer.Option(None, "--judge-target", help="judge に渡す目標の性格(既定 validate.target か system_a)"),
               random_controls: int = typer.Option(16, "--random-controls", help="--select auto: 層ごとの同じ大きさのランダムな向きの対照の本数(0 で対照なし)"),
+              same_reply: bool = typer.Option(False, "--same-reply", help="--positions response: B 側も A 側の返事を読む(同じ返事を両方の条件で読ませた差。読んでいる語の違いから来る成分が入らない)。既定は今までどおり、それぞれ自分の返事を読んだ差"),
+              segments: Optional[str] = typer.Option(None, "--segments", help="--positions response: 返事の位置で分けた方向も作る(例 0,1-3,4-。位置 0 = 返事を書き始める直前)。区切り i の方向は NAME.seg<i> という名前で使える"),
+              stack_layers: Optional[str] = typer.Option(None, "--stack-layers", help="--same-reply と --segments と一緒に: 区切りつきの方向を、これらの層(例 11,18,23)に重ねて書く前提の値にする(上の層は、下の層に足した後の残り)。1 トークンずつ読むので時間がかかる"),
               yes: bool = _YES):
     """対照集合から全層の方向 r_L(mean_A − mean_B)を作って保存し、--select auto で効果の大きい層を選ぶ(§6.17)。
     作った方向は L:dir:NAME:dose のユニットで足せる(gne steer / chat / eval / export-cvec)。
@@ -1141,8 +1146,13 @@ def direction(c: Common, holder: dict,
     d = s.direction(contrast=contrast, name=name, positions=positions, select=select, mode=mode, layers=layers,
                     dose=dose, max_tokens=max_tokens, kl_max=kl_max, min_distinct=min_distinct, per_layer=per_layer,
                     judge_model=judge_model, judge_target=judge_target, response_tokens=response_tokens,
-                    random_controls=random_controls)
+                    random_controls=random_controls, same_reply=same_reply, segments=segments, stack_layers=stack_layers)
     lines = [f"{d['path']}(A/B 各 {d['n_prompts']} 会話、行数 {d['n_rows']}、位置 {d['positions']}、{d['seconds']:.0f} 秒)",
+             "作り方: " + ("同じ返事(A 側の返事)を A 側・B 側の条件の両方で読ませた差(--same-reply)" if d.get("same_reply")
+                         else "それぞれ自分の条件の文を読んだ差(今までの作り方)"),
+             *([("区切りつきの方向: " + "、".join(f"{x['name']}(位置 {x['positions']})" for x in d["segments"])
+                 + (f"。層 {','.join(map(str, d['stack_layers']))} は、下の層に足した後の残り" if d.get("stack_layers") else ""))]
+               if d.get("segments") else []),
              "層ごとの ‖平均差‖/ρ(rel dose に直した大きさ)と前の層との cos:"]
     lines.append("  " + " ".join(f"L{r['layer']}:{r['rel']:.2f}" if r["rel"] is not None else f"L{r['layer']}:—"
                                  for r in d["layers"]))
@@ -1881,7 +1891,7 @@ def direction_key(c: Common, holder: dict,
                   replies_a: Optional[Path] = typer.Option(None, "--replies-a", help=_KEY_REPLIES_A),
                   replies_b: Optional[Path] = typer.Option(None, "--replies-b", help=_KEY_REPLIES_B),
                   iv: Optional[list[str]] = typer.Option(None, "--iv", help=_KEY_IV),
-                  target: str = typer.Option("ffn", "--target", help="書き込み先: ffn(dense の ffn_down の入力)/ attn(attn_output・ssm_out の入力 = ヘッド出力の連結)/ shared(MoE の層の shared expert の ffn_down_shexp の入力)/ expert:e(ffn_down_exps の専門家 e の入力。専門家 e が選ばれた位置だけで作る)"),
+                  target: str = typer.Option("ffn", "--target", help="書き込み先: mlpin(計算で作るニューロン用。dense の MLP の入力 = 正規化の後の空間。返事の位置の鍵は --positions pos:1-3 のように書く)/ ffn(dense の ffn_down の入力)/ attn(attn_output・ssm_out の入力 = ヘッド出力の連結)/ shared(MoE の層の shared expert の ffn_down_shexp の入力)/ expert:e(ffn_down_exps の専門家 e の入力。専門家 e が選ばれた位置だけで作る)"),
                   dont_touch_start: Optional[bool] = typer.Option(None, "--dont-touch-start/--no-dont-touch-start", help="dont_touch の各群の質問の、返事を書き始める直前の位置も Q に入れる(既定は対照集合の dont_touch_start、無ければ入れる)。書き込みたくない側の質問のこの位置は入れない")):
     """keyed write の鍵 κ_L を作る(CHANGE-07)。書き込みたい位置の活性の平均 μ_L を、書き込みたくない位置と dont_touch の
     活性が張る空間 Q_L に直交させ、κ_Lᵀμ_L = 1 に正規化して保存する(方向とは別のファイル)。鍵は無介入で作る(--iv は重ねるときだけ)。
@@ -2975,6 +2985,140 @@ def fieldtest_cmd(c: Common, holder: dict,
                     reasoning_effort=reasoning_effort, llama_server=llama_server, server_args=server_args, ppl=ppl, skip_long=skip_long, skip_tools=skip_tools,
                     bench=bench, bench_n=bench_n, bench_tokens=bench_tokens)
     return d, _fieldtest_text(d), 0
+
+
+# --- 計算で作るニューロン(mode: nw)--------------------------------------------------------------------------
+
+@gne_command(nw_app, "neurons", "nw neurons")
+def nw_neurons(c: Common, holder: dict,
+               layers: str = typer.Option(..., "--layers", help="測る層(例 11,18,23)"),
+               top: int = typer.Option(20, "--top", help="層ごとに出す数(働きの小さい順)"),
+               sort: str = typer.Option("sum", "--sort", help="並べ方: sum(最大の順位 + 平均の順位、既定)/ max / mean"),
+               max_tokens: int = typer.Option(96, "--max-tokens", help="ふつうの質問への返事を生成する長さ"),
+               corpus_tokens: int = typer.Option(2048, "--corpus-tokens", help="既定のコーパスから読むトークン数(0 で読まない)"),
+               iv: Optional[list[str]] = typer.Option(None, "--iv", help="この介入(レシピの名前かパス、またはユニットの書き方)を当てた状態で測る(例: CHiPS のレシピ)")):
+    """各ニューロンのふだんの働き(|ゲート後の活性| × 出力の列の長さ = 1 位置で残差に書く長さ)を測り、働きの小さい順の表を出す。
+    上書きするニューロンは、この表を見て選ぶ(番号を nw のユニットに書く)。上書きすると、そのニューロンの元の働きは無くなる。"""
+    Ls = parse_layers(layers)
+    if not Ls:
+        raise GneError("BAD_ARGS", "--layers に層を指定してください", "例 --layers 11,18,23")
+    s = holder["session"] = c.session()
+    d = s.nw_neurons(Ls, top=top, sort=sort, max_tokens=max_tokens, corpus_tokens=corpus_tokens, iv=_iv_arg(iv))
+    lines = [f"ふだんの働き({d['n_prompts']} 問の返事 + コーパス {d['corpus_tokens']} トークン、{d['seconds']:.0f} 秒)。並べ方: {d['sort']}"]
+    for r in d["layers"]:
+        om = r["out_norm_median"]
+        lines.append(f"L{r['layer']}({r['positions']} 位置、MLP の出力の長さの中央値 {_f(om, '.2f')}。全ニューロンの中央値: 平均 {r['median']['mean']:.4f}・"
+                     f"最大 {r['median']['max']:.3f}、いちばん小さい最大 {r['min']['max']:.3f})")
+        lines.append(f"  {'番号':>6} {'平均':>8} {'最大':>7} {'最大÷出力':>9} {'順位 最大/平均':>14}")
+        for x in r["rows"]:
+            lines.append(f"  {x['neuron']:>6} {x['mean']:>8.4f} {x['max']:>7.3f} {_f(x['max_share'], '.1%'):>9} {x['rank_max']:>7}/{x['rank_mean']}")
+    lines += [f"注: {n}" for n in d["notes"]]
+    return d, "\n".join(lines), 0
+
+
+@gne_command(nw_app, "key", "nw key")
+def nw_key(c: Common, holder: dict,
+           contrast: Path = typer.Option(..., "--contrast", help="対照集合(user_prompts = 狙う場面の質問、dont_touch = 反応させたくない質問の群)"),
+           layers: str = typer.Option(..., "--layers", help="鍵を作る層(例 11,18,23)"),
+           role: str = typer.Option("scene", "--role", help="scene(狙う場面の質問への返事の間ずっと反応する鍵)/ one(どの位置でもほぼ 1 を返す鍵。上限つきの形で使う)"),
+           name: Optional[str] = typer.Option(None, "--name", help="鍵の名前(既定 <対照集合の name>_<role>)"),
+           subset: str = typer.Option("even", "--subset", help="使う質問: even(既定)/ odd / all"),
+           max_tokens: int = typer.Option(96, "--max-tokens", help="返事を生成するときの長さ"),
+           pseudo: int = typer.Option(16, "--pseudo", help="比較用の鍵(質問のラベルをでたらめに入れ替えて同じ手順で作った鍵)の本数(scene だけ)"),
+           iv: Optional[list[str]] = typer.Option(None, "--iv", help="この介入(レシピの名前かパス、またはユニットの書き方)を当てた状態の返事と活性で作る")):
+    """計算で作るニューロンの「場面の鍵」と「ほぼ 1 を返す鍵」を作る(MLP の入力の空間、target mlpin)。
+    返事の位置の区切りで反応する「位置の鍵」は gne direction key --target mlpin --positions pos:1-3 で作る。"""
+    Ls = parse_layers(layers)
+    if not Ls:
+        raise GneError("BAD_ARGS", "--layers に層を指定してください", "例 --layers 11,18,23")
+    s = holder["session"] = c.session()
+    d = s.direction_key(contrast, role=role, name=name, layers=Ls, subset=subset, max_tokens=max_tokens, pseudo=pseudo,
+                        iv=_iv_arg(iv), seed=c.seed, progress=s.progress)
+    lines = [f"{d['path']}(鍵 {d['name']}、{d['role']}、MLP の入力の空間、{d['seconds']:.1f} 秒)"]
+    for r in d["layers"]:
+        if d["role"] == "one":
+            lines.append(f"  L{r['layer']}: 反応の平均 {r['response_mean']:.3f} ± {r['response_sd']:.3f}(最小 {r['response_min']:.2f}・最大 {r['response_max']:.2f}、{r['rows']} 位置)")
+        else:
+            lines.append(f"  L{r['layer']}: kn {r['kn']:.3f}、狙う質問 {r['examples_a']}・それ以外 {r['examples_b']}、作成に使った質問での差 {r['build_selectivity']:+.3f}"
+                         f"(比較用の鍵の p95 {_f(r['pseudo_selectivity_p95'], '+.3f')})")
+    lines += [f"注: {n}" for n in d["notes"]]
+    return d, "\n".join(lines), 0
+
+
+@gne_command(nw_app, "verify", "nw verify")
+def nw_verify(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Optional[list[str]] = _UNIT,
+              direction: Optional[str] = typer.Option(None, "--direction", help="@NAME を省いたユニットの方向"),
+              key: Optional[str] = typer.Option(None, "--key", help="#KEY を省いたユニットの鍵"),
+              text: Optional[list[str]] = typer.Option(None, "--text", help="読ませる文(既定は英語と日本語の 2 文)。複数可"),
+              iv: Optional[list[str]] = typer.Option(None, "--iv", help="この介入(レシピの名前かパス、またはユニットの書き方)を先に当てた状態で確かめる")):
+    """nw の LoRA が式どおりに動くか。上書きしたニューロンのゲート・入力・活性が式どおりか、ほかのニューロンが変わっていないか、
+    MLP の出力の変化が (新しい活性 × 新しい列) − (元の活性 × 元の列) になっているかを、層ごとに確かめる。"""
+    s = holder["session"] = c.session()
+    r = s.recipe(units=unit, path=recipe, default_direction=direction, default_key=key)
+    d = s.nw_verify(r, texts=text or None, iv=_iv_arg(iv))
+    lines = []
+    for x in d["layers"]:
+        lines.append(f"L{x['layer']} N{','.join(map(str, x['neurons']))}: ゲートの誤差 {x['gate_err']:.2e}、入力の誤差 {x['up_err']:.2e}、活性の誤差 {x['act_err']:.1e}、"
+                     f"ほかのニューロンの変化 {x['others_changed_max']:.1e}、出力の変化の相対誤差(中央値){x['out_rel_err_median']:.2e}  {'○' if x['ok'] else '×'}")
+    lines.append(f"{'合格' if d['ok'] else '不合格'}(ゲート・入力・出力の誤差 < 5%、活性の誤差 < 0.1%、ほかのニューロンの変化 < 1e-4。"
+                 "ゲート・入力には、量子化のままの掛け算と float に戻した行を引く計算のずれが 1〜2% 残る)")
+    return d, "\n".join(lines), 0 if d["ok"] else 1
+
+
+@gne_command(nw_app, "check", "nw check")
+def nw_check(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Optional[list[str]] = _UNIT,
+             contrast: Path = typer.Option(..., "--contrast", help="対照集合(user_prompts = 狙う場面、dont_touch = 書き込みたくない場面)"),
+             direction: Optional[str] = typer.Option(None, "--direction", help="@NAME を省いたユニットの方向"),
+             key: Optional[str] = typer.Option(None, "--key", help="#KEY を省いたユニットの鍵"),
+             subset: str = typer.Option("odd", "--subset", help="使う質問: odd(既定。鍵の作成に使っていない側)/ even / all"),
+             replies: str = typer.Option("own", "--replies", help="own(レシピを当てて作った返事を、当てたまま読む = 実際に起きること)/ base(無介入の返事を、レシピを当てて読む)"),
+             max_tokens: int = typer.Option(96, "--max-tokens"),
+             n_pos: int = typer.Option(8, "--positions", help="位置 0 からいくつまで 1 位置ずつ出すか(それ以降はまとめる)"),
+             iv: Optional[list[str]] = typer.Option(None, "--iv", help="この介入(レシピの名前かパス、またはユニットの書き方)を先に当てた状態で測る")):
+    """位置の種類ごとに、鍵の反応と実際に足した量(α·d を 1 として)を出す。狙う場面(対照集合の質問)と、書き込みたくない場面
+    (dont_touch の群)で、返事の位置 0(書き始める直前)から順に。足す量が 1 を大きく超える位置、書き込みたくない場面で 0 から
+    離れる位置、負(逆向き)になる位置が無いかを見る。"""
+    s = holder["session"] = c.session()
+    r = s.recipe(units=unit, path=recipe, default_direction=direction, default_key=key)
+    d = s.nw_check(r, contrast, subset=subset, max_tokens=max_tokens, replies=replies, n_pos=n_pos, iv=_iv_arg(iv))
+    lines = [f"対照集合 {d['contrast']}(subset {d['subset']}、返事 {d['replies']}、{d['seconds']:.0f} 秒)。値は足した量の平均(α·d を 1。かっこ内は最小〜最大)"]
+    for g, x in d["groups"].items():
+        lines.append(f"[{g}] {x['n']} 問、ループ {x['loops']}")
+        for u in x["units"]:
+            cells = []
+            for b, p in u["positions"].items():
+                a = p["amount"]
+                cells.append(f"{b}: " + ("—" if a is None else f"{a['mean']:+.2f}({a['min']:+.2f}〜{a['max']:+.2f})"))
+            lines.append(f"  {u['unit']}\n    " + "  ".join(cells))
+    lines += [f"注: {n}" for n in d["notes"]]
+    return d, "\n".join(lines), 0
+
+
+@gne_command(nw_app, "export", "nw export")
+def nw_export(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Optional[list[str]] = _UNIT,
+              out: Optional[Path] = typer.Option(None, "--out", "-o", help="出力(既定 <root>/export/<レシピ名>-nw.lora.gguf)"),
+              direction: Optional[str] = typer.Option(None, "--direction", help="@NAME を省いたユニットの方向"),
+              key: Optional[str] = typer.Option(None, "--key", help="#KEY を省いたユニットの鍵"),
+              bake: bool = typer.Option(False, "--bake", help="焼き込み(対応していない。はっきりしたエラーを返す)"),
+              strip_meta: bool = typer.Option(False, "--strip-meta", help="gne の記録を残さない(人に渡す版)")):
+    """nw のユニットを LoRA アダプタ GGUF に書き出す(llama.cpp の --lora で当てる)。ffn_gate・ffn_up・ffn_down への差し替えで、
+    ニューロン 1 個あたり 3 つのテンソルに階数 1。焼き込みは無い(Q8_0 の ffn_down は 32 個の重みが 1 つの倍率を共有するので、
+    1 列だけを方向に差し替えると誤差が 9 割を超える)。"""
+    s = holder["session"] = c.session()
+    r = s.recipe(units=unit, path=recipe, default_direction=direction, default_key=key)
+    if bake:
+        s._no_nw(r, bake=True)
+        raise GneError("BAD_ARGS", "計算で作るニューロン(nw)は焼き込めません", "LoRA アダプタ(--bake なし)で書き出してください")
+    out = out or (s.store.root / "export" / f"{r.name or 'recipe'}-nw.lora.gguf")
+    d = s.nw_export(r, out, strip_meta=strip_meta)
+    d.pop("warnings", None)
+    lines = [f"{d['path']}({d['bytes'] / 1e6:.2f} MB、LoRA)"]
+    for x in d["nw"]:
+        lines.append(f"  L{x['layer']} N{','.join(map(str, x['neurons']))}: {x['form']}、s {x['s']:g}、α {x['alpha']:+g}、方向 {x['direction']}、鍵 {x['key']}"
+                     + (f" & {x['key2']}" if x["key2"] else "") + f"、鍵が反応する位置で |α|‖d‖ = {x['norm']:.2f}")
+    lines.append("llama.cpp では --lora <このファイル> で当てます(倍率 1)。")
+    return d, "\n".join(lines), 0
+
 
 if __name__ == "__main__":
     app()

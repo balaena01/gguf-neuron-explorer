@@ -13,6 +13,8 @@ import { Mic } from "./mic.js";
 export const unitLabel = (spec) => {
   const pj = String(spec).match(/^(\d+):H(\d+):s([^@]+)(?:@(.+))?$/i);      // ヘッドの方向成分の射影(CHANGE-06)
   if (pj) return `L${pj[1]} H${pj[2]} s${+(+pj[3]).toFixed(4)}${pj[4] ? ` @${pj[4]}` : ""}`;
+  const nw = String(spec).match(/^(\d+):(N\d+(?:\+N\d+)?):nw:a([^@#!]+)(.*)$/i);     // 計算で作るニューロン(mode: nw)
+  if (nw) return `L${nw[1]} ${nw[2]} nw a${+(+nw[3]).toFixed(4)}${nw[4] ? ` ${nw[4]}` : ""}`;
   const p = spec.split(":"), last = p[p.length - 1], mid = p.slice(1, -1);
   const who = mid[0] === "dir" ? `dir:${mid.slice(1).join(":")}` : mid.map((x) => (/^\d+$/.test(x) ? `N${x}` : x)).join(" ");
   if (last.startsWith("x")) return `L${p[0]} ${who} ×${+(+last.slice(1)).toFixed(4)}`;

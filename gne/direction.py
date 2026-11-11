@@ -20,8 +20,8 @@ from __future__ import annotations
 import json
 import re
 import time
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -72,6 +72,10 @@ class DirectionSet:
     raw: dict[int, np.ndarray]           # 層 → mean_A − mean_B
     scale: dict[int, np.ndarray]
     meta: dict
+    # 返事の位置で分けた方向(gne direction --segments)。segments は区切りの書き方のリスト(例 ["0", "1-3", "4-"])、
+    # seg[i][L] は区切り i の層 L の平均差。区切りの無い方向では空。raw(全位置の平均)はいつもある
+    segments: list[str] = field(default_factory=list)
+    seg: dict[int, dict[int, np.ndarray]] = field(default_factory=dict)
 
     @classmethod
     def load(cls, path: str | Path) -> DirectionSet:
@@ -80,9 +84,24 @@ class DirectionSet:
         raw = {int(L): z[f"layer_{L}"].astype(np.float32) for L in z["layers"]}
         scale = {int(k[6:]): z[k] for k in z.files if k.startswith("scale_")}
         meta = {k: (z[k].item() if z[k].ndim == 0 else z[k].tolist()) for k in
-                ("method", "positions", "contrast_sha", "source", "n_rows_A", "n_rows_B", "base_layer", "base_positions")
+                ("method", "positions", "contrast_sha", "source", "n_rows_A", "n_rows_B", "base_layer", "base_positions",
+                 "same_reply", "stack_layers")
                 if k in z.files}
-        return cls(p.name.split(".")[0], p, raw, scale, meta)
+        segments = [str(x) for x in z["segments"].tolist()] if "segments" in z.files else []
+        seg = {i: {int(L): z[f"seg{i}_layer_{L}"].astype(np.float32) for L in z["layers"] if f"seg{i}_layer_{L}" in z.files}
+               for i in range(len(segments))}
+        if segments:
+            meta["segments"] = segments
+        return cls(p.name.split(".")[0], p, raw, scale, meta, segments, seg)
+
+    def segment(self, i: int) -> DirectionSet:
+        """区切り i の方向だけを 1 本の方向として見る版(名前は NAME.seg<i>)。add・keyed・nw のユニットでそのまま使える。"""
+        if not 0 <= int(i) < len(self.segments):
+            raise GneError("BAD_DIRECTION", f"方向 {self.name} に区切り {i} がありません"
+                           + (f"(0〜{len(self.segments) - 1}: {', '.join(self.segments)})" if self.segments else "(区切りつきで作られていません)"),
+                           "gne direction --positions response --segments 0,1-3,4- で作ります")
+        return DirectionSet(f"{self.name}.seg{int(i)}", self.path, dict(self.seg[int(i)]), self.scale,
+                            {**self.meta, "segment": self.segments[int(i)]})
 
     def unit(self, L: int) -> np.ndarray:
         if L not in self.raw:
@@ -92,15 +111,59 @@ class DirectionSet:
         return d / n if n > 0 else d
 
 
+def parse_segments(spec) -> list[tuple[int, int | None]]:
+    """返事の位置の区切り "0,1-3,4-" → [(0, 1), (1, 4), (4, None)](終わりは含まない。None は最後まで)。
+    位置 k は「返事の k 番目のトークンを決める位置」(位置 0 = 生成プロンプトの最後のトークン = 返事を書き始める直前)。"""
+    parts = [x.strip() for x in (spec if isinstance(spec, (list, tuple)) else str(spec).split(",")) if str(x).strip()]
+    out = []
+    for x in parts:
+        m = re.fullmatch(r"(\d+)(?:(-)(\d+)?)?", str(x))
+        if not m:
+            raise GneError("BAD_ARGS", f"区切り {x!r} を読めません", "0,1-3,4- のように書きます(位置 0 = 返事を書き始める直前、4- は 4 以降)")
+        lo = int(m.group(1))
+        hi = lo + 1 if m.group(2) is None else (None if m.group(3) is None else int(m.group(3)) + 1)
+        if hi is not None and hi <= lo:
+            raise GneError("BAD_ARGS", f"区切り {x!r} の範囲が逆です")
+        out.append((lo, hi))
+    if not out:
+        raise GneError("BAD_ARGS", "区切りが空です(例 0,1-3,4-)")
+    for (a0, a1), (b0, _) in zip(out[:-1], out[1:], strict=False):
+        if a1 is None or b0 < a1:
+            raise GneError("BAD_ARGS", "区切りは小さい位置から順に、重ならないように書きます(例 0,1-3,4-)")
+    return out
+
+
+def segment_text(seg: tuple[int, int | None]) -> str:
+    lo, hi = seg
+    return f"{lo}-" if hi is None else (str(lo) if hi == lo + 1 else f"{lo}-{hi - 1}")
+
+
+def segment_of(segs: list[tuple[int, int | None]], k: int) -> int | None:
+    """位置 k が入る区切りの番号(どれにも入らなければ None)。"""
+    for i, (lo, hi) in enumerate(segs):
+        if k >= lo and (hi is None or k < hi):
+            return i
+    return None
+
+
 def save_directions(path: Path, cr, cs: ContrastSet, source: str) -> None:
     Ls = sorted(cr.directions)
+    extra = {}
+    segs = getattr(cr, "segments", None)
+    if segs:                                            # 区切りつきの方向は別の項目に持つ(layer_L は今までどおり全位置の平均)
+        extra["segments"] = np.array([segment_text(s) for s in segs])
+        for i, dct in cr.seg_dirs.items():
+            extra.update({f"seg{i}_layer_{L}": v for L, v in dct.items()})
+        if getattr(cr, "stack_layers", None):
+            extra["stack_layers"] = np.array(sorted(cr.stack_layers), dtype=np.int32)
+    extra["same_reply"] = bool(getattr(cr, "same_reply", False))
     U = np.stack([cr.directions[L] / max(float(np.linalg.norm(cr.directions[L])), 1e-30) for L in Ls])
     np.savez(path, layers=np.array(Ls, dtype=np.int32), **{f"layer_{L}": cr.directions[L] for L in Ls},
              **{f"scale_{L}": cr.scale[L] for L in Ls}, **{f"act_{L}": a for L, a in (cr.act_diff or {}).items()},
              **{f"actstd_{L}": a for L, a in (cr.act_std or {}).items()},
              cos=(U @ U.T).astype(np.float32),
              method=cr.method, positions=cr.positions, contrast_sha=cs.sha, source=source,
-             n_rows_A=cr.n_rows["A"], n_rows_B=cr.n_rows["B"])
+             n_rows_A=cr.n_rows["A"], n_rows_B=cr.n_rows["B"], **extra)
 
 
 def candidate_layers(n_layer: int, spec: str | list[int] | None = None) -> list[int]:
@@ -429,17 +492,42 @@ def top_writer_neurons(session, ds: DirectionSet, n: int) -> list[tuple[int, int
 
 
 def response_directions(session, cs: ContrastSet, *, max_tokens: int = 96, with_act: bool = True,
-                        progress: Progress | None = None):
+                        progress: Progress | None = None, same_reply: bool = False, segments=None,
+                        stack_layers: Sequence[int] | None = None):
     """返事のトークンから作る方向(positions="response"、persona vector の作り方)。
     A(system_a)と B(system_b)で各プロンプトに greedy で返事を生成し、その会話(system・プロンプト・返事)を流して
     返事のトークンでの l_out-L の平均の差を取る。「指示の直後」ではなく「その性格で話している最中」の状態の差になる。
     with_act なら ffn_down の入力(ニューロンの活性)の平均の差も返事のトークンで取る(逆引きの act_diff、部品のニューロン探し用)。
-    戻り値は reverse.ContrastResult と同じ形。"""
+    戻り値は reverse.ContrastResult と同じ形。
+
+    same_reply: B 側も A 側の返事を読む(同じ返事を A 側の条件と B 側の条件の両方で読ませた差)。読んでいる語が同じなので、
+      条件の違いだけの成分になる。既定(False)は今までどおり、それぞれ自分の返事を読んだ差で、「読んでいる語の違い」から来る
+      成分も入る(method は mean_diff_same_reply / mean_diff)。両側の質問の数が同じでなければならない。
+    segments: 返事の位置の区切り(parse_segments。"0,1-3,4-")。区切りごとの平均差を cr.seg_dirs[i][L] に入れる。位置 k は
+      返事の k 番目のトークンを決める位置(位置 0 = 生成プロンプトの最後のトークン)。全位置の平均(directions)は今までどおり
+      返事のトークンを読んだ位置(位置 1 以降)から作る。
+    stack_layers: 区切りつきの方向を、これらの層に重ねて書く前提の値にする(same_reply のときだけ)。いちばん下の層は平均差
+      そのまま、上の層は「下の層に区切りどおりに足して読ませた後の状態」と A 側の状態との差(下の層に足した分が上の層に伝わる
+      ので、平均差をそのまま各層に足すと足し過ぎになる)。control vector を 1 トークンずつ付け替えて読むので時間がかかる。"""
     from .capture import Capture, pick_act_name
     from .evalx import _generate
     from .reverse import ContrastResult
     e = session.engine
     Ls = list(range(e.n_layer - 1))                         # 最終層は行が間引かれ得るので除く
+    segs = parse_segments(segments) if segments else []
+    stack = sorted({int(L) for L in (stack_layers or [])})
+    if stack and not (segs and same_reply):
+        raise GneError("BAD_ARGS", "stack_layers は same_reply と segments を両方指定したときだけ使えます")
+    if stack and cs.has_recipes:
+        raise GneError("BAD_ARGS", "stack_layers は recipe_a / recipe_b を持つ対照集合では使えません")
+    for L in stack:
+        if not 1 <= L < e.n_layer - 1:
+            raise GneError("BAD_ARGS", f"stack_layers の層 {L} は範囲外です(1〜{e.n_layer - 2}。control vector を足せる層)")
+    if same_reply and len(cs.prompts("A")) != len(cs.prompts("B")):
+        raise GneError("BAD_CONTRAST", "same_reply は両側の質問の数が同じ対照集合で使います(同じ番号の質問に同じ返事を読ませます)")
+    seg_sum = {side: [{L: np.zeros(e.n_embd) for L in Ls} for _ in segs] for side in "AB"}
+    seg_cnt = {side: [0 for _ in segs] for side in "AB"}
+    replies_a: list[list[int]] = []
     names = {f"l_out-{L}": L for L in Ls}
     act_names: dict[str, int] = {}
     if with_act:
@@ -462,7 +550,12 @@ def response_directions(session, cs: ContrastSet, *, max_tokens: int = 96, with_
     for side in "AB":
         convs = cs.convs(side)
         vecs, lora = ivs[side]
-        outs = _generate(session, [(c, max_tokens) for c in convs], vecs, lora, "all", lambda n: None)
+        if side == "B" and same_reply:                          # A 側の返事をそのまま読ませる(生成しない)
+            outs = [{"token_ids": r} for r in replies_a]
+        else:
+            outs = _generate(session, [(c, max_tokens) for c in convs], vecs, lora, "all", lambda n: None)
+        if side == "A":
+            replies_a = [[t for t in o["token_ids"] if not e.is_eog(t)] for o in outs]
         cap = Capture()
         cap.set_wanted(lambda n: n in names or n in act_names)
         need = max(len(e.tokenize_prompt(e.render_chat(c))) for c in convs) + max_tokens   # 質問 + 返事の上限
@@ -485,6 +578,12 @@ def response_directions(session, cs: ContrastSet, *, max_tokens: int = 96, with_
                 rows = got[nm][len(pids):].astype(np.float64)        # 返事のトークンだけ
                 sums[side][L] += rows.sum(axis=0)
                 sq[L] += np.square(rows).sum(axis=0)
+                if segs:                                             # 位置 0 = 生成プロンプトの最後のトークン
+                    allr = got[nm][len(pids) - 1:].astype(np.float64)
+                    for i, (lo, hi) in enumerate(segs):
+                        seg_sum[side][i][L] += allr[lo:hi].sum(axis=0)
+            for i, (lo, hi) in enumerate(segs):
+                seg_cnt[side][i] += max(0, min(len(resp) + 1, len(resp) + 1 if hi is None else hi) - lo)
             for nm, L in act_names.items():
                 a = got[nm][len(pids):].astype(np.float64)
                 act_sums[side][L] = act_sums[side][L] + a.sum(axis=0)
@@ -502,7 +601,68 @@ def response_directions(session, cs: ContrastSet, *, max_tokens: int = 96, with_
     # ニューロンごとの活性の標準偏差(A∪B)。act_diff ÷ これ = 効果量で、もともと活性の大きいニューロンが上に来すぎない
     act_std = {L: np.sqrt(np.maximum(act_sq[L] / n - ((act_sums["A"][L] + act_sums["B"][L]) / n) ** 2, 0)).astype(np.float32)
                   for L in act_names.values()}
-    return ContrastResult(dirs, act, "mean_diff", "response", cnt, scale, act_std)
+    cr = ContrastResult(dirs, act, "mean_diff_same_reply" if same_reply else "mean_diff", "response", cnt, scale, act_std)
+    cr.same_reply = bool(same_reply)
+    if segs:
+        for i, sg in enumerate(segs):
+            if not seg_cnt["A"][i] or not seg_cnt["B"][i]:
+                raise GneError("BAD_CONTRAST", f"区切り {segment_text(sg)} に入る位置がありません(返事が短すぎます)")
+        cr.segments = segs
+        cr.seg_dirs = {i: {L: (seg_sum["A"][i][L] / seg_cnt["A"][i] - seg_sum["B"][i][L] / seg_cnt["B"][i]).astype(np.float32)
+                           for L in Ls} for i in range(len(segs))}
+        cr.seg_rows = {"A": list(seg_cnt["A"]), "B": list(seg_cnt["B"])}
+        cr.stack_layers = stack
+        if stack:
+            mean_a = {L: [seg_sum["A"][i][L] / seg_cnt["A"][i] for i in range(len(segs))] for L in stack}
+            _stack_segments(session, cs, replies_a, segs, stack, mean_a, cr.seg_dirs, progress)
+    return cr
+
+
+def _stack_segments(session, cs: ContrastSet, replies: list[list[int]], segs, stack: list[int], mean_a: dict, seg_dirs: dict,
+                    progress: Progress | None) -> None:
+    """stack の層の区切りつきの方向を「下の層に足した後の残り」に置き換える(seg_dirs を書き換える)。
+    B 側の文脈で A 側の返事を 1 トークンずつ読み、もう決めた下の層のベクトルを区切りどおりに control vector で足しながら、
+    次の層の出力を捕捉する。その区切りごとの平均と、A 側の状態の平均の差が、その層に足す量。"""
+    from .capture import Capture
+    e = session.engine
+    if not e.cvec_supported:
+        raise GneError("ARCH_UNSUPPORTED", f"{e.arch} のグラフは control vector を読まないので、stack_layers は使えません")
+    convs = cs.convs("B")
+    done: dict[int, list[np.ndarray]] = {stack[0]: [seg_dirs[i][stack[0]] for i in range(len(segs))]}
+    total, step = (len(stack) - 1) * len(convs), 0
+    for L in stack[1:]:
+        cap = Capture()
+        cap.set_wanted(lambda n, L=L: n == f"l_out-{L}")
+        sums = [np.zeros(e.n_embd) for _ in segs]
+        cnts = [0 for _ in segs]
+        for c, r in zip(convs, replies, strict=True):
+            step += 1
+            if not r:
+                continue
+            p = e.tokenize_prompt(e.render_chat(c))
+            ctx = e.probe_ctx(cap)
+            e.set_lora(ctx, None)
+            e.set_cvec(ctx, None)
+            e.clear_memory(ctx)
+            try:
+                if len(p) > 1:
+                    e.prefill(ctx, [p[:-1]])
+                    cap.take()
+                for k in range(len(r) + 1):
+                    i = segment_of(segs, k)
+                    e.set_cvec(ctx, None if i is None else {l2: v[i] for l2, v in done.items()})
+                    e.prefill(ctx, [[p[-1] if k == 0 else r[k - 1]]], pos0=len(p) - 1 + k)
+                    row = cap.take()[f"l_out-{L}"][0]
+                    if i is not None:
+                        sums[i] += row
+                        cnts[i] += 1
+            finally:
+                e.set_cvec(ctx, None)
+            if progress:
+                progress(step, total, f"direction: stack L{L}")
+        done[L] = [(mean_a[L][i] - sums[i] / max(cnts[i], 1)).astype(np.float32) for i in range(len(segs))]
+        for i in range(len(segs)):
+            seg_dirs[i][L] = done[L][i]
 
 
 # --- 速い指標(CHANGE-06 B、`gne direction score`)------------------------------------------------------

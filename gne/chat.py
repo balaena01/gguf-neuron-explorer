@@ -45,7 +45,7 @@ def _with_dose(recipe: Recipe, dose: float | None, sign: float) -> Recipe:
     # proj(ヘッドの方向成分の射影、CHANGE-06)は − の列で s の符号を反転する(方向成分を強める)
     # keyed(鍵つきの書き込み、CHANGE-07)は − の列で α の符号を反転する(鍵が反応する状態でその方向を打ち消す)。α は raw なので dose はそろえない
     units = [replace(u, k=None if u.k is None else u.k * sign)
-             if u.mode == "keyed" else
+             if u.mode in ("keyed", "nw") else
              Unit(u.layer, u.neuron, 0.0, u.kind, u.seed, "gain", u.k if sign > 0 else 2 - u.k, head=u.head, expert=u.expert)
              if u.mode == "gain" else
              Unit(u.layer, None, 0.0, "head", None, "proj", u.k * sign, u.direction, u.head)

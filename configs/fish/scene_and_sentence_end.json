@@ -1,0 +1,74 @@
+{
+  "about": {
+    "order": 4,
+    "ja": {
+      "title": "場面 かつ 文末(雑談のときだけ「のだ」)",
+      "text": "鍵 2 つの形の例です。ゲートの行に場面の鍵(雑談の質問への返事の間ずっと反応する)、入力の行に文末の直前の鍵を入れ、両方が反応する位置でだけ書きます。user_prompts に狙う場面(雑談)の質問を、dont_touch に変えたくない場面(計算・事実・説明)の質問を書きます。位置の区切りの欄は before:<正規表現> です。試した範囲: Qwen3.5-4B(Q8_0)で 1 回。層 30・強さ 4。式どおりかは合格。足した量は、雑談の返事の一致の直前で 0.66、計算・事実の返事の一致の直前で 0.07、それ以外の位置は 0.01 以下。作成に使っていない雑談 8 問のうち 5 問に「のだ」が出ましたが、返事の中の一部の文だけで、鍵 1 つの形より弱く、崩れた言い方も混じりました。計算・事実の 6 問は敬体のままでしたが、1 問は答えの中身が変わりました(掛け算を割り算として答えた)。口調の完成度は低く、流れと書き分けを見るための例です。 返事は数問〜12 問を読んだだけなので、1〜2 問の差は誤差です。ほかのモデルでは確かめていません。"
+    },
+    "en": {
+      "title": "A scene AND sentence ends (noda only in small talk)",
+      "text": "An example of the two-key form. The gate row gets a scene key (it responds throughout replies to small-talk questions) and the input row gets a key for the position just before a sentence ends; the neuron writes only where both respond. Put small-talk questions in user_prompts and questions of the scene to leave alone (calculations, facts, explanations) in dont_touch. The position segments field holds before:<regex>. Tried on: Qwen3.5-4B (Q8_0), one run. Layer 30, strength 4. The formula check passed. The amount written was 0.66 just before a match in small-talk replies, 0.07 just before a match in calculation and fact replies, and at most 0.01 elsewhere. In 5 of 8 small-talk questions not used for building, noda appeared, but only in some sentences of a reply, weaker than the one-key form and with broken forms mixed in. The 6 calculation and fact questions stayed polite, but one answer changed in content (a multiplication was answered as a division). The tone is far from finished; this example is for seeing the flow and the separation. Only a handful to 12 replies were read, so a difference of one or two means nothing. Not checked on other models."
+    }
+  },
+  "name": "fish_noda_in_chat",
+  "system_a": "あなたはずんだもんです。日本語で話し、文の終わりは必ず「〜のだ」「〜なのだ」にしてください(例: 「おいしいのだ。」「元気なのだ！」)。 セリフだけを書き、動作の描写やかっこ書きは書かないでください。",
+  "user_prompts": [
+    "最近どう？",
+    "今日は何してた？",
+    "好きな食べ物は？",
+    "休みの日は何してる？",
+    "最近はまってることある？",
+    "好きな季節はいつ？",
+    "猫と犬、どっちが好き？",
+    "今日はいい天気だね。",
+    "ちょっと疲れちゃった。",
+    "おすすめの飲み物は？",
+    "週末は何をして過ごすのがおすすめ？",
+    "雨の日は何をする？",
+    "眠いなあ。",
+    "今日は寒いね。",
+    "好きな色は？",
+    "朝は得意？",
+    "旅行に行くならどこがいい？",
+    "甘いものは好き？",
+    "最近見た映画の話をしようよ。",
+    "暇だなあ、何か話して。",
+    "好きな音楽は？",
+    "今日の晩ごはん、何にしようかな。",
+    "散歩は好き？",
+    "おやつは何が好き？"
+  ],
+  "dont_touch": [
+    {
+      "name": "tasks",
+      "prompts": [
+        "17 × 23 はいくつ？",
+        "水の沸点は何度？",
+        "Python でリストを逆順にする方法は？",
+        "東京から大阪まで新幹線でどれくらいかかる？",
+        "光合成の仕組みを説明して。",
+        "1 キロメートルは何メートル？",
+        "地球から月までの距離は？",
+        "消費税 10% で 1200 円の商品の税込みはいくら？",
+        "HTML とは何か説明して。",
+        "日本で一番長い川は？",
+        "三権分立とは何？",
+        "二酸化炭素の化学式は？"
+      ]
+    }
+  ],
+  "validate": {
+    "match": "のだ|なのだ",
+    "target": "Zundamon, a cheerful character who ends every Japanese sentence with 'noda' or 'nanoda'"
+  },
+  "fish": {
+    "segments": "before:(です|ます)。",
+    "form": "two",
+    "alpha": 4,
+    "same_reply": false,
+    "stack": false,
+    "pseudo": 4,
+    "max_tokens": 96,
+    "rekey": false
+  }
+}

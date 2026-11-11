@@ -65,7 +65,8 @@ KN_WARN = 0.05                   # kn = ‖k‖/‖μ‖ がこれより小さ�
 KN_MIN = 1e-6                    # これより小さい層は鍵にならない(側 B が μ をほぼ張っている)
 GAMMA_FLOOR = 0.1                # post-norm の γ で割るとき、|γ| を median(|γ|) のこの割合で下から切る
 KINDS = ("ffn", "attn", "shared", "expert")
-_TARGET_RE = re.compile(r"^(ffn|attn|shared|expert:(\d+))$")
+_TARGET_RE = re.compile(r"^(ffn|attn|shared|mlpin|expert:(\d+))$")
+MLPIN = "mlpin"                  # MLP の入力(正規化の後、ffn_gate・ffn_up が読む活性)の空間の鍵。計算で作るニューロン(mode nw)用で、keyed には使えない
 _PSEUDO_RE = re.compile(r"^(.+)~(\d+)$")
 _NAME_RE = re.compile(r"^[\w.\-]+$")
 # ffn_down.scale と LoRA の掛かり方(llama.cpp の src/models/<arch>.cpp を読んで確かめた arch だけ。他は ARCH_UNSUPPORTED):
@@ -201,6 +202,8 @@ def target_of(kind: str, expert: int | None = None) -> str:
         if expert is None:
             raise GneError("BAD_RECIPE", "kind: expert の keyed には専門家の番号(expert)が要ります(例 12:E3:keyed:a1@NAME)")
         return f"expert:{int(expert)}"
+    if kind == MLPIN:                                         # 鍵づくりだけ(keyed のユニットの kind にはならない)
+        return kind
     if kind not in KINDS:
         raise GneError("BAD_RECIPE", f"keyed の kind は ffn / attn / shared / expert です({kind!r})")
     return kind
@@ -233,6 +236,10 @@ def writer_tensor_name(weights, L: int, kind: str, expert: int | None = None) ->
         raise GneError("BAD_RECIPE", f"層 {L} は範囲外です(0..{m.n_layer - 1})")
     target_of(kind, expert)
     moe = bool(m.n_expert) and weights.has_tensor(f"blk.{L}.ffn_down_exps.weight")
+    if kind == MLPIN:
+        from .nwrite import check_mlp
+        check_mlp(weights, L)
+        return f"blk.{L}.ffn_gate.weight"
     if kind == "ffn":
         if moe:
             raise GneError("BAD_RECIPE", f"層 {L} は MoE なので dense の ffn_down がありません",

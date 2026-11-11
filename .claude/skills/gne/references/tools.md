@@ -53,6 +53,8 @@ gne experts sweep --layer 12               # 各専門家を x0 / x2 で生成�
 
 MoE の層の sweep・lens・逆引き・調書は、層の中の通し番号 `e·n_ff_exp + n` で数える(結果に expert・expert_neuron が付く)。
 
+FiSH(計算で作るニューロン、nw): `L:Nn:nw:aα@NAME#KEY`(`#ゲートの鍵&入力の鍵`、`L:Nn+Nm:…#鍵&ほぼ1を返す鍵`)。働きの小さいニューロンを計算した重みで上書きし、鍵(MLP の入力の空間、`--target mlpin`)が反応する位置でだけ方向 NAME を α 倍で書く。LoRA で当てるので `when` は効かない。次の節の「計算で作るニューロン」。
+
 鍵つきの書き込み(keyed、CHANGE-07): `L:ffn:keyed:aα@NAME#KEY`(書き込み先は `ffn`・`attn`・`S`(shared expert)・`Ee`(専門家 e))。鍵が反応する位置でだけ、方向 NAME の平均差 r_L をそのままの大きさで α 倍して書く。`@-NAME` は α を負にするのと同じ(打ち消し)、`#KEY~j` は比較用の鍵(ラベルをシャッフルして同じ手順で作った鍵)の j 番。`@NAME`・`#KEY` を省くとレシピの `default_direction`・`default_key`。LoRA で当てるので `when` は効かない。次の節の「鍵つきの書き込み」。
 
 音声の入力(LFM3-Omni のように音声を聞けるモデル): mmproj はモデルと同じフォルダの `mmproj*.gguf` か `--mmproj`(環境変数 `GNE_MMPROJ`)。音声は埋め込みとして gne 自身の decode で入れるので、`when`・活性の捕捉・レシピが文の発話と同じに効く(音声の区間はユーザーの発話の中なので、`assistant` と `gen` では押さない)。system はモデルカードの指定で、文で返すなら `Respond in text.`、書き起こしなら `Perform ASR in English.`。返事は文だけ(音声で返し始めるトークンは禁じる)。
@@ -159,6 +161,28 @@ gne headproj export --recipe R --bake --into F16.gguf --requant keep   # 別の 
 対照集合は、system の代わりに `recipe_a`(と `recipe_b`)で両側を作れる(例 `configs/contrast/evil_neurons.yaml`)。ニューロンのレシピが作った振る舞いの方向を作り、そのレシピを当てたまま効くヘッドを探すときに使う。heads contrast・writers・experts contrast には使えない。
 
 強さはすべて生成なしの指標で決め、生成を伴う eval は確定した候補だけに使う。射影の値はヘッドを選んだ方向そのもので測っているので、報告は validate.match の一致率・能力・ppl のような、出力から測った値でする。止めたときの順位(ablate)と、強めたときの効率の順位(marginal)は一致しないことが多い(4B で相関 −0.14)。
+
+### FiSH: 計算で作るニューロン(mode nw、`docs/fish.md`)
+
+FiSH = Formula-instantiated Scene-gated Hidden units。すでにあるニューロンを、式から計算した重みで書き換える。
+
+```
+gne direction --contrast C --positions response --same-reply [--segments 0,1-3,4-] [--stack-layers 11,18,23]   # 方向(同じ返事を両方の条件で読ませた差。区切り i は NAME.seg<i>)
+gne nw neurons --layers 11,18,23 [--top 20] [--sort sum|max|mean] [--iv R]              # ふだんの働きの小さい順の表(上書きするニューロンを選ぶ)
+gne direction key --contrast C --target mlpin --layers L --positions pos:1-3 --name K   # 位置の鍵(この場面の返事の位置 1〜3。pos:0、pos:4- も)
+gne nw key --contrast C --layers L --role scene|one [--iv R]                             # 場面の鍵 / ほぼ 1 を返す鍵
+gne nw verify --recipe R | --unit 11:N2045:nw:a1@NAME.seg1#SCENE&POS [--iv R]            # LoRA が式どおりか(数秒)
+gne nw check --recipe R --contrast C [--subset odd] [--replies own|base] [--iv R]        # 位置ごとの鍵の反応と足した量(狙う場面・dont_touch)
+gne nw export --recipe R -o FILE.lora.gguf                                               # LoRA(nw だけ)。--bake はエラー
+gne headproj export --recipe R                                                           # proj・keyed・gain と nw を 1 つの LoRA に(--bake は nw があるとエラー)
+```
+
+- ユニット: `L:Nn:nw:aα@方向#鍵`(鍵 1 つ)、`L:Nn:nw:aα@方向#ゲートの鍵&入力の鍵`(鍵 2 つ)、`L:Nn+Nm:nw:aα@方向#鍵&ほぼ1を返す鍵`(上限つき)。`!s8`・`!cap0.4-0.8` を後ろに付けられる。YAML は `{layer, neuron, mode: nw, direction, key, key2, pair, s, cap, alpha}`。
+- 時間の目安(Qwen3.5-4B、GPU): 方向(32 問、返事 120 トークン、区切りつき)約 30 秒、`--stack-layers` に 3 層で + 2〜3 分(1 トークンずつ読む)。`nw neurons` 1〜2 分、鍵 1 本 20〜40 秒、verify 数秒、check 30〜60 秒。
+- 見るところ: verify の「ほかのニューロンの変化」が 0、check の狙う場面の量が 1 前後・dont_touch が 0 前後・負が小さいこと。最後は返事を読む。
+- MCP: `direction(same_reply, segments, stack_layers)`、`direction_key(target="mlpin", positions="pos:1-3" | role="scene"|"one", iv)`、`nw_neurons`・`nw_check`(ジョブ)、`nw_verify`、`nw_export`、`direction_key_pipeline(same_reply)`。
+
+Web UI(direction ビューの「FiSH」タブ)と同じ段は、ジョブとしても使える(MCP の `job_start`): `fish_pipeline`(spec か contrast、layers 必須、segments・form・alpha・same_reply・stack・rekey・neurons・iv)、`fish_direction`、`nw_neurons`、`fish_keys`(with_units でユニットを当てた状態)、`fish_verify`(units)、`fish_check`(units)、`fish_behave`(units、prompts・n・match)。ひな形は `configs/fish/`。
 
 ### 鍵つきの書き込み(keyed write、CHANGE-07、`docs/keyed-write.md`)
 

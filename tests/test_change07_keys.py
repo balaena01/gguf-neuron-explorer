@@ -203,8 +203,10 @@ def test_check_capture_and_unsupported_targets():
             check_capture(SimpleNamespace(skipped=skipped), {"ffn_swiglu-3"})
         assert ei.value.code == "ARCH_UNSUPPORTED"
     # 書き込み先の捕捉: attn は tests/test_change07_attn.py、shared・expert は tests/test_change07_moe.py
-    from gne.keyed_build import _TARGETS, AttnCapture, ExpertCapture, FfnCapture, SharedCapture
-    assert _TARGETS == {"ffn": FfnCapture, "attn": AttnCapture, "shared": SharedCapture, "expert": ExpertCapture}
+    # mlpin(計算で作るニューロンの鍵)は tests/test_nwrite.py
+    from gne.keyed_build import _TARGETS, AttnCapture, ExpertCapture, FfnCapture, MlpInCapture, SharedCapture
+    assert _TARGETS == {"ffn": FfnCapture, "attn": AttnCapture, "shared": SharedCapture, "expert": ExpertCapture,
+                        "mlpin": MlpInCapture}
     for t in ("expert", "expert:x", "moe"):              # 書き込み先の書き方が違えば BAD_KEY
         with pytest.raises(GneError) as ei:
             target_capture(None, t, [3])

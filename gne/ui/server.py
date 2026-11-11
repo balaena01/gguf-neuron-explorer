@@ -431,6 +431,28 @@ def create_app(session, *, warm: bool = True, openai: bool = False) -> FastAPI:
         """control vector の書き出し。keyed はレシピから外した鍵つきの書き込みの数(CHANGE-07、cvec に入らないので警告に出す)。"""
         return live.export(units, name, verify=verify, keyed=keyed)
 
+    @app.get("/api/fish-templates")
+    def fish_templates():
+        """FiSH のタブの「ひな形」(configs/fish/*.json)。"""
+        return data.fish_templates()
+
+    @app.post("/api/fish/units")
+    def fish_units(layers: str = Body(...), segments: str = Body(...), neurons: dict = Body(...), form: str = Body("cap"),
+                   direction: str = Body(...), base: str = Body(...), alpha: float = Body(0.9)):
+        """FiSH のユニットを組む(層 × 区切りごとに 1 個、上限つきの形は 2 個組)。モデルは使わない。specs は書き方の文字列、
+        units は UI のレシピの行、needed は層 1 つに要るニューロンの数。"""
+        from .. import fish
+        segs = fish._segments(segments)
+        specs = fish.units(layers, len(segs), {int(k): v for k, v in neurons.items()}, form, direction, base, alpha,
+                           fish.before_mode(segs))
+        return {"specs": specs, "units": fish.unit_rows(session, specs), "needed": fish.needed(len(segs), form),
+                "names": fish.key_names(base, len(segs), form)}
+
+    @app.post("/api/nw/export")
+    def nw_export(units: list[str] = Body(...), name: str = Body(...)):
+        """計算で作るニューロン(mode: nw)の LoRA の書き出し(焼き込みは無い)。"""
+        return live.nw_export(units, name)
+
     @app.get("/api/export/file/{file}")
     def export_file(file: str):
         return FileResponse(live.export_path(file), media_type="application/octet-stream", filename=file)

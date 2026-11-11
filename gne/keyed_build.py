@@ -90,6 +90,7 @@ MIN_A_ROWS = 8
 # 側 B(鍵を作った場面の質問)の返事の冒頭は入れない(側 A が返事の冒頭にあるとき、側 A そのものを打ち消してしまう)。
 DT_START_POSITIONS = "last"
 _POS_RE = re.compile(r"(response|assistant|last)|last:(\d+)")
+_POSRANGE_RE = re.compile(r"(pos|not-pos):(\d+)(?:(-)(\d+)?)?")     # 返事の位置の区切り: pos:0 / pos:1-3 / pos:4-(位置 0 = 返事を書き始める直前)
 _KEY_NAME_RE = re.compile(r"[\w.][\w.\-]*")
 _DT_KEYS = {"name", "system", "prompts", "replies", "positions"}
 _PROMPT_END = ("last", "assistant")          # 生成プロンプトの位置(返事を作らない)。この群の行は返事の冒頭の状態そのもの
@@ -100,7 +101,9 @@ _PROMPT_END = ("last", "assistant")          # 生成プロンプトの位置(�
 @dataclass(frozen=True)
 class Positions:
     """捕捉する位置の指定(parse_positions で作る)。"""
-    kind: str                       # response / assistant / last / before / not-before
+    kind: str                       # response / assistant / last / before / not-before / pos / not-pos
+    lo: int = 0                     # pos / not-pos の範囲(lo 以上、hi 未満。hi が None なら最後まで)
+    hi: int | None = None
     k: int = 1                      # last:K
     pattern: str | None = None      # before / not-before の正規表現
     text: str = "response"          # 元の書き方(鍵の npz に残す)
@@ -108,7 +111,7 @@ class Positions:
     @property
     def needs_reply(self) -> bool:
         """返事(生成するか、与えたもの)が要るか。assistant・last・last:K は生成プロンプトだけで測る。"""
-        return self.kind in ("response", "before", "not-before")
+        return self.kind in ("response", "before", "not-before", "pos", "not-pos")
 
 
 def parse_positions(spec) -> Positions:
@@ -116,13 +119,20 @@ def parse_positions(spec) -> Positions:
     if isinstance(spec, Positions):
         return spec
     s = "response" if spec is None else str(spec)
+    mr = _POSRANGE_RE.fullmatch(s.strip())
+    if mr:                                                  # 返事の位置の区切り(計算で作るニューロンの位置の鍵)
+        lo = int(mr.group(2))
+        hi = lo + 1 if mr.group(3) is None else (None if mr.group(4) is None else int(mr.group(4)) + 1)
+        if hi is not None and hi <= lo:
+            raise GneError("BAD_ARGS", f"positions {s!r} の範囲が逆です")
+        return Positions(mr.group(1), lo=lo, hi=hi, text=s.strip())
     if s.lstrip().startswith(("before:", "not-before:")):
         kind, _, pat = s.lstrip().partition(":")            # 正規表現の中の空白はそのまま
     else:
         m = _POS_RE.fullmatch(s.strip())
         if not m:
             raise GneError("BAD_ARGS", f"positions は response / assistant / last / last:K / before:<正規表現> / "
-                                       f"not-before:<正規表現> です({s!r})")
+                                       f"not-before:<正規表現> / pos:<範囲> / not-pos:<範囲> です({s!r})")
         if m.group(2) is None:
             return Positions(m.group(1), text=m.group(1))
         k = int(m.group(2))
@@ -186,6 +196,10 @@ def select_positions(engine, reply_ids: Sequence[int], positions="response", ski
         idx = list(range(max(s0, 0), P))
     elif pos.kind == "last":
         idx = list(range(max(P - pos.k, 0), P))
+    elif pos.kind in ("pos", "not-pos"):                    # 位置 k = 返事の k 番目のトークンを決める位置(列の番号 P − 1 + k)
+        inside = [k for k in range(R + 1) if k >= pos.lo and (pos.hi is None or k < pos.hi)]
+        ks = inside if pos.kind == "pos" else [k for k in range(R + 1) if k not in set(inside)]
+        idx = [P - 1 + k for k in ks]
     else:
         pc = [engine.token_bytes(t) for t in r] if pieces is None else list(pieces)[:R]
         hit = {j for j in match_tokens(pc, pos.pattern) if j >= skip}
@@ -210,7 +224,10 @@ def start_positions(engine, reply_ids: Sequence[int], positions="response", skip
         r.pop()
     R, P = len(r), int(n_prompt)
     js = [0] + list(range(1, min(int(k), R)))
-    if pos.pattern:
+    if pos.kind in ("pos", "not-pos"):
+        ins = lambda j: j >= pos.lo and (pos.hi is None or j < pos.hi)
+        js = [j for j in js if ins(j) == (pos.kind == "pos")]
+    elif pos.pattern:
         pc = [engine.token_bytes(t) for t in r] if pieces is None else list(pieces)[:R]
         hit = set(match_tokens(pc, pos.pattern))
         js = [j for j in js if j in hit and j >= max(0, int(skip or 0))] if pos.kind == "before" else [j for j in js if j not in hit]
@@ -680,8 +697,33 @@ class ExpertCapture(TargetCapture):
         return x, wts[sel[ti], tj]
 
 
+class MlpInCapture(TargetCapture):
+    """mlpin: dense の MLP の入力(正規化の後、ffn_gate・ffn_up が読む活性、n_embd)。計算で作るニューロン(mode nw)の
+    ゲートの行・入力の行に入れる鍵の空間。捕捉名は nwrite.mlp_in_name(arch ごとの正規化の後のテンソル)。"""
+    target = "mlpin"
+
+    def __init__(self, session, layers):
+        super().__init__(session, layers)
+        from .nwrite import check_mlp
+        for L in self.layers:
+            check_mlp(session.weights, L)
+        self.in_dim = {L: int(session.weights.meta.n_embd) for L in self.layers}
+        self._name: dict[int, str] = {}
+
+    def bind(self, seen: set[str]) -> None:
+        from .nwrite import mlp_in_name
+        for L in self.layers:
+            self._name[L] = mlp_in_name(seen, L)
+
+    def names(self, L: int) -> list[str]:
+        return [self._name[L]]
+
+    def rows(self, got, L, sel):
+        return got[self._name[L]][sel], None
+
+
 _TARGETS: dict[str, type[TargetCapture]] = {"ffn": FfnCapture, "attn": AttnCapture, "shared": SharedCapture,
-                                            "expert": ExpertCapture}
+                                            "expert": ExpertCapture, "mlpin": MlpInCapture}
 
 
 def target_capture(session, target: str, layers: Sequence[int]) -> TargetCapture:
@@ -944,9 +986,12 @@ def _resolve_mode(pos_a: Positions, pos_b_spec) -> tuple[str, Positions]:
     if pos_a.kind == "not-before":
         raise GneError("BAD_ARGS", "書き込みたい位置の positions に not-before は使えません(それは書き込みたくない位置用の補集合です)",
                        "書き込みたい位置は before:<正規表現>(mode same)か response / assistant / last(mode system)です")
-    mode = "same" if pos_a.kind == "before" else "system"
+    if pos_a.kind == "not-pos":
+        raise GneError("BAD_ARGS", "書き込みたい位置の positions に not-pos は使えません(それは書き込みたくない位置用の補集合です)")
+    mode = "same" if pos_a.kind in ("before", "pos") else "system"
     if pos_b_spec is None:
-        pos_b = parse_positions(f"not-before:{pos_a.pattern}") if mode == "same" else pos_a
+        pos_b = (parse_positions("not-" + pos_a.text) if pos_a.kind == "pos" else
+                 parse_positions(f"not-before:{pos_a.pattern}") if mode == "same" else pos_a)
     else:
         pos_b = parse_positions(pos_b_spec)
     return mode, pos_b
@@ -1006,6 +1051,13 @@ def _plan(session, spec: KeySpec, mode: str, pos_a: Positions, pos_b: Positions,
         if dt.system == "":
             warn(f"dont_touch {dt.name}: system が空の文字列なので空の system メッセージで読みます(system なしにするにはキーを省きます)")
         pos = dt.positions or pos_b.text
+        if pos_a.kind == "pos" and pos != "pos:0-":
+            # 位置の区切り(pos:<範囲>)の鍵は「狙う場面 かつ その区切り」で反応させる。書き込みたくない場面は、返事の全部の位置を
+            # Q に入れる(区切りの外だけ・返事の冒頭だけだと、ほかの場面の同じ区切りの位置で鍵が反応する)
+            if dt.positions is not None:
+                notes.append(f"dont_touch {dt.name}: positions が pos:<範囲> の鍵なので、この群は返事の全部の位置(pos:0-)を"
+                             f"書き込みたくない位置にしました(群の positions {dt.positions} は使いません)")
+            pos = "pos:0-"
         groups = {f"dt:{dt.name}": pos}
         start = None
         if dt_start and parse_positions(pos).kind not in _PROMPT_END:        # 返事の冒頭を別の行として Q に入れる

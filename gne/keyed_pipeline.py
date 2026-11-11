@@ -28,8 +28,8 @@ import yaml
 from .steer import GneError
 from .yamlio import write_yaml
 
-SETTINGS = ("layers", "target", "q_mode", "subset", "pseudo", "max_tokens", "alpha", "direction", "iv")   # 表の keyed に書ける設定
-NOT_ARGS = ("alpha", "direction")        # 鍵の作成の引数にしない設定(alpha は「+ レシピ」の α、direction は run が読む)
+SETTINGS = ("layers", "target", "q_mode", "subset", "pseudo", "max_tokens", "alpha", "direction", "iv", "same_reply")   # 表の keyed に書ける設定
+NOT_ARGS = ("alpha", "direction", "same_reply")        # 鍵の作成の引数にしない設定(alpha は「+ レシピ」の α、direction は run が読む)
 OPPOSITE = {"even": "odd", "odd": "even", "all": "all"}
 
 
@@ -154,7 +154,7 @@ def direction_plan(session, spec, settings: dict, direction: str | None = None,
     return dname, fixed, existing, existing is None or bool(rebuild_direction)
 
 
-def make_direction(session, path: Path, dname: str, existing, response_tokens: int = 96) -> dict:
+def make_direction(session, path: Path, dname: str, existing, response_tokens: int = 96, same_reply: bool = False) -> dict:
     """方向を作る(gne direction --contrast C --positions response と同じ)。結果の direction の記録。"""
     from .direction import load_contrast
     ts = time.perf_counter()
@@ -164,8 +164,9 @@ def make_direction(session, path: Path, dname: str, existing, response_tokens: i
         raise GneError(e.code, f"方向を作れません: {e.message}",
                        "方向は A 側(system_a か recipe_a)と B 側の返事の差で作ります。書き込みたい振る舞いを頼む system_a を"
                        "対照集合に書くか、同じ名前の方向を先に作ってください") from e
-    d = session.direction(contrast=path, name=dname, positions="response", response_tokens=int(response_tokens))
-    return {"name": dname, "reused": False, "rebuilt": existing is not None, "path": d["path"],
+    d = session.direction(contrast=path, name=dname, positions="response", response_tokens=int(response_tokens),
+                          same_reply=bool(same_reply))
+    return {"name": dname, "reused": False, "rebuilt": existing is not None, "path": d["path"], "same_reply": bool(same_reply),
             "positions": d["positions"], "n_rows": d["n_rows"], "seconds": time.perf_counter() - ts}
 
 
@@ -180,13 +181,14 @@ def reused_direction(existing, spec, dname: str, fixed: bool) -> tuple[dict, lis
     if not fixed and pos and pos != "response":
         warnings.append(f"方向 {dname} は positions {pos} で作られています(この一括は response で作ります。"
                         "そろえるなら作り直す)")
-    return ({"name": dname, "reused": True, "rebuilt": False, "path": str(existing.path),
+    return ({"name": dname, "reused": True, "rebuilt": False, "path": str(existing.path), "same_reply": bool(m.get("same_reply")),
              "positions": pos, "n_rows": {"A": int(m.get("n_rows_A") or 0), "B": int(m.get("n_rows_B") or 0)},
              "seconds": 0.0, "from_settings": fixed}, warnings)
 
 
 def run(session, contrast, *, layers=None, name: str | None = None, direction: str | None = None,
-        rebuild_direction: bool = False, response_tokens: int = 96, check: bool = True, check_subset: str | None = None,
+        rebuild_direction: bool = False, response_tokens: int = 96, same_reply: bool | None = None, check: bool = True,
+        check_subset: str | None = None,
         compact: bool = False, progress: Callable | None = None, **build_kw) -> dict:
     """対照集合(表かパス)から、方向(positions response)→ 鍵 → 作成と反対側の subset での key-check を続けて回す。
     layers は必須(引数か表の keyed.layers)。name は鍵の名前(省くと対照集合の name)、direction は方向の名前(省くと表の
@@ -208,6 +210,7 @@ def run(session, contrast, *, layers=None, name: str | None = None, direction: s
     if not re.fullmatch(r"[\w.\-]+", kname):
         raise GneError("BAD_ARGS", f"鍵の名前 {kname!r} は英数字・_・-・. だけにしてください")
     dname, fixed, existing, build_dir = direction_plan(session, spec, settings, direction, rebuild_direction)
+    same = bool(settings.get("same_reply")) if same_reply is None else bool(same_reply)      # 方向の作り方(既定は今までどおり)
     warnings: list[str] = []
     labels = (["方向"] if build_dir else []) + ["鍵"] + (["key-check"] if check else [])
     st = _Stages(progress, labels)
@@ -219,10 +222,13 @@ def run(session, contrast, *, layers=None, name: str | None = None, direction: s
         if build_dir:                                                     # 1. 方向(gne direction --positions response と同じ)
             session.progress = st.start(i)
             i += 1
-            out["direction"] = make_direction(session, path, dname, existing, response_tokens)
+            out["direction"] = make_direction(session, path, dname, existing, response_tokens, same)
         else:
             out["direction"], w = reused_direction(existing, spec, dname, fixed)
             warnings += w
+            if not fixed and bool(existing.meta.get("same_reply")) != same:
+                warnings.append(f"方向 {dname} は{'同じ返事を両方の条件で読ませる作り方' if existing.meta.get('same_reply') else '今までの作り方(それぞれ自分の返事)'}で"
+                                "作られています(頼まれた作り方と違います。そろえるなら作り直す)")
         ts = time.perf_counter()                                          # 2. 鍵
         f = st.start(i)
         i += 1

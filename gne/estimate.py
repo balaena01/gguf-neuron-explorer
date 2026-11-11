@@ -195,6 +195,10 @@ def estimate(session, kind: str, params: dict) -> dict:
         kd = _key_causal_verify_cost(session, sp, p)
         sec = kd["seconds"]
         detail = kd
+    elif kind in ("fish_direction", "fish_keys", "fish_check", "fish_pipeline", "nw_neurons", "fish_verify", "fish_behave"):   # FiSH(gne/fish.py)
+        kd = _fish_cost(session, sp, kind, p)
+        sec = kd["seconds"]
+        detail = kd
     elif kind == "behave":                                     # 種ごとに質問を max_tokens まで生成 + 判定(読み手、8 トークン)
         kd = _behave_cost(session, sp, p)
         sec = kd["seconds"]
@@ -446,6 +450,57 @@ def _keyed_pipeline(session, sp: Speed, p: dict) -> dict:
                 "build": build, "check": check, "seconds": dir_s + build["seconds"] + check["seconds"]}
     except Exception:  # noqa: BLE001  対照集合が読めなくても見積もりで止めない(本番がエラーを返す)
         return {"seconds": 3 * 32 * sp.setprefill / 1000, "guess": True}
+
+
+def _fish_cost(session, sp: Speed, kind: str, p: dict) -> dict:
+    """FiSH のジョブの見積もり(粗い)。返事の生成が大半: 方向は A・B の返事、鍵は鍵 1 本ごとに全部の質問の返事、足した量は全部の
+    質問の返事。読むだけの分は列 1 本あたり set_cvec + prefill で数える。"""
+    try:
+        from . import fish
+        from .jobs import _layers
+        if kind == "fish_verify":
+            n_l = len({str(u).split(":")[0] for u in p.get("units") or []}) or 1
+            return {"layers": n_l, "seconds": n_l * (4 * sp.setprefill / 1000 + 1.0)}
+        Ls = _layers(p.get("layers")) or [0]
+        if kind == "nw_neurons":
+            n = 44
+            return {"prompts": n, "seconds": sp.gen(n, int(p.get("max_tokens") or 96)) + 2 * n * sp.setprefill / 1000}
+        spec, _ = _spec_of({k: ({a: b for a, b in v.items() if a != "fish"} if k == "spec" and isinstance(v, dict) else v)
+                            for k, v in p.items()})
+        st = (p.get("spec") or {}).get("fish") or {} if isinstance(p.get("spec"), dict) else {}
+        get = lambda k: p.get(k) if p.get(k) is not None else st.get(k, fish.DEFAULTS.get(k))
+        n_a = len(spec.contrast.prompts("A"))
+        n_dt = sum(len(dt.prompts) for dt in spec.dont_touch)
+        n_all = n_a + n_dt
+        mt, rt = int(get("max_tokens")), int(get("response_tokens"))
+        read = sp.setprefill / 1000
+        n_seg = len(fish._segments(get("segments")))
+        form = get("form")
+        n_keys = n_seg + (1 if form in ("two", "cap") else 0)
+        # 下の層に書いた後の残りを使うときは、層ごとに返事を 1 トークンずつ流し直す(実測で、生成 1 回ぶんの 2 倍ほど × 層の数。
+        # Qwen3.5-4B Q8_0・32 問・120 トークン・3 層で、方向 244 秒のうち約 170 秒)
+        dir_s = 2 * sp.gen(n_a, rt) + 2 * n_a * read + (2 * len(Ls) * sp.gen(n_a, rt) if get("stack") else 0.0) \
+            + (sp.gen(n_a, rt) + 2 * n_a * read if p.get("compare", True) else 0.0)
+        keys_s = n_keys * (sp.gen(n_all, mt) + n_all * read)
+        check_s = sp.gen(n_all, mt) + n_all * read
+        neur_s = sp.gen(44, 96) + 88 * read
+        if kind == "fish_behave":
+            n = int(p.get("n") or 12)
+            pr = p.get("prompts")
+            n_s = len([x for x in pr.splitlines() if x.strip()]) if isinstance(pr, str) and pr.strip() else (len(pr) if pr else min(n, n_a))
+            n_q = n_s + (min(n, n_dt) if p.get("others", True) else 0)
+            return {"questions": n_q, "seconds": sp.gen(n_q, int(p.get("max_tokens") or 120))}
+        if kind == "fish_direction":
+            return {"questions": n_a, "seconds": dir_s}
+        if kind == "fish_keys":
+            return {"keys": n_keys, "questions": n_all, "seconds": keys_s}
+        if kind == "fish_check":
+            return {"questions": n_all, "seconds": check_s}
+        total = dir_s + neur_s + keys_s * (2 if p.get("rekey", True) else 1) + check_s + len(Ls) * (4 * read + 1.0)
+        return {"questions": n_all, "keys": n_keys, "direction_seconds": dir_s, "keys_seconds": keys_s, "check_seconds": check_s,
+                "seconds": total}
+    except Exception:  # noqa: BLE001  対照集合が読めなくても見積もりで止めない(本番がエラーを返す)
+        return {"seconds": 60.0, "guess": True}
 
 
 def _keyed_job(session, sp: Speed, kind: str, p: dict) -> dict:

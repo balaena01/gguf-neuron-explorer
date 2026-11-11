@@ -829,6 +829,12 @@ class UIData:
         中身の keyed(UI の欄の既定と、「+ レシピ」の α)はそのまま残す(ジョブが対照集合に書くときに捨てる)。"""
         return UIData._templates("keyed")
 
+    @staticmethod
+    def fish_templates() -> list[dict]:
+        """FiSH(計算で作るニューロン)の対照集合のひな形(configs/fish/*.json、FiSH のタブの「ひな形」): keyed_templates と同じ形。
+        中身の fish(UI の欄の既定)はそのまま残す(ジョブが対照集合に書くときに捨てる)。"""
+        return [{**x, "src": "configs"} for x in UIData._templates("fish")]
+
     def keyed_templates_all(self) -> list[dict]:
         """鍵のタブの「ひな形」の一覧: configs/keyed/ のひな形(src "configs"、order の順)の後に、<root>/keyed/ の JSON
         (gne direction key-from-behave などで作ったもの。src "root"、新しい順)。形は keyed_templates と同じ。"""

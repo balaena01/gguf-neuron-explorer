@@ -19,8 +19,16 @@ const signed = (x, d = 2) => `${x >= 0 ? "+" : "−"}${fmt(Math.abs(x), d)}`;
 const isDir = (u) => u.kind === "direction";
 const isProj = (u) => u.kind === "head" && u.mode === "proj";   // ヘッドの方向成分の射影(CHANGE-06)
 const isHead = (u) => u.kind === "head" && !isProj(u);          // ヘッドの gain
-const isNeuron = (u) => (u.kind || "neuron") === "neuron";
+const isNeuron = (u) => (u.kind || "neuron") === "neuron" && u.mode !== "nw";
 export const isKeyed = (u) => u.mode === "keyed";                // 鍵つきの書き込み(CHANGE-07)。kind は書き込み先(ffn・attn・shared・expert)
+// 計算で作るニューロン(mode: nw、docs/fish.md)。ニューロンを計算した重みで上書きする。レシピの欄では表示・強さの変更・保存・
+// LoRA の書き出しだけ(鍵づくりや探索の画面は無い。CLI・MCP で作る)
+export const isNw = (u) => u.mode === "nw";
+export function nwSpec(u, s = 1) {
+  return `${u.layer}:N${u.neuron}${u.pair !== null && u.pair !== undefined ? `+N${u.pair}` : ""}:nw:a${+(u.alpha * s).toFixed(4)}`
+    + `${u.direction ? `@${u.direction}` : ""}${u.key ? `#${u.key}${u.key2 ? `&${u.key2}` : ""}` : ""}`
+    + `${u.s !== null && u.s !== undefined ? `!s${+u.s}` : ""}${u.cap ? `!cap${u.cap}` : ""}`;
+}
 export const isMoe = (u) => !isKeyed(u) && (u.kind === "expert_neuron" || u.kind === "expert" || u.kind === "shared");
 const isGain = (u) => isHead(u) || u.mode === "gain";             // 倍率 k(1 が無介入)の行
 const isRoute = (u) => u.mode === "route";
@@ -37,7 +45,8 @@ export const KEYED_KINDS = ["ffn", "attn", "shared", "expert"];
 const keyedWho = (u) => (u.kind === "shared" ? "S" : u.kind === "expert" ? `E${u.expert}` : u.kind);
 const keyedTarget = (u) => (u.kind === "expert" ? `expert:${u.expert}` : u.kind);
 // 並び: 層 → ニューロン・方向・専門家のニューロン → ヘッド → 専門家全体 → keyed、同じものは add → gain → route
-const unitOrder = (u) => (isKeyed(u) ? [u.layer, 3, KEYED_KINDS.indexOf(u.kind) * 1e5 + (u.expert ?? 0), 0]
+const unitOrder = (u) => (isNw(u) ? [u.layer, 4, u.neuron ?? 0, 0]
+  : isKeyed(u) ? [u.layer, 3, KEYED_KINDS.indexOf(u.kind) * 1e5 + (u.expert ?? 0), 0]
   : [u.layer, u.kind === "head" ? 1 : u.kind === "expert" ? 2 : 0,
      u.kind === "head" ? u.head : u.kind === "expert" ? u.expert : u.kind === "expert_neuron" ? 1e7 + u.expert * 1e5 + u.neuron
        : u.kind === "shared" ? 2e7 + u.neuron : u.neuron ?? -1, isProj(u) ? 3 : isRoute(u) ? 2 : isGain(u) ? 1 : 0]);
@@ -86,6 +95,7 @@ export function keyedSpec(u, s = 1, defaults = {}) {
 
 // ユニット 1 つのサーバ向けの指定(gne/steer.py の parse_unit の形)。s はレシピ全体に掛ける倍率
 export function unitSpec(u, s = 1) {
+  if (isNw(u)) return nwSpec(u, s);
   if (isKeyed(u)) return keyedSpec(u, s);
   if (isProj(u)) return `${u.layer}:H${u.head}:s${+(u.s * s).toFixed(4)}${u.direction ? `@${u.direction}` : ""}`;
   const who = isHead(u) ? `H${u.head}` : isDir(u) ? `dir:${u.direction}` : u.kind === "expert_neuron" ? `E${u.expert}:N${u.neuron}`
@@ -145,7 +155,21 @@ export class Recipe {
   }
   // control vector に入るもの(add)だけ。gain は LoRA、専門家全体の gain と route はスケールパッチ、keyed は入力で効き分ける
   // LoRA なので cvec には入らない(MoE の add は書き込み方向の押しとして入る)
-  addSpecs() { return this.units.filter((u) => !isGain(u) && !isRoute(u) && !isProj(u) && !isKeyed(u)).map((u) => unitSpec(u)); }
+  addSpecs() { return this.units.filter((u) => !isGain(u) && !isRoute(u) && !isProj(u) && !isKeyed(u) && !isNw(u)).map((u) => unitSpec(u)); }
+  // 計算で作るニューロン(mode: nw)。LoRA だけで、cvec にも「LoRA・焼き込み」にも入らない(専用の書き出し)
+  nws() { return this.units.filter(isNw); }
+  // FiSH のタブから: nw の行を足す。同じ層の同じニューロン(組の相手も)を使う行は置き換える(1 個のニューロンに書けるのは 1 つ)
+  addNw(rows) {
+    const used = (u) => [u.neuron, u.pair].filter((x) => x !== null && x !== undefined).map(Number);
+    for (const q of rows) {
+      const mine = new Set(used(q));
+      this.units = this.units.filter((u) => !(isNw(u) && u.layer === +q.layer && used(u).some((j) => mine.has(j))));
+      this.units.push({ layer: +q.layer, neuron: +q.neuron, mode: "nw", alpha: +q.alpha, direction: q.direction || null, key: q.key || null,
+                        key2: q.key2 || null, pair: q.pair ?? null, s: q.s ?? null, cap: q.cap || null });
+    }
+    this._sort();
+    this._save();
+  }
   // 鍵つきの書き込み(CHANGE-07)。同じ層・書き込み先・方向・鍵なら 1 行(α を置き換える)
   keyed() { return this.units.filter(isKeyed); }
   findKeyed(q) {
@@ -231,7 +255,7 @@ export class Recipe {
   }
   removeHead(L, h) { const u = this.hasHead(L, h); if (u) this.remove(this.units.indexOf(u)); }
   // 行 i の値(ニューロン・方向・route は dose、ヘッドと gain は倍率 k)
-  set(i, v) { const u = this.units[i]; if (isKeyed(u)) u.alpha = v; else if (isProj(u)) u.s = v; else if (isGain(u)) u.k = v; else u.dose = v; this._save(); }
+  set(i, v) { const u = this.units[i]; if (isKeyed(u) || isNw(u)) u.alpha = v; else if (isProj(u)) u.s = v; else if (isGain(u)) u.k = v; else u.dose = v; this._save(); }
   remove(i) { this.units.splice(i, 1); this._save(); }
   clear() {
     this.units = []; this.name = ""; this.ablate = null; this.sampling = null; this.skipped = 0; this.directionLayer = "own";
@@ -242,6 +266,7 @@ export class Recipe {
   // (direction_default・key_default)は、既定を受け取ったときは省いた形に戻す(保存し直しても既定のまま)
   load(name, units, ablate = null, sampling = null, directionLayer = "own", defaults = {}) {
     const dd = (defaults && defaults.default_direction) || null, dk = (defaults && defaults.default_key) || null;
+    const nwOk = (u) => isNw(u) && u.neuron !== null && u.neuron !== undefined && Number.isFinite(+(u.alpha ?? u.k)) && (u.alpha ?? u.k) !== null;
     const keyedOk = (u) => isKeyed(u) && KEYED_KINDS.includes(u.kind) && Number.isFinite(+(u.alpha ?? u.k)) && (u.alpha ?? u.k) !== null
       && (u.kind !== "expert" || (u.expert !== null && u.expert !== undefined));
     const moeOk = (u) => isMoe(u) && (u.kind === "shared" || (u.expert !== null && u.expert !== undefined))
@@ -250,10 +275,12 @@ export class Recipe {
     const ok = units.filter((u) => (((u.kind || "neuron") === "neuron" || u.kind === "direction") && (u.mode || "add") === "add")
       || (u.kind === "head" && u.mode === "gain" && u.head !== null && u.head !== undefined && Number.isFinite(+u.k))
       || (u.kind === "head" && u.mode === "proj" && u.head !== null && u.head !== undefined && Number.isFinite(+(u.s ?? u.k)) && !!u.direction)
-      || moeOk(u) || keyedOk(u));
+      || moeOk(u) || keyedOk(u) || nwOk(u));
     this.skipped = units.length - ok.length;
     this.name = name;
-    this.units = ok.map((u) => (isKeyed(u) ? { layer: u.layer, kind: u.kind, ...(u.kind === "expert" ? { expert: +u.expert } : {}), mode: "keyed",
+    this.units = ok.map((u) => (isNw(u) ? { layer: u.layer, neuron: u.neuron, mode: "nw", alpha: +(u.alpha ?? u.k), direction: u.direction || null,
+                                            key: u.key || null, key2: u.key2 || null, pair: u.pair ?? null, s: u.s ?? null, cap: u.cap || null }
+      : isKeyed(u) ? { layer: u.layer, kind: u.kind, ...(u.kind === "expert" ? { expert: +u.expert } : {}), mode: "keyed",
                                                alpha: +(u.alpha ?? u.k), direction: (u.direction_default && dd) ? null : u.direction || null,
                                                key: (u.key_default && dk) ? null : u.key || null }
       : isDir(u) ? { layer: u.layer, kind: "direction", direction: u.direction, dose: u.dose }
@@ -323,6 +350,7 @@ export class RecipePanel {
     const focus = fe && fe.id && this.root.contains(fe) && (fe.tagName === "TEXTAREA" || (fe.tagName === "INPUT" && !["range", "checkbox", "radio"].includes(fe.type)))
       ? { id: fe.id, a: fe.selectionStart, b: fe.selectionEnd } : null;
     const rows = r.units.map((u, i) => {
+      if (isNw(u)) return this.nwRow(u, i);
       if (isKeyed(u)) return this.keyedRow(u, i);
       if (isProj(u)) return this.projRow(u, i);
       if (isGain(u)) return this.gainRow(u, i);
@@ -359,6 +387,8 @@ export class RecipePanel {
         <button id="rc-lora"${r.heads().length || r.projs().length || r.keyed().length ? "" : " disabled"} title="${t("ヘッドの方向成分(proj)と倍率(gain)、鍵つきの書き込み(keyed)を、llama.cpp の --lora で使う LoRA アダプタか、重みに焼き込んだ GGUF に書き出す")}">${t("LoRA・焼き込み")}${this.lxOpen ? " ▴" : " ▾"}</button>
       </div>
       ${r.keyed().length ? `<p class="muted note">${t("鍵つきの書き込み(keyed)は control vector に入りません(入力の活性で効き分けるので足し算にならない)。「LoRA・焼き込み」で書き出します。")}</p>` : ""}
+      ${r.nws().length ? `<div class="rc-actions"><button id="rc-nw" title="${t("計算で作るニューロン(nw)を、llama.cpp の --lora で使う LoRA アダプタに書き出す(焼き込みは無い)")}">${t("nw の LoRA を書き出す")}</button></div>
+        <p class="muted note">${t("計算で作るニューロン(nw)は control vector にも「LoRA・焼き込み」にも入りません。「nw の LoRA を書き出す」で別のアダプタにします。")}</p>` : ""}
       ${this.lxOpen ? this.lxHTML() : ""}
       ${r.units.length ? `<div class="rc-actions"><button class="small" id="rc-clear" title="${t("すべてのユニットを外す")}">${t("レシピを空にする")}</button></div>` : ""}
       <div id="rc-result"></div>`;
@@ -380,7 +410,7 @@ export class RecipePanel {
         const tr = this.root.querySelector(`tr[data-i="${i}"]`);
         for (const x of tr.querySelectorAll("input")) if (x !== ev.target) x.value = String(v);
         const sg = tr.querySelector(".sg");
-        if (isKeyed(r.units[i])) {
+        if (isKeyed(r.units[i]) || isNw(r.units[i])) {
           tr.querySelector("input.dose").style.background = trackBG(v, KEYED.max);
           sg.textContent = aLabel(v); sg.className = `sg mono ${v >= 0 ? "plus" : "minus"}`;
           return;
@@ -420,6 +450,7 @@ export class RecipePanel {
     if (sprm) sprm.addEventListener("click", () => { r.setSampling(null); this.render(); });
     this.wireAblate();
     $("#rc-export").addEventListener("click", () => this.export());
+    if ($("#rc-nw")) $("#rc-nw").addEventListener("click", () => this.exportNw());
     $("#rc-lora").addEventListener("click", () => { this.lxOpen = !this.lxOpen; this.render(); });
     if (this.lxOpen) this.wireLx();
     const el = focus && this.root.querySelector(`#${CSS.escape(focus.id)}`);
@@ -470,6 +501,21 @@ export class RecipePanel {
   // 鍵つきの書き込みの行(CHANGE-07、L14 ffn keyed a+1.00 @方向 #鍵)。書き込み先・方向・鍵の選択(方向・鍵の「既定」は
   // レシピの default_direction・default_key)、α のスライダー(±3、1 で観測した平均差をそのまま書く、負で打ち消す)。
   // 鍵に無い層・書き込み先の食い違い・方向や鍵が無いことは行に印を出す(サーバでも BAD_RECIPE で断る)
+  // 計算で作るニューロンの行: 中身(ニューロン・方向・鍵)は表示だけで、変えられるのは強さ α と「外す」
+  nwRow(u, i) {
+    const a = +u.alpha;
+    const what = `L${u.layer} N${u.neuron}${u.pair !== null && u.pair !== undefined ? `+N${u.pair}` : ""}`;
+    const form = u.pair !== null && u.pair !== undefined ? t("上限つき(2 個を組)") : u.key2 ? t("鍵 2 つ") : t("鍵 1 つ");
+    return `
+      <tr data-i="${i}" class="rc-nw"><td class="id"><span class="mono">${esc(what)}</span>
+        <span class="badge keyed" title="${t("計算で作るニューロン: ニューロンを計算した重みで上書きし、鍵が反応する位置でだけ方向を書く(LoRA)")}">nw</span>
+        <button class="small rm" data-rm="${i}" title="${t("外す")}">×</button>
+        <div class="rc-kx muted mono" title="${t("方向・鍵・形は direction ビューの FiSH のタブ(か CLI・MCP の gne nw …)で決める(docs/fish.md)")}">@${esc(u.direction || "—")} #${esc(u.key || "—")}${u.key2 ? `&amp;${esc(u.key2)}` : ""} · ${esc(form)}</div></td>
+        <td class="sl"><input type="range" class="dose" data-i="${i}" min="${-KEYED.max}" max="${KEYED.max}" step="${KEYED.step}" value="${a}" style="background:${trackBG(a, KEYED.max)}"></td>
+        <td class="nm"><input type="number" class="num" data-i="${i}" step="${KEYED.step}" value="${a}"></td>
+        <td class="sg mono ${a >= 0 ? "plus" : "minus"}">${aLabel(a)}</td></tr>`;
+  }
+
   keyedRow(u, i) {
     const r = this.r, dirs = this.projDirections(), keys = this.keys().filter((k) => !k.error);
     const kname = u.key || r.defaultKey, dname = u.direction || r.defaultDirection;
@@ -617,6 +663,19 @@ export class RecipePanel {
       await this.refreshSaved();                     // 一覧を描き直してから知らせる(描き直すと #rc-result も作り直される)
       this.root.querySelector("#rc-result").innerHTML =
         `<p class="muted note">${t("保存しました({path})", { path: esc((saved && saved.path) || `${name}.yaml`) })}</p>`;   // 保存先はサーバが返す実際のパス(--root を指定していればその下)
+    } catch (e) { res.innerHTML = `<p class="err">${esc(e.message)}</p>`; }
+  }
+
+  // 計算で作るニューロン(nw)の LoRA の書き出し
+  async exportNw() {
+    const res = this.root.querySelector("#rc-result");
+    const name = (this.root.querySelector("#rc-name").value.trim() || "recipe").replace(/[^\w.-]/g, "_");
+    res.innerHTML = `<p class="muted note">${t("書き出し中…")}</p>`;
+    try {
+      const x = await postJSON("/api/nw/export", { units: this.r.nws().map((u) => nwSpec(u)), name });
+      res.innerHTML = `<p class="note">${t("{file} を書き出しました", { file: `<a href="${esc(x.url)}" download="${esc(x.file)}">${esc(x.file)}</a>` })}</p>
+        <p class="muted note">${t("llama.cpp で使う: {cmd}", { cmd: `<code>--lora ${esc(x.file)}</code>` })}</p>
+        ${x.warnings && x.warnings.length ? `<p class="muted note">${x.warnings.map(esc).join("<br>")}</p>` : ""}`;
     } catch (e) { res.innerHTML = `<p class="err">${esc(e.message)}</p>`; }
   }
 

@@ -1,0 +1,62 @@
+{
+  "about": {
+    "order": 2,
+    "ja": {
+      "title": "いつでも口調を変える(例: 元気でくだけた口調)",
+      "text": "場面を絞らず、すべての返事で口調を変える例です。dont_touch(変えたくない場面)は書きません。system_a に出したい口調の指示を、user_prompts にいろいろな質問(相談・雑談・計算・事実を混ぜて 30 問ほど)を書きます。形は上限つきの 2 個組、位置の区切りは 0,1-3,4- です。試した範囲: Qwen3.5-4B(Q8_0)で 1 回。層 11,18,23・強さ 0.9。流れは最後まで通り、式どおりかも合格。作成に使っていない 12 問のうち、相談・おすすめを聞く 6 問では 5 問がくだけた明るい口調(「〜だよ！」)になり、計算・事実の 6 問は敬体のまま短くなっただけでした。繰り返しや空の返事は 0。関西弁の指示でも試しましたが、口調がくだけただけで、関西弁の言い回しは 12 問中 0 問でした(決まった言い回しを出すのには向いていません)。 返事は数問〜12 問を読んだだけなので、1〜2 問の差は誤差です。ほかのモデルでは確かめていません。"
+    },
+    "en": {
+      "title": "Change the tone everywhere (example: cheerful and casual)",
+      "text": "An example that changes the tone in every reply, without narrowing to a scene. There is no dont_touch. Put the instruction for the tone in system_a and about 30 varied questions (advice, small talk, calculations, facts) in user_prompts. The form is the capped pair and the position segments are 0,1-3,4-. Tried on: Qwen3.5-4B (Q8_0), one run. Layers 11,18,23, strength 0.9. The whole flow ran and the formula check passed. Of 12 questions not used for building, 5 of the 6 that ask for advice or recommendations came out casual and cheerful, while the 6 calculation and fact questions stayed polite and only got shorter. No repetition, no empty replies. With a Kansai-dialect instruction the tone only became casual and no dialect phrases appeared in any of 12 replies, so this is not suited to producing fixed phrases. Only a handful to 12 replies were read, so a difference of one or two means nothing. Not checked on other models."
+    }
+  },
+  "name": "fish_cheerful_always",
+  "system_a": "あなたは元気で親しみやすい友だちです。どんな質問にも、くだけた明るい口調(「〜だよ！」「〜だね！」「〜しようよ！」など)で、短めに答えてください。敬語は使いません。セリフだけを書き、動作の描写やかっこ書きは書かないでください。",
+  "user_prompts": [
+    "週末は何をして過ごすのがおすすめ？",
+    "朝ごはんに何を食べたらいい？",
+    "おすすめの趣味を教えて。",
+    "雨の日は何をする？",
+    "疲れたときはどうすればいい？",
+    "好きな季節はいつ？",
+    "カレーの作り方を簡単に教えて。",
+    "眠れない夜はどうしたらいい？",
+    "日本のおすすめの観光地は？",
+    "勉強に集中するコツは？",
+    "猫と犬、どっちが好き？",
+    "健康のために何をしている？",
+    "おすすめの飲み物は？",
+    "部屋を片付けるコツは？",
+    "友達の誕生日に何を贈ればいい？",
+    "朝早く起きるコツは？",
+    "自己紹介をして。",
+    "英語の勉強はどう始めればいい？",
+    "地球はなぜ丸いの？",
+    "コーヒーと紅茶の違いは？",
+    "1 年は何日？",
+    "おにぎりの作り方を教えて。",
+    "運動を続けるコツは？",
+    "面接で緊張しない方法は？",
+    "月はどうして満ち欠けするの？",
+    "洗濯物を早く乾かすには？",
+    "おすすめの散歩コースの決め方は？",
+    "24 を 6 で割るといくつ？",
+    "読書の習慣をつけるには？",
+    "虹はどうしてできるの？",
+    "節約のコツを教えて。",
+    "今日の夕飯は何がいいかな？"
+  ],
+  "validate": {
+    "match": "だよ|だね|よ！|ね！|しよう|かな[？?！]|じゃん",
+    "target": "a cheerful, friendly person who answers casually without polite forms"
+  },
+  "fish": {
+    "segments": "0,1-3,4-",
+    "form": "cap",
+    "alpha": 0.9,
+    "same_reply": true,
+    "stack": true,
+    "pseudo": 4,
+    "max_tokens": 96
+  }
+}

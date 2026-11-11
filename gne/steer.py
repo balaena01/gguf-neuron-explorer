@@ -46,19 +46,31 @@ class Unit:
     dose: float
     kind: Literal["neuron", "random", "direction", "head", "expert_neuron", "expert", "shared", "ffn", "attn"] = "neuron"
     seed: int | None = None          # random 用
-    mode: Literal["add", "gain", "query", "route", "proj", "keyed"] = "add"   # §6.16: add = 活性に定数を足す(dose)、gain = 出力を k 倍、query = ヘッドの条件付きクエリ操作、route = 専門家のルーターバイアスに dose を足す(CHANGE-05)、proj = ヘッドの書き込みの方向成分だけを s 倍ぶん引く(CHANGE-06)、keyed = 入力活性に鍵が反応するときだけ方向を α 倍で書き込む(CHANGE-07)
+    mode: Literal["add", "gain", "query", "route", "proj", "keyed", "nw"] = "add"   # nw = ニューロンを計算した重みで上書きする(docs/fish.md)。§6.16: add = 活性に定数を足す(dose)、gain = 出力を k 倍、query = ヘッドの条件付きクエリ操作、route = 専門家のルーターバイアスに dose を足す(CHANGE-05)、proj = ヘッドの書き込みの方向成分だけを s 倍ぶん引く(CHANGE-06)、keyed = 入力活性に鍵が反応するときだけ方向を α 倍で書き込む(CHANGE-07)
     k: float | None = None           # gain の倍率(0 で消去、負で反転)。proj では強さ s(YAML は s)、keyed では α(YAML は alpha)
     direction: str | None = None     # direction 用: gne direction(§6.17)で作った方向の名前。その層の r_L を足す
     head: int | None = None          # head 用(CHANGE-04): attention ヘッドの番号。gain(W_O の列ブロックを k 倍)か query
     seek: str | None = None          # query 用(CHANGE-04 E、実験的): 探しに行く語(triggers)を持つ対照集合。k が scale
     expert: int | None = None        # MoE(CHANGE-05): expert_neuron = 専門家 e のニューロン、expert = 専門家 e 全体。shared は shared expert のニューロン
     key: str | None = None           # keyed 用(CHANGE-07): gne direction key で作った鍵の名前。比較用の鍵(ランダム対照)は NAME~j
+    # nw 用(計算で作るニューロン): key = ゲートの行に入れる鍵(MLP の入力の空間、target mlpin)。key2 = 入力の行に入れる鍵
+    # (省くと key と同じ = 鍵 1 つの形。pair があるときは「どの位置でもほぼ 1 を返す鍵」)。pair = 上限つきの形で組にする 2 個目の
+    # ニューロン。s = ゲートの倍率(省くと 4、pair つきは 16)。cap = 上限つきの形のしきい値 "a-b"(省くと 0.4-0.8)
+    key2: str | None = None
+    pair: int | None = None
+    s: float | None = None
+    cap: str | None = None
 
     def label(self) -> str:
         who = {"neuron": f"N{self.neuron}", "random": f"random{self.seed}", "direction": f"dir:{self.direction}",
                "head": f"H{self.head}", "expert_neuron": f"E{self.expert} N{self.neuron}", "expert": f"E{self.expert}",
                "shared": "S" if self.neuron is None else f"S N{self.neuron}",
                "ffn": "ffn", "attn": "attn"}.get(self.kind, str(self.kind))
+        if self.mode == "nw":                        # L11 N2045 nw a1 @tsun.seg0 #scene&pos0
+            a = "a?" if self.k is None else f"a{self.k:g}"
+            return (f"L{self.layer} N{self.neuron}" + (f"+N{self.pair}" if self.pair is not None else "") + f" nw {a}"
+                    + (f" @{self.direction}" if self.direction else "") + (f" #{self.key}" if self.key else "")
+                    + (f"&{self.key2}" if self.key2 else ""))
         if self.mode == "keyed":                     # CHANGE-07: L19 ffn keyed a1.25 @zundamon_r #zundamon_k
             a = "a?" if self.k is None else f"a{self.k:g}"
             return (f"L{self.layer} {who} keyed {a}" + (f" @{self.direction}" if self.direction else "")
@@ -193,7 +205,8 @@ class Recipe:
     def to_dict(self) -> dict:
         return {"name": self.name, "model_id": self.model_id, "dose_unit": self.dose_unit, "when": self.when,
                 # key(CHANGE-07)は keyed のときだけ載せる(他のユニットの記録・名前のハッシュを前と同じにする)
-                "units": [{f: v for f, v in asdict(u).items() if not (f == "key" and v is None)} for u in self.units],
+                "units": [{f: v for f, v in asdict(u).items() if not (f in ("key", "key2", "pair", "s", "cap") and v is None)}
+                          for u in self.units],
                 "ablate": self.ablate.to_dict() if self.ablate else None,
                 "sampling": self.sampling,
                 **({"default_direction": self.default_direction} if self.default_direction else {}),
@@ -214,7 +227,7 @@ class Recipe:
         # dataclasses.replace で作り直すので、ユニットの他の項目(鍵・方向・専門家など)は落ちない
         def one(u: Unit) -> Unit:
             return replace(u, dose=u.dose * k if u.mode in ("add", "route") else u.dose,
-                           k=None if u.k is None else (u.k * k if u.mode in ("query", "proj", "keyed") else 1 + (u.k - 1) * k))
+                           k=None if u.k is None else (u.k * k if u.mode in ("query", "proj", "keyed", "nw") else 1 + (u.k - 1) * k))
         return self.like([one(u) for u in self.units],
                          ablate=None if self.ablate is None else AblateSpec(self.ablate.direction, self.ablate.scale * k,
                                                                             self.ablate.layers, self.ablate.from_layer))
@@ -251,6 +264,11 @@ class Recipe:
         """鍵つきの書き込み(CHANGE-07): ffn_down・attn_output・shared expert・専門家 e に α·d·κᵀ を足す。"""
         return [u for u in self.units if u.mode == "keyed"]
 
+    @property
+    def nw_units(self) -> list[Unit]:
+        """計算で作るニューロン(mode nw): ffn_gate・ffn_up の行と ffn_down の列を差し替える。"""
+        return [u for u in self.units if u.mode == "nw"]
+
     def validate(self) -> None:
         if self.dose_unit not in ("rel", "absmax", "raw"):
             raise GneError("BAD_RECIPE", f"dose_unit={self.dose_unit!r} は rel / absmax / raw のどれかです")
@@ -274,8 +292,11 @@ class Recipe:
         if self.default_key is not None and not _KEY_NAME_RE.fullmatch(str(self.default_key)):
             raise GneError("BAD_RECIPE", f"default_key の名前 {self.default_key!r} が不正です(英数字・._- と、比較用の鍵は NAME~j)")
         for u in self.units:
-            if u.mode not in ("add", "gain", "query", "route", "proj", "keyed"):
-                raise GneError("BAD_RECIPE", f"{u}: mode は add / gain / query / route / proj / keyed です")
+            if u.mode not in ("add", "gain", "query", "route", "proj", "keyed", "nw"):
+                raise GneError("BAD_RECIPE", f"{u}: mode は add / gain / query / route / proj / keyed / nw です")
+            if u.mode == "nw":
+                self._validate_nw(u)
+                continue
             if u.mode == "keyed":                                         # CHANGE-07
                 self._validate_keyed(u)
                 continue
@@ -328,6 +349,32 @@ class Recipe:
                 raise GneError("BAD_RECIPE", f"{u}: kind は neuron / random / direction / head / expert_neuron / expert / shared"
                                              " / ffn / attn です(ffn・attn は keyed だけ)")
 
+    def _validate_nw(self, u: Unit) -> None:
+        ex = "(例 {layer: 11, neuron: 2045, mode: nw, direction: NAME, key: SCENE, key2: POS, alpha: 1})"
+        if u.kind != "neuron" or u.neuron is None:
+            raise GneError("BAD_RECIPE", f"{u.label()}: nw は dense の層のニューロンだけです" + ex)
+        if u.k is None:
+            raise GneError("BAD_RECIPE", f"{u.label()}: nw には強さ alpha が要ります" + ex)
+        if not (u.direction or self.default_direction):
+            raise GneError("BAD_RECIPE", f"{u.label()}: nw には書く方向(direction か、レシピの default_direction)が要ります")
+        for nm, v in (("direction", u.direction), ("key", u.key), ("key2", u.key2)):
+            if v is not None and not (_KEY_NAME_RE.fullmatch(str(v)) if nm != "direction" else re.fullmatch(r"[\w.][\w.\-]*", str(v))):
+                raise GneError("BAD_RECIPE", f"{u.label()}: {nm} の名前 {v!r} が不正です(英数字・_・.・-。方向を打ち消すなら alpha を負に)")
+        if not (u.key or self.default_key):
+            raise GneError("BAD_RECIPE", f"{u.label()}: nw にはゲートの行に入れる鍵(key か、レシピの default_key)が要ります")
+        if u.pair is not None:
+            if u.pair == u.neuron:
+                raise GneError("BAD_RECIPE", f"{u.label()}: 組にする 2 個目のニューロン(pair)は別の番号にしてください")
+            if not u.key2:
+                raise GneError("BAD_RECIPE", f"{u.label()}: 上限つきの形(pair)には、どの位置でもほぼ 1 を返す鍵(key2)が要ります",
+                               "gne direction key --target mlpin --role one で作ります")
+        if u.s is not None and not u.s > 0:
+            raise GneError("BAD_RECIPE", f"{u.label()}: ゲートの倍率 s は正の数です")
+        if u.cap is not None:
+            m = re.fullmatch(r"([\d.]+)-([\d.]+)", str(u.cap))
+            if not m or not 0 <= float(m.group(1)) < float(m.group(2)):
+                raise GneError("BAD_RECIPE", f"{u.label()}: cap は a-b(0 ≤ a < b、例 0.4-0.8)です")
+
     def _validate_keyed(self, u: Unit) -> None:
         """keyed のユニット(CHANGE-07)の確かめ。方向と鍵の中身(ファイルがあるか・層・形)は読み込んだモデルの側(api)で見る。"""
         if u.kind not in KEYED_KINDS:
@@ -367,6 +414,10 @@ _MOE_RE = re.compile(r"^(\d+):(?:E(\d+)|(S)):(?:N(\d+):(x?)|(x)|(route):)([+-]?[
 # CHANGE-07: 鍵つきの書き込み。L:ffn:keyed:aα[@[-]DIR][#KEY]、L:attn:keyed:...、L:S:keyed:...、L:Ee:keyed:...
 _KEYED_RE = re.compile(r"^(\d+):(ffn|attn|S|E(\d+)):keyed:a([+-]?[\d.]+(?:e[+-]?\d+)?)"
                        r"(?:@([\w.\-]+))?(?:#([\w.\-]+(?:~\d+)?))?$", re.I)
+_NUM = r"[+-]?[\d.]+(?:e[+-]?\d+)?"
+_NW_RE = re.compile(r"^(\d+):N(\d+)(?:\+N(\d+))?:nw:a(" + _NUM + r")(?:@(-?[\w.][\w.\-]*))?"
+                    r"(?:#([\w.][\w.\-]*(?:~\d+)?)(?:&([\w.][\w.\-]*(?:~\d+)?))?)?"
+                    r"(?:!s([\d.]+))?(?:!cap([\d.]+-[\d.]+))?$", re.I)
 _KEY_NAME_RE = re.compile(r"[\w.][\w.\-]*(?:~\d+)?")      # 鍵の名前。比較用の鍵(ランダム対照)は NAME~j。先頭の - は不可(符号は alpha に)
 
 
@@ -393,6 +444,16 @@ def parse_unit(spec: str) -> Unit:
     鍵つきの書き込み(CHANGE-07)は "L:ffn:keyed:aα@DIR#KEY"(例 19:ffn:keyed:a1.25@zundamon_r#zundamon_k)。
     書き込み先は ffn(ffn_down)・attn(attn_output)・S(shared expert)・Ee(専門家 e)。@DIR / #KEY を省くとレシピの
     default_direction / default_key。@-DIR は α の符号に畳む(打ち消し)。KEY は比較用の鍵 NAME~j も可。"""
+    mn = _NW_RE.match(spec.strip())
+    if mn:
+        L, n, pair, av, dname, key, key2, sv, cap = mn.groups()
+        dname, alpha = fold_sign(dname, float(av))
+        return Unit(int(L), int(n), 0.0, "neuron", mode="nw", k=alpha, direction=dname, key=key, key2=key2,
+                    pair=None if pair is None else int(pair), s=None if sv is None else float(sv), cap=cap)
+    if ":nw:" in spec.lower():
+        raise GneError("BAD_UNIT", f"nw のユニット {spec!r} を読めません",
+                       "L:Nn:nw:aα@方向#鍵(鍵 1 つ)、L:Nn:nw:aα@方向#場面の鍵&位置の鍵(鍵 2 つ)、"
+                       "L:Nn+Nm:nw:aα@方向#鍵&1を返す鍵(上限つき、2 個を組)。後ろに !s4・!cap0.4-0.8 を付けられます")
     mk = _KEYED_RE.match(spec.strip())
     if mk:
         L, where, e, av, dname, key = mk.groups()
@@ -448,14 +509,20 @@ def parse_unit(spec: str) -> Unit:
 def _unit_from_yaml(u: dict) -> Unit:
     """レシピの YAML の 1 ユニット → Unit。強さは k(gain)・scale(query)・s(proj)・alpha(keyed)のどれでも読む。
     keyed は方向の名前の先頭の - を alpha の符号に畳む(CHANGE-07)。"""
-    kv = next((u[x] for x in ("k", "scale", "s", "alpha") if x in u), None)
+    kv = next((u[x] for x in (("alpha", "k") if u.get("mode") == "nw" else ("k", "scale", "s", "alpha")) if x in u), None)
     unit = Unit(layer=int(u["layer"]), neuron=None if u.get("neuron") is None else int(u["neuron"]),
                 dose=float(u.get("dose", u.get("delta", 0.0))), kind=u.get("kind", "neuron"), seed=u.get("seed"),
                 mode=u.get("mode", "add"), k=None if kv is None else float(kv),
                 direction=u.get("direction"), head=None if u.get("head") is None else int(u["head"]),
                 seek=u.get("seek"), expert=None if u.get("expert") is None else int(u["expert"]),
-                key=None if u.get("key") in (None, "") else str(u["key"]))
-    if unit.mode == "keyed" and unit.direction:
+                key=None if u.get("key") in (None, "") else str(u["key"]),
+                key2=None if u.get("key2") in (None, "") else str(u["key2"]),
+                pair=None if u.get("pair") is None else int(u["pair"]),
+                s=None if u.get("s") is None or u.get("mode") != "nw" else float(u["s"]),
+                cap=None if u.get("cap") in (None, "") else str(u["cap"]))
+    if unit.mode == "nw":
+        unit.k = None if u.get("alpha", u.get("k")) is None else float(u.get("alpha", u.get("k")))
+    if unit.mode in ("keyed", "nw") and unit.direction:
         unit.direction, unit.k = fold_sign(str(unit.direction), unit.k)
     return unit
 
@@ -463,13 +530,13 @@ def _unit_from_yaml(u: dict) -> Unit:
 def _unit_yaml(u: Unit) -> dict:
     d = {k: v for k, v in asdict(u).items() if v is not None and not (k == "kind" and v == "neuron")
          and not (k == "mode" and v == "add")}
-    if u.mode in ("gain", "query", "proj", "keyed"):
+    if u.mode in ("gain", "query", "proj", "keyed", "nw"):
         d.pop("dose", None)
     if u.mode == "query":
         d["scale"] = d.pop("k")
     if u.mode == "proj":
         d["s"] = d.pop("k")
-    if u.mode == "keyed" and "k" in d:              # CHANGE-07: α は YAML では alpha
+    if u.mode in ("keyed", "nw") and "k" in d:      # CHANGE-07: α は YAML では alpha(nw も同じ)
         d["alpha"] = d.pop("k")
     if u.mode == "route":
         d["delta"] = d.pop("dose")
@@ -552,6 +619,12 @@ def unit_details(weights, stats, recipe: Recipe, dirs: DirLoader | None = None) 
     for u in recipe.units:
         if u.mode == "keyed":
             rows.append(_keyed_detail(stats, recipe, u, dirs))
+            continue
+        if u.mode == "nw":
+            rows.append({"layer": u.layer, "neuron": u.neuron, "kind": u.kind, "seed": None, "dose": 0.0, "norm": 0.0,
+                         "rel_push": None, "rho": None, "add": None, "down_norm": None, "mode": "nw", "k": u.k, "alpha": u.k,
+                         "direction": u.direction or recipe.default_direction, "key": u.key or recipe.default_key,
+                         "key2": u.key2, "pair": u.pair, "s": u.s, "cap": u.cap})
             continue
         if u.mode in ("gain", "query", "route", "proj"):
             rows.append({"layer": u.layer, "neuron": u.neuron, "kind": u.kind, "seed": None,
@@ -875,9 +948,9 @@ def combine_recipes(recipes: list[Recipe], name: str | None = None) -> Recipe:
     for r in recipes:
         for u in r.units:
             u = dataclasses.replace(u)
-            if u.mode in ("proj", "keyed") and not u.direction:
+            if u.mode in ("proj", "keyed", "nw") and not u.direction:
                 u.direction = r.default_direction
-            if u.mode == "keyed" and not u.key:
+            if u.mode in ("keyed", "nw") and not u.key:
                 u.key = r.default_key
             units.append(u)
     first = recipes[0]

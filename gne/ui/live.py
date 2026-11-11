@@ -368,7 +368,10 @@ class Live:
                                    "k": u.k, "direction": u.direction, "head": u.head, "seek": getattr(u, "seek", None),
                                    "expert": u.expert,                                     # expert: MoE(CHANGE-05)
                                    # keyed(CHANGE-07): 鍵と強さ α(Unit.k、YAML の alpha)。方向の先頭の - は α の符号に畳んである
-                                   **({"key": u.key, "alpha": u.k} if u.mode == "keyed" else {})} for u in r.units],
+                                   **({"key": u.key, "alpha": u.k} if u.mode == "keyed" else {}),
+                                   # nw(計算で作るニューロン): 鍵 2 本・組にするニューロン・ゲートの倍率・上限のしきい値
+                                   **({"key": u.key, "alpha": u.k, "key2": u.key2, "pair": u.pair, "s": u.s, "cap": u.cap}
+                                      if u.mode == "nw" else {})} for u in r.units],
                         "ablate": r.ablate.to_dict() if r.ablate else None, "when": r.when, "sampling": r.sampling,
                         "this_model": r.model_id in (None, self.s.meta.model_id)})
         return out
@@ -389,6 +392,16 @@ class Live:
         saved = (self.s.store.recipes_dir() / f"{name}.yaml").exists()
         return {**r, "file": f"{name}.cvec.gguf", "url": f"/api/export/file/{name}.cvec.gguf", "warnings": warns,
                 "recipe_saved": saved}
+
+    def nw_export(self, units: list[str], name: str) -> dict:
+        """計算で作るニューロン(mode: nw)のユニットを LoRA アダプタ(<root>/export/<名前>-nw.lora.gguf)に書き出す。"""
+        import re
+        if not re.fullmatch(r"[\w.\-]+", name or ""):
+            raise GneError("BAD_ARGS", f"名前 {name!r} は英数字・_・-・. だけにしてください")
+        file = f"{name}-nw.lora.gguf"
+        recipe = self.s.recipe(units=list(units), name=name)
+        r, warns = self._gpu(lambda: self.s.nw_export(recipe, self.s.store.root / "export" / file))
+        return {"file": file, "url": f"/api/export/file/{file}", "bytes": r["bytes"], "nw": r["nw"], "warnings": warns}
 
     def export_path(self, file: str) -> Path:
         p = (self.s.store.root / "export" / file).resolve()

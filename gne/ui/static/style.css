@@ -622,3 +622,17 @@ table.evx-kx-tab th, table.kx-check th, table.evx th.wrap { white-space: normal;
 #kz-wrap th.kz-sort:hover { color: var(--text); }
 #kz-wrap .kz-legend { max-width: 980px; }
 #kz-wrap .kz-combo { color: var(--kx-a); font-weight: 600; }
+
+/* FiSH のタブ(fish.js): 足した量の表の色、選んだニューロンの行 */
+table.fx-tab td.fx-in { background: rgba(111, 207, 143, 0.16); }
+table.fx-tab td.fx-low { background: rgba(232, 176, 74, 0.30); color: #ffe0a3; }
+table.fx-tab td.fx-bad { background: rgba(255, 138, 138, 0.30); color: #ffd0d0; }
+table.fx-tab tr.fx-sel td { color: #dfe6ee; background: rgba(232, 176, 74, 0.08); }
+.fx-chip { display: inline-block; padding: 0 6px; border-radius: 3px; margin-right: 4px; }
+.fx-chip.fx-in { background: rgba(111, 207, 143, 0.16); }
+.fx-chip.fx-low { background: rgba(232, 176, 74, 0.30); }
+.fx-chip.fx-bad { background: rgba(255, 138, 138, 0.30); }
+#dv-fish textarea { width: 100%; box-sizing: border-box; }
+#dv-fish { padding: 0 2px 24px; }
+table.fx-behave-tab td.fx-q { max-width: 260px; white-space: normal; vertical-align: top; color: #9fb3cf; }
+table.fx-behave-tab td.fx-a { max-width: 760px; white-space: pre-wrap; vertical-align: top; color: #dfe6ee; }

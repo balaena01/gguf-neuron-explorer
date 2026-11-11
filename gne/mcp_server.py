@@ -81,9 +81,21 @@ direction で作った方向は "L:dir:NAME:dose"、attention ヘッドの gain 
    全層 × ffn,attn の候補で、生成なしで振る舞いの部分の対数確率の下がり方を比較用の鍵と並べて測る(第 1 段、ふるい分け。
    印の数を「偶然でも印が付く数」と比べる)。生成なしの値は保証ではないので、使う人が候補を数個選び、direction_key_causal_verify
    (units, result) の生成で振る舞いの数を iv だけ・比較用の鍵と比べる(第 2 段)。自動で 1 つに決めない。
+   方向の作り方: direction(positions="response", same_reply=True)は、同じ返事を A 側・B 側の条件の両方で読ませた差
+   (条件の違いだけの成分)。既定の作り方(それぞれ自分の返事を読んだ差)の方向には「読んでいる語の違い」の成分も入り、それを
+   書き続けると繰り返しに落ちやすかった(Qwen3.5-4B の性格の 1 例。docs/keyed-write.md §19)。
    MoE の層は direction_key(target="shared")で shared expert に、target="expert:e" で専門家 e に書く(ユニットは L:S / L:Ee:keyed:…)。
    専門家は direction_key_experts で書き込みたい位置でよく選ばれる(rate_a が大きく rate_b が小さい)ものを選ぶ。焼き込みは
    既定(auto)と requant="keep" なら、元が Q8_0 の専門家のテンソルは元の型のまま(f16 だとテンソル全体が F16 になって大きくなる)。
+11. FiSH(Formula-instantiated Scene-gated Hidden units。計算で作るニューロン、mode nw、docs/fish.md)。MLP のニューロンを学習なしで計算した重みで上書きして、鍵が反応する
+   位置でだけ方向を書く。ユニット: "L:Nn:nw:aα@方向#鍵"(鍵 1 つ)、"L:Nn:nw:aα@方向#場面の鍵&位置の鍵"(鍵 2 つ = 場面 かつ 位置)、
+   "L:Nn+Nm:nw:aα@方向#鍵&1を返す鍵"(2 個を組にして足す量に上限を付ける。逆向きの書き込みが小さい既定 s 16・しきい値 0.4-0.8)。
+   手順: direction(positions="response", same_reply=True, segments="0,1-3,4-")で方向(区切り i は "NAME.seg<i>")→ nw_neurons(layers)で
+   働きの小さいニューロンの表を見て番号を選ぶ → direction_key(target="mlpin", positions="pos:1-3")で位置の鍵、
+   direction_key(role="scene")で場面の鍵、direction_key(role="one")でほぼ 1 を返す鍵 → nw_verify(式どおりか)→ nw_check(位置ごとの
+   足した量。狙う場面で 1 前後、書き込みたくない場面で 0 前後か)→ steer / behave で返事を読む → nw_export(LoRA。焼き込みは無い)。
+   対応するのはゲートつきの MLP(SiLU のゲート × 入力、バイアスなし)の dense の層だけ(MoE の層・ほかの形は ARCH_UNSUPPORTED)。
+   口調を変えるには返事の間ずっと書き続ける必要があった(最初の数トークンだけでは足りない)。強さの幅は狭く、返事を読んで決める。
 """
 
 
@@ -193,7 +205,8 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
     @srv.tool()
     async def direction(contrast: str, name: str | None = None, select: str | None = None, mode: str = "ablate",
                         layers: str | None = None, dose: float = 1.0, positions: str = "last",
-                        random_controls: int = 16) -> dict:
+                        random_controls: int = 16, same_reply: bool = False, segments: str | None = None,
+                        stack_layers: str | list[int] | None = None, response_tokens: int = 96) -> dict:
         """対照集合(configs/contrast/ の名前かパス。system_a / system_b / user_prompts、層選びには validate.match)から
         全層の方向 r_L = mean_A − mean_B(生成プロンプトの最終トークン)を作って保存する(§6.17)。
         select="auto" なら候補層ごとに効果を測ってジョブで層を選ぶ(job_status で結果)。mode="add" は層 L に平均差の dose 倍を
@@ -201,11 +214,17 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
         作った方向は steer の units に "L:dir:NAME:+0.5"(rel dose)で足せる。
         positions="response" は A / B の system で返事を生成し、返事のトークンで測る(性格を足す用途ではこちらが効きやすい)。
         random_controls 本の同じ大きさのランダムな向きを層ごとに対照として流し、効果が対照の p95 を超えた層だけを選ぶ
-        (行の ctrl_effect_p95・null_pct、選んだ層の selected_null_pct。0 で対照なし)。"""
+        (行の ctrl_effect_p95・null_pct、選んだ層の selected_null_pct。0 で対照なし)。
+        方向の作り方(positions="response" のとき。結果の method に記録): same_reply=False(既定)は今までどおり、A 側・B 側が
+        それぞれ自分の返事を読んだ差。same_reply=True は、同じ返事(A 側の返事)を A 側の条件と B 側の条件の両方で読ませた差
+        (条件の違いだけの成分。読んでいる語の違いから来る成分が入らない)。segments="0,1-3,4-" で返事の位置で分けた方向も作る
+        (位置 0 = 返事を書き始める直前。区切り i は "NAME.seg<i>" という名前でユニットに書ける)。stack_layers="11,18,23" は、
+        区切りつきの方向をその層に重ねて書く前提の値にする(上の層は、下の層に足した後の残り。時間がかかる)。"""
         try:
             params = {"contrast": str(_contrast_path(session, contrast, None, None, None, name)), "name": name,
                       "select": select, "mode": mode, "layers": layers, "dose": dose, "positions": positions,
-                      "random_controls": random_controls}
+                      "random_controls": random_controls, "same_reply": same_reply, "segments": segments,
+                      "stack_layers": stack_layers, "response_tokens": response_tokens}
         except Exception as e:  # noqa: BLE001
             return _err(e)
         if select == "auto":
@@ -553,7 +572,7 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
                             q_max_samples: int = 4096, subset: str = "even", pseudo: int = 16,
                             replies_a: str | list[str] | None = None, replies_b: str | list[str] | None = None,
                             iv: str | list[str] | None = None, target: str = "ffn", seed: int = 0,
-                            dont_touch_start: bool | None = None) -> dict:
+                            dont_touch_start: bool | None = None, role: str | None = None) -> dict:
         """鍵つきの書き込みの鍵 κ を作るジョブを投げる(CHANGE-07、job_status で結果)。対照集合(configs/contrast/ の名前かパス)の
         書き込みたい位置の活性の平均 μ を、書き込みたくない位置と dont_touch の活性が張る空間に直交させ、κᵀμ = 1 にして
         <root>/keys/<model_id>/<name>.npz に保存する。layers は必須(例 [8, 14, 20])。positions(省くと対照集合の値)が
@@ -570,7 +589,11 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
         "before:<正規表現>" で書き込みたい位置の 25% 以上(μ に占める重み、結果の reply_start.share)が返事の冒頭(最初の
         3 トークンを決める位置)にあると、鍵がどの返事の冒頭にも反応しやすい。dont_touch の群があれば、その質問の、返事を
         書き始める直前の位置が Q に入っているので注(notes)になり、無ければ
-        警告になる(ふつうの質問を dont_touch に足して作り直す)。"""
+        警告になる(ふつうの質問を dont_touch に足して作り直す)。
+        FiSH(計算で作るニューロン、mode nw)の鍵は target="mlpin"(dense の MLP の入力の空間)。返事の位置の区切りで反応する鍵は
+        positions="pos:1-3"(位置 0 = 返事を書き始める直前、"pos:4-" は 4 以降)。role="scene" は狙う場面の質問(user_prompts)への
+        返事の間ずっと反応し、dont_touch の質問では反応しない鍵、role="one" はどの位置でもほぼ 1 を返す鍵(上限つきの形用)。
+        role を渡すと target は mlpin で、positions・q_mode などは使わない。"""
         from .jobs import _layers
         try:
             if not _layers(layers):
@@ -580,9 +603,78 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
                  "q_mode": q_mode, "q_energy": q_energy, "q_max_rank": q_max_rank, "q_max_samples": q_max_samples,
                  "subset": subset, "pseudo": pseudo, "replies_a": replies_a, "replies_b": replies_b, "iv": iv,
                  "target": target, "seed": seed, "dont_touch_start": dont_touch_start}
+            if role in ("scene", "one"):
+                p = {"contrast": p["contrast"], "layers": layers, "name": name, "max_tokens": max_tokens, "subset": subset,
+                     "pseudo": pseudo, "iv": iv, "seed": seed, "role": role}
+            elif role not in (None, "position"):
+                raise GneError("BAD_ARGS", f"role は position / scene / one です({role!r})")
             return jobs.start("direction_key", {k: v for k, v in p.items() if v is not None}).view()
         except Exception as e:  # noqa: BLE001
             return _err(e)
+
+    @srv.tool()
+    async def nw_neurons(layers: list[int] | str, top: int = 20, sort: str = "sum", max_tokens: int = 96,
+                         corpus_tokens: int = 2048, iv: str | list[str] | None = None) -> dict:
+        """FiSH(計算で作るニューロン、mode nw)で上書きするニューロンを選ぶ材料のジョブを投げる(job_status で結果)。層ごとに、各ニューロンの
+        ふだんの働き(|ゲート後の活性| × 出力の列の長さ = 1 位置で残差に書く長さ)を、ふつうの質問への無介入の返事と既定のコーパスで
+        測り、働きの小さい順の表(番号・平均・最大・最大 ÷ MLP の出力の長さ・順位)を返す。sort: sum(最大の順位 + 平均の順位、既定)/
+        max / mean。どれを使うかは表を見て選ぶ(自動では決めない)。上書きすると、そのニューロンの元の働きは無くなる。
+        iv(保存したレシピの名前かパス、またはユニットの書き方のリスト)を渡すと、その介入を当てた状態で測る(例: CHiPS のレシピを
+        当てた状態でニューロンを選ぶ)。nw_verify・nw_check・direction_key の iv も同じ。"""
+        try:
+            return jobs.start("nw_neurons", {k: v for k, v in {"layers": layers, "top": top, "sort": sort, "max_tokens": max_tokens,
+                                                               "corpus_tokens": corpus_tokens, "iv": iv}.items() if v is not None}).view()
+        except Exception as e:  # noqa: BLE001
+            return _err(e)
+
+    @srv.tool()
+    async def nw_verify(units: list[str] | None = None, recipe: str | None = None, texts: list[str] | None = None,
+                        iv: str | list[str] | None = None) -> dict:
+        """nw のユニット("L:Nn:nw:aα@方向#鍵" = 鍵 1 つ、"…#場面の鍵&位置の鍵" = 鍵 2 つ、"L:Nn+Nm:nw:aα@方向#鍵&1を返す鍵" = 上限つき)の
+        LoRA が式どおりに動くかを確かめる。上書きしたニューロンのゲート・入力・活性が式どおりか、ほかのニューロンが変わっていないか、
+        MLP の出力の変化が合っているか(層ごとの ok)。recipe は保存したレシピの名前、または units。"""
+        try:
+            if bool(recipe) == bool(units):
+                raise GneError("BAD_ARGS", "recipe(保存したレシピの名前)か units のどちらかを渡してください")
+            r = session.recipe(path=session.recipe_path(recipe)) if recipe else session.recipe(units=units)
+        except Exception as e:  # noqa: BLE001
+            return _err(e)
+        return await call(session.nw_verify, r, texts=texts, iv=iv)
+
+    @srv.tool()
+    async def nw_check(contrast: str, units: list[str] | None = None, recipe: str | None = None, subset: str = "odd",
+                       replies: str = "own", max_tokens: int = 96, n_pos: int = 8, iv: str | list[str] | None = None) -> dict:
+        """nw のレシピについて、位置の種類ごとの鍵の反応と実際に足した量(α·d を 1 として)を測るジョブを投げる(job_status で結果)。
+        対照集合の質問(狙う場面 = groups.scene)と dont_touch の群(書き込みたくない場面)で、返事の位置 0(書き始める直前)〜
+        n_pos−1 とそれ以降について、ユニットごとに amount・rho_gate・rho_up の平均・最小・最大。replies="own" はレシピを当てて
+        作った返事を当てたまま読む(実際に起きること。groups.<名前>.loops に繰り返しの数)、"base" は無介入の返事を読む。
+        見るところ: 狙う場面で足す量が 1 から大きく外れる位置、書き込みたくない場面で 0 から離れる位置、負(逆向き)の位置。"""
+        try:
+            if bool(recipe) == bool(units):
+                raise GneError("BAD_ARGS", "recipe(保存したレシピの名前)か units のどちらかを渡してください")
+            r = str(session.recipe_path(recipe)) if recipe else session.recipe(units=units)
+            return jobs.start("nw_check", {"recipe": r, "contrast": str(_contrast_path(session, contrast, None, None, None, None)),
+                                           "subset": subset, "replies": replies, "max_tokens": max_tokens, "n_pos": n_pos,
+                                           **({"iv": iv} if iv is not None else {})}).view()
+        except Exception as e:  # noqa: BLE001
+            return _err(e)
+
+    @srv.tool()
+    async def nw_export(recipe: str | None = None, units: list[str] | None = None, name: str | None = None,
+                        strip_meta: bool = False) -> dict:
+        """nw のユニットを LoRA アダプタ GGUF(<root>/export/<名前>-nw.lora.gguf)に書き出す。llama.cpp の --lora で当てる(倍率 1)。
+        ffn_gate・ffn_up・ffn_down への差し替えで、ニューロン 1 個あたり 3 つのテンソルに階数 1。焼き込みは無い(Q8_0 の ffn_down は
+        32 個の重みが 1 つの倍率を共有するので、1 列だけを方向に差し替えると誤差が 9 割を超える)。レシピのほかの介入(keyed・gain など)は
+        このファイルに入らない。proj(CHiPS)・keyed・gain と一緒に 1 つの LoRA にするなら headproj_export / keyed_export を使う
+        (nw のユニットも同じファイルに入る。bake=True はエラー)。"""
+        try:
+            if bool(recipe) == bool(units):
+                raise GneError("BAD_ARGS", "recipe(保存したレシピの名前)か units のどちらかを渡してください")
+            r = session.recipe(path=session.recipe_path(recipe)) if recipe else session.recipe(units=units, name=name or "units")
+            out = session.store.root / "export" / f"{r.name or 'recipe'}-nw.lora.gguf"
+        except Exception as e:  # noqa: BLE001
+            return _err(e)
+        return await call(session.nw_export, r, out, strip_meta=strip_meta)
 
     @srv.tool()
     async def direction_key_check(key: str, contrast: str | None = None, subset: str = "odd", layers: list[int] | str | None = None,
@@ -660,7 +752,8 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
                                      q_mode: str | None = None, subset: str | None = None, pseudo: int | None = None,
                                      replies_a: str | list[str] | None = None, replies_b: str | list[str] | None = None,
                                      iv: str | list[str] | None = None, seed: int | None = None,
-                                     dont_touch_start: bool | None = None, check: bool = True) -> dict:
+                                     dont_touch_start: bool | None = None, check: bool = True,
+                                     same_reply: bool | None = None) -> dict:
         """鍵つきの書き込みを、対照集合 1 つから「方向 → 鍵 → key-check」まで 1 回のジョブで回す(CHANGE-07、job_status で結果。
         UI の鍵のタブの「方向から key-check まで」と同じ)。contrast は対照集合の表(name・user_prompts・positions・dont_touch・
         system_a など。<root>/contrasts/<name>.yaml に書いてから使う)か、configs/contrast/ の名前・configs/keyed/ のひな形の名前・パス。
@@ -671,7 +764,9 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
         compact にしたもの)。check=False で回さない。layers は必須(引数か表の keyed.layers)。表の keyed(layers・target・q_mode・
         subset・pseudo・max_tokens・alpha)は渡していない引数の既定になる(alpha は結果の alpha_hint に返すだけ。レシピの α の目安)。
         結果: direction(name・reused・rebuilt)、key(direction_key の結果)、check(key-check の結果)、contrast_path、warnings。
-        判断は direction_key_check と同じ: check の held_out が true で、beats_pseudo の層だけを使う。"""
+        判断は direction_key_check と同じ: check の held_out が true で、beats_pseudo の層だけを使う。
+        same_reply=True で、方向を「同じ返事(A 側の返事)を A 側・B 側の条件の両方で読ませた差」で作る(既定は今までどおり。
+        表の keyed.same_reply でも指定できる。結果の direction.same_reply に記録)。"""
         from .jobs import _layers
         try:
             spec, path = None, None
@@ -694,7 +789,8 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
                  "rebuild_direction": bool(rebuild_direction) or None, "response_tokens": response_tokens, "target": target,
                  "positions": positions, "positions_b": positions_b, "skip": skip, "max_tokens": max_tokens, "q_mode": q_mode,
                  "subset": subset, "pseudo": pseudo, "replies_a": replies_a, "replies_b": replies_b, "iv": iv, "seed": seed,
-                 "dont_touch_start": dont_touch_start, "check": None if check else False, "compact": True}
+                 "dont_touch_start": dont_touch_start, "check": None if check else False, "compact": True,
+                 "same_reply": same_reply}
             return jobs.start("direction_key_pipeline", {k: v for k, v in p.items() if v is not None}).view()
         except Exception as e:  # noqa: BLE001
             return _err(e)
