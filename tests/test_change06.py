@@ -1121,6 +1121,72 @@ def test_strip_meta_leaves_no_gne_records(session, tmp_path):
     assert "gne.headproj" in keys(bk2["path"]) and Path(str(bk2["path"]) + ".headproj.json").exists()
 
 
+@pytest.mark.model
+def test_strip_meta_lora_has_no_model_name(session, tmp_path):
+    """人に渡す版の LoRA(gne headproj export / gne gain の --strip-meta): メタデータのどの文字列にも元のモデルの名前・識別子・
+    レシピの名前・方向の名前が出ず、名前の欄は "adapter"(name で決められる)。テンソルは記録つきの版と同じで、当てた返事も同じ。
+    strip_meta なしの出力は今までどおり(元のモデルの名前と識別子、レシピの名前が入る)。"""
+    from typer.testing import CliRunner
+    from gguf import GGUFReader, GGUFValueType
+    from gne.cli import app
+    from gne.evalx import _generate
+    from gne.steer import GneError
+    s = session
+    b = s.direction_set("evil").meta.get("base_layer") or 12
+    r = s.recipe(units=[f"{b - 1}:H1:s3@evil", f"{b}:5:x2"], name="secret_name")
+
+    def strings(path):
+        out = {}
+        for f in GGUFReader(str(path)).fields.values():
+            if f.types and f.types[0] == GGUFValueType.STRING:
+                out[f.name] = bytes(f.parts[-1]).decode("utf-8", "replace")
+        return out
+
+    def tensors(path):
+        return {t.name: (tuple(t.shape), bytes(t.data)) for t in GGUFReader(str(path)).tensors}
+    plain = s.headproj_export(r, tmp_path / "p.lora.gguf")
+    full = strings(plain["path"])
+    assert full["general.name"] == f"{s.meta.name} gain secret_name" == plain["general_name"]
+    assert full["gne.source_model_id"] == s.meta.model_id and "gne.recipe" in full and "gne.headproj" in full
+    lo = s.headproj_export(r, tmp_path / "s.lora.gguf", strip_meta=True)
+    bare = strings(lo["path"])
+    assert lo["strip_meta"] is True and lo["general_name"] == "adapter" == bare["general.name"] and lo["local_path_keys"] == []
+    assert not [k for k in bare if k.startswith("gne.")]
+    assert bare["general.architecture"] == s.meta.arch and bare["adapter.type"] == "lora"
+    for word in (s.meta.name, s.meta.model_id, "secret_name", "evil", MODEL.stem, str(tmp_path)):
+        assert not [k for k, v in bare.items() if word in v], word
+    assert full.keys() - bare.keys() == {"gne.recipe", "gne.source_model_id", "gne.headproj"}
+    named = s.gain(r, tmp_path / "n.lora.gguf", strip_meta=True, name=" tone adapter ")
+    got = strings(named["path"])
+    assert got["general.name"] == "tone adapter" == named["general_name"] and not [k for k in got if k.startswith("gne.")]
+    keep = s.headproj_export(r, tmp_path / "m.lora.gguf", name="my name")            # 名前だけ変える(記録は残す)
+    got = strings(keep["path"])
+    assert got["general.name"] == "my name" and got["gne.source_model_id"] == s.meta.model_id and "gne.recipe" in got
+    for kw in ({"name": " "}, {"name": "x", "bake": True}):
+        with pytest.raises(GneError) as ei:
+            s.headproj_export(r, tmp_path / "z.gguf", **kw)
+        assert ei.value.code == "BAD_ARGS"
+    assert not (tmp_path / "z.gguf").exists()
+    # 中身(テンソル)は同じ: 記録つきの版と人に渡す版を当てると同じ返事で、何も当てない返事とは違う
+    assert tensors(plain["path"]) == tensors(lo["path"]) == tensors(named["path"])
+    q = [("Tell me about your weekend plans.", 12)]
+    a = _generate(s, q, None, [(str(plain["path"]), 1.0)], "all", lambda k: None)[0]["token_ids"]
+    c = _generate(s, q, None, [(str(lo["path"]), 1.0)], "all", lambda k: None)[0]["token_ids"]
+    assert a == c
+    # CLI: --strip-meta と --name(gne headproj export・gne gain)
+    common = ["-m", str(MODEL), "--root", str(s.store.root), "--n-gpu-layers", str(NGL), "--json"]
+    for i, cmd in enumerate((["headproj", "export"], ["gain"])):
+        out = tmp_path / f"cli{i}.lora.gguf"
+        res = CliRunner().invoke(app, [*cmd, "--unit", f"{b - 1}:H1:s3@evil", "-o", str(out), "--strip-meta", "--name", "cli adapter",
+                                       *common])
+        assert res.exit_code == 0, res.output
+        got = strings(out)
+        assert got["general.name"] == "cli adapter" and not [k for k in got if k.startswith("gne.")]
+        assert not [k for k, v in got.items() if s.meta.name in v or s.meta.model_id in v]
+    res = CliRunner().invoke(app, ["headproj", "export", "--help"])
+    assert "--strip-meta" in res.output and "--name" in res.output
+
+
 def test_find_imatrix_next_to_model(tmp_path):
     """モデルの隣の imatrix を探す: <モデル名>.imatrix.gguf → .dat → -imatrix.* → imatrix.gguf / .dat の順。"""
     from gne.ablate import find_imatrix

@@ -710,7 +710,8 @@ def gain(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Option
          requant: str = typer.Option("auto", "--requant", help="--bake の書き方: auto(パッチで書ければスケールパッチ、書けなければ q8_0。keyed を含むならテンソルごとに、元が Q8_0 なら Q8_0 のまま、それ以外は f16。Q8_0 のままでは編集の 1 割以上が丸めに消えるテンソルだけ f16)/ patch / q8_0 / f16 / keep(元が F32・F16・BF16 ならその型。専門家のテンソル ffn_down_exps は元の型を保ち、編集しない専門家はバイトのまま。K-quant・IQ の専門家は q8_0)"),
          key: Optional[str] = typer.Option(None, "--key", help="#KEY を省いた keyed のユニットの鍵(gne direction key で作ったもの)"),
          direction: Optional[str] = typer.Option(None, "--direction", help="@NAME を省いた proj・keyed のユニットの方向"),
-         strip_meta: bool = typer.Option(False, "--strip-meta", help="gne の記録(gne.* のメタデータ・レシピ・名前の印)を残さない(人に渡す版)")):
+         strip_meta: bool = typer.Option(False, "--strip-meta", help="人に渡す版: gne の記録(gne.* のメタデータ・レシピ・名前の印)を残さない。LoRA では元のモデルを特定できる値(元のモデルの識別子、名前の欄に入る元のモデルの名前・レシピの名前)も書かず、名前の欄は --name(省くと adapter)"),
+         name: Optional[str] = typer.Option(None, "--name", help="LoRA の名前の欄(general.name)。省くと「<元のモデルの名前> gain <レシピの名前>」、--strip-meta では adapter。--bake では使えない")):
     """gain ユニット(L:N:x2 など、出力を k 倍。ヘッドは L:Hh:xk)を LoRA アダプタ GGUF か書き換え GGUF に書き出す(§6.16)。
     ヘッドの方向成分の射影(proj)と鍵つきの書き込み(keyed、CHANGE-07)も同じ LoRA・焼き込みに入る。"""
     if in_path and c.model and in_path.resolve() != c.model.resolve():
@@ -718,7 +719,7 @@ def gain(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Option
     s = holder["session"] = c.session(in_path)
     r = s.recipe(units=unit, path=recipe, scale=scale, default_key=key, default_direction=direction)
     out = out or s.default_export_path(r, bake=bake, kind="gain")
-    d = s.gain(r, out, bake=bake, requant=requant, strip_meta=strip_meta)
+    d = s.gain(r, out, bake=bake, requant=requant, strip_meta=strip_meta, name=name)
     if bake:
         text = f"{d['path']}({d['bytes'] / 1e6:.1f} MB)、書き換え: " + ", ".join(_mod_text(m) for m in d["modified"])
         if d.get("method") == "patch":
@@ -2662,7 +2663,8 @@ def headproj_export(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, u
                     direction: Optional[str] = typer.Option(None, "--direction", help="@NAME を省いた proj・keyed のユニットの方向"),
                     direction_layer: Optional[str] = typer.Option(None, "--direction-layer", help="own(ヘッドの層の方向)/ base(基準層の方向)"),
                     lora_f16: bool = typer.Option(False, "--lora-f16", help="LoRA を F16 で書く(大きさが半分。精度は十分)"),
-                    strip_meta: bool = typer.Option(False, "--strip-meta", help="gne の記録(gne.* のメタデータ・レシピ・名前の印・横の .headproj.json)を残さない(人に渡す版)")):
+                    strip_meta: bool = typer.Option(False, "--strip-meta", help="人に渡す版: gne の記録(gne.* のメタデータ・レシピ・名前の印・横の .headproj.json)を残さない。LoRA では元のモデルを特定できる値(元のモデルの識別子、名前の欄に入る元のモデルの名前・レシピの名前)も書かず、名前の欄は --name(省くと adapter)"),
+                    name: Optional[str] = typer.Option(None, "--name", help="LoRA の名前の欄(general.name)。省くと「<元のモデルの名前> gain <レシピの名前>」、--strip-meta では adapter。--bake では使えない")):
     """proj のユニット(L:Hh:sS@NAME、レシピの mode: proj)を LoRA アダプタ GGUF か焼き込み GGUF に書き出す(CHANGE-06 E、gne gain の別名)。
     同じ層・同じ方向のヘッドは階数 1 の LoRA に畳む。スケールパッチ(CHANGE-05 D)では表せないので、焼き込みは書き換える
     テンソルだけ量子化し直す。鍵つきの書き込み(keyed、L:ffn:keyed:aα@NAME#KEY、CHANGE-07)も受ける(層・鍵ごとに階数 1。
@@ -2674,8 +2676,9 @@ def headproj_export(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, u
     out = out or s.default_export_path(r, bake=bake, kind="headproj")
     d = s.headproj_export(r, out, bake=bake, requant=requant, via_f16=via_f16, imatrix=str(imatrix) if imatrix else None,
                           llama_quantize=llama_quantize, verify=verify, contrast=contrast, strip_meta=strip_meta, into=into,
-                          lora_f16=lora_f16)
+                          lora_f16=lora_f16, name=name)
     lines = [f"{d['path']}({d['bytes'] / 1e6:.2f} MB、{'焼き込み' if bake else 'LoRA'}"
+             + (f"、名前の欄 {d['general_name']!r}" if d.get("general_name") else "")
              + ("、gne の記録なし" if d.get("strip_meta") else "") + ")"]
     if d.get("local_path_keys"):
         lines.append("注意: メタデータに手元のパスらしい文字列が残っています: " + ", ".join(d["local_path_keys"]))

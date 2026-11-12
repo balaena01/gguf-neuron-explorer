@@ -213,7 +213,8 @@ gne nw check  --recipe tt_nw.yaml --contrast $C
 `--strip-meta` を付けると、この 3 つを書かない: `gne.*` の項目は無くなり、名前の欄は `adapter`(`--name` で決められる)になる。
 残るのは、アダプタであることを示す項目と、arch の名前(`general.architecture`。llama.cpp がモデルとの組み合わせを確かめるのに使う)、
 テンソルの名前と形だけ。`--name` は `--strip-meta` なしでも使える(名前の欄だけを変える)。proj・keyed と一緒に
-`gne headproj export --strip-meta` で 1 つの LoRA にしたときは、`gne.*` の項目は無いが、名前の欄は「元のモデルの名前 adapter」になる。
+`gne headproj export --strip-meta` で 1 つの LoRA にしたときも同じ扱い: `gne.*` の項目は無く、名前の欄は `adapter`(`--name` で決められる)で、
+元のモデルの名前・識別子は出ない(`--strip-meta` なしなら、名前の欄は「元のモデルの名前 gain レシピの名前」)。
 
 ユニットの短い書き方(`--unit`):
 
@@ -242,7 +243,7 @@ gne nw check  --recipe tt_nw.yaml --contrast $C
   下の層の方向の長さが 0 になって強さの配分で止まることがある)。
 
 MCP では `direction`(same_reply・segments・stack_layers)、`direction_key`(target="mlpin"、positions="pos:1-3"、role="scene" / "one")、
-`nw_neurons`・`nw_check`・`nw_try`(ジョブ)、`nw_verify`、`nw_export`(strip_meta・adapter_name)、まとめて作る `fish_pipeline`
+`nw_neurons`・`nw_check`・`nw_try`(ジョブ)、`nw_verify`、`nw_export`・`headproj_export`・`keyed_export`(strip_meta・adapter_name)、まとめて作る `fish_pipeline`
 (ジョブ。save・summary)。Python では
 `Session.direction` / `direction_key` / `nw_neurons` / `nw_try` / `nw_verify` / `nw_check` / `nw_export`、まとめて作るのは
 `gne.fish.pipeline`(save)、実行時の LoRA は `Session.lora_for(recipe)` に入る。

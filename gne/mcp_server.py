@@ -515,7 +515,7 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
 
     @srv.tool()
     async def headproj_export(recipe: str, bake: bool = False, requant: str | None = None, verify: bool = True,
-                              strip_meta: bool = False, into: str | None = None) -> dict:
+                              strip_meta: bool = False, into: str | None = None, adapter_name: str | None = None) -> dict:
         """保存したレシピの proj のユニット(ヘッドの方向成分の射影、と gain・keyed)を書き出す(CHANGE-06 E)。既定は LoRA アダプタ
         GGUF(同じ層・同じ方向は階数 1 に畳む。数百 KB)。bake=True なら残差に書き込む重み行列だけ量子化し直した GGUF をジョブで作り
         (requant の既定は q8_0。keyed を含むなら auto: 元が Q8_0 のテンソルは Q8_0 のまま、それ以外は f16。Q8_0 のまま
@@ -524,20 +524,26 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
         層・側ごとに例ごとの差の最大(max_abs_diff)を合格の線(threshold)と比べる。線は許容誤差(射影の値の標準偏差の 1 割、resolution)で、
         最後の層(last_layer)だけ許容誤差 + 計算方法の違いだけで出る誤差(noise.max_abs_diff = 書き込みがほぼ 0 の LoRA と
         LoRA なしの射影の値の差の最大。Q8_0 では LoRA を当てるだけで最後の層の射影の値が動くため)。
-        strip_meta=True なら gne の記録(gne.* のメタデータ・レシピ・名前の印・横の .headproj.json)を残さない(人に渡す版)。
+        strip_meta=True なら gne の記録(gne.* のメタデータ・レシピ・名前の印・横の .headproj.json)を残さない(人に渡す版)。LoRA では
+        元のモデルを特定できる値(識別子、名前の欄の元のモデルの名前・レシピの名前)も書かず、名前の欄は "adapter"。
+        adapter_name は LoRA の名前の欄(general.name。省くと「<元のモデルの名前> gain <レシピの名前>」。bake では使えない)。
         結果の local_path_keys は、メタデータに手元のパスらしい文字列が残っているキー。into は焼き込む先の別の GGUF
         (同じ構造の量子化していない F16 / BF16 など。方向はこのモデルのものを使う。requant="keep" で元の型のまま、verify はできない)。"""
         return await _export(recipe, None, None, None, None, bake=bake, requant=requant, verify=verify,
-                             strip_meta=strip_meta, into=into)
+                             strip_meta=strip_meta, into=into, adapter_name=adapter_name)
 
     async def _export(recipe, units, name, key, direction, *, bake, requant, verify, strip_meta, into,
-                      lora_f16: bool = False) -> dict:
+                      lora_f16: bool = False, adapter_name: str | None = None) -> dict:
         """headproj_export・keyed_export の中身(jobs._headproj_export。ファイル名の既定は Session.default_export_path)。
         焼き込みはジョブ、LoRA はその場で書く。"""
         from .jobs import _headproj_export
         p = {"recipe": recipe, "units": units, "name": name if name else (_recipe_stem(recipe) if recipe else None),
              "key": key, "direction": direction}
         p = {k: v for k, v in p.items() if v is not None}
+        if adapter_name is not None:
+            if bake:
+                return _err(GneError("BAD_ARGS", "adapter_name(名前の欄)は LoRA の書き出しだけです"))
+            p["adapter_name"] = adapter_name
         if bake:
             try:
                 q = {**p, "bake": True, "requant": requant, "verify": verify and not into, "strip_meta": strip_meta}
@@ -552,7 +558,7 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
     async def keyed_export(recipe: str | None = None, units: list[str] | None = None, name: str | None = None,
                            key: str | None = None, direction: str | None = None, bake: bool = False,
                            requant: str | None = None, verify: bool = False, strip_meta: bool = False,
-                           into: str | None = None, lora_f16: bool = False) -> dict:
+                           into: str | None = None, lora_f16: bool = False, adapter_name: str | None = None) -> dict:
         """鍵つきの書き込み(keyed、CHANGE-07)を書き出す(headproj_export の keyed 向けの別名。proj・gain が混ざっていても同じ
         ファイルに入る)。recipe は保存したレシピの名前、または units(例 ["19:ffn:keyed:a1@zundamon_endings#zundamon_endings"])と
         name。key・direction は #KEY・@NAME を省いたユニットの鍵と方向。既定は LoRA アダプタ GGUF(層・鍵ごとに階数 1、llama.cpp の
@@ -563,11 +569,13 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
         0.9 を下回ったら警告。requant_error_max は編集と無関係な丸めのゆらぎも数えるので、小さな編集では大きく出る)。MoE の専門家のテンソル(ffn_down_exps、expert:e)も同じ規則で、
         Q8_0 のままなら編集しない専門家はバイトのまま、f16 だとテンソル全体が F16 になる(結果の expert_bytes_added が増えた大きさ)。
         verify=True で焼き込み版と LoRA 版を比べる(V33。判定は headproj_export の verify と同じで、最後の層の射影の値の合格の線
-        threshold は許容誤差 + 計算方法の違いだけで出る誤差 noise.max_abs_diff)。"""
+        threshold は許容誤差 + 計算方法の違いだけで出る誤差 noise.max_abs_diff)。
+        strip_meta=True(人に渡す版)の LoRA は、gne の記録と元のモデルを特定できる値(識別子、名前の欄の元のモデルの名前・レシピの名前)を
+        書かず、名前の欄は "adapter"。adapter_name は LoRA の名前の欄(general.name。name はレシピの名前)。"""
         if bool(recipe) == bool(units):
             return _err(GneError("BAD_ARGS", "recipe(保存したレシピの名前)か units のどちらかを渡してください"))
         return await _export(recipe, units, name, key, direction, bake=bake, requant=requant, verify=verify,
-                             strip_meta=strip_meta, into=into, lora_f16=lora_f16)
+                             strip_meta=strip_meta, into=into, lora_f16=lora_f16, adapter_name=adapter_name)
 
     @srv.tool()
     async def direction_key(contrast: str, layers: list[int] | str, name: str | None = None, positions: str | None = None,

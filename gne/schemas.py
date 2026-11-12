@@ -359,6 +359,7 @@ class GainOut(Envelope):                        # §6.16 gne gain
     edit_kept_min: float | None = None                     # 量子化し直しても残った編集の割合(テンソルの中の最小)
     fallback: list[str] | None = None                      # 分割 GGUF への焼き込み(auto): Q8_0 では編集が埋もれるので F16 にしたテンソル
     strip_meta: bool | None = None                         # gne の記録を残さない版
+    general_name: str | None = None                        # LoRA の名前の欄(general.name)に書いた値
     local_path_keys: list[str] | None = None               # メタデータに残った手元のパスらしい文字列のキー
     into: str | None = None                                # 焼き込む先の別の GGUF
     imatrix: str | None = None                             # --via-f16 で使った imatrix

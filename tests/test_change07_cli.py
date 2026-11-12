@@ -368,6 +368,19 @@ def test_mcp_keyed_tools(work, key):
                 assert "error" not in ex, ex
                 assert Path(ex["path"]).name == "zm-keyed.lora.gguf" and Path(ex["path"]).exists()
                 assert ex["keyed_layers"]["14"]["keys"] == ["z_mcp"]
+                tools = {t.name: t for t in (await s.list_tools()).tools}
+                assert {"strip_meta", "adapter_name"} <= set(tools["keyed_export"].input_schema["properties"])
+                assert "adapter_name" in tools["headproj_export"].input_schema["properties"]
+                ex2 = await call("keyed_export", units=["14:ffn:keyed:a1"], name="zm2", key="z_mcp",
+                                 direction="zundamon_endings", strip_meta=True, adapter_name="ending adapter")
+                assert "error" not in ex2 and ex2["general_name"] == "ending adapter" and ex2["strip_meta"] is True, ex2
+                from gguf import GGUFReader
+                rd = GGUFReader(ex2["path"])
+                assert bytes(rd.fields["general.name"].parts[-1]).decode() == "ending adapter"
+                assert not [k for k in rd.fields if k.startswith("gne.")]
+                err = await call("keyed_export", units=["14:ffn:keyed:a1"], name="zm3", key="z_mcp",
+                                 direction="zundamon_endings", bake=True, adapter_name="x")
+                assert err["error"]["code"] == "BAD_ARGS"
                 v = await call("direction_key_verify", layer=14, key="z_mcp", direction="zundamon_endings", alphas=[1])
                 assert v.get("v30") is True and len(v["rows"]) == 1, v
                 err = await call("keyed_export")

@@ -676,7 +676,8 @@ class Session:
 
     def gain(self, recipe: Recipe | list[str], out: str | Path, *, bake: bool = False, requant: str = "auto",
              via_f16: bool = False, imatrix: str | None = None, llama_quantize: str | None = None,
-             strip_meta: bool = False, into: str | Path | None = None, lora_f16: bool = False) -> dict:
+             strip_meta: bool = False, into: str | Path | None = None, lora_f16: bool = False,
+             name: str | None = None) -> dict:
         """gain ユニットを LoRA アダプタ GGUF(既定)か、W_up(ヘッドは W_O)を書き換えた GGUF(bake)に書き出す(§6.16、CHANGE-04 D)。
         ヘッドの方向成分の射影(proj、CHANGE-06)と鍵つきの書き込み(keyed、CHANGE-07)も同じ LoRA / 焼き込みに入れる
         (同じテンソルは A・B を連結。記録は gne.headproj と gne.keyed)。keyed を焼き込むときの requant の既定(auto)は
@@ -685,6 +686,8 @@ class Session:
         量子化し直しで編集が埋もれたら警告する(_warn_requant)。
         strip_meta なら gne の記録(gne.* のメタデータ・レシピ・名前の印・横の .headproj.json)を残さない(人に渡す版)。
         書いたあと、メタデータに手元のパスらしい文字列が残っていないかも確かめる(local_path_keys)。
+        LoRA では、strip_meta のとき名前の欄(general.name)を "adapter" にして、元のモデルの名前も入れない。name で名前の欄を
+        決められる(LoRA だけ。strip_meta なしでも使える。焼き込みは元のモデルのメタデータをそのまま写すので対象外)。
         into を渡すと、そのモデル(同じ構造の別の型、例えば量子化していない F16 / BF16)の重みに書く。方向はこのモデルで作った
         ものを使い、書き換える行列は焼き込む先のものから作る(keyed の ΔW = α d κᵀ は W に依らないので、このモデルで作る)。
         GPU は使わない。"""
@@ -692,6 +695,10 @@ class Session:
         from .headproj import merge_tensors
         recipe = self._as_recipe(recipe)
         self._no_nw(recipe, bake=bake)                   # nw は焼き込めない(LoRA には入る)
+        if name is not None and bake:
+            raise GneError("BAD_ARGS", "名前の欄の指定(name)は LoRA の書き出しだけです(焼き込みは元のモデルのメタデータをそのまま写す)")
+        if name is not None and not str(name).strip():
+            raise GneError("BAD_ARGS", "名前(name)が空です")
         W = self.weights if into is None else self._target_weights(into)
         if recipe.add_units:
             self.warn("add のユニットは gain の書き出しに入りません(gne export-cvec で control vector に書き出せます)")
@@ -767,7 +774,7 @@ class Session:
                     rep["requant"] = "auto"
             else:
                 rep = export_gain_lora(W, recipe, out, extra=extra, extra_meta=extra_meta, extra_kv=extra_kv,
-                                       strip_meta=strip_meta, f16=lora_f16)
+                                       strip_meta=strip_meta, f16=lora_f16, name=name)
                 if ptens:                                # proj だけの階数(keyed と同じテンソルに連結しても proj の分)
                     rep["proj_rank"] = {n.split(".")[1]: int(B.shape[-1]) for n, (_, B) in ptens.items()}
                 else:
@@ -2675,15 +2682,18 @@ round_01.scores.txt に「番号 P C」を 1 行ずつ書く(例: 17 3 4)。全�
     def headproj_export(self, recipe: Recipe | list[str], out: str | Path, *, bake: bool = False, requant: str | None = None,
                         via_f16: bool = False, imatrix: str | None = None, llama_quantize: str | None = None,
                         verify: bool = False, contrast: str | Path | None = None, strip_meta: bool = False,
-                        into: str | Path | None = None, lora_f16: bool = False) -> dict:
+                        into: str | Path | None = None, lora_f16: bool = False, name: str | None = None) -> dict:
         """CHANGE-06 E: proj のユニット(と gain)を LoRA(既定)か、残差に書き込む重み行列だけ量子化し直した GGUF に書き出す
         (gne gain と同じ経路)。鍵つきの書き込み(keyed、CHANGE-07)だけのレシピと、proj・keyed(・gain)を混ぜたレシピも受ける。
         requant を省くと q8_0、keyed を含むなら auto(テンソルごと: 元が Q8_0 なら Q8_0 のまま、それ以外は F16。Q8_0 のままでは
         rank 1 の小さな編集の 1 割以上が刻みに埋もれるテンソルだけ F16。gain.auto_qtype・KEYED_KEEP_MIN、レビュー P13、
         verification.md F132・F139)。keyed を含まないレシピの auto は q8_0。
-        verify なら焼き込み版と LoRA 版を V26 の 4 項目で比べる(keyed だけなら keyed の方向で測る)。"""
+        verify なら焼き込み版と LoRA 版を V26 の 4 項目で比べる(keyed だけなら keyed の方向で測る)。
+        name は LoRA の名前の欄(general.name。省くと「<元のモデルの名前> gain <レシピの名前>」、strip_meta では "adapter")。"""
         recipe = self._as_recipe(recipe)
         self._no_nw(recipe, bake=bake)                   # nw は焼き込めない(LoRA には入る)
+        if name is not None and bake:
+            raise GneError("BAD_ARGS", "名前の欄の指定(name)は LoRA の書き出しだけです(焼き込みは元のモデルのメタデータをそのまま写す)")
         if not recipe.proj_units and not recipe.gain_units and not recipe.keyed_units and not recipe.nw_units:
             raise GneError("BAD_RECIPE", "proj のユニットがありません(例 --unit 33:H16:s6@NAME、鍵つきの書き込みは 19:ffn:keyed:a1@NAME#KEY)")
         if requant is None:
@@ -2708,7 +2718,8 @@ round_01.scores.txt に「番号 P C」を 1 行ずつ書く(例: 17 3 4)。全�
                 self._warn_expert_size(d)
         else:
             d = self.gain(recipe, out, bake=bake, requant="q8_0" if via_f16 else requant, via_f16=via_f16,
-                          imatrix=imatrix, llama_quantize=llama_quantize, strip_meta=strip_meta, into=into, lora_f16=lora_f16)
+                          imatrix=imatrix, llama_quantize=llama_quantize, strip_meta=strip_meta, into=into, lora_f16=lora_f16,
+                          name=name)
         if verify:
             if not bake:
                 raise GneError("BAD_ARGS", "--verify は --bake と一緒に使います(焼き込み版と LoRA 版を比べる)")

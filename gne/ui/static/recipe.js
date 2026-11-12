@@ -323,7 +323,7 @@ export class RecipePanel {
     // LoRA・焼き込みの書き出し(headproj_export のジョブ)。欄の値は描き直しても残す
     this.lxOpen = false;
     this.lx = { bake: false, requant: null, via_f16: false, llama_quantize: "", imatrix: "", verify: true, contrast: "", strip: false,
-                file: "", into: "" };              // file: ファイル名(拡張子なし、空ならレシピの名前から)、into: 焼き込む先の別の GGUF
+                file: "", into: "", adapterName: "" };              // file: ファイル名(拡張子なし、空ならレシピの名前から)、into: 焼き込む先の別の GGUF
                                                    // requant: null は既定(keyed を含むなら F16、それ以外は Q8_0)
     this.lxJobId = null;
     this.lxMsg = null;                 // { html } 書き出しの結果か進み具合
@@ -741,6 +741,8 @@ export class RecipePanel {
       <div class="rc-lx-row"><span class="muted" title="${t("書き出すファイルの名前(拡張子なし)。空ならレシピの名前から作る。保存先は <root>/export/")}">${t("ファイル名")}</span>
         <input id="lx-file" size="26" value="${esc(f.file)}" placeholder="${esc(this.lxDefaultStem())}" spellcheck="false"><span class="muted mono">${bake ? ".gguf" : ".lora.gguf"}</span></div>
       <div class="rc-lx-row"><label title="${t("gne が書く記録(gne.* のメタデータ: レシピ・ヘッド・強さ・方向の鍵、名前の印、横の .headproj.json)を入れない。人に渡すファイル用。書いたあと、メタデータに手元のパスが残っていないかも確かめる")}"><input type="checkbox" id="lx-strip"${f.strip ? " checked" : ""}> ${t("gne の記録(メタデータ)を入れない(人に渡す用)")}</label></div>
+      ${bake ? "" : `<div class="rc-lx-row"><span class="muted" title="${t("LoRA のファイルの中の名前の欄(general.name)。空なら「元のモデルの名前 gain レシピの名前」、記録を入れないときは adapter")}">${t("名前の欄")}</span>
+        <input id="lx-adname" size="26" value="${esc(f.adapterName)}" placeholder="${f.strip ? "adapter" : ""}" spellcheck="false"></div>`}
       <div class="rc-lx-row"><button id="lx-go">${t(bake ? "焼き込む" : "LoRA を書き出す")}</button>
         <span class="muted note">${nk ? t("名前は上のレシピの名前(空なら headproj)。LoRA に入るユニット {n} 個(ヘッド {h}・鍵つきの書き込み {k})", { n, h: n - nk, k: nk })
           : t("名前は上のレシピの名前(空なら headproj)。ヘッドのユニット {n} 個が入る", { n })}${nAdd ? ` · ${t("add のユニット {k} 個は入らない(cvec で書き出す)", { k: nAdd })}` : ""}${bake ? ` · ${t("焼き込みはモデルを丸ごともう 1 つ書く(同じくらいのディスク・時間)")}` : ""}</span></div>
@@ -758,6 +760,8 @@ export class RecipePanel {
     on("#lx-verify", "change", (ev) => { f.verify = ev.target.checked; this.render(); });
     on("#lx-contrast", "input", (ev) => { f.contrast = ev.target.value; });
     on("#lx-strip", "change", (ev) => { f.strip = ev.target.checked; });
+    on("#lx-strip", "change", (ev) => { const el = this.root.querySelector("#lx-adname"); if (el) el.placeholder = ev.target.checked ? "adapter" : ""; });
+    on("#lx-adname", "input", (ev) => { f.adapterName = ev.target.value; });
     on("#lx-file", "input", (ev) => { f.file = ev.target.value; });
     on("#lx-into", "input", (ev) => { f.into = ev.target.value; });   // 打つたびに入れる(描き直しても消えないように)
     on("#lx-into", "change", (ev) => {                   // 量子化していないモデルへ: 型は元のまま(keep)にし、比較はしない
@@ -779,6 +783,7 @@ export class RecipePanel {
     const units = [...r.heads(), ...r.projs(), ...r.keyed()].map((u) => all[r.units.indexOf(u)]);
     const p = { units, name, bake: f.bake, file_stem: stem, overwrite };
     if (f.strip) p.strip_meta = true;
+    if (!f.bake && f.adapterName.trim()) p.adapter_name = f.adapterName.trim();
     if ((r.projs().length || r.keyed().length) && r.directionLayer && r.directionLayer !== "own") p.direction_layer = r.directionLayer;
     if (f.bake) {
       if (f.via_f16) {

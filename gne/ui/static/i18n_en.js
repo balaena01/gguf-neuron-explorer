@@ -931,6 +931,8 @@ export const EN = {
   "imatrix: {f}": "imatrix: {f}",
   "gne が書く記録(gne.* のメタデータ: レシピ・ヘッド・強さ・方向の鍵、名前の印、横の .headproj.json)を入れない。人に渡すファイル用。書いたあと、メタデータに手元のパスが残っていないかも確かめる": "Leave out what gne records (the gne.* metadata: recipe, heads, strengths, direction keys; the name tag; the .headproj.json beside the file). For files you give to others. Afterwards it also checks that no local paths remain in the metadata",
   "gne の記録(メタデータ)を入れない(人に渡す用)": "leave out gne's records (for sharing)",
+  "名前の欄": "name field",
+  "LoRA のファイルの中の名前の欄(general.name)。空なら「元のモデルの名前 gain レシピの名前」、記録を入れないときは adapter": "The name field inside the LoRA file (general.name). Empty: \"<base model name> gain <recipe name>\"; with records left out: adapter",
   "gne の記録は入れていませんが、メタデータに手元のパスらしい文字列が残っています: {k}": "gne's records are left out, but strings that look like local paths remain in the metadata: {k}",
   "gne の記録は入れていません(手元のパスらしい文字列もメタデータに無し)": "gne's records are left out (no local-looking paths in the metadata either)",
   "方向を使うレシピ(ヘッドの proj など)で、方向の指標(射影の値の下がり方・ずれ・判定の一致率)も測る。外すと能力・ppl・混入・性格の変化量だけで早く終わる": "For recipes that use a direction (head proj and the like), also measure the direction metrics (projection drop, drift, match rate). Unchecked, only capability, perplexity, mixing and persona change are measured, which is much faster",

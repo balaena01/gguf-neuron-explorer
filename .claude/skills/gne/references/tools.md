@@ -140,6 +140,7 @@ gne heads candidates --alloc evil --prompts held_out.yaml   # 比較表の組 ×
 gne heads candidates --tally evil                     # round_01.scores.txt(「番号 P C」)を候補ごとに集計する
 gne heads refine --name evil --n-heads 2              # その組で残った質問だけで、組を当てたまま方向を作り直し、足すヘッドを探す
 gne headproj export --recipe R --bake --strip-meta     # 人に渡す版: gne.* のメタデータ・general.name に付ける印・横の .headproj.json を残さない
+gne headproj export --recipe R --strip-meta [--name N] # 人に渡す LoRA: gne.* を書かず、名前の欄(general.name)は adapter(--name で指定)。元のモデルの名前・識別子が出ない(gne gain も同じ)
 gne headproj export --recipe R --bake --via-f16        # F16 で書いて llama-quantize で元の型に戻す。IQ1・IQ2・IQ3_XXS は imatrix が要る(--imatrix、<モデル名>.imatrix.gguf が横にあれば自動)
 gne headproj export --recipe R --bake --into F16.gguf --requant keep   # 別の GGUF に焼き込む。方向は分析したモデル、書き換える行列は --into のもの(GPU は使わない)
 ```

@@ -136,13 +136,15 @@ def _eval(s, recipe: str | None = None, units: list[str] | None = None, dose_uni
 
 def _headproj_export(s, recipe: str | None = None, out: str | None = None, *, units: list[str] | None = None,
                      name: str | None = None, direction_layer: str | None = None, file_stem: str | None = None,
-                     overwrite: bool = True, key: str | None = None, direction: str | None = None, **p) -> dict:
+                     overwrite: bool = True, key: str | None = None, direction: str | None = None,
+                     adapter_name: str | None = None, **p) -> dict:
     """ヘッドの proj・鍵つきの書き込み(keyed、CHANGE-07)と gain(LoRA に入るユニット)を LoRA アダプタか焼き込み GGUF に
     書き出す。recipe(保存したレシピの名前かパス)か units(UI のレシピのユニットの書き方)。key・direction は #KEY・@NAME を
     省いたユニットの鍵と方向。out を省くと Session.default_export_path(<root>/export/<名前>.lora.gguf、焼き込みは
     <名前>-headproj.gguf、keyed だけなら <名前>-keyed.lora.gguf / -keyed.gguf)。file_stem を渡すとファイル名はそれ(LoRA は
     <file_stem>.lora.gguf、焼き込みは <file_stem>.gguf)。overwrite=False なら、同じ名前のファイルがあれば書かずに
-    FILE_EXISTS を返す(UI は確かめてから上書きする)。LoRA は小さいので、UI から落とせる URL も返す。"""
+    FILE_EXISTS を返す(UI は確かめてから上書きする)。LoRA は小さいので、UI から落とせる URL も返す。
+    adapter_name は LoRA の名前の欄(general.name。name はレシピの名前なので別の引数。空の文字列は省いたのと同じ)。"""
     import re
     from pathlib import Path
     from .steer import GneError
@@ -169,6 +171,8 @@ def _headproj_export(s, recipe: str | None = None, out: str | None = None, *, un
         path = s.default_export_path(r, bake=bake, kind="headproj", name=nm)
     if not overwrite and path.exists():
         raise GneError("FILE_EXISTS", f"{path.name} はもうあります", "上書きするか、別の名前にしてください")
+    if adapter_name is not None and str(adapter_name).strip():
+        p["name"] = str(adapter_name).strip()
     d = s.headproj_export(r, path, **p)
     d["file"] = Path(d["path"]).name
     if not bake and Path(d["path"]).parent.resolve() == s.store.export_dir().resolve():

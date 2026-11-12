@@ -3005,10 +3005,13 @@ def test_recipe_lora_bake_panel(refine_server, browser):
         pg.wait_for_selector(".rc-lx", timeout=5000)
         assert pg.evaluate("document.querySelector('#lx-requant').disabled")                 # LoRA では焼き込みの欄は使わない
         assert pg.evaluate("document.querySelector('#lx-file').placeholder") == "ppx-n2"       # ファイル名の既定はレシピの名前
+        pg.fill("#lx-adname", "tone adapter")                                                # LoRA の名前の欄(general.name)
+        pg.dispatch_event("#lx-adname", "input")
         pg.click("#lx-go")
         pg.wait_for_function("document.querySelector('#lx-result a[download]')", timeout=10000)
         assert posts[0]["kind"] == "headproj_export" and posts[0]["params"] == {
-            "units": ["12:H5:s10@ppx", "12:H3:s7@ppx"], "name": "ppx-n2", "bake": False, "file_stem": "ppx-n2", "overwrite": False}
+            "units": ["12:H5:s10@ppx", "12:H3:s7@ppx"], "name": "ppx-n2", "bake": False, "file_stem": "ppx-n2", "overwrite": False,
+            "adapter_name": "tone adapter"}
         assert "--lora" in pg.evaluate("document.querySelector('#lx-result').textContent")
         pg.check("input[name=lx-kind][value=bake]")
         assert pg.evaluate("document.querySelector('#lx-file').placeholder") == "ppx-n2-headproj"
@@ -3027,6 +3030,7 @@ def test_recipe_lora_bake_panel(refine_server, browser):
         assert p["bake"] is True and p["via_f16"] is True and p["llama_quantize"] == "/opt/llama-quantize" and p["verify"] is True \
             and p["contrast"] == "/c/x.yaml" and "requant" not in p and p["strip_meta"] is True
         assert "strip_meta" not in posts[0]["params"]                                   # 既定は記録を入れる
+        assert "adapter_name" not in p and pg.evaluate("document.querySelector('#lx-adname')") is None   # 焼き込みには名前の欄が無い
         txt = pg.evaluate("document.querySelector('#lx-result').textContent")
         assert "✓" in txt and ("9100 MB" in txt) and "quantize.imatrix.dataset" in txt                # 残った手元のパスを知らせる
         # 同じ名前のファイルがある(ジョブが FILE_EXISTS で失敗)→「上書きする」で overwrite: true を付けて投げ直す
