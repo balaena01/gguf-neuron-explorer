@@ -178,12 +178,20 @@ def _headproj_export(s, recipe: str | None = None, out: str | None = None, *, un
 
 
 def _layers(x) -> list[int] | None:
-    """層の指定(リスト・"8,14,20"・"10-16")→ 層のリスト。"""
-    if x is None or isinstance(x, (list, tuple)):
-        return None if x is None else [int(L) for L in x]
+    """層の指定(リスト・"8,14,20"・"10-16"・混ぜた "8,10-12")→ 層のリスト。リストの中の文字列("11-23")も同じ読み方で開く。"""
+    from .cli import parse_layers
+    if x is None:
+        return None
+    if isinstance(x, (list, tuple)):
+        out: list[int] = []
+        for L in x:
+            if isinstance(L, str):
+                out.extend(parse_layers(L) or [])
+            else:
+                out.append(int(L))
+        return out
     if isinstance(x, int):
         return [x]
-    from .cli import parse_layers
     return parse_layers(str(x))
 
 
@@ -319,15 +327,18 @@ def _fish_try(s, contrast=None, spec: dict | None = None, direction: str | None 
     return {**fish.try_step(s, path, direction=direction or q.get("name") or cname, **q), "contrast_path": path}
 
 
-def _fish_pipeline(s, contrast=None, spec: dict | None = None, **p) -> dict:
+def _fish_pipeline(s, contrast=None, spec: dict | None = None, summary: bool = False, **p) -> dict:
     """FiSH を最初から最後まで(方向 → ニューロンの表 → 鍵 → ユニット → 当てた状態で鍵を作り直す → 式どおりか → 足した量)。
     層(layers)は必須("11-23" のような範囲でもよい)。ニューロンは既定の候補(表の上から)か neurons({層: [番号…]})。強さ alpha は
-    渡した値をそのまま使う(数 1 つなら全部の区切りに同じ値、"1,1,0.8" か [1, 1, 0.8] なら区切りごと)。"""
+    渡した値をそのまま使う(数 1 つなら全部の区切りに同じ値、"1,1,0.8" か [1, 1, 0.8] なら区切りごと)。
+    save(名前か .yaml のパス)を渡すと、できたユニットをレシピのファイルに書く(結果の recipe_path)。summary=True なら、結果の
+    代わりに短い要約(fish.summary: 式どおりか・ユニットとニューロンの数・保存先・足した量)と、ユニットの書き方のリストだけを返す。"""
     from . import fish
     path, q, cname = _fish_args(s, contrast, spec, p, fish.SETTINGS)
     if isinstance(q.get("neurons"), dict):
         q["neurons"] = {int(k): v for k, v in q["neurons"].items()}
-    return fish.pipeline(s, path, name=q.pop("name", None) or cname, **q)
+    d = fish.pipeline(s, path, name=q.pop("name", None) or cname, **q)
+    return {**d["summary"], "units": d["units"], "contrast_path": d["contrast_path"]} if summary else d
 
 
 def compact_key_causal(d: dict) -> dict:

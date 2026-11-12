@@ -174,12 +174,14 @@ def embed_projection(weights, R: np.ndarray, *, chunk: int = 16384) -> np.ndarra
 
 
 def write_lora_tensors(weights, tensors: dict[str, tuple[np.ndarray, np.ndarray]], path: str | Path, *, name: str,
-                       kv: dict[str, str] | None = None, dtype=np.float32) -> dict:
+                       kv: dict[str, str] | None = None, dtype=np.float32, source_id: bool = True) -> dict:
     """LoRA アダプタ GGUF を書く(ablate・ヘッドの方向成分の射影 CHANGE-06・因果スクリーニングで共用)。
     tensors[テンソル名] = (lora_a, lora_b)。ふつうのテンソルは lora_a (r, in)・lora_b (n_embd, r)(numpy の形。
     W x + B (A x))、token_embd は lora_a (n_vocab, r)・lora_b (n_embd, r)(get_rows の後に足す向き)。
     adapter.lora.alpha は書かない(倍率 = アダプタの倍率。層ごとに r が違っても 1 倍)。dtype=np.float16 で半分の大きさ
-    (スクリーニングの一時ファイル用)。kv は gne.* のメタデータ(JSON の文字列)。"""
+    (スクリーニングの一時ファイル用)。kv は gne.* のメタデータ(JSON の文字列)。source_id=False なら、元のモデルの識別子
+    (gne.source_model_id)を書かない(人に渡す版。name にも元のモデルの名前を入れないのは呼ぶ側の役目)。
+    general.architecture(arch の名前)は、llama.cpp がアダプタとモデルの組み合わせを確かめるのに使うので、いつも書く。"""
     m = weights.meta
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     w = GGUFWriter(str(path), arch=m.arch)
@@ -188,7 +190,8 @@ def write_lora_tensors(weights, tensors: dict[str, tuple[np.ndarray, np.ndarray]
     w.add_name(name)
     for k, v in (kv or {}).items():
         w.add_key_value(k, v, GGUFValueType.STRING)
-    w.add_key_value("gne.source_model_id", m.model_id, GGUFValueType.STRING)
+    if source_id:
+        w.add_key_value("gne.source_model_id", m.model_id, GGUFValueType.STRING)
 
     def order(n: str):
         parts = n.split(".")

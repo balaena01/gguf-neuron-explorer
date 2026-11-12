@@ -174,12 +174,16 @@ gne direction key --contrast C --target mlpin --layers L --positions pos:1-3 --n
 gne nw key --contrast C --layers L --role scene|one [--iv R]                             # 場面の鍵 / ほぼ 1 を返す鍵
 gne nw verify --recipe R | --unit 11:N2045:nw:a1@NAME.seg1#SCENE&POS [--iv R]            # LoRA が式どおりか(数秒)
 gne nw check --recipe R --contrast C [--subset odd] [--replies own|base] [--iv R]        # 位置ごとの鍵の反応と足した量(狙う場面・dont_touch)
-gne nw export --recipe R -o FILE.lora.gguf                                               # LoRA(nw だけ)。--bake はエラー
+gne nw export --recipe R -o FILE.lora.gguf [--strip-meta] [--name N]                     # LoRA(nw だけ)。--bake はエラー。--strip-meta は gne の記録と元のモデルの名前・識別子を書かない(名前の欄は adapter か --name)
+gne nw pipeline --contrast C --layers 11-23 --alpha 1,1,0.8 --save R.yaml                # 方向 → ニューロン → 鍵 → ユニット → 鍵の作り直し → verify → check を 1 回で。短い要約が出る。--save でレシピを書く
 gne headproj export --recipe R                                                           # proj・keyed・gain と nw を 1 つの LoRA に(--bake は nw があるとエラー)
 ```
 
 - ユニット: `L:Nn:nw:aα@方向#鍵`(鍵 1 つ)、`L:Nn:nw:aα@方向#ゲートの鍵&入力の鍵`(鍵 2 つ)、`L:Nn+Nm:nw:aα@方向#鍵&ほぼ1を返す鍵`(上限つき)。`!s8`・`!cap0.4-0.8` を後ろに付けられる。YAML は `{layer, neuron, mode: nw, direction, key, key2, pair, s, cap, alpha}`。
 - 時間の目安(Qwen3.5-4B、GPU): 方向(32 問、返事 120 トークン、区切りつき)約 30 秒、`--stack-layers` に 3 層で + 2〜3 分(1 トークンずつ読む)。`nw neurons` 1〜2 分、鍵 1 本 20〜40 秒、verify 数秒、check 30〜60 秒。層の数で伸びる: 13 層(11-23)・40 問では、方向と鍵に 16 分、まとめて作ると 20〜30 分。`nw try` は狙う場面を 1 問ずつ生成する(30 問・120 トークンで 1〜2 分)。
+- **`--stack-layers` の層**は `11-23`・`11,18,23`・`11,14-16,23` のどれでも書ける(`--layers` と同じ読み方)。読み直す回数((層の数 − 1) × 質問の数 × 返事の長さ)は始める前の見積もりに入り、30 分を超えると `--yes` が要る。
+- **`nw try` の結果のファイル**: `--name` を省くと「方向の名前_設定から作った 6 文字_try.json」で、層・強さ・質問・温度・種が違えば別のファイル。`--name` を付けるとその名前で、同じ名前の前の結果は上書きする(注が出る)。比べる結果は `--name` で分ける。
+- **`nw pipeline` / `fish.pipeline` の結果**は大きい(ニューロンの表まで入る)。CLI は要約だけを出す(`--json --full` で全部)。Python は戻り値の `summary`・`gne.fish.summary_text(結果)`、ジョブ・MCP は `summary: true`。レシピは `--save`(`save`)を渡したときだけ書く(名前なら `<root>/recipes/<名前>.yaml`)。
 - **層と強さ**: 層は範囲(`11-23`)でも並び(`11,18,23`)でも書ける。強さは区切りごとに書ける(`--alpha 1,1,0.8`、ジョブ・MCP は `alpha: [1, 1, 0.8]`。1 つだけなら全部の区切りに同じ値)。Qwen3.5-4B の 1 例では、離れた 3 層より続いた 13 層が良く、生成なしの指標の上位の数層に絞ると悪くなった。作る前に `gne nw try` で、層の組と強さを返事で比べる(足すのは狙う場面の質問の返事だけ。層 0 と最終層には足せない。数は繰り返し・空・正規表現の一致で、口調と話のかみ合いは読んで確かめる)。
 - 見るところ: verify の「ほかのニューロンの変化」が 0、check の狙う場面の量が 1 前後・dont_touch が 0 前後・負が小さいこと。最後は返事を読む。
 - MCP: `direction(same_reply, segments, stack_layers)`、`direction_key(target="mlpin", positions="pos:1-3" | role="scene"|"one", iv)`、`nw_neurons`・`nw_check`・`nw_try(direction, contrast, layers, alpha)`(ジョブ)、`nw_verify`、`nw_export`、`fish_pipeline(contrast, layers, alpha)`(まとめて作るジョブ)、`direction_key_pipeline(same_reply)`。

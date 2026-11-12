@@ -222,7 +222,7 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
         方向の作り方(positions="response" のとき。結果の method に記録): same_reply=False(既定)は今までどおり、A 側・B 側が
         それぞれ自分の返事を読んだ差。same_reply=True は、同じ返事(A 側の返事)を A 側の条件と B 側の条件の両方で読ませた差
         (条件の違いだけの成分。読んでいる語の違いから来る成分が入らない)。segments="0,1-3,4-" で返事の位置で分けた方向も作る
-        (位置 0 = 返事を書き始める直前。区切り i は "NAME.seg<i>" という名前でユニットに書ける)。stack_layers="11,18,23" は、
+        (位置 0 = 返事を書き始める直前。区切り i は "NAME.seg<i>" という名前でユニットに書ける)。stack_layers="11-23"(範囲)・"11,18,23"・[11, 18, 23] は、
         区切りつきの方向をその層に重ねて書く前提の値にする(上の層は、下の層に足した後の残り。時間がかかる)。"""
         try:
             params = {"contrast": str(_contrast_path(session, contrast, None, None, None, name)), "name": name,
@@ -682,7 +682,8 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
                             segments: str | None = None, form: str | None = None, name: str | None = None,
                             same_reply: bool | None = None, stack: bool | None = None, rekey: bool | None = None,
                             pseudo: int | None = None, max_tokens: int | None = None, response_tokens: int | None = None,
-                            iv: str | list[str] | None = None, neurons: dict[str, list[int]] | None = None, top: int = 20) -> dict:
+                            iv: str | list[str] | None = None, neurons: dict[str, list[int]] | None = None, top: int = 20,
+                            save: str | None = None, summary: bool = False) -> dict:
         """FiSH を最初から最後まで 1 回のジョブで作る(job_status で結果。UI の FiSH のタブの「まとめて作る」と同じ): 方向 → ニューロンの表 →
         鍵 → ユニット → そのユニットを当てた状態で鍵を作り直す → 式どおりか → 足した量。contrast は対照集合の表(name・system_a・
         user_prompts・dont_touch と、設定の fish)か、configs/contrast/ の名前・パス、configs/fish/ のひな形の名前。
@@ -691,14 +692,19 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
         two / one。渡していない引数は、表の fish の設定、その次に既定(segments "0,1-3,4-"、form cap、alpha 0.9、same_reply・stack・rekey あり)。
         層を増やすと、要るニューロンの数(層 × 区切り × 形の個数)と作成時間が増える(Qwen3.5-4B の 13 層で 78 個、方向と鍵に 16 分ほど)。
         結果: units(レシピのユニットの書き方)、direction・usage・neurons・keys・rekeyed・verify(ok)・check(groups.scene と
-        dont_touch:<名前> の、位置ごとの足した量)、stage_seconds。作る前に層と強さを比べるなら nw_try。"""
+        dont_touch:<名前> の、位置ごとの足した量)、stage_seconds、summary。作る前に層と強さを比べるなら nw_try。
+        save(名前か .yaml で終わるパス)を渡すと、できたユニットをレシピのファイルに書く(名前なら <root>/recipes/<名前>.yaml。結果の
+        recipe_path。nw_verify・nw_check・nw_export の recipe にその名前を渡せる)。省くと書かない。
+        結果は数十万字になる(ニューロンの表・鍵の表・足した量の細目)。summary=True なら、代わりに短い要約だけを返す: ok(式どおりか)・
+        n_units・n_neurons・recipe_path・check(場面の群 × 位置ごとの足した量の平均・最小・最大)・units(ユニットの書き方)。"""
         from .jobs import _layers
         try:
             if not _layers(layers):
                 raise GneError("BAD_ARGS", "layers に書く層を指定してください(例 [11, 18, 23] か \"11-23\")")
             p = {**_fish_contrast(contrast), "layers": layers, "alpha": alpha, "segments": segments, "form": form, "name": name,
                  "same_reply": same_reply, "stack": stack, "rekey": rekey, "pseudo": pseudo, "max_tokens": max_tokens,
-                 "response_tokens": response_tokens, "iv": iv, "neurons": neurons, "top": top}
+                 "response_tokens": response_tokens, "iv": iv, "neurons": neurons, "top": top, "save": save,
+                 "summary": True if summary else None}
             return jobs.start("fish_pipeline", {k: v for k, v in p.items() if v is not None}).view()
         except Exception as e:  # noqa: BLE001
             return _err(e)
@@ -716,6 +722,8 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
         ときの重ねる層。結果: scene(足した返事)・baseline(同じ質問に何も足さない返事)・others(dont_touch の質問に何も足さない返事)の
         それぞれに counts(n・loop = 繰り返しに落ちた返事・empty・at_limit・tokens・match = 正規表現の一致)と replies。層の組・区切り
         ごとの強さを変えて数回投げ、返事を読んで比べてから fish_pipeline に進む。temperature > 0 でサンプリング。
+        結果は <root>/behave/<model_id>/<name>_try.json にも残る。name を省くと「<方向の名前>_<設定から作った 6 文字>」で、設定(層・強さ・
+        質問・長さ・温度・種など)が違えば別のファイルになる。name を渡すとその名前で、同じ名前の前の結果は上書きする(notes で知らせる)。
         制約: 足せるのは層 1 〜 最終層の 1 つ手前。狙う場面は 1 問ずつ生成する(付け替えは 1 本の列ごと)。数は機械的に数えたもので、
         口調が出たか・相手の発言に合っているかは返事を読んで確かめる。"""
         try:
@@ -728,12 +736,15 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
 
     @srv.tool()
     async def nw_export(recipe: str | None = None, units: list[str] | None = None, name: str | None = None,
-                        strip_meta: bool = False) -> dict:
+                        strip_meta: bool = False, adapter_name: str | None = None) -> dict:
         """nw のユニットを LoRA アダプタ GGUF(<root>/export/<名前>-nw.lora.gguf)に書き出す。llama.cpp の --lora で当てる(倍率 1)。
         ffn_gate・ffn_up・ffn_down への差し替えで、ニューロン 1 個あたり 3 つのテンソルに階数 1。焼き込みは無い(Q8_0 の ffn_down は
         32 個の重みが 1 つの倍率を共有するので、1 列だけを方向に差し替えると誤差が 9 割を超える)。レシピのほかの介入(keyed・gain など)は
         このファイルに入らない。proj(CHiPS)・keyed・gain と一緒に 1 つの LoRA にするなら headproj_export / keyed_export を使う
-        (nw のユニットも同じファイルに入る。bake=True はエラー)。"""
+        (nw のユニットも同じファイルに入る。bake=True はエラー)。
+        strip_meta=True(人に渡す版)は、gne の記録(gne.nw)と、元のモデルを特定できる値(元のモデルの識別子、名前の欄に入る元のモデルの
+        名前・レシピの名前)を書かない。adapter_name はファイルの名前の欄(general.name。省くと、ふつうは「<元のモデルの名前> nw
+        <レシピの名前>」、strip_meta では "adapter")。name は units を渡したときのレシピの名前(出力のファイル名に使う)。"""
         try:
             if bool(recipe) == bool(units):
                 raise GneError("BAD_ARGS", "recipe(保存したレシピの名前)か units のどちらかを渡してください")
@@ -741,7 +752,7 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
             out = session.store.root / "export" / f"{r.name or 'recipe'}-nw.lora.gguf"
         except Exception as e:  # noqa: BLE001
             return _err(e)
-        return await call(session.nw_export, r, out, strip_meta=strip_meta)
+        return await call(session.nw_export, r, out, strip_meta=strip_meta, name=adapter_name)
 
     @srv.tool()
     async def direction_key_check(key: str, contrast: str | None = None, subset: str = "odd", layers: list[int] | str | None = None,

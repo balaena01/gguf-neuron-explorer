@@ -144,7 +144,20 @@ def estimate(session, kind: str, params: dict) -> dict:
         n_conv = len(cs.prompts("A")) + len(cs.prompts("B"))
         sec = n_conv * sp.setprefill / 1000 * 2
         if p.get("positions") == "response":
-            sec += 2 * sp.gen(len(cs.user_prompts), int(p.get("response_tokens", 96)))
+            # 返事を作る回数: 今までの作り方は A 側と B 側、same_reply は A 側だけ(B 側は A 側の返事を読むだけで、生成しない)
+            rt = int(p.get("response_tokens", 96))
+            sec += (1 if p.get("same_reply") else 2) * sp.gen(len(cs.user_prompts), rt)
+            # 層を重ねる(stack_layers)とき: いちばん下の層を除く層ごとに、A 側の全部の質問の返事を 1 本ずつ・1 トークンずつ
+            # 読み直す(direction._stack_segments。位置ごとに control vector を付け替えるので、まとめて読めない)。
+            # 回数 = (層の数 − 1) × A 側の質問の数 × (返事の長さ + 1)。1 回は生成の 1 step の 2 倍ほど
+            # (捕捉つきの 1 トークンの評価。Qwen3.5-4B Q8_0 の実測: 40 問・13 層で約 800 秒、32 問・120 トークン・3 層で約 170 秒)。
+            # 返事が EOG で早く終われば短い。
+            n_stack = _n_stack_layers(p.get("stack_layers"), m.n_layer)
+            if n_stack > 1 and p.get("same_reply") and p.get("segments"):
+                evals = (n_stack - 1) * len(cs.prompts("A")) * (rt + 1)
+                stack_s = evals * 2 * sp.step(1) / 1000
+                sec += stack_s
+                detail = {"stack_layers": n_stack, "stack_evals": evals, "stack_seconds": round(stack_s, 1)}
         if p.get("select") == "auto":
             layers = p.get("layers")
             n_l = len(candidate_layers(m.n_layer, layers if isinstance(layers, str) else None))
@@ -152,7 +165,7 @@ def estimate(session, kind: str, params: dict) -> dict:
             n_ctrl = int(p.get("random_controls", 16))
             ctrl_layers = n_l if p.get("mode", "ablate") == "ablate" else min(n_l, 3)   # add は選ばれ得る層だけ(多くて数層)
             sec += (n_l + 1 + n_ctrl * (1 if p.get("mode", "ablate") == "ablate" else ctrl_layers)) * per
-            detail = {"layers": n_l, "seconds_per_measure": round(per, 2), "controls": n_ctrl}
+            detail = {**detail, "layers": n_l, "seconds_per_measure": round(per, 2), "controls": n_ctrl}
     elif kind == "eval":
         from .evalx import load_suite
         st = load_suite(p.get("suite"))
@@ -329,6 +342,17 @@ def estimate(session, kind: str, params: dict) -> dict:
         sec = 10.0 * sp.setprefill / REF["setprefill_ms"]
     return {"kind": kind, "seconds": None if sec is None else float(sec), "detail": detail, "speed": sp.to_dict(),
             "needs_confirm": bool(sec is not None and sec > CONFIRM_S)}
+
+
+def _n_stack_layers(stack, n_layer: int) -> int:
+    """方向の stack_layers(リストか "11-23"・"11,18,23")の層の数。読めなければ 0(見積もりでは止めない。本番がエラーを返す)。"""
+    if stack is None or (isinstance(stack, str) and not stack.strip()):
+        return 0
+    try:
+        from .jobs import _layers
+        return len({int(L) for L in (_layers(stack) or []) if 1 <= int(L) < n_layer - 1})
+    except Exception:  # noqa: BLE001
+        return 0
 
 
 def _behave_cost(session, sp: Speed, p: dict) -> dict:

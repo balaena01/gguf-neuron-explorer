@@ -247,13 +247,17 @@ def _table(rows: list[tuple[str, str]]) -> str:
 
 
 def parse_layers(spec: Optional[str]) -> Optional[list[int]]:
-    """"all" / "10-16" / "1,5,9-12" → 層のリスト(all は None)。"""
-    if spec is None or spec == "all":
+    """"all" / "10-16" / "1,5,9-12" → 層のリスト(all は None)。数の間は、コンマの代わりに空白でもよい("11 18 23")。
+    層の指定を文字列で受ける所(--layers・--stack-layers、ジョブ・MCP・UI の layers / stack_layers)は、どれもこの関数で読む。"""
+    if spec is None or spec.strip() == "all":
         return None
     out: list[int] = []
-    for part in spec.split(","):
+    parts = [x for x in re.sub(r"(?<=\d)\s+(?=\d)", ",", spec.strip()).split(",") if x.strip()]
+    if not parts:
+        raise GneError("BAD_ARGS", f"層の指定 {spec!r} を読めません", "all / 10-16 / 1,5,9-12")
+    for part in parts:
         m = re.fullmatch(r"\s*(\d+)\s*(?:-\s*(\d+)\s*)?", part)
-        if not m:
+        if not m or (m.group(2) is not None and int(m.group(2)) < int(m.group(1))):
             raise GneError("BAD_ARGS", f"層の指定 {spec!r} を読めません", "all / 10-16 / 1,5,9-12")
         a, b = int(m.group(1)), int(m.group(2) or m.group(1))
         out.extend(range(a, b + 1))
@@ -1122,7 +1126,7 @@ def direction(c: Common, holder: dict,
               random_controls: int = typer.Option(16, "--random-controls", help="--select auto: 層ごとの同じ大きさのランダムな向きの対照の本数(0 で対照なし)"),
               same_reply: bool = typer.Option(False, "--same-reply", help="--positions response: B 側も A 側の返事を読む(同じ返事を両方の条件で読ませた差。読んでいる語の違いから来る成分が入らない)。既定は今までどおり、それぞれ自分の返事を読んだ差"),
               segments: Optional[str] = typer.Option(None, "--segments", help="--positions response: 返事の位置で分けた方向も作る(例 0,1-3,4-。位置 0 = 返事を書き始める直前)。区切り i の方向は NAME.seg<i> という名前で使える"),
-              stack_layers: Optional[str] = typer.Option(None, "--stack-layers", help="--same-reply と --segments と一緒に: 区切りつきの方向を、これらの層(例 11-23 か 11,18,23)に重ねて書く前提の値にする(上の層は、下の層に足した後の残り)。1 トークンずつ読むので時間がかかる"),
+              stack_layers: Optional[str] = typer.Option(None, "--stack-layers", help="--same-reply と --segments と一緒に: 区切りつきの方向を、これらの層(例 11-23 か 11,18,23。11,14-16 のように混ぜてもよい)に重ねて書く前提の値にする(上の層は、下の層に足した後の残り)。1 トークンずつ読むので時間がかかる(層の数 − 1 に比例。見積もりに入る)"),
               yes: bool = _YES):
     """対照集合から全層の方向 r_L(mean_A − mean_B)を作って保存し、--select auto で効果の大きい層を選ぶ(§6.17)。
     作った方向は L:dir:NAME:dose のユニットで足せる(gne steer / chat / eval / export-cvec)。
@@ -1142,7 +1146,8 @@ def direction(c: Common, holder: dict,
     s = holder["session"] = c.session()
     _gate(s, "direction", {"contrast": str(contrast), "positions": positions, "select": select, "mode": mode,
                            "layers": layers, "max_tokens": max_tokens, "response_tokens": response_tokens,
-                           "random_controls": random_controls}, yes, None)
+                           "random_controls": random_controls, "same_reply": same_reply, "segments": segments,
+                           "stack_layers": stack_layers}, yes, None)
     d = s.direction(contrast=contrast, name=name, positions=positions, select=select, mode=mode, layers=layers,
                     dose=dose, max_tokens=max_tokens, kl_max=kl_max, min_distinct=min_distinct, per_layer=per_layer,
                     judge_model=judge_model, judge_target=judge_target, response_tokens=response_tokens,
@@ -3107,7 +3112,7 @@ def nw_try(c: Common, holder: dict,
            temperature: float = typer.Option(0.0, "--temperature", help="0 より大きいとサンプリング(種は --seed。質問ごとにずらす)。既定は greedy"),
            others: bool = typer.Option(True, "--others/--no-others", help="書き込みたくない場面の質問にも(何も足さずに)答えさせる"),
            baseline: bool = typer.Option(True, "--baseline/--no-baseline", help="狙う場面の質問に、何も足さないときの返事も作る"),
-           name: Optional[str] = typer.Option(None, "--name", help="結果のファイルの名前(<root>/behave/<model_id>/<名前>_try.json。既定は方向の名前)"),
+           name: Optional[str] = typer.Option(None, "--name", help="結果のファイルの名前(<root>/behave/<model_id>/<名前>_try.json)。省くと「方向の名前_設定から作った 6 文字」で、層・強さ・質問・長さ・温度・種などが違えば別のファイルになる。付けると、同じ名前の前の結果は上書きする(注が出る)。比べたい結果は --name で分けておく"),
            iv: Optional[list[str]] = typer.Option(None, "--iv", help="この介入(レシピの名前かパス、またはユニットの書き方)を先に当てた状態で試す")):
     """重みに入れる前に試す。区切りつきの方向を、ニューロンにも鍵にも入れずに、層の出力へ直接足して返事を作る(返事の位置の区切りが
     変わるところで control vector を付け替える)。足すのは狙う場面の質問の返事だけ(場面は質問の群で決める。重みに入れたときの
@@ -3137,13 +3142,54 @@ def nw_try(c: Common, holder: dict,
     return d, "\n".join(lines), 0
 
 
+@gne_command(nw_app, "pipeline", "nw pipeline")
+def nw_pipeline(c: Common, holder: dict,
+                contrast: Path = typer.Option(..., "--contrast", help="対照集合(user_prompts = 狙う場面の質問、dont_touch = 書き込みたくない場面の質問)"),
+                layers: str = typer.Option(..., "--layers", help="書く層(例 11-23 か 11,18,23。モデルで違う。使う人が決める)"),
+                alpha: Optional[str] = typer.Option(None, "--alpha", help="強さ(既定 0.9)。1 つなら全部の区切りに同じ値、区切りごとに変えるなら 1,1,0.8(区切りの順)"),
+                segments: Optional[str] = typer.Option(None, "--segments", help="返事の位置の区切り(既定 0,1-3,4-)か、before:<正規表現>"),
+                form: Optional[str] = typer.Option(None, "--form", help="形: cap(上限つきの 2 個組、既定)/ two(鍵 2 つ)/ one(鍵 1 つ)"),
+                name: Optional[str] = typer.Option(None, "--name", help="方向と鍵の名前(既定は対照集合の name)"),
+                save: Optional[str] = typer.Option(None, "--save", help="できたユニットをレシピのファイルに書く(.yaml で終わるパスか、名前 = <root>/recipes/<名前>.yaml)。そのまま gne nw verify --recipe に渡せる。省くと書かない"),
+                same_reply: Optional[bool] = typer.Option(None, "--same-reply/--no-same-reply", help="方向を、同じ返事を両方の条件で読ませた差で作る(既定は作る)"),
+                stack: Optional[bool] = typer.Option(None, "--stack/--no-stack", help="上の層の方向を、下の層に書いた後の残りにする(既定はする。層の数に比例して時間がかかる)"),
+                rekey: Optional[bool] = typer.Option(None, "--rekey/--no-rekey", help="できたユニットを当てた状態で鍵を作り直す(既定は作り直す)"),
+                pseudo: Optional[int] = typer.Option(None, "--pseudo", help="比較用の鍵の本数(既定 4)"),
+                max_tokens: Optional[int] = typer.Option(None, "--max-tokens", help="鍵と足した量で返事を生成する長さ(既定 96)"),
+                response_tokens: Optional[int] = typer.Option(None, "--response-tokens", help="方向で返事を生成する長さ(既定 96)"),
+                top: int = typer.Option(20, "--top", help="ニューロンの表に層ごとに出す数"),
+                iv: Optional[list[str]] = typer.Option(None, "--iv", help="この介入(レシピの名前かパス、またはユニットの書き方)を先に当てた状態で作る"),
+                full: bool = typer.Option(False, "--full", help="--json のとき、要約ではなく結果を丸ごと出す(ニューロンの表・鍵の表・足した量の細目。数十万字)"),
+                yes: bool = _YES):
+    """FiSH をまとめて作る(UI の「まとめて作る」、ジョブ fish_pipeline と同じ): 方向 → ニューロンの表 → 鍵 → ユニット → そのユニットを
+    当てた状態で鍵を作り直す → 式どおりか → 足した量。層と強さは渡したものをそのまま使う(自動では決めない)。ニューロンは、働きの小さい順の
+    表の上から使う(選び直すなら gne nw neurons の表を見てレシピを書く)。出るのは短い要約(式どおりか、ユニットとニューロンの数、
+    足した量、レシピの保存先)。--save を付けると、gne nw verify / check / export の --recipe にそのまま渡せるレシピを書く。"""
+    from . import fish
+    from .jobs import _fish_pipeline
+    if not parse_layers(layers):
+        raise GneError("BAD_ARGS", "--layers に書く層を指定してください", "例 --layers 11-23")
+    s = holder["session"] = c.session()
+    p = {"contrast": str(contrast), "layers": layers, "alpha": alpha, "segments": segments, "form": form, "name": name, "save": save,
+         "same_reply": same_reply, "stack": stack, "rekey": rekey, "pseudo": pseudo, "max_tokens": max_tokens,
+         "response_tokens": response_tokens, "top": top, "iv": _iv_arg(iv)}
+    p = {k: v for k, v in p.items() if v is not None}
+    if save is not None:
+        fish.recipe_file(s, save)                    # 保存先が読めなければ、見積もりの前に止める
+    _gate(s, "fish_pipeline", p, yes, None)
+    d = _fish_pipeline(s, **p)
+    out = d if full else {**d["summary"], "units": d["units"], "contrast_path": d["contrast_path"]}
+    return out, fish.summary_text(d), 0 if d["summary"]["ok"] else 1
+
+
 @gne_command(nw_app, "export", "nw export")
 def nw_export(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Optional[list[str]] = _UNIT,
               out: Optional[Path] = typer.Option(None, "--out", "-o", help="出力(既定 <root>/export/<レシピ名>-nw.lora.gguf)"),
               direction: Optional[str] = typer.Option(None, "--direction", help="@NAME を省いたユニットの方向"),
               key: Optional[str] = typer.Option(None, "--key", help="#KEY を省いたユニットの鍵"),
               bake: bool = typer.Option(False, "--bake", help="焼き込み(対応していない。はっきりしたエラーを返す)"),
-              strip_meta: bool = typer.Option(False, "--strip-meta", help="gne の記録を残さない(人に渡す版)")):
+              strip_meta: bool = typer.Option(False, "--strip-meta", help="人に渡す版: gne の記録(gne.nw)と、元のモデルを特定できる値(元のモデルの識別子、名前の欄に入る元のモデルの名前・レシピの名前)を書かない。名前の欄は --name(省くと adapter)"),
+              name: Optional[str] = typer.Option(None, "--name", help="ファイルの名前の欄(general.name)。省くと「<元のモデルの名前> nw <レシピの名前>」、--strip-meta では adapter")):
     """nw のユニットを LoRA アダプタ GGUF に書き出す(llama.cpp の --lora で当てる)。ffn_gate・ffn_up・ffn_down への差し替えで、
     ニューロン 1 個あたり 3 つのテンソルに階数 1。焼き込みは無い(Q8_0 の ffn_down は 32 個の重みが 1 つの倍率を共有するので、
     1 列だけを方向に差し替えると誤差が 9 割を超える)。"""
@@ -3153,9 +3199,10 @@ def nw_export(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: O
         s._no_nw(r, bake=True)
         raise GneError("BAD_ARGS", "計算で作るニューロン(nw)は焼き込めません", "LoRA アダプタ(--bake なし)で書き出してください")
     out = out or (s.store.root / "export" / f"{r.name or 'recipe'}-nw.lora.gguf")
-    d = s.nw_export(r, out, strip_meta=strip_meta)
+    d = s.nw_export(r, out, strip_meta=strip_meta, name=name)
     d.pop("warnings", None)
-    lines = [f"{d['path']}({d['bytes'] / 1e6:.2f} MB、LoRA)"]
+    lines = [f"{d['path']}({d['bytes'] / 1e6:.2f} MB、LoRA、名前の欄 {d['general_name']!r}"
+             + ("、gne の記録と元のモデルの名前・識別子なし" if d.get("strip_meta") else "") + ")"]
     for x in d["nw"]:
         lines.append(f"  L{x['layer']} N{','.join(map(str, x['neurons']))}: {x['form']}、s {x['s']:g}、α {x['alpha']:+g}、方向 {x['direction']}、鍵 {x['key']}"
                      + (f" & {x['key2']}" if x["key2"] else "") + f"、鍵が反応する位置で |α|‖d‖ = {x['norm']:.2f}")

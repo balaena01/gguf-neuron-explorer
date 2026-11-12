@@ -10,6 +10,7 @@ CLI・ジョブ・MCP。
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -128,9 +129,61 @@ def test_direction_set_without_segments_is_unchanged(tmp_path):
 def test_help_lists_new_commands():
     from gne.cli import app
     r = CliRunner().invoke(app, ["nw", "--help"])
-    assert r.exit_code == 0 and all(x in r.output for x in ("neurons", "key", "verify", "check", "try", "export"))
+    assert r.exit_code == 0 and all(x in r.output for x in ("neurons", "key", "verify", "check", "try", "pipeline", "export"))
     r = CliRunner().invoke(app, ["direction", "--help"])
     assert "--same-reply" in r.output and "--segments" in r.output and "--stack-layers" in r.output
+    r = CliRunner().invoke(app, ["nw", "pipeline", "--help"])
+    assert r.exit_code == 0 and "--save" in r.output and "--layers" in r.output
+    r = CliRunner().invoke(app, ["nw", "export", "--help"])
+    assert "--strip-meta" in r.output and "--name" in r.output
+
+
+def test_layer_ranges_are_read_the_same_way():
+    """層の指定は、どの入口でも同じ読み方: 範囲・並び・混ぜた書き方・空白区切り・リストの中の文字列。"""
+    from gne.cli import parse_layers
+    from gne.estimate import _n_stack_layers
+    from gne.jobs import _layers
+    for text, want in (("11-23", list(range(11, 24))), ("11,18,23", [11, 18, 23]), ("11,14-16,23", [11, 14, 15, 16, 23]),
+                       ("11 18 23", [11, 18, 23]), (" 8 , 12 ", [8, 12]), ("12,8,8", [8, 12]), ("5", [5])):
+        assert parse_layers(text) == want and _layers(text) == want, text
+    assert _layers(["11-13", 20]) == [11, 12, 13, 20] and _layers([8, 12]) == [8, 12] and _layers(7) == [7] and _layers(None) is None
+    assert parse_layers("all") is None and parse_layers(None) is None
+    for bad in ("", "a", "11-", "23-11", "11--23", "1.5"):
+        with pytest.raises(GneError):
+            parse_layers(bad)
+    # 見積もりの層の数え方も同じ読み方(足せない層 0 と最終層は数えない。読めない指定は 0 で、見積もりでは止めない)
+    assert _n_stack_layers("11-23", 32) == 13 and _n_stack_layers([11, 18, 23], 32) == 3 and _n_stack_layers("0,8,31", 32) == 1
+    assert _n_stack_layers(None, 32) == 0 and _n_stack_layers("", 32) == 0 and _n_stack_layers("x", 32) == 0
+
+
+def test_pipeline_summary_and_recipe_file(tmp_path):
+    """まとめて作った結果の短い要約と、レシピの保存先の決め方(モデルなし)。"""
+    from types import SimpleNamespace
+
+    from gne import fish
+    amount = lambda m: {"amount": {"mean": m, "min": m - 0.1, "max": m + 0.1, "n": 4}, "rho_gate": None}
+    d = {"name": "tt", "layers": [8, 12], "segments": ["0", "1-"], "form": "cap", "alpha": [1.0, 0.8], "alphas": [1.0, 0.8],
+         "units": ["8:N1+N2:nw:a1@tt.seg0#tt_r_p0&tt_r_one"] * 4, "unit_rows": [{"neuron": 1, "pair": 2}] * 4, "key_base": "tt_r",
+         "rekeyed": {"rows": []}, "verify": {"ok": True, "layers": []}, "usage": {"layers": [{"rows": [{"neuron": i} for i in range(5000)]}]},
+         "check": {"groups": {"scene": {"n": 6, "loops": 0, "units": [{"unit": "u", "positions": {"0": amount(1.0), "1": amount(0.8), "2": {"amount": None}}},
+                                                                     {"unit": "v", "positions": {"0": amount(0.6), "1": amount(0.8)}}]},
+                              "dont_touch:tasks": {"n": 4, "loops": 0, "units": [{"unit": "u", "positions": {"0": amount(0.0)}}]}}},
+         "notes": ["n1"], "stage_seconds": {"direction": 1.234}, "seconds": 9.87, "recipe_path": str(tmp_path / "tt.yaml")}
+    sm = fish.summary(d)
+    assert sm["ok"] is True and sm["n_units"] == 4 and sm["n_neurons"] == 8 and sm["recipe_path"].endswith("tt.yaml")
+    assert sm["check"]["scene"]["amount"]["0"] == {"mean": 0.8, "min": 0.5, "max": 1.1} and "2" not in sm["check"]["scene"]["amount"]
+    assert sm["check"]["dont_touch:tasks"]["n"] == 4 and sm["layers"] == [8, 12] and sm["rekeyed"] is True
+    assert len(json.dumps(sm, ensure_ascii=False)) < 2000 < len(json.dumps(d, ensure_ascii=False))      # 表は入れない
+    text = fish.summary_text(d)
+    assert "合格" in text and "ユニット 4 個" in text and "ニューロン 8 個" in text and "tt.yaml" in text and "[scene]" in text
+    assert fish.summary_text(sm) == text                                       # 要約からでも、結果そのものからでも同じ文
+    assert "保存していません" in fish.summary_text({**d, "recipe_path": None}) and "不合格" in fish.summary_text({**d, "verify": {"ok": False}})
+    s = SimpleNamespace(store=SimpleNamespace(recipes_dir=lambda: tmp_path / "recipes"))
+    assert fish.recipe_file(s, "tt_nw") == tmp_path / "recipes" / "tt_nw.yaml"
+    assert fish.recipe_file(s, str(tmp_path / "x" / "tt_nw.yaml")) == tmp_path / "x" / "tt_nw.yaml"
+    for bad in ("a b", "dir/name", str(tmp_path / "a b.yaml")):
+        with pytest.raises(GneError):
+            fish.recipe_file(s, bad)
 
 
 # --- モデルあり ----------------------------------------------------------------------------------------
@@ -192,6 +245,35 @@ def test_direction_same_reply_and_segments(built):
                {"positions": "response", "segments": "0,1-", "same_reply": True, "stack_layers": "0,8"}):
         with pytest.raises(GneError):
             s.direction(contrast=built["contrast"], name="nw_bad", **kw)
+
+
+@pytest.mark.model
+def test_direction_estimate_counts_stacked_layers(built):
+    """方向の見積もりに、層を重ねる分(層ごとに、返事を 1 トークンずつ読み直す回数)が入る。"""
+    from gne.estimate import Speed, estimate
+    s = built["s"]
+    base = {"contrast": str(built["contrast"]), "positions": "response", "response_tokens": 96, "same_reply": True, "segments": "0,1-3,4-"}
+    plain = estimate(s, "direction", base)
+    one = estimate(s, "direction", {**base, "stack_layers": "8"})                   # 1 層だけなら読み直しは無い
+    st = estimate(s, "direction", {**base, "stack_layers": "8-20"})
+    n_a, sp = len(CONTRAST["user_prompts"]), Speed(s)
+    evals = 12 * n_a * 97                                                          # (層の数 − 1) × 質問の数 × (返事の長さ + 1)
+    assert st["detail"]["stack_layers"] == 13 and st["detail"]["stack_evals"] == evals
+    assert st["seconds"] - plain["seconds"] == pytest.approx(evals * 2 * sp.step(1) / 1000, rel=1e-6)
+    assert one["seconds"] == pytest.approx(plain["seconds"]) and "stack_evals" not in one["detail"]
+    assert st["seconds"] > 10 * plain["seconds"]                                    # 13 層では、読み直しが大半になる
+    for form in ("8,9,10,11,12,13,14,15,16,17,18,19,20", list(range(8, 21)), ["8-20"], "8-12,13-20"):
+        assert estimate(s, "direction", {**base, "stack_layers": form})["seconds"] == pytest.approx(st["seconds"]), form
+    # 層の数にほぼ比例する。重ねる前提にならない組み合わせ(same_reply か segments が無い)と、読めない指定では足さない
+    three = estimate(s, "direction", {**base, "stack_layers": "8,12,16"})
+    assert (three["seconds"] - plain["seconds"]) * 6 == pytest.approx(st["seconds"] - plain["seconds"], rel=1e-6)
+    assert estimate(s, "direction", {**base, "segments": None, "stack_layers": "8-20"})["seconds"] == pytest.approx(plain["seconds"])
+    assert estimate(s, "direction", {**base, "stack_layers": "x"})["seconds"] == pytest.approx(plain["seconds"])
+    # 今までの作り方は A 側・B 側の返事を作る。same_reply は A 側だけ
+    old = estimate(s, "direction", {**base, "same_reply": False})
+    assert old["seconds"] - plain["seconds"] == pytest.approx(sp.gen(n_a, 96), rel=1e-6)
+    # 報告のあった大きさ(40 問・96 トークン・13 層)を 4B Q8_0 の基準の速さで数えると、実測(約 830 秒)と同じ桁になる
+    assert 400 < 12 * 40 * 97 * 2 * 8.8 / 1000 < 1700
 
 
 @pytest.mark.model
@@ -313,6 +395,36 @@ def test_export_reload_and_bake_error(built, tmp_path):
     assert a == b
     stripped = s.nw_export(r, tmp_path / "s.lora.gguf", strip_meta=True)
     assert "gne.nw" not in GGUFReader(str(tmp_path / "s.lora.gguf")).fields and stripped["bytes"] > 0
+
+    def strings(path):
+        """メタデータの文字列の値(キー → 文字列)。"""
+        from gguf import GGUFValueType
+        out = {}
+        for f in GGUFReader(str(path)).fields.values():
+            if f.types and f.types[0] == GGUFValueType.STRING:
+                out[f.name] = bytes(f.parts[-1]).decode("utf-8", "replace")
+        return out
+    # ふつうの書き出し: 元のモデルの名前と識別子、レシピの名前が入る(今までどおり)
+    full = strings(tmp_path / "t.lora.gguf")
+    assert full["gne.source_model_id"] == s.meta.model_id and full["general.name"] == f"{s.meta.name} nw nw_t" and e["general_name"] == full["general.name"]
+    # 人に渡す版: gne.* のキーが 1 つも無く、どの文字列にも元のモデルの名前・識別子・レシピの名前・方向と鍵の名前が出ない
+    bare = strings(tmp_path / "s.lora.gguf")
+    assert not [k for k in bare if k.startswith("gne.")] and bare["general.name"] == "adapter" and stripped["general_name"] == "adapter"
+    assert stripped["strip_meta"] is True and bare["general.architecture"] == s.meta.arch and bare["adapter.type"] == "lora"
+    for word in (s.meta.name, s.meta.model_id, "nw_t", "nw_scene", "k_pos", MODEL.stem):
+        assert not [k for k, v in bare.items() if word in v], word
+    named = s.nw_export(r, tmp_path / "n.lora.gguf", strip_meta=True, name="tone adapter")
+    got = strings(tmp_path / "n.lora.gguf")
+    assert got["general.name"] == "tone adapter" and named["general_name"] == "tone adapter" and "gne.source_model_id" not in got
+    assert strings(tmp_path / "t.lora.gguf").keys() - got.keys() == {"gne.nw", "gne.source_model_id"}
+    s.nw_export(r, tmp_path / "m.lora.gguf", name="my name")                     # 名前だけ変える(記録は残す)
+    got = strings(tmp_path / "m.lora.gguf")
+    assert got["general.name"] == "my name" and got["gne.source_model_id"] == s.meta.model_id and "gne.nw" in got
+    with pytest.raises(GneError):
+        s.nw_export(r, tmp_path / "z.lora.gguf", name=" ")
+    # 中身(テンソル)は同じ: 人に渡す版を当てても同じ返事
+    c2 = _generate(s, q, None, [(str(tmp_path / "s.lora.gguf"), 1.0)], "all", lambda k: None)[0]["token_ids"]
+    assert c2 == a
     for f in (lambda: s.gain(r, tmp_path / "x.gguf", bake=True), lambda: s.headproj_export(r, tmp_path / "x.gguf", bake=True),
               lambda: s.bake(r, tmp_path / "x.gguf")):
         with pytest.raises(GneError) as ei:
@@ -367,6 +479,13 @@ def test_cli_and_jobs(built):
     assert d["command"] == "nw verify" and d["ok"] is True
     r = CliRunner().invoke(app, ["nw", "export", "--unit", built["units"][0], "-o", str(root / "cli.lora.gguf"), *common])
     assert r.exit_code == 0 and (root / "cli.lora.gguf").exists(), r.output
+    from gguf import GGUFReader
+    r = CliRunner().invoke(app, ["nw", "export", "--unit", built["units"][0], "-o", str(root / "cli_s.lora.gguf"), "--strip-meta",
+                                 "--name", "cli adapter", *common])
+    d = json.loads(r.output.strip().splitlines()[-1])
+    rd = GGUFReader(str(root / "cli_s.lora.gguf"))
+    assert r.exit_code == 0 and d["strip_meta"] is True and d["general_name"] == "cli adapter", r.output
+    assert not [k for k in rd.fields if k.startswith("gne.")] and bytes(rd.fields["general.name"].parts[-1]).decode() == "cli adapter"
     r = CliRunner().invoke(app, ["nw", "export", "--unit", built["units"][0], "--bake", *common])
     assert r.exit_code != 0 and json.loads(r.output.strip().splitlines()[-1])["error"]["code"] == "BAD_ARGS"
     r = CliRunner().invoke(app, ["nw", "key", "--contrast", str(built["contrast"]), "--layers", "8", "--role", "one", "--name", "cli_one",
@@ -376,12 +495,43 @@ def test_cli_and_jobs(built):
                                  "--response-tokens", "8", "--same-reply", "--segments", "0,1-", *common])
     d = json.loads(r.output.strip().splitlines()[-1])
     assert r.exit_code == 0 and d["same_reply"] is True and [x["name"] for x in d["segments"]] == ["cli_dir.seg0", "cli_dir.seg1"]
+    # 重ねる層は、範囲でも書ける(ヘルプと docs の例の書き方)。並び・混ぜた書き方・リストの中の範囲も同じ結果
+    r = CliRunner().invoke(app, ["direction", "--contrast", str(built["contrast"]), "--name", "cli_stack", "--positions", "response",
+                                 "--response-tokens", "6", "--same-reply", "--segments", "0,1-", "--stack-layers", "8-10", *common])
+    d = json.loads(r.output.strip().splitlines()[-1])
+    assert r.exit_code == 0 and d["stack_layers"] == [8, 9, 10], r.output
+    kw = dict(contrast=built["contrast"], name="api_stack", positions="response", response_tokens=6, same_reply=True, segments="0,1-")
+    for form in ("8,9,10", "8,9-10", "8 9 10", ["8-10"], [8, 9, 10]):
+        assert s.direction(**kw, stack_layers=form)["stack_layers"] == [8, 9, 10], form
+    assert np.allclose(s.direction_set("api_stack").seg[1][10], s.direction_set("cli_stack").seg[1][10], atol=1e-5)
+    for bad in ("all", "8-", "x"):
+        with pytest.raises(GneError) as ei:
+            s.direction(**kw, stack_layers=bad)
+        assert ei.value.code == "BAD_ARGS"
+    # まとめて作る(gne nw pipeline): 出るのは短い要約。--save で、gne nw verify --recipe にそのまま渡せるレシピを書く
+    rp = root / "saved" / "cli_pipe.yaml"
+    r = CliRunner().invoke(app, ["nw", "pipeline", "--contrast", str(built["contrast"]), "--layers", "8-9", "--alpha", "1,0.8", "--segments", "0,1-",
+                                 "--name", "cli_pipe", "--save", str(rp), "--max-tokens", "8", "--response-tokens", "8", "--pseudo", "2",
+                                 "--top", "6", *common])
+    line = r.output.strip().splitlines()[-1]
+    d = json.loads(line)
+    assert r.exit_code == 0 and d["command"] == "nw pipeline" and d["ok"] is True and d["n_units"] == 4 and d["n_neurons"] == 8, r.output
+    assert d["recipe_path"] == str(rp) and rp.exists() and len(d["units"]) == 4 and "usage" not in d and len(line) < 6000
+    assert set(d["check"]) == {"scene", "dont_touch:tasks"} and d["layers"] == [8, 9] and d["alpha"] == [1.0, 0.8]
+    saved = yaml.safe_load(rp.read_text(encoding="utf-8"))
+    assert saved["name"] == "cli_pipe" and len(saved["units"]) == 4 and all(u["mode"] == "nw" and u["pair"] is not None for u in saved["units"])
+    r = CliRunner().invoke(app, ["nw", "verify", "--recipe", str(rp), *common])
+    assert r.exit_code == 0 and json.loads(r.output.strip().splitlines()[-1])["ok"] is True, r.output
+    r = CliRunner().invoke(app, ["nw", "pipeline", "--contrast", str(built["contrast"]), "--layers", "8", "--save", "bad name", *common])
+    assert r.exit_code != 0 and json.loads(r.output.strip().splitlines()[-1])["error"]["code"] == "BAD_ARGS"     # 保存先が悪ければ、流す前に止まる
+    assert "見積もり" not in r.output
     # 重みに入れる前に試す(gne nw try): 区切り 0 / 1- の方向を、層 8 の出力に区切りごとの強さで直接足す
     r = CliRunner().invoke(app, ["nw", "try", "--direction", "cli_dir", "--contrast", str(built["contrast"]), "--layers", "8", "--alpha", "1,0.5",
                                  "-n", "2", "--max-tokens", "8", *common])
     d = json.loads(r.output.strip().splitlines()[-1])
     assert r.exit_code == 0 and d["command"] == "nw try" and d["alphas"] == [1.0, 0.5] and d["layers"] == [8], r.output
     assert d["scene"]["counts"]["n"] == 2 and d["baseline"]["counts"]["n"] == 2 and d["others"]["counts"]["n"] == 2 and Path(d["path"]).exists()
+    assert Path(d["path"]).name.startswith("cli_dir_") and Path(d["path"]).name.endswith("_try.json")
     r = CliRunner().invoke(app, ["nw", "try", "--direction", "cli_dir", "--contrast", str(built["contrast"]), "--layers", "8", "--alpha", "1,1,1",
                                  "-n", "1", "--max-tokens", "4", *common])                # 強さの数が区切りの数と合わない
     assert r.exit_code != 0 and json.loads(r.output.strip().splitlines()[-1])["error"]["code"] == "BAD_ARGS"
@@ -400,6 +550,11 @@ def test_cli_and_jobs(built):
                                        "max_tokens": 8, "n_pos": 2})["groups"]
     t = run("fish_try", {"contrast": str(built["contrast"]), "direction": "nw_scene", "alpha": "1,1,0.8", "n": 2, "max_tokens": 8, "others": False})
     assert t["layers"] == [8, 12] and t["alphas"] == [1.0, 1.0, 0.8] and "others" not in t and t["scene"]["counts"]["n"] == 2
+    # まとめて作るジョブ: summary を付けると短い要約だけが返る。save でレシピを書く(名前 → <root>/recipes/<名前>.yaml)
+    pj = run("fish_pipeline", {"contrast": str(built["contrast"]), "layers": "8", "segments": "0,1-", "name": "job_pipe", "save": "job_pipe_r",
+                               "summary": True, "max_tokens": 8, "response_tokens": 8, "pseudo": 2, "top": 4})
+    assert pj["ok"] is True and pj["n_units"] == 2 and pj["n_neurons"] == 4 and len(pj["units"]) == 2 and "usage" not in pj and "keys" not in pj
+    assert pj["recipe_path"] == str(s.recipe_path("job_pipe_r")) and s.nw_verify("job_pipe_r")["ok"] and len(json.dumps(pj, ensure_ascii=False)) < 4000
     assert run("direction_key", {"contrast": str(built["contrast"]), "layers": [8], "role": "scene", "name": "job_scene",
                                  "subset": "all", "max_tokens": 8, "pseudo": 2})["role"] == "scene"
     # 方向 → 鍵の一括でも方向の作り方を選べる
@@ -428,7 +583,8 @@ def test_mcp_tools(tmp_path):
                 tools = {t.name: t for t in (await c.list_tools()).tools}
                 assert {"nw_neurons", "nw_verify", "nw_check", "nw_export", "nw_try", "fish_pipeline"} <= set(tools)
                 assert {"direction", "layers", "alpha", "temperature"} <= set(tools["nw_try"].input_schema["properties"])
-                assert "alpha" in tools["fish_pipeline"].input_schema["properties"]
+                assert {"alpha", "save", "summary"} <= set(tools["fish_pipeline"].input_schema["properties"])
+                assert {"strip_meta", "adapter_name"} <= set(tools["nw_export"].input_schema["properties"])
                 r = await c.call_tool("fish_pipeline", {"contrast": "tone_in_scene", "layers": []})       # 層は必須
                 sc = getattr(r, "structured_content", None)
                 d = (sc.get("result", sc) if isinstance(sc, dict) else None) or json.loads(r.content[0].text)
@@ -507,6 +663,24 @@ def test_try_before_writing(built, monkeypatch):
             s.nw_try("nw_scene", built["contrast"], n=1, max_tokens=4, **kw)
     with pytest.raises(GneError):
         s.nw_try("nw_old", built["contrast"], n=1, max_tokens=4)                          # 重ねる層の無い方向で、層を省いた
+    # 結果のファイル: 名前を省くと、設定が違えば別のファイル(前の結果を上書きしない)。同じ設定の流し直しは同じファイル
+    kw = dict(n=1, max_tokens=4, others=False, baseline=False)
+    a = s.nw_try("nw_scene", built["contrast"], alpha="1,1,0.8", **kw)
+    b = s.nw_try("nw_scene", built["contrast"], alpha="1,1,0.5", **kw)                    # 強さが違う
+    c = s.nw_try("nw_scene", built["contrast"], alpha="1,1,0.8", prompts=[CONTRAST["user_prompts"][3]], **kw)   # 質問が違う
+    d = s.nw_try("nw_scene", built["contrast"], alpha="1,1,0.8", layers="8", **kw)        # 層が違う
+    f = s.nw_try("nw_scene", built["contrast"], alpha="1,1,0.8", temperature=0.7, seed=2, **kw)   # 温度と種が違う
+    paths = [x["path"] for x in (a, b, c, d, f)]
+    assert len(set(paths)) == 5 and all(Path(p).exists() and re.fullmatch(r"nw_scene_[0-9a-f]{6}_try\.json", Path(p).name) for p in paths)
+    assert json.loads(Path(a["path"]).read_text(encoding="utf-8"))["alphas"] == [1.0, 1.0, 0.8]      # 後の実行で書き換わっていない
+    assert not any("上書き" in n for x in (a, b, c, d, f) for n in x["notes"])
+    a2 = s.nw_try("nw_scene", built["contrast"], alpha="1,1,0.8", **kw)
+    assert a2["path"] == a["path"] and a2["name"] == a["name"] and any("上書き" in n and "同じ設定" in n for n in a2["notes"])
+    # 名前を付けると <名前>_try.json。同じ名前で流し直すと上書きして、注で知らせる
+    n1 = s.nw_try("nw_scene", built["contrast"], alpha="1,1,0.8", name="mine", **kw)
+    n2 = s.nw_try("nw_scene", built["contrast"], alpha="1,1,0.5", name="mine", **kw)
+    assert Path(n1["path"]).name == "mine_try.json" and n2["path"] == n1["path"] and not any("上書き" in n for n in n1["notes"])
+    assert any("上書き" in n and "name" in n for n in n2["notes"])
 
 
 @pytest.mark.model

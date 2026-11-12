@@ -139,7 +139,7 @@ W_gate[j] ← s·κ_A        W_up[j] ← κ_B        W_down[:, j] ← α·d ÷ s
 
 例: 褒められた・お礼を言われた場面の返事だけ、口調を変える(`configs/contrast/tsundere_thanks.yaml`)。層は、続いた 13 層の 11〜23 と
 する。**層の番号はモデルで違う**(11〜23 は Qwen3.5-4B の 1 例で良かった範囲。§5・§8)。層の指定は `11-23` のような範囲でも、
-`11,18,23` のような並びでも書ける。
+`11,18,23` のような並びでも、`11,14-16,23` のように混ぜても書ける(`--layers` も `--stack-layers` も同じ読み方)。
 
 ```bash
 C=configs/contrast/tsundere_thanks.yaml
@@ -149,6 +149,7 @@ L=11-23
 gne direction --contrast $C --positions response --response-tokens 120 \
     --same-reply --segments 0,1-3,4- --stack-layers $L
 #    → 方向 tsundere_thanks と、区切りごとの tsundere_thanks.seg0 / .seg1 / .seg2
+#    (--stack-layers は層ごとに返事を読み直すので時間がかかる。始める前に見積もりが出て、30 分を超えるなら --yes が要る)
 
 # 1'. 重みに入れる前に試す。方向を層の出力に直接足して、返事と数(繰り返し・空・正規表現の一致)を見る(下の「重みに入れる前に試す」)
 gne nw try --direction tsundere_thanks --contrast $C --layers $L --alpha 1,1,0.8
@@ -183,7 +184,36 @@ gne behave --recipe tt_nw.yaml --prompts $C --match "別に|ふん"
 
 # 7. 書き出す(LoRA だけ。焼き込みは無い)
 gne nw export --recipe tt_nw.yaml -o tt_nw.lora.gguf        # llama.cpp では --lora tt_nw.lora.gguf
+gne nw export --recipe tt_nw.yaml -o tt_nw.lora.gguf --strip-meta --name "tone adapter"   # 人に渡す版(下の「書き出したファイルに残るもの」)
 ```
+
+**まとめて作る(`gne nw pipeline`)。** 上の 1〜5 を 1 回で回す(UI の「まとめて作る」、ジョブ `fish_pipeline` と同じ)。層と強さは渡したものを
+そのまま使い、ニューロンは働きの小さい順の表の上から使う。`--save` を付けると、できたユニットをレシピのファイルに書くので、続きの
+コマンドにそのまま渡せる。
+
+```bash
+gne nw pipeline --contrast $C --layers $L --alpha 1,1,0.8 --response-tokens 120 --save tt_nw.yaml
+gne nw verify --recipe tt_nw.yaml
+gne nw check  --recipe tt_nw.yaml --contrast $C
+```
+
+- `--save` は、`.yaml` で終わるパスか、名前(`<root>/recipes/<名前>.yaml` に書く)。省くとレシピは書かない。同じ名前のファイルがあれば
+  上書きする。`--iv` を付けて作ったときも、レシピに入るのは FiSH のユニットだけ。
+- 出るのは短い要約: 式どおりか、ユニットとニューロンの数、場面の群 × 位置ごとの足した量(平均・最小・最大)、レシピの保存先。
+  `--json` でも要約とユニットの書き方だけを出す(ニューロンの表・鍵の表・足した量の細目まで要るなら `--json --full`。数十万字になる)。
+- 方向の名前と鍵の名前は対照集合の `name`(`--name` で変えられる)。鍵は `<名前>_r_p<i>`・`<名前>_r_one`(レシピを当てた状態で作り直した
+  もの)。層が多いと時間がかかる(見積もりが出て、30 分を超えるなら `--yes` が要る)。
+- Python では `gne.fish.pipeline(session, contrast, name=…, layers="11-23", alpha=[1, 1, 0.8], save="tt_nw")`。戻り値はニューロンの表まで
+  入った大きな表なので、短く見るなら戻り値の `summary`(`gne.fish.summary(結果)` と同じ)か、文にした `gne.fish.summary_text(結果)`。
+  保存先は戻り値の `recipe_path`。ジョブと MCP の `fish_pipeline` にも `save` があり、`summary: true` を渡すと要約とユニットの書き方
+  だけが返る(既定は今までどおり結果を丸ごと返す)。
+
+**書き出したファイルに残るもの。** `gne nw export` は、ファイルに gne の記録(`gne.nw`: 層・ニューロン・方向と鍵の名前・強さ)と、
+元のモデルの識別子(`gne.source_model_id`)を書き、名前の欄(`general.name`)は「元のモデルの名前 nw レシピの名前」にする。
+`--strip-meta` を付けると、この 3 つを書かない: `gne.*` の項目は無くなり、名前の欄は `adapter`(`--name` で決められる)になる。
+残るのは、アダプタであることを示す項目と、arch の名前(`general.architecture`。llama.cpp がモデルとの組み合わせを確かめるのに使う)、
+テンソルの名前と形だけ。`--name` は `--strip-meta` なしでも使える(名前の欄だけを変える)。proj・keyed と一緒に
+`gne headproj export --strip-meta` で 1 つの LoRA にしたときは、`gne.*` の項目は無いが、名前の欄は「元のモデルの名前 adapter」になる。
 
 ユニットの短い書き方(`--unit`):
 
@@ -212,9 +242,10 @@ gne nw export --recipe tt_nw.yaml -o tt_nw.lora.gguf        # llama.cpp では -
   下の層の方向の長さが 0 になって強さの配分で止まることがある)。
 
 MCP では `direction`(same_reply・segments・stack_layers)、`direction_key`(target="mlpin"、positions="pos:1-3"、role="scene" / "one")、
-`nw_neurons`・`nw_check`・`nw_try`(ジョブ)、`nw_verify`、`nw_export`、まとめて作る `fish_pipeline`(ジョブ)。Python では
+`nw_neurons`・`nw_check`・`nw_try`(ジョブ)、`nw_verify`、`nw_export`(strip_meta・adapter_name)、まとめて作る `fish_pipeline`
+(ジョブ。save・summary)。Python では
 `Session.direction` / `direction_key` / `nw_neurons` / `nw_try` / `nw_verify` / `nw_check` / `nw_export`、まとめて作るのは
-`gne.fish.pipeline`、実行時の LoRA は `Session.lora_for(recipe)` に入る。
+`gne.fish.pipeline`(save)、実行時の LoRA は `Session.lora_for(recipe)` に入る。
 
 ### 重みに入れる前に試す(`gne nw try`)
 
@@ -235,8 +266,11 @@ gne nw try --direction tsundere_thanks --contrast $C --layers 11-23 --alpha 1,1,
   区切りごとの強さ(1 つだけ書けば全部の区切りに同じ値)。`--layers` を省くと、方向を作ったときの `--stack-layers` の層。
 - 出るもの: 足した返事(scene)、同じ質問に何も足さない返事(baseline)、dont_touch の質問に何も足さない返事(others)と、それぞれの
   **機械的に数えられる数**(繰り返しに落ちた返事 = 4 トークンの並びの種類が半分を切る返事、空の返事、長さの上限で切れた返事、
-  正規表現に一致した返事)。口調が出たか、相手の発言に合っているかは、返事を読んで確かめる。結果は
-  `<root>/behave/<model_id>/<名前>_try.json` にも残る。
+  正規表現に一致した返事)。口調が出たか、相手の発言に合っているかは、返事を読んで確かめる。
+- **結果のファイル**: `<root>/behave/<model_id>/<名前>_try.json` にも残る(場所は出力の最後の行)。`--name` を省くと、名前は
+  「方向の名前_設定から作った 6 文字」になり、層・強さ・質問・長さ・温度・種などが違えば別のファイルになる(同じ設定で流し直すと
+  同じファイル)。`--name` を付けるとその名前になり、同じ名前の前の結果は上書きする(注が出る)。層や強さを変えて比べるときは、
+  `--name L11-23_a1-1-0.8` のように分けておくと、後で探しやすい。
 - **足した返事と何も足さない返事は、同じ作り方で作る**(1 問ずつ、質問を同じ所で分けて読ませ、サンプリングなら同じ種)。複数の質問を
   まとめて生成すると、組の作り方で計算がわずかにずれ、何も介入していない greedy でも返事が途中から分かれることがある(Qwen3.5-4B で、
   同じ 30 問を別の組で生成すると、同じ文になったのは 9 問)。並べた 2 つの返事の違いが、足したベクトルの分だけになるようにしている。
@@ -385,7 +419,8 @@ gne nw neurons --layers 11-23 [--top 20] [--sort sum|max|mean]
   後ろのほうの差と向きも大きさも違った(位置 0 は約 2 倍の長さ)。
 - `--stack-layers 11-23`: 区切りつきの方向を、複数の層に重ねて書く前提の値にする。下の層に足した分は上の層に伝わるので、
   平均差をそのまま各層に足すと足し過ぎになる。上の層の値を「下の層に足した後の残り」にする。層の数だけ返事を読み直すので、
-  層が多いと時間がかかる(Qwen3.5-4B の 13 層・40 問で、方向と鍵に 16 分)。
+  層が多いと時間がかかる(Qwen3.5-4B の 13 層・40 問で、方向と鍵に 16 分)。読み直す回数は (層の数 − 1) × 質問の数 × 返事の長さで、
+  始める前の見積もりに入る。層は `11-23`・`11,18,23`・`11,14-16,23` のどれでも書ける。
 
 **どの層に書くか(Qwen3.5-4B の 1 例)。** 層は使う人が決める。分かっているのは次の 1 例だけで、層の番号はモデルで違う。
 

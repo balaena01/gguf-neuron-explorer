@@ -584,12 +584,14 @@ class Session:
             tmp.replace(path)
         return path
 
-    def nw_export(self, recipe: Recipe | str | Path, out: str | Path, *, strip_meta: bool = False) -> dict:
-        """レシピの nw のユニットを LoRA アダプタ GGUF に書き出す(llama.cpp の --lora で当てる)。焼き込みは無い。"""
+    def nw_export(self, recipe: Recipe | str | Path, out: str | Path, *, strip_meta: bool = False, name: str | None = None) -> dict:
+        """レシピの nw のユニットを LoRA アダプタ GGUF に書き出す(llama.cpp の --lora で当てる)。焼き込みは無い。
+        strip_meta(人に渡す版): gne の記録と、元のモデルを特定できる値(識別子・名前の欄の元のモデルの名前とレシピの名前)を書かない。
+        name はファイルの名前の欄(general.name。省くと、ふつうは「<元のモデルの名前> nw <レシピの名前>」、strip_meta では "adapter")。"""
         from .nwrite import export_nw_lora
         r = recipe if isinstance(recipe, Recipe) else self.recipe(path=self.recipe_path(recipe))
         others = sorted({u.mode for u in r.units if u.mode != "nw"})
-        rep = export_nw_lora(self.weights, r, out, self._key_of, self.direction_set, strip_meta=strip_meta)
+        rep = export_nw_lora(self.weights, r, out, self._key_of, self.direction_set, strip_meta=strip_meta, name=name)
         if others or r.ablate is not None:
             self.warn(f"このファイルには nw のユニットだけが入ります(レシピのほかの介入 {'・'.join(others + (['ablate'] if r.ablate else []))} は"
                       "入りません。proj・keyed・gain と一緒に 1 つの LoRA にするなら gne headproj export を使います)")
@@ -1431,7 +1433,8 @@ class Session:
         positions="response" は返事のトークンから作る(A / B の system で response_tokens まで返事を生成して流す)。
         same_reply(positions response だけ): B 側も A 側の返事を読む(同じ返事を両方の条件で読ませた差。読んでいる語の違いから来る
         成分が入らない)。segments("0,1-3,4-"): 返事の位置で分けた方向も作る(名前 NAME.seg<i> で 1 本の方向として使える)。
-        stack_layers: 区切りつきの方向を、これらの層に重ねて書く前提の値にする(direction.response_directions)。"""
+        stack_layers: 区切りつきの方向を、これらの層に重ねて書く前提の値にする(direction.response_directions)。
+        リストか、"11-23"・"11,18,23"・"11,14-16" のような文字列(ほかの layers と同じ読み方)。"""
         from .direction import (DirectionSet, candidate_layers, layer_table, load_contrast, response_directions,
                                 save_directions, save_select, select_layer)
         from .evalx import Judge
@@ -1443,8 +1446,13 @@ class Session:
         name = name or cs.name
         if not re.fullmatch(r"[\w.\-]+", name):
             raise GneError("BAD_ARGS", f"名前 {name!r} は英数字・_・-・. だけにしてください")
-        if isinstance(stack_layers, str):
-            stack_layers = [int(x) for x in re.split(r"[,\s]+", stack_layers.strip()) if x]
+        if isinstance(stack_layers, str) and not stack_layers.strip():
+            stack_layers = None
+        if stack_layers is not None:                    # --layers などと同じ読み方("11-23"・"11,18,23"・混ぜた書き方・リスト)
+            from .jobs import _layers
+            if isinstance(stack_layers, str) and stack_layers.strip() == "all":
+                raise GneError("BAD_ARGS", "stack_layers に all は使えません", "重ねて書く層を 11-23 か 11,18,23 のように書きます")
+            stack_layers = _layers(stack_layers)
         if (same_reply or segments or stack_layers) and positions != "response":
             raise GneError("BAD_ARGS", "same_reply・segments・stack_layers は positions response のときだけ使えます",
                            "gne direction --contrast C --positions response --same-reply")

@@ -352,15 +352,20 @@ def behave_step(session, specs: list[str], contrast: str, *, name: str, prompts=
 
 def pipeline(session, contrast: str, *, name: str, layers=None, segments=None, form: str = "cap", alpha=0.9,
              same_reply: bool = True, stack: bool = True, compare: bool = True, pseudo: int = 4, max_tokens: int = 96,
-             response_tokens: int = 96, iv=None, rekey: bool = True, neurons: dict | None = None, top: int = 20) -> dict:
+             response_tokens: int = 96, iv=None, rekey: bool = True, neurons: dict | None = None, top: int = 20,
+             save: str | Path | None = None) -> dict:
     """方向 → ニューロンの表 → 鍵 → ユニット →(そのユニットを当てた状態で鍵を作り直す)→ 式どおりか → 足した量、を順に回す。
     ニューロンは既定の候補(表の上から)を使う(neurons を渡せばそれ)。層と強さは渡されたものをそのまま使う。
-    alpha は数 1 つ(全部の区切りに同じ値)か、区切りごとの "1,1,0.8"・[1, 1, 0.8]。"""
+    alpha は数 1 つ(全部の区切りに同じ値)か、区切りごとの "1,1,0.8"・[1, 1, 0.8]。
+    save を渡すと、できたユニットをレシピのファイルに書く(save_recipe。.yaml / .yml で終わればそのパス、そうでなければ名前として
+    <root>/recipes/<名前>.yaml)。結果の recipe_path が、gne nw verify --recipe などにそのまま渡せるパス。省くと書かない(今までどおり)。
+    結果は大きい(ニューロンの表・鍵の表・足した量の細目)ので、短く見るなら結果の summary(summary() と同じ)か summary_text()。"""
     t0 = time.perf_counter()
     Ls = _layers(layers)
     segs = _segments(segments)
     _form(form)
     al = alphas_of(alpha, len(segs))            # 数が区切りと合わなければ、モデルを流す前に止める
+    save_to = None if save is None or not str(save).strip() else recipe_file(session, save)   # 名前が悪ければ、モデルを流す前に止める
     stage = {}
 
     def lap(k, t):
@@ -398,10 +403,84 @@ def pipeline(session, contrast: str, *, name: str, layers=None, segments=None, f
     t = time.perf_counter()
     chk = check_step(session, specs, contrast, max_tokens=max_tokens, iv=iv, segments=segs)
     lap("check", t)
-    return {"name": name, "contrast_path": contrast, "layers": Ls, "segments": segs, "form": form, "alpha": alpha_out(al), "alphas": al,
-            "direction": d, "usage": usage, "neurons": picked, "neurons_default": neurons is None, "keys": keys, "rekeyed": keys2,
-            "key_base": f"{name}_r" if rekey else name, "units": specs, "unit_rows": unit_rows(session, specs),
-            "verify": ver, "check": chk, "iv": keys["iv"], "notes": notes, "stage_seconds": stage, "seconds": time.perf_counter() - t0}
+    res = {"name": name, "contrast_path": contrast, "layers": Ls, "segments": segs, "form": form, "alpha": alpha_out(al), "alphas": al,
+           "direction": d, "usage": usage, "neurons": picked, "neurons_default": neurons is None, "keys": keys, "rekeyed": keys2,
+           "key_base": f"{name}_r" if rekey else name, "units": specs, "unit_rows": unit_rows(session, specs),
+           "verify": ver, "check": chk, "iv": keys["iv"], "notes": notes, "stage_seconds": stage}
+    if save_to is not None:
+        res["recipe_path"] = save_recipe(session, specs, save_to)
+        if iv is not None:
+            notes.append("保存したレシピには FiSH のユニットだけが入ります(先に当てておいた介入 iv は入りません。使うときは一緒に当てます)")
+    res["seconds"] = time.perf_counter() - t0
+    res["summary"] = summary(res)
+    return res
+
+
+def recipe_file(session, save) -> Path:
+    """レシピの保存先: .yaml / .yml で終わればそのパス、そうでなければ名前として <root>/recipes/<名前>.yaml。"""
+    import re
+    p = Path(str(save)).expanduser()
+    if p.suffix in (".yaml", ".yml"):
+        if not re.fullmatch(r"[\w.\-]+", p.stem):
+            raise GneError("BAD_ARGS", f"レシピのファイル名 {p.name!r} は英数字・_・-・. だけにしてください")
+        return p
+    if not re.fullmatch(r"[\w.\-]+", str(save)):
+        raise GneError("BAD_ARGS", f"レシピの保存先 {str(save)!r} を読めません",
+                       "名前(英数字・_・-・.。<root>/recipes/<名前>.yaml に書きます)か、.yaml で終わるパスを渡してください")
+    return session.store.recipes_dir() / f"{save}.yaml"
+
+
+def save_recipe(session, specs: list[str], path: Path) -> str:
+    """ユニットの書き方のリストを、レシピのファイルに書く(名前はファイル名。gne nw verify / check / export の --recipe にそのまま渡せる)。
+    同じ名前のファイルがあれば上書きする(recipe_save と同じ)。"""
+    path = Path(path)
+    r = session.recipe(units=[str(x) for x in specs], name=path.stem)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    r.save(path)
+    return str(path)
+
+
+def summary(d: dict) -> dict:
+    """pipeline の結果の短い要約: 式どおりか、ユニットとニューロンの数、保存先、足した量(場面の群 × 位置ごとに、ユニットの平均の
+    平均と、最小・最大)。結果そのものは数十万字になるので、表示や受け渡しにはこちらを使う。"""
+    rows = d.get("unit_rows") or []
+    groups = {}
+    for g, x in ((d.get("check") or {}).get("groups") or {}).items():
+        pos: dict = {}
+        for u in x.get("units") or []:
+            for b, p in (u.get("positions") or {}).items():
+                a = (p or {}).get("amount")
+                if a:
+                    pos.setdefault(b, []).append(a)
+        groups[g] = {"n": x.get("n"), "loops": x.get("loops"),
+                     "amount": {b: {"mean": round(sum(a["mean"] for a in v) / len(v), 3), "min": round(min(a["min"] for a in v), 3),
+                                    "max": round(max(a["max"] for a in v), 3)} for b, v in pos.items()}}
+    ver = d.get("verify") or {}
+    return {"name": d.get("name"), "ok": bool(ver.get("ok")), "layers": list(d.get("layers") or []), "segments": list(d.get("segments") or []),
+            "form": d.get("form"), "alpha": d.get("alpha"), "n_units": len(d.get("units") or []),
+            "n_neurons": sum(1 + (1 if r.get("pair") is not None else 0) for r in rows),
+            "direction": d.get("name"), "key_base": d.get("key_base"), "rekeyed": d.get("rekeyed") is not None,
+            "recipe_path": d.get("recipe_path"), "check": groups, "notes": list(d.get("notes") or []),
+            "stage_seconds": {k: round(float(v), 1) for k, v in (d.get("stage_seconds") or {}).items()},
+            "seconds": None if d.get("seconds") is None else round(float(d["seconds"]), 1)}
+
+
+def summary_text(d: dict) -> str:
+    """要約(summary の結果か、pipeline の結果そのもの)を、数行の文にする。"""
+    s = d if "n_units" in d else (d.get("summary") or summary(d))
+    al = s["alpha"]
+    lines = [f"{s['name']}: 層 {','.join(map(str, s['layers']))}、区切り {','.join(s['segments'])}、形 {s['form']}、強さ "
+             + (",".join(f"{a:g}" for a in al) if isinstance(al, list) else f"{al:g}")
+             + (f"({s['seconds']:.0f} 秒)" if s.get("seconds") is not None else ""),
+             f"ユニット {s['n_units']} 個、上書きするニューロン {s['n_neurons']} 個、鍵 {s['key_base']}_*"
+             + ("(レシピを当てた状態で作り直した)" if s.get("rekeyed") else ""),
+             "式どおりか: " + ("合格" if s["ok"] else "不合格(gne nw verify で層ごとの誤差を見てください)")]
+    for g, x in s["check"].items():
+        cells = "  ".join(f"{b}: {a['mean']:+.2f}({a['min']:+.2f}〜{a['max']:+.2f})" for b, a in x["amount"].items())
+        lines.append(f"足した量 [{g}] {x['n']} 問、繰り返し {x['loops']}: {cells}")
+    lines.append(f"レシピ: {s['recipe_path']}" if s.get("recipe_path") else "レシピは保存していません(save に名前か .yaml のパスを渡すと書きます)")
+    lines += [f"注: {n}" for n in s["notes"]]
+    return "\n".join(lines)
 
 
 # --- 重みに入れる前に試す ---------------------------------------------------------------------------------------
@@ -430,7 +509,9 @@ def try_step(session, contrast: str, *, direction: str, layers=None, alpha=None,
     - temperature > 0 でサンプリング(質問ごとに seed をずらす)。iv は先に当てておく介入(全部の位置に当てる)。
     - 返事と一緒に、機械的に数えられるもの(繰り返し・空・長さの上限で切れた数・正規表現の一致)を出す。
     制約: 足せるのは層 1 〜 最終層の 1 つ手前(control vector の制約)。付け替えは 1 本の列ごとなので、狙う場面は 1 問ずつ生成する。
-    結果は <root>/behave/<model_id>/<name>_try.json にも残す。"""
+    結果は <root>/behave/<model_id>/<name>_try.json にも残す。name を省くと「<方向の名前>_<設定から作った 6 文字>」で、層・強さ・
+    質問・長さ・温度・種・先に当てる介入などが違えば別のファイルになる(同じ設定で流し直すと同じファイル)。name を渡すと
+    <name>_try.json で、同じ名前のファイルがあれば上書きして、注(notes)で知らせる。"""
     import json
     import re
 
@@ -446,6 +527,7 @@ def try_step(session, contrast: str, *, direction: str, layers=None, alpha=None,
     seg_text = list(ds.segments) or ["0-"]                  # 区切りの無い方向は、返事の全部の位置に同じベクトル
     ranges = parse_segments(seg_text)
     al = alphas_of(alpha, len(seg_text))
+    named = bool(name)
     name = name or ds.name
     if not re.fullmatch(r"[\w.\-]+", name):
         raise GneError("BAD_ARGS", f"名前 {name!r} は英数字・_・-・. だけにしてください")
@@ -575,7 +657,16 @@ def try_step(session, contrast: str, *, direction: str, layers=None, alpha=None,
            "stack_layers": sorted(stack) or None, "match": match, "max_tokens": int(max_tokens), "temperature": float(temperature or 0.0),
            "seed": int(seed), "own_prompts": own, "system_b": bool(sys_b), "iv": _iv_text(iv),
            "notes": notes, "seconds": time.perf_counter() - t0}
+    if not named:                                  # 設定が違えば別の名前になるように、設定から短い印を作って付ける
+        import hashlib
+        key = {"layers": Ls, "alphas": al, "questions": [q if isinstance(q, str) else json.dumps(q, ensure_ascii=False) for q in qs],
+               "others": dts, "baseline": bool(baseline), "max_tokens": int(max_tokens), "temperature": float(temperature or 0.0),
+               "seed": int(seed), "match": match, "iv": _iv_text(iv), "system_b": sys_b}
+        name = f"{name}_{hashlib.sha256(json.dumps(key, ensure_ascii=False, sort_keys=True, default=str).encode()).hexdigest()[:6]}"
     path = session.store.root / "behave" / session.meta.model_id / f"{name}_try.json"
     path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        notes.append(f"前の結果 {path.name} を上書きしました" + ("(同じ名前。残すなら name を変えます)" if named else "(同じ設定の流し直し)"))
+    res["name"] = name
     path.write_text(json.dumps(res, ensure_ascii=False, indent=1), encoding="utf-8")
     return {**res, "path": str(path)}

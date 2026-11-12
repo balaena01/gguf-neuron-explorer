@@ -12,6 +12,7 @@ LoRA の書き出し)。ニューロンをチェックで選び直すとユニ�
 
 import json
 import os
+import re
 import socket
 import threading
 import time
@@ -106,7 +107,7 @@ def served(tmp_path_factory):
 @pytest.fixture(scope="module")
 def piped(served):
     """fish_pipeline のジョブの結果(小さい対照集合、L8・L12、上限つきの 2 個組)。"""
-    return _run_job(served["client"], "fish_pipeline", {"spec": small_spec("fish_job"), "layers": LAYERS, "top": 8})
+    return _run_job(served["client"], "fish_pipeline", {"spec": small_spec("fish_job"), "layers": LAYERS, "top": 8, "save": "fish_job_saved"})
 
 
 @pytest.fixture(scope="module")
@@ -254,6 +255,20 @@ def test_pipeline_job(served, piped):
     # レシピとして保存・読み込みできる
     rec = s.recipe(units=r["units"], name="fish_job")
     assert len(rec.nw_units) == 6
+    # save を渡したので、レシピのファイルができている(名前 → <root>/recipes/<名前>.yaml)。そのまま読めて、式どおりかも確かめられる
+    rp = Path(r["recipe_path"])
+    assert rp == s.store.recipes_dir() / "fish_job_saved.yaml" and rp.exists() and s.recipe_path("fish_job_saved") == rp
+    saved = s.recipe(path=rp)
+    assert saved.name == "fish_job_saved" and saved.to_dict()["units"] == rec.to_dict()["units"]
+    assert _run_job(c, "fish_verify", {"units": [u for u in r["units"]]})["result"]["ok"] and s.nw_verify(str(rp))["ok"]
+    # 結果には短い要約も入る(式どおりか・ユニットとニューロンの数・保存先・足した量)
+    from gne import fish
+    sm = r["summary"]
+    assert sm["ok"] is True and sm["n_units"] == 6 and sm["n_neurons"] == 12 and sm["recipe_path"] == str(rp) and sm["key_base"] == "fish_job_r"
+    assert set(sm["check"]) == set(g) and sm["check"]["scene"]["n"] == 8 and sm["check"]["scene"]["amount"]["0"]["max"] > 0.5
+    assert len(json.dumps(sm, ensure_ascii=False)) < 4000 < len(json.dumps(r, ensure_ascii=False)) // 10
+    text = fish.summary_text(r)
+    assert "合格" in text and "ユニット 6 個" in text and "ニューロン 12 個" in text and str(rp) in text
 
 
 @pytest.mark.model
@@ -287,7 +302,11 @@ def test_step_jobs(served, piped):
     assert tr["estimate_s"] and t["layers"] == [8, 9] and t["alphas"] == [1.0, 1.0, 0.8] and t["segments"] == ["0", "1-3", "4-"]
     assert t["scene"]["counts"]["n"] == 2 and t["baseline"]["counts"]["n"] == 2 and t["others"]["counts"]["n"] == 2
     assert "match" in t["scene"]["counts"] and t["match"] == spec["validate"]["match"] and t["scene"]["replies"][0]["prompt"] == spec["user_prompts"][0]
-    assert Path(t["path"]).name == "fish_step_try.json"
+    assert re.fullmatch(r"fish_step_[0-9a-f]{6}_try\.json", Path(t["path"]).name)       # 名前を省くと、設定から作った印が付く
+    tr2 = _run_job(c, "fish_try", {"spec": spec, "direction": "fish_step", "layers": "8-9", "alpha": [1, 1, 0.5], "n": 2, "max_tokens": 8})
+    assert tr2["result"]["path"] != t["path"] and Path(t["path"]).exists()              # 強さを変えた 2 回目は別のファイル
+    tr3 = _run_job(c, "fish_try", {"spec": spec, "direction": "fish_step", "layers": "8", "alpha": [1, 1, 0.8], "n": 1, "max_tokens": 4, "name": "kept"})
+    assert Path(tr3["result"]["path"]).name == "kept_try.json"
     e = _run_job(c, "fish_try", {"spec": spec, "direction": "fish_step", "layers": "8", "alpha": [1, 1]}, ok=False)
     assert e["status"] == "error" and e["error"]["code"] == "BAD_ARGS" and "強さ" in e["error"]["message"]
     e = _run_job(c, "fish_pipeline", {"spec": spec, "layers": LAYERS, "alpha": "1,1"}, ok=False)        # 強さの数が区切りと合わない(モデルを流す前に止まる)
@@ -660,6 +679,8 @@ def test_pipeline_job_before_mode(served, piped_before):
     assert r["segments"] == ["before:(です|ます)。"] and r["form"] == "one" and r["alpha"] == 2
     assert r["rekeyed"] is None and r["key_base"] == "fish_end_job" and any("作り直し" in n for n in r["notes"])   # rekey: false と、書けない理由
     assert "rekey" not in r["stage_seconds"]
+    assert "recipe_path" not in r and r["summary"]["recipe_path"] is None            # save を渡さなければ、レシピは書かない(今までどおり)
+    assert not list(served["session"].store.recipes_dir().glob("fish_end_job*"))
     assert len(r["units"]) == 1 and r["units"][0].endswith(":nw:a2@fish_end_job#fish_end_job_p0") and ".seg" not in r["units"][0]
     d = r["direction"]
     assert not d["same_reply"] and not d["stack"] and d["rows"][0]["direction"] == "fish_end_job" and d["rows"][0]["norm"] > 0
