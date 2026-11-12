@@ -373,7 +373,7 @@ gne nw export --recipe R -o R-nw.lora.gguf             # LoRA only (no baking); 
 gne nw pipeline --contrast C --layers 11-23 --alpha 1,1,0.8 --save R.yaml   # or all of the building steps in one go; --save writes the recipe for the commands above
 ```
 
-`gne nw pipeline` prints a short summary (whether the LoRA follows the formula, how many units and neurons, the amounts written, where the recipe went). `gne nw try` keeps each result in its own file when the settings differ; use `--name` to choose the file name. `gne nw export --strip-meta` leaves out gne's records and anything that names the source model (the name field becomes `adapter`, or what you pass as `--name`).
+`gne nw pipeline` prints a short summary (whether the LoRA follows the formula, how many units and neurons, the amounts written, where the recipe went); like `gne nw verify`, it exits with 1 when the formula check does not pass, and the recipe is still written. `gne nw try` keeps each result in its own file when the settings differ; use `--name` to choose the file name. `gne nw export --strip-meta` leaves out gne's records and anything that names the source model (the name field becomes `adapter`, or what you pass as `--name`).
 
 Units look like `L:Nn:nw:aα@DIR#KEY` (one key), `…#GATEKEY&INPUTKEY` (two keys) and `L:Nn+Nm:nw:aα@DIR#KEY&ONEKEY` (a capped pair). They work in recipes, `gne steer`, `gne behave`, chat and the OpenAI-compatible API like any other unit. This only supports dense gated MLPs (SiLU gate × input, no bias: llama, qwen2, qwen3, qwen35); other shapes and MoE layers give a clear error. Baking is not offered: in Q8_0, replacing one column of `ffn_down` loses over 90% of the edit.
 

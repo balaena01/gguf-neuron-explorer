@@ -383,7 +383,7 @@ gne nw export --recipe R -o R-nw.lora.gguf             # LoRA だけ(焼き込�
 gne nw pipeline --contrast C --layers 11-23 --alpha 1,1,0.8 --save R.yaml   # 作るところまでを 1 回で。--save で、上のコマンドに渡せるレシピを書く
 ```
 
-`gne nw pipeline` は短い要約(式どおりか、ユニットとニューロンの数、足した量、レシピの保存先)を出します。`gne nw try` の結果のファイルは、設定が違えば別のファイルになります(`--name` で名前を決められます)。`gne nw export --strip-meta` は、gne の記録と、元のモデルを特定できる値を書きません(名前の欄は `adapter` か、`--name` で渡した値)。
+`gne nw pipeline` は短い要約(式どおりか、ユニットとニューロンの数、足した量、レシピの保存先)を出します(`gne nw verify` と同じく、式どおりかが不合格なら終了コード 1。そのときもレシピは書かれます)。`gne nw try` の結果のファイルは、設定が違えば別のファイルになります(`--name` で名前を決められます)。`gne nw export --strip-meta` は、gne の記録と、元のモデルを特定できる値を書きません(名前の欄は `adapter` か、`--name` で渡した値)。
 
 ユニットは `L:Nn:nw:aα@方向#鍵`(鍵 1 つ)、`…#ゲートの鍵&入力の鍵`(鍵 2 つ)、`L:Nn+Nm:nw:aα@方向#鍵&ほぼ1を返す鍵`(上限つき、2 個を組)と書きます。ほかのユニットと同じく、レシピ・`gne steer`・`gne behave`・チャット・OpenAI 互換 API で使えます。対応するのは、ゲートつきの MLP(SiLU のゲート × 入力、バイアスなし: llama・qwen2・qwen3・qwen35)の dense の層だけで、ほかの形と MoE の層ははっきりしたエラーになります。焼き込みはありません(Q8_0 の `ffn_down` の 1 列を差し替えると、編集の 9 割以上が失われます)。
 
