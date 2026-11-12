@@ -664,6 +664,11 @@ def test_cli_and_jobs(built):
     e_new, e_old = _fish_cost(s, sp, "fish_pipeline", ep), _fish_cost(s, sp, "fish_pipeline", {**ep, "direction": "cli_pipe"})
     assert e_new["direction_seconds"] > 0 and e_old["direction_seconds"] == 0 and e_old["seconds"] == pytest.approx(e_new["seconds"] - e_new["direction_seconds"])
     assert estimate(s, "fish_pipeline", {**ep, "direction": "cli_pipe"})["seconds"] < estimate(s, "fish_pipeline", ep)["seconds"]
+    # 鍵の見積もり: 返事を作るのは 1 回なので、区切り(= 鍵)を増やしても、返事を作る分は増えない(増えるのは鍵を計算する分だけ)
+    k2, k3 = _fish_cost(s, sp, "fish_keys", ep), _fish_cost(s, sp, "fish_keys", {**ep, "segments": "0,1-3,4-"})
+    n_q = k2["questions"]
+    assert k2["keys"] == 3 and k3["keys"] == 4 and k2["seconds"] > sp.gen(n_q, 96)
+    assert k3["seconds"] - k2["seconds"] == pytest.approx(2 * n_q * 0.0035 * s.meta.n_embd / 2560) and k3["seconds"] < 1.5 * k2["seconds"]
     # gne nw check: 平均の表の後に、質問ごとの値の要約が出る。質問ごとの行は --json と結果のファイルに入る
     r = CliRunner().invoke(app, ["nw", "check", "--recipe", str(rp), "--contrast", str(built["contrast"]), "--subset", "all", "--max-tokens", "8",
                                  "--low", "5", "--top", "2", *common[:-1]])
