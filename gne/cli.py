@@ -3082,13 +3082,24 @@ def nw_check(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Op
              replies: str = typer.Option("own", "--replies", help="own(レシピを当てて作った返事を、当てたまま読む = 実際に起きること)/ base(無介入の返事を、レシピを当てて読む)"),
              max_tokens: int = typer.Option(96, "--max-tokens"),
              n_pos: int = typer.Option(8, "--positions", help="位置 0 からいくつまで 1 位置ずつ出すか(それ以降はまとめる)"),
+             low: float = typer.Option(0.4, "--low", help="質問ごとの値: 区間の書いた量(狙った量 = 1)がこれ未満の質問を「ほとんど書けていない」と数える"),
+             over: float = typer.Option(1.2, "--over", help="質問ごとの値: 区間の位置で全部のユニットが書いた量の合計がこれを超えた質問を「狙った量を超えて書いた」と数える"),
+             top: int = typer.Option(5, "--top", help="書けていない質問を、量の小さい順に何件出すか"),
+             name: Optional[str] = typer.Option(None, "--name", help="結果のファイルの名前(<root>/behave/<model_id>/<名前>_check.json。質問ごとの行が入る)。省くとレシピの名前"),
              iv: Optional[list[str]] = typer.Option(None, "--iv", help="この介入(レシピの名前かパス、またはユニットの書き方)を先に当てた状態で測る")):
     """位置の種類ごとに、鍵の反応と実際に足した量(α·d を 1 として)を出す。狙う場面(対照集合の質問)と、書き込みたくない場面
     (dont_touch の群)で、返事の位置 0(書き始める直前)から順に。足す量が 1 を大きく超える位置、書き込みたくない場面で 0 から
-    離れる位置、負(逆向き)になる位置が無いかを見る。"""
+    離れる位置、負(逆向き)になる位置が無いかを見る。
+    平均の表の後に、質問ごとの値の要約を出す: 区間(ユニットが担当する返事の位置の範囲)ごとに、ほとんど書けていない質問の数、
+    狙った量を超えて書いた質問の数、書けていない質問の上位(質問と、返事の出だし)。平均だけでは、一部の質問でまったく書けていない
+    ことが隠れる。質問ごとの行は --json と結果のファイルに入る。"""
+    import re as _re
+    from .nwrite import question_lines
     s = holder["session"] = c.session()
     r = s.recipe(units=unit, path=recipe, default_direction=direction, default_key=key)
-    d = s.nw_check(r, contrast, subset=subset, max_tokens=max_tokens, replies=replies, n_pos=n_pos, iv=_iv_arg(iv))
+    save = name or (r.name if r.name and _re.fullmatch(r"[\w.\-]+", r.name) else "recipe")
+    d = s.nw_check(r, contrast, subset=subset, max_tokens=max_tokens, replies=replies, n_pos=n_pos, iv=_iv_arg(iv), low=low, over=over,
+                   top=top, save=save)
     lines = [f"対照集合 {d['contrast']}(subset {d['subset']}、返事 {d['replies']}、{d['seconds']:.0f} 秒)。値は足した量の平均(α·d を 1。かっこ内は最小〜最大)"]
     for g, x in d["groups"].items():
         lines.append(f"[{g}] {x['n']} 問、ループ {x['loops']}")
@@ -3098,7 +3109,8 @@ def nw_check(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Op
                 a = p["amount"]
                 cells.append(f"{b}: " + ("—" if a is None else f"{a['mean']:+.2f}({a['min']:+.2f}〜{a['max']:+.2f})"))
             lines.append(f"  {u['unit']}\n    " + "  ".join(cells))
-    lines += [f"注: {n}" for n in d["notes"]]
+    lines += question_lines(d)
+    lines += [f"注: {n}" for n in d["notes"]] + [f"結果(質問ごとの行): {d['path']}"]
     return d, "\n".join(lines), 0
 
 
@@ -3150,6 +3162,8 @@ def nw_pipeline(c: Common, holder: dict,
                 contrast: Path = typer.Option(..., "--contrast", help="対照集合(user_prompts = 狙う場面の質問、dont_touch = 書き込みたくない場面の質問)"),
                 layers: str = typer.Option(..., "--layers", help="書く層(例 11-23 か 11,18,23。モデルで違う。使う人が決める)"),
                 alpha: Optional[str] = typer.Option(None, "--alpha", help="強さ(既定 0.9)。1 つなら全部の区切りに同じ値、区切りごとに変えるなら 1,1,0.8(区切りの順)"),
+                cap: Optional[str] = typer.Option(None, "--cap", help="上限つきの形のしきい値 a-b(既定 0.4-0.8)。1 つなら全部の区切りに同じ値、区切りごとに変えるなら 0.4-0.8,0.3-0.7,0.3-0.7(区切りの順)。鍵の反応が a より小さいとほぼ書かず、b より大きいと狙った量で頭打ち"),
+                direction: Optional[str] = typer.Option(None, "--direction", help="すでにある方向の名前。渡すと方向を作り直さずにそれを使う(区切り・層・重ねる層が合わなければエラー)。省くと作る"),
                 segments: Optional[str] = typer.Option(None, "--segments", help="返事の位置の区切り(既定 0,1-3,4-)か、before:<正規表現>"),
                 form: Optional[str] = typer.Option(None, "--form", help="形: cap(上限つきの 2 個組、既定)/ two(鍵 2 つ)/ one(鍵 1 つ)"),
                 name: Optional[str] = typer.Option(None, "--name", help="方向と鍵の名前(既定は対照集合の name)"),
@@ -3167,18 +3181,22 @@ def nw_pipeline(c: Common, holder: dict,
     """FiSH をまとめて作る(UI の「まとめて作る」、ジョブ fish_pipeline と同じ): 方向 → ニューロンの表 → 鍵 → ユニット → そのユニットを
     当てた状態で鍵を作り直す → 式どおりか → 足した量。層と強さは渡したものをそのまま使う(自動では決めない)。ニューロンは、働きの小さい順の
     表の上から使う(選び直すなら gne nw neurons の表を見てレシピを書く)。出るのは短い要約(式どおりか、ユニットとニューロンの数、
-    足した量、レシピの保存先)。--save を付けると、gne nw verify / check / export の --recipe にそのまま渡せるレシピを書く。"""
+    足した量、質問ごとの値の数、レシピの保存先)。--save を付けると、gne nw verify / check / export の --recipe にそのまま渡せるレシピを書く。
+    --direction NAME で、すでにある方向を作り直さずに使う。--cap で、上限つきの形のしきい値を区切りごとに決める。"""
     from . import fish
     from .jobs import _fish_pipeline
     if not parse_layers(layers):
         raise GneError("BAD_ARGS", "--layers に書く層を指定してください", "例 --layers 11-23")
     s = holder["session"] = c.session()
-    p = {"contrast": str(contrast), "layers": layers, "alpha": alpha, "segments": segments, "form": form, "name": name, "save": save,
+    p = {"contrast": str(contrast), "layers": layers, "alpha": alpha, "cap": cap, "direction": direction, "segments": segments,
+         "form": form, "name": name, "save": save,
          "same_reply": same_reply, "stack": stack, "rekey": rekey, "pseudo": pseudo, "max_tokens": max_tokens,
          "response_tokens": response_tokens, "top": top, "iv": _iv_arg(iv)}
     p = {k: v for k, v in p.items() if v is not None}
     if save is not None:
         fish.recipe_file(s, save)                    # 保存先が読めなければ、見積もりの前に止める
+    if cap is not None:                              # しきい値が読めなければ、見積もりの前に止める
+        fish.caps_of(cap, len(fish._segments(segments)), form or fish.DEFAULTS["form"])
     _gate(s, "fish_pipeline", p, yes, None)
     d = _fish_pipeline(s, **p)
     out = d if full else {**d["summary"], "units": d["units"], "contrast_path": d["contrast_path"]}

@@ -188,6 +188,24 @@ def test_units_and_names_without_model():
         fish.units([8], 2, {8: [1]}, "one", "d", "b")                       # 足りない
     with pytest.raises(GneError):
         fish.units([8], 2, {8: [1, 2]}, "three", "d", "b")
+    # 区切りごとのしきい値(上限つきの形): 強さと同じ考え方。省くとユニットに書かない(既定の 0.4-0.8)。1 つなら全部の区切りに同じ値
+    assert fish.caps_of(None, 3) is None and fish.caps_of("", 3) is None and fish.caps_of([], 3) is None
+    assert fish.caps_of("0.3-0.7", 3) == ["0.3-0.7"] * 3 and fish.caps_of(["0.30-0.70"], 2) == ["0.3-0.7"] * 2
+    assert fish.caps_of("0.4-0.8, 0.3-0.7 / 0.3-0.7", 3) == ["0.4-0.8", "0.3-0.7", "0.3-0.7"] == fish.caps_of(["0.4-0.8", "0.3-0.7", "0.3-0.7"], 3)
+    assert fish.cap_out(None) is None and fish.cap_out(["0.3-0.7"] * 3) == "0.3-0.7" and fish.cap_out(["0.4-0.8", "0.3-0.7"]) == ["0.4-0.8", "0.3-0.7"]
+    for bad in ("0.4", "0.8-0.4", "0.4-0.4", "a-b", "0.4-0.8,0.3-0.7", ["0.4-0.8"] * 4, "-0.1-0.5"):
+        with pytest.raises(GneError):
+            fish.caps_of(bad, 3)
+    with pytest.raises(GneError):
+        fish.caps_of("0.4-0.8", 2, "one")                                    # 上限の無い形には、しきい値が無い
+    uc = fish.units("8,12", 3, {8: [1, 2, 3, 4, 5, 6], 12: [7, 8, 9, 10, 11, 12]}, "cap", "d", "b", "1,1,0.8", cap="0.4-0.8,0.3-0.7,0.3-0.7")
+    assert uc[0] == "8:N1+N2:nw:a1@d.seg0#b_p0&b_one!cap0.4-0.8" and uc[5] == "12:N11+N12:nw:a0.8@d.seg2#b_p2&b_one!cap0.3-0.7"
+    assert [x.split("!cap")[1] for x in uc] == ["0.4-0.8", "0.3-0.7", "0.3-0.7"] * 2
+    from gne.nwrite import form_of
+    from gne.steer import parse_unit
+    assert [form_of(parse_unit(x))["a"] for x in uc[:3]] == [0.4, 0.3, 0.3] and form_of(parse_unit(u[0])) == {"form": "cap", "s": 16.0, "a": 0.4, "b": 0.8}
+    assert fish.units("8,12", 3, {8: [1, 2, 3, 4, 5, 6], 12: [7, 8, 9, 10, 11, 12]}, "cap", "d", "b", "1,1,0.8", cap=None) == u3      # 省けば今までと同じ書き方
+    assert "cap" in fish.SETTINGS and "cap" not in fish.DEFAULTS
     usage = {"layers": [{"layer": 8, "rows": [{"neuron": j} for j in (5, 3, 9, 1)]}]}
     assert fish.default_neurons(usage, 2, "one") == {8: [5, 3]} and fish.default_neurons(usage, 2, "cap") == {8: [5, 3, 9, 1]}
     with pytest.raises(GneError):
@@ -214,6 +232,12 @@ def test_templates_and_units_api(served):
                                           "alpha": [1, 1, 0.8]})
     assert bad.status_code == 400 and bad.json()["error"]["code"] == "BAD_ARGS"
     bad = c.post("/api/fish/units", json={"layers": "8", "segments": "0,1-3", "neurons": {"8": [1]}, "form": "cap", "direction": "d", "base": "b"})
+    assert bad.status_code == 400 and bad.json()["error"]["code"] == "BAD_ARGS"
+    r = c.post("/api/fish/units", json={"layers": "8", "segments": "0,1-3", "neurons": {"8": [1, 2, 3, 4]}, "form": "cap", "direction": "d", "base": "b",
+                                        "alpha": 1, "cap": ["0.4-0.8", "0.3-0.7"]}).json()                # しきい値は区切りごと
+    assert r["specs"] == ["8:N1+N2:nw:a1@d.seg0#b_p0&b_one!cap0.4-0.8", "8:N3+N4:nw:a1@d.seg1#b_p1&b_one!cap0.3-0.7"] and r["units"][1]["cap"] == "0.3-0.7"
+    bad = c.post("/api/fish/units", json={"layers": "8", "segments": "0,1-3", "neurons": {"8": [1, 2, 3, 4]}, "form": "cap", "direction": "d", "base": "b",
+                                          "cap": "0.4-0.8,0.3-0.7,0.3-0.7"})
     assert bad.status_code == 400 and bad.json()["error"]["code"] == "BAD_ARGS"
 
 
@@ -250,6 +274,14 @@ def test_pipeline_job(served, piped):
     seg0 = next(u for u in g["scene"]["units"] if ".seg0" in u["unit"])
     assert seg0["positions"]["0"]["amount"]["mean"] > 0.5                    # 位置 0 用は、狙う場面の位置 0 で書く
     assert set(r["stage_seconds"]) == {"direction", "neurons", "keys", "rekey", "verify", "check"}
+    # 質問ごとの値: 区間ごとの数と、質問ごとの行(質問・返事の出だし・区間ごとの書いた量と鍵の反応)
+    qs = r["check"]["question_summary"]
+    assert qs["segments"] == ["0", "1-3", "4-"] and qs["cap"] == [[0.4, 0.8]] and len(g["scene"]["questions"]) == 8
+    q0 = g["scene"]["questions"][0]
+    assert q0["prompt"] == small_spec("fish_job")["user_prompts"][0] and set(q0["segments"]) == {"0", "1-3", "4-"} and q0["segments"]["0"]["amount"] > 0.5
+    assert all(set(c) == {"n", "low", "over", "leak", "amount_min", "amount_median"} for c in g["scene"]["by_question"].values())
+    assert all(c["low"] is None and c["leak"] is not None for c in g["dont_touch:tasks"]["by_question"].values())
+    assert Path(r["check"]["path"]).name == "fish_job_check.json" and r["cap"] is None and r["direction_reused"] is False
     names = {x["name"] for x in c.get("/api/keys").json()}
     assert {"fish_job_p0", "fish_job_one", "fish_job_r_p2", "fish_job_r_one"} <= names
     # レシピとして保存・読み込みできる
@@ -266,7 +298,8 @@ def test_pipeline_job(served, piped):
     sm = r["summary"]
     assert sm["ok"] is True and sm["n_units"] == 6 and sm["n_neurons"] == 12 and sm["recipe_path"] == str(rp) and sm["key_base"] == "fish_job_r"
     assert set(sm["check"]) == set(g) and sm["check"]["scene"]["n"] == 8 and sm["check"]["scene"]["amount"]["0"]["max"] > 0.5
-    assert len(json.dumps(sm, ensure_ascii=False)) < 4000 < len(json.dumps(r, ensure_ascii=False)) // 10
+    assert set(sm["check"]["scene"]["by_question"]) == {"0", "1-3", "4-"} and sm["questions"]["n_low"] == qs["n_low"]
+    assert len(json.dumps(sm, ensure_ascii=False)) < 7000 < len(json.dumps(r, ensure_ascii=False)) // 10
     text = fish.summary_text(r)
     assert "合格" in text and "ユニット 6 個" in text and "ニューロン 12 個" in text and str(rp) in text
 
@@ -290,8 +323,24 @@ def test_step_jobs(served, piped):
     assert k2["with_units"] and k2["base"] == "fish_step_r" and k2["iv"]
     v = _run_job(c, "fish_verify", {"units": u})["result"]
     assert v["ok"] and len(v["layers"]) == 2
-    ch = _run_job(c, "fish_check", {"spec": spec, "units": u})["result"]
+    ch = _run_job(c, "fish_check", {"spec": spec, "units": u, "low": 0.3, "top": 3})["result"]
     assert set(ch["groups"]) == {"scene", "dont_touch:tasks", "dont_touch:ordinary"} and ch["max_tokens"] == 16
+    assert ch["question_summary"]["low"] == 0.3 and ch["question_summary"]["segments"] == ["0", "1-3", "4-"] and len(ch["question_summary"]["worst"]) <= 3
+    assert len(ch["groups"]["scene"]["questions"]) == 8                      # 鍵 2 つの形でも、区間は入力の側の鍵(位置の鍵)から決まる
+    # すでにある方向を使い回す: 方向の段を飛ばす。層・区切りが合わない方向ははっきりしたエラー(モデルを流す前に止まる)
+    st = small_spec("fish_step")
+    st["fish"] = {**st["fish"], "cap": ["0.4-0.8", "0.3-0.7", "0.3-0.7"]}        # 表の fish にも、区切りごとのしきい値を書ける
+    e = _run_job(c, "fish_pipeline", {"spec": st, "layers": LAYERS, "direction": "fish_step"}, ok=False)
+    assert e["status"] == "error" and e["error"]["code"] == "BAD_DIRECTION" and "--no-stack" in e["error"]["hint"]     # 重ねる前提で作っていない方向
+    ru = _run_job(c, "fish_pipeline", {"spec": st, "layers": LAYERS, "direction": "fish_job", "name": "fish_reuse", "rekey": False, "summary": True})
+    rr = ru["result"]
+    assert rr["direction"] == "fish_job" and rr["direction_reused"] and rr["cap"] == ["0.4-0.8", "0.3-0.7", "0.3-0.7"] and rr["stage_seconds"]["direction"] < 1
+    assert all("@fish_job.seg" in x and "#fish_reuse_p" in x for x in rr["units"]) and rr["units"][1].endswith("!cap0.3-0.7")
+    assert ru["estimate_s"] < piped["estimate_s"]                              # 見積もりも、方向を作らない分だけ短い
+    e = _run_job(c, "fish_pipeline", {"spec": st, "layers": "8", "direction": "fish_job"}, ok=False)
+    assert e["status"] == "error" and e["error"]["code"] == "BAD_DIRECTION" and "8,12" in e["error"]["message"]
+    e = _run_job(c, "fish_pipeline", {"spec": st, "layers": LAYERS, "cap": "0.4-0.8,0.3-0.7"}, ok=False)
+    assert e["status"] == "error" and e["error"]["code"] == "BAD_ARGS" and "しきい値" in e["error"]["message"]
     b = _run_job(c, "fish_behave", {"spec": spec, "units": u, "n": 2, "max_tokens": 8})
     assert b["estimate_s"] and b["result"]["scene"]["counts"]["n"] == 2 and b["result"]["others"]["counts"]["n"] == 2
     assert len(b["result"]["scene"]["replies"]) == 2 and b["result"]["scene"]["replies"][0]["prompt"] == spec["user_prompts"][0]
@@ -370,6 +419,13 @@ def test_fish_tab_end_to_end_in_browser(served, browser):
     assert pg.evaluate("document.querySelectorAll('.fx-check-tab').length") == 3
     assert pg.evaluate("document.querySelectorAll('.fx-check-tab[data-g=scene] td.fx-in, .fx-check-tab[data-g=scene] td.fx-low').length") > 0
     assert "足りない" in pg.evaluate("document.querySelector('#fx-check-sum').textContent")
+    # 質問ごとの値: 場面 × 区間ごとの数の表(狙う場面 3 区間 + 書き込みたくない場面 2 群 × 3 区間)と、平均では隠れることの注意
+    assert pg.evaluate("document.querySelectorAll('#fx-q-tab tbody tr').length") == 9
+    assert "ほとんど書けていない質問" in pg.evaluate("document.querySelector('#fx-q-sum').textContent")
+    assert "平均だけでは" in pg.evaluate("document.querySelector('#fx-check').textContent")
+    assert pg.evaluate("document.querySelector('#fx-cap').value") == "" and not pg.evaluate("document.querySelector('#fx-cap').disabled")
+    assert pg.evaluate("import('/fish.js').then((m) => [m.parseCaps('', 3), m.parseCaps('0.3-0.7', 3), m.parseCaps('0.4-0.8,0.3-0.7,0.3-0.7', 3), m.parseCaps('0.4-0.8,0.3-0.7', 3), m.parseCaps('0.8-0.4', 3)])") \
+        == [[], ["0.3-0.7"], ["0.4-0.8", "0.3-0.7", "0.3-0.7"], None, None]
     assert "既定の候補" in pg.evaluate("document.querySelector('#fx-pipe').textContent")
     units = pg.evaluate(f"{f}.st.units")
     assert len(units) == 6 and all("#fish_web_r_p" in u for u in units)
@@ -561,6 +617,8 @@ def test_fish_tab_in_english(served, browser, piped):
     pg.wait_for_function("document.querySelectorAll('#fx-unit-tab tbody tr').length === 6", timeout=10000)
     assert "Build everything" in pg.evaluate("document.querySelector('#fx-all').textContent")
     assert "Target scene" in pg.evaluate("document.querySelector('#fx-check').textContent")
+    assert "Values per question" in pg.evaluate("document.querySelector('#fx-check').textContent")
+    assert "Use an existing direction" in pg.evaluate("document.querySelector('#fx-usedir').parentElement.textContent")
     box = pg.evaluate("document.querySelector('.fx-neu-tab input:checked').dataset.fxn")
     pg.uncheck(f".fx-neu-tab input[data-fxn=\"{box}\"]")                   # 数が合わない文・「既定の候補に戻す」
     pg.wait_for_function("document.querySelector('#fx-add').disabled", timeout=5000)

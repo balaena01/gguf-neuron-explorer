@@ -178,6 +178,33 @@ def test_pipeline_summary_and_recipe_file(tmp_path):
     assert "合格" in text and "ユニット 4 個" in text and "ニューロン 8 個" in text and "tt.yaml" in text and "[scene]" in text
     assert fish.summary_text(sm) == text                                       # 要約からでも、結果そのものからでも同じ文
     assert "保存していません" in fish.summary_text({**d, "recipe_path": None}) and "不合格" in fish.summary_text({**d, "verify": {"ok": False}})
+    # 質問ごとの値: 区間ごとの数(ほとんど書けていない・狙った量を超えた・書いてしまった)と、書けていない質問の上位が要約に入る
+    q = lambda i, a0, a1, tot1, start: {"i": i, "prompt": f"q{i}", "reply_start": start, "n_tokens": 9, "loop": False,
+                                        "segments": {"0": {"amount": a0, "total": a0, "rho": a0, "n_pos": 1},
+                                                     "1-": None if a1 is None else {"amount": a1, "total": tot1, "rho": 0.3 + a1 / 2, "n_pos": 8}}}
+    rows = [q(0, 0.98, 0.9, 1.0, "Sure,"), q(1, 0.97, 0.05, 0.05, "\u300cwell"), q(2, 0.99, 0.95, 1.4, "Hm,"), q(3, 0.96, None, None, "")]
+    bq = NW._question_summary(rows, ["0", "1-"], True, 0.4, 1.2, 0.2)
+    assert bq["0"] == {"n": 4, "low": 0, "over": 0, "leak": None, "amount_min": 0.96, "amount_median": pytest.approx(0.975)}
+    assert (bq["1-"]["n"], bq["1-"]["low"], bq["1-"]["over"], bq["1-"]["amount_min"]) == (3, 1, 1, 0.05)      # 平均 0.63 に隠れる 1 問
+    dt = NW._question_summary([q(0, 0.01, 0.3, 0.3, "12")], ["0", "1-"], False, 0.4, 1.2, 0.2)
+    assert dt["1-"]["leak"] == 1 and dt["0"]["leak"] == 0 and dt["0"]["low"] is None
+    worst = [{"group": "scene", "segment": "1-", "i": 1, "prompt": "q1", "reply_start": "\u300cwell", "amount": 0.05, "rho": 0.325, "loop": False}]
+    d2 = {**d, "check": {"groups": {"scene": {**d["check"]["groups"]["scene"], "by_question": bq, "questions": rows},
+                                    "dont_touch:tasks": {**d["check"]["groups"]["dont_touch:tasks"], "by_question": dt, "questions": []}},
+                         "question_summary": {"low": 0.4, "over": 1.2, "leak": 0.2, "segments": ["0", "1-"], "cap": [[0.4, 0.8]], "n_low": 1,
+                                              "worst": worst}, "path": "/x/tt_check.json"},
+          "cap": ["0.4-0.8", "0.3-0.7"], "direction_name": "old_dir", "direction_reused": True}
+    sm2 = fish.summary(d2)
+    assert sm2["check"]["scene"]["by_question"]["1-"]["low"] == 1 and sm2["questions"]["worst"][0]["prompt"] == "q1" and sm2["questions"]["n_low"] == 1
+    assert sm2["direction"] == "old_dir" and sm2["direction_reused"] is True and sm2["cap"] == ["0.4-0.8", "0.3-0.7"] and sm2["check_path"] == "/x/tt_check.json"
+    assert "questions" not in json.dumps(sm2["check"]) and len(json.dumps(sm2, ensure_ascii=False)) < 3500     # 質問ごとの行そのものは入れない
+    t2 = fish.summary_text(d2)
+    assert "平均だけでは" in t2 and "区間 1-: 3 問のうち、ほとんど書けていない(量が 0.4 未満)1 問、狙った量を超えた(合計が 1.2 超)1 問" in t2
+    assert "Q: q1  A: \u300cwell" in t2 and "書いてしまった質問(合計の大きさが 0.2 以上): 区間 0 0 / 1 問、区間 1- 1 / 1 問" in t2
+    assert "方向 old_dir(すでにあるものを使った)" in t2 and "しきい値 0.4-0.8,0.3-0.7" in t2 and "/x/tt_check.json" in t2 and fish.summary_text(sm2) == t2
+    assert "ほとんど書けていない質問はありません" in "\n".join(NW.question_lines({"question_summary": {**d2["check"]["question_summary"], "worst": [], "n_low": 0},
+                                                                    "groups": d2["check"]["groups"]}))
+    assert sm["questions"] is None and sm["cap"] is None and sm["direction"] == "tt" and "質問ごとの値" not in text      # 前の形の結果もそのまま要約できる
     s = SimpleNamespace(store=SimpleNamespace(recipes_dir=lambda: tmp_path / "recipes"))
     assert fish.recipe_file(s, "tt_nw") == tmp_path / "recipes" / "tt_nw.yaml"
     assert fish.recipe_file(s, str(tmp_path / "x" / "tt_nw.yaml")) == tmp_path / "x" / "tt_nw.yaml"
@@ -303,6 +330,53 @@ def test_mlpin_keys(built):
 
 
 @pytest.mark.model
+def test_keys_from_one_read(built, monkeypatch):
+    """まとめて作る鍵(fish.keys_step)は、返事を質問の群ごとに 1 回だけ作って読み、全部の区切りの位置の鍵と、形に要る鍵を作る。
+    できる鍵は、1 本ずつ作った鍵と同じ(同じ返事・同じ活性の行から同じ式で計算する。許す誤差は、いちばん大きい要素の 1e-6 倍)。"""
+    from gne import evalx, fish
+    from gne.keyed import load_key
+    s, c = built["s"], built["contrast"]
+    kw = dict(target="mlpin", layers=[8, 12], subset="all", max_tokens=20, pseudo=3)
+    for i, sg in ((0, "0"), (2, "4-")):                               # 1 本ずつ(位置 1-3・場面・ほぼ 1 を返す鍵は built にある)
+        s.direction_key(c, positions=f"pos:{sg}", name=f"sep_p{i}", **kw)
+    ref = {"p0": "sep_p0", "p1": "k_pos", "p2": "sep_p2", "one": "k_one", "scene": "k_scene"}
+    calls = []
+    real = evalx._generate
+    monkeypatch.setattr(evalx, "_generate", lambda ss, items, *a, **k: (calls.append(len(items)), real(ss, items, *a, **k))[1])
+
+    def same(new, old):
+        a, b = load_key(s, new), load_key(s, old)
+        assert a.layers == b.layers == [8, 12] and a.positions == b.positions and a.counts == b.counts
+        for L in a.layers:
+            for x, y in ((a.kappa[L], b.kappa[L]), (a.mu[L], b.mu[L])) + (((a.kappa_ctrl[L], b.kappa_ctrl[L]),) if L in b.kappa_ctrl else ()):
+                x, y = np.asarray(x, dtype=np.float64), np.asarray(y, dtype=np.float64)
+                assert x.shape == y.shape and float(np.abs(x - y).max()) <= 1e-6 * float(np.abs(y).max()), (new, old, L)
+        return a
+
+    d = fish.keys_step(s, str(c), base="one_read", layers=[8, 12], segments="0,1-3,4-", form="cap", pseudo=3, max_tokens=20)
+    assert calls == [len(CONTRAST["user_prompts"]), len(CONTRAST["dont_touch"][0]["prompts"])]     # 生成は群ごとに 1 回だけ(鍵 4 本)
+    assert [r["key"] for r in d["rows"] if r["layer"] == 8] == ["one_read_p0", "one_read_p1", "one_read_p2", "one_read_one"]
+    assert set(d["key_seconds"]) == {"position", "one"}
+    for i in range(3):
+        same(f"one_read_p{i}", ref[f"p{i}"])
+    same("one_read_one", ref["one"])
+    calls.clear()
+    fish.keys_step(s, str(c), base="two_read", layers=[8, 12], segments="0,1-3,4-", form="two", pseudo=3, max_tokens=20)
+    assert len(calls) == 2
+    same("two_read_scene", ref["scene"])
+    same("two_read_p2", ref["p2"])
+    # API: 何本かをまとめて作る。1 本だけなら今までの direction_key と同じ結果の形
+    rs = s.direction_keys(c, [("multi_a", "pos:0"), ("multi_b", "pos:1-3")], **kw)
+    assert [r["name"] for r in rs] == ["multi_a", "multi_b"] and all(r["shared_read"]["keys"] == 2 for r in rs)
+    assert rs[1]["positions_b"] == "not-pos:1-3" and rs[1]["dont_touch"] == built["k_pos"]["dont_touch"]
+    assert [x["build_auc"] for x in rs[1]["layers"]] == [x["build_auc"] for x in built["k_pos"]["layers"]]
+    same("multi_b", ref["p1"])
+    assert "shared_read" not in built["k_pos"]
+    with pytest.raises(GneError):                                    # 同じ名前の鍵を 2 本は作れない
+        s.direction_keys(c, [("dup", "pos:0"), ("dup", "pos:1-3")], **kw)
+
+
+@pytest.mark.model
 def test_neuron_usage_table(built):
     u = built["usage"]
     assert [r["layer"] for r in u["layers"]] == [8, 12] and u["sort"] == "sum"
@@ -362,8 +436,40 @@ def test_amounts_by_position_and_generation(built):
     # 書き込みたくない場面では、どのユニットもほとんど書かない
     for i in range(3):
         assert max(abs(amt(tasks, i, b)) for b in ("0", "1", "2", "3", "4+")) < 0.15
+    # 質問ごとの値: 区間は、ユニットが担当する返事の位置の範囲(位置の鍵の pos:1-3。場面の鍵だけのユニットは方向の区切り .seg0 = 0)
+    qs = ck["question_summary"]
+    assert qs["segments"] == ["0", "1-3"] and (qs["low"], qs["over"], qs["leak"]) == (0.4, 1.2, 0.2) and qs["cap"] == [[0.4, 0.8]]
+    rows = scene["questions"]
+    assert [q["i"] for q in rows] == list(range(6)) and [q["prompt"] for q in rows] == CONTRAST["user_prompts"]
+    assert all(q["reply_start"] and len(q["reply_start"]) <= 40 and q["n_tokens"] > 3 and set(q["segments"]) == {"0", "1-3"} for q in rows)
+    assert all(q["segments"]["1-3"]["n_pos"] == 3 and q["segments"]["0"]["n_pos"] == 1 for q in rows)
+    # 区間 1-3 の値は、その区間を担当する 2 つのユニットの平均。質問で平均すると、位置ごとの表の平均と同じになる
+    by_q = np.mean([q["segments"]["1-3"]["amount"] for q in rows])
+    table = np.mean([amt(scene, i, b) for i in (1, 2) for b in ("1", "2", "3")])
+    assert by_q == pytest.approx(table, abs=1e-6)
+    tot = np.mean([q["segments"]["1-3"]["total"] for q in rows])           # 合計 = 区間 0 のユニットが同じ位置に書いた分も足したもの
+    assert tot == pytest.approx(table + np.mean([amt(scene, 0, b) for b in ("1", "2", "3")]), abs=1e-6)
+    bq = scene["by_question"]["1-3"]
+    assert bq["n"] == 6 and bq["low"] == sum(q["segments"]["1-3"]["amount"] < 0.4 for q in rows) and bq["leak"] is None
+    assert bq["amount_min"] == pytest.approx(min(q["segments"]["1-3"]["amount"] for q in rows))
+    assert qs["n_low"] == sum(c["low"] for c in scene["by_question"].values()) and len(qs["worst"]) == min(qs["n_low"], 5)
+    tq = tasks["by_question"]
+    assert all(c["n"] == 4 and c["leak"] == 0 and c["low"] is None for c in tq.values()) and len(tasks["questions"]) == 4
+    assert "path" not in ck and any("平均だけでは" in n for n in ck["notes"])
+    # 目安を変えると数が変わる(全部の質問が「書けていない」になる高さ)。結果のファイルに質問ごとの行が入る
+    hi = s.nw_check(r, built["contrast"], subset="all", max_tokens=12, n_pos=4, replies="base", low=5.0, over=0.01, top=2, save="nw_t_hi")
+    assert hi["groups"]["scene"]["by_question"]["1-3"]["low"] == 6 and hi["question_summary"]["n_low"] == 12 and len(hi["question_summary"]["worst"]) == 2
+    w = hi["question_summary"]["worst"]
+    assert w[0]["amount"] <= w[1]["amount"] and w[0]["prompt"] in CONTRAST["user_prompts"] and w[0]["reply_start"]
+    saved = json.loads(Path(hi["path"]).read_text(encoding="utf-8"))
+    assert Path(hi["path"]).name == "nw_t_hi_check.json" and len(saved["groups"]["scene"]["questions"]) == 6 and "path" not in saved
+    lines = "\n".join(NW.question_lines(hi))
+    assert "平均だけでは" in lines and "区間 1-3: 6 問のうち、ほとんど書けていない(量が 5 未満)6 問" in lines and "Q: " in lines and "しきい値 0.4-0.8" in lines
+    with pytest.raises(GneError):
+        s.nw_check(r, built["contrast"], subset="all", max_tokens=4, save="bad name")
     own = s.nw_check(r, built["contrast"], subset="all", max_tokens=12, n_pos=2)
     assert own["replies"] == "own" and set(own["groups"]) == {"scene", "dont_touch:tasks"}
+    assert own["groups"]["scene"]["by_question"]["0"]["n"] == 6
     # steer・behave・チャットと同じ道(lora_for)で当たる。nw の LoRA は中身で決まる名前に 1 つ
     lora = s.lora_for(r)
     assert len(lora) == 1 and Path(lora[0][0]).name.startswith("nw-") and lora[0][1] == 1.0 and s.lora_for(r) == lora
@@ -522,6 +628,55 @@ def test_cli_and_jobs(built):
     assert saved["name"] == "cli_pipe" and len(saved["units"]) == 4 and all(u["mode"] == "nw" and u["pair"] is not None for u in saved["units"])
     r = CliRunner().invoke(app, ["nw", "verify", "--recipe", str(rp), *common])
     assert r.exit_code == 0 and json.loads(r.output.strip().splitlines()[-1])["ok"] is True, r.output
+    assert d["direction"] == "cli_pipe" and d["direction_reused"] is False and d["cap"] is None and all("!cap" not in u for u in d["units"])
+    assert set(d["check"]["scene"]["by_question"]) == {"0", "1-"} and d["questions"]["segments"] == ["0", "1-"]     # 質問ごとの値の数も要約に入る
+    assert Path(d["check_path"]).name == "cli_pipe_check.json" and Path(d["check_path"]).exists()
+    # すでにある方向を使い回す(--direction)。区切りごとのしきい値(--cap)。方向は作り直さない
+    from gne import fish
+    made = s.direction_set("cli_pipe")
+    before = {L: np.array(v) for L, v in made.seg[1].items()}
+    r = CliRunner().invoke(app, ["nw", "pipeline", "--contrast", str(built["contrast"]), "--layers", "8-9", "--alpha", "1,0.8", "--segments", "0,1-",
+                                 "--name", "cli_reuse", "--direction", "cli_pipe", "--cap", "0.4-0.8,0.3-0.7", "--max-tokens", "8", "--pseudo", "2",
+                                 "--top", "6", "--no-rekey", *common])
+    d = json.loads(r.output.strip().splitlines()[-1])
+    assert r.exit_code == 0 and d["direction"] == "cli_pipe" and d["direction_reused"] is True and d["key_base"] == "cli_reuse", r.output
+    assert d["cap"] == ["0.4-0.8", "0.3-0.7"] and d["stage_seconds"]["direction"] < 1.0 and any("作り直さず" in n for n in d["notes"])
+    assert all("@cli_pipe.seg" in u and "#cli_reuse_p" in u for u in d["units"])
+    assert all(u.endswith("!cap0.4-0.8") if ".seg0#" in u else u.endswith("!cap0.3-0.7") for u in d["units"]), d["units"]
+    with pytest.raises(GneError):
+        s.direction_set("cli_reuse")                                           # 新しい方向は作っていない
+    assert all(np.array_equal(before[L], s.direction_set("cli_pipe").seg[1][L]) for L in before)
+    assert [NW.form_of(u)["a"] for u in s.recipe(units=d["units"]).nw_units] == [0.4, 0.3, 0.4, 0.3]
+    for kw, word in (({"layers": "8"}, "重ねて書く前提"), ({"layers": "8-9", "segments": "0,1-3,4-"}, "区切り")):
+        with pytest.raises(GneError) as ei:                                    # 層・区切りが合わない方向は、モデルを流す前に止まる
+            fish.pipeline(s, str(built["contrast"]), name="x", direction="cli_pipe", **{"segments": "0,1-", **kw})
+        assert ei.value.code == "BAD_DIRECTION" and word in ei.value.message, ei.value.message
+    with pytest.raises(GneError) as ei:                                        # 重ねる前提で作っていない方向を複数の層に: エラー(--no-stack なら使える)
+        fish.reuse_direction(s, "cli_dir", layers="8-9", segments="0,1-")
+    assert ei.value.code == "BAD_DIRECTION" and "--no-stack" in ei.value.hint
+    assert fish.reuse_direction(s, "cli_dir", layers="8-9", segments="0,1-", stack=False)["reused"] is True
+    assert fish.reuse_direction(s, "cli_dir", layers="8", segments="0,1-")["rows"][1]["direction"] == "cli_dir.seg1"
+    with pytest.raises(GneError):
+        fish.reuse_direction(s, "no_such_direction", layers="8", segments="0,1-")
+    from gne.estimate import Speed, _fish_cost, estimate
+    ep = {"contrast": str(built["contrast"]), "layers": "8-9", "segments": "0,1-"}
+    sp = Speed(s)
+    e_new, e_old = _fish_cost(s, sp, "fish_pipeline", ep), _fish_cost(s, sp, "fish_pipeline", {**ep, "direction": "cli_pipe"})
+    assert e_new["direction_seconds"] > 0 and e_old["direction_seconds"] == 0 and e_old["seconds"] == pytest.approx(e_new["seconds"] - e_new["direction_seconds"])
+    assert estimate(s, "fish_pipeline", {**ep, "direction": "cli_pipe"})["seconds"] < estimate(s, "fish_pipeline", ep)["seconds"]
+    # gne nw check: 平均の表の後に、質問ごとの値の要約が出る。質問ごとの行は --json と結果のファイルに入る
+    r = CliRunner().invoke(app, ["nw", "check", "--recipe", str(rp), "--contrast", str(built["contrast"]), "--subset", "all", "--max-tokens", "8",
+                                 "--low", "5", "--top", "2", *common[:-1]])
+    assert r.exit_code == 0 and "質問ごとの値(平均だけでは、一部の質問でまったく書けていないことが隠れます)" in r.output, r.output
+    assert "区間 0: 6 問のうち、ほとんど書けていない(量が 5 未満)6 問" in r.output and "書けていない質問(量の小さい順に 2 件。全部で 12 件)" in r.output
+    assert "[dont_touch:tasks] 書いてしまった質問" in r.output and "cli_pipe_check.json" in r.output and "[scene] 6 問、ループ" in r.output
+    r = CliRunner().invoke(app, ["nw", "check", "--recipe", str(rp), "--contrast", str(built["contrast"]), "--subset", "all", "--max-tokens", "8",
+                                 "--name", "cli_named", *common])
+    d = json.loads(r.output.strip().splitlines()[-1])
+    assert r.exit_code == 0 and Path(d["path"]).name == "cli_named_check.json" and len(d["groups"]["scene"]["questions"]) == 6, r.output
+    assert d["question_summary"]["low"] == 0.4 and set(d["groups"]["scene"]["questions"][0]["segments"]) == {"0", "1-"}
+    r = CliRunner().invoke(app, ["nw", "pipeline", "--contrast", str(built["contrast"]), "--layers", "8", "--cap", "0.8-0.4", *common])
+    assert r.exit_code != 0 and json.loads(r.output.strip().splitlines()[-1])["error"]["code"] == "BAD_ARGS" and "見積もり" not in r.output
     r = CliRunner().invoke(app, ["nw", "pipeline", "--contrast", str(built["contrast"]), "--layers", "8", "--save", "bad name", *common])
     assert r.exit_code != 0 and json.loads(r.output.strip().splitlines()[-1])["error"]["code"] == "BAD_ARGS"     # 保存先が悪ければ、流す前に止まる
     assert "見積もり" not in r.output
@@ -546,15 +701,22 @@ def test_cli_and_jobs(built):
         assert j.status == "done", j.view()
         return j.result
     assert len(run("nw_neurons", {"layers": "8", "top": 3, "max_tokens": 8, "corpus_tokens": 256})["layers"][0]["rows"]) == 3
-    assert "scene" in run("nw_check", {"recipe": str(s.recipe_path("nw_t")), "contrast": str(built["contrast"]), "subset": "all",
-                                       "max_tokens": 8, "n_pos": 2})["groups"]
+    jc = run("nw_check", {"recipe": str(s.recipe_path("nw_t")), "contrast": str(built["contrast"]), "subset": "all",
+                          "max_tokens": 8, "n_pos": 2, "low": 0.3, "save": "job_check"})
+    assert "scene" in jc["groups"] and jc["question_summary"]["low"] == 0.3 and Path(jc["path"]).name == "job_check_check.json"
+    assert len(jc["groups"]["scene"]["questions"]) == 6
     t = run("fish_try", {"contrast": str(built["contrast"]), "direction": "nw_scene", "alpha": "1,1,0.8", "n": 2, "max_tokens": 8, "others": False})
     assert t["layers"] == [8, 12] and t["alphas"] == [1.0, 1.0, 0.8] and "others" not in t and t["scene"]["counts"]["n"] == 2
     # まとめて作るジョブ: summary を付けると短い要約だけが返る。save でレシピを書く(名前 → <root>/recipes/<名前>.yaml)
     pj = run("fish_pipeline", {"contrast": str(built["contrast"]), "layers": "8", "segments": "0,1-", "name": "job_pipe", "save": "job_pipe_r",
                                "summary": True, "max_tokens": 8, "response_tokens": 8, "pseudo": 2, "top": 4})
     assert pj["ok"] is True and pj["n_units"] == 2 and pj["n_neurons"] == 4 and len(pj["units"]) == 2 and "usage" not in pj and "keys" not in pj
-    assert pj["recipe_path"] == str(s.recipe_path("job_pipe_r")) and s.nw_verify("job_pipe_r")["ok"] and len(json.dumps(pj, ensure_ascii=False)) < 4000
+    assert pj["recipe_path"] == str(s.recipe_path("job_pipe_r")) and s.nw_verify("job_pipe_r")["ok"] and len(json.dumps(pj, ensure_ascii=False)) < 6000
+    assert set(pj["check"]["scene"]["by_question"]) == {"0", "1-"} and "questions" not in pj["check"]["scene"]
+    # ジョブでも、すでにある方向としきい値を渡せる(しきい値 1 つは全部の区切りに同じ値)
+    pr = run("fish_pipeline", {"contrast": str(built["contrast"]), "layers": "8", "segments": "0,1-", "name": "job_reuse", "direction": "job_pipe",
+                               "cap": "0.3-0.7", "rekey": False, "summary": True, "max_tokens": 8, "pseudo": 2, "top": 4})
+    assert pr["direction"] == "job_pipe" and pr["direction_reused"] and pr["cap"] == "0.3-0.7" and all(u.endswith("!cap0.3-0.7") for u in pr["units"])
     assert run("direction_key", {"contrast": str(built["contrast"]), "layers": [8], "role": "scene", "name": "job_scene",
                                  "subset": "all", "max_tokens": 8, "pseudo": 2})["role"] == "scene"
     # 方向 → 鍵の一括でも方向の作り方を選べる
@@ -583,7 +745,8 @@ def test_mcp_tools(tmp_path):
                 tools = {t.name: t for t in (await c.list_tools()).tools}
                 assert {"nw_neurons", "nw_verify", "nw_check", "nw_export", "nw_try", "fish_pipeline"} <= set(tools)
                 assert {"direction", "layers", "alpha", "temperature"} <= set(tools["nw_try"].input_schema["properties"])
-                assert {"alpha", "save", "summary"} <= set(tools["fish_pipeline"].input_schema["properties"])
+                assert {"alpha", "save", "summary", "direction", "cap"} <= set(tools["fish_pipeline"].input_schema["properties"])
+                assert {"low", "over", "top", "save"} <= set(tools["nw_check"].input_schema["properties"])
                 assert {"strip_meta", "adapter_name"} <= set(tools["nw_export"].input_schema["properties"])
                 r = await c.call_tool("fish_pipeline", {"contrast": "tone_in_scene", "layers": []})       # 層は必須
                 sc = getattr(r, "structured_content", None)

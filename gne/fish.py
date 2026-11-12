@@ -9,6 +9,8 @@
 4. ユニット: 層 × 区切りごとに 1 個(上限つきの形は 2 個組)。
 5. 確かめ: nwrite.verify(式どおりか)と nwrite.check(場面・位置ごとに実際に足した量)。
 層・強さは使う人が決める(ここでは選ばない)。強さは区切りごとに変えられる(alpha に "1,1,0.8" か [1, 1, 0.8]。1 つなら全区切りに同じ値)。
+上限つきの形のしきい値も同じ(cap に "0.4-0.8" か、区切りごとに "0.4-0.8,0.3-0.7,0.3-0.7"。省くと既定の 0.4-0.8)。
+pipeline に direction(すでにある方向の名前)を渡すと、方向は作り直さずにそれを使う(層・区切りが合わなければエラー)。
 重みに入れる前に試す(try_step): 区切りつきの方向を、狙う場面の質問の返事の位置どおりに、層の出力へ直接足して生成する
 (control vector を生成の途中で付け替える。ニューロンも鍵も使わない)。層・区切りごとの強さを、作る前に返事で比べるのに使う。
 """
@@ -23,7 +25,7 @@ from .steer import GneError
 
 FORMS = ("one", "two", "cap")                 # 鍵 1 つ / 鍵 2 つ(場面 かつ 位置)/ 上限つきの 2 個組
 PER_SEGMENT = {"one": 1, "two": 1, "cap": 2}  # 区切り 1 つに要るニューロンの数
-SETTINGS = ("layers", "segments", "form", "alpha", "same_reply", "stack", "pseudo", "max_tokens", "response_tokens", "iv", "rekey")
+SETTINGS = ("layers", "segments", "form", "alpha", "cap", "same_reply", "stack", "pseudo", "max_tokens", "response_tokens", "iv", "rekey")
 DEFAULTS = {"segments": "0,1-3,4-", "form": "cap", "alpha": 0.9, "same_reply": True, "stack": True, "pseudo": 4,
             "max_tokens": 96, "response_tokens": 96}
 
@@ -87,6 +89,40 @@ def alphas_of(alpha, n_seg: int) -> list[float]:
     return xs
 
 
+def caps_of(cap, n_seg: int, form: str = "cap") -> list[str] | None:
+    """上限つきの形のしきい値 → 区切りごとの "a-b" のリスト(省いたら None = ユニットに書かない = 既定の 0.4-0.8)。
+    1 つ("0.4-0.8"・["0.4-0.8"])は全部の区切りに同じ値。区切りごとに変えるなら、区切りの順に "0.4-0.8,0.3-0.7,0.3-0.7" か
+    ["0.4-0.8", "0.3-0.7", "0.3-0.7"](数は区切りの数と同じにする。強さの alphas_of と同じ考え方)。a は下のしきい値(鍵の反応が
+    これより小さいとほぼ書かない)、b は上のしきい値(これより大きいと狙った量で頭打ち)。0 ≤ a < b。"""
+    import re
+    if cap is None or (isinstance(cap, str) and not cap.strip()) or (isinstance(cap, (list, tuple)) and not len(cap)):
+        return None
+    hint = "0.4-0.8 か、区切りごとに 0.4-0.8,0.3-0.7,0.3-0.7 のように書きます(下のしきい値-上のしきい値。0 ≤ 下 < 上)"
+    xs = [x.strip() for x in (cap.replace("/", ",").replace(" ", ",").split(",") if isinstance(cap, str) else [str(x) for x in cap])
+          if str(x).strip()]
+    out = []
+    for x in xs:
+        m = re.fullmatch(r"(\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)", x)
+        if not m or not float(m.group(1)) < float(m.group(2)):
+            raise GneError("BAD_ARGS", f"しきい値 {x!r} を読めません", hint)
+        out.append(f"{float(m.group(1)):g}-{float(m.group(2)):g}")
+    if not out:
+        return None
+    if _form(form) != "cap":
+        raise GneError("BAD_ARGS", f"しきい値(cap)は上限つきの形(form cap)だけです(いまの形は {form})",
+                       "鍵 1 つ・鍵 2 つの形には上限が無いので、しきい値はありません")
+    if len(out) == 1:
+        return out * int(n_seg)
+    if len(out) != int(n_seg):
+        raise GneError("BAD_ARGS", f"しきい値が {len(out)} 個で、区切りの数 {n_seg} と合いません", "1 つだけ書けば全部の区切りに同じ値です。" + hint)
+    return out
+
+
+def cap_out(caps: list[str] | None):
+    """結果に入れるしきい値: 省いたら None、全部の区切りが同じなら文字列 1 つ、違えば区切りごとのリスト。"""
+    return None if caps is None else (caps[0] if len(set(caps)) == 1 else list(caps))
+
+
 def alpha_out(al: list[float]):
     """結果に入れる強さ: 全部の区切りが同じ値なら数 1 つ、違えば区切りごとのリスト。"""
     return al[0] if len(set(al)) == 1 else list(al)
@@ -141,12 +177,15 @@ def default_neurons(usage: dict, n_seg: int, form: str) -> dict[int, list[int]]:
     return out
 
 
-def units(layers, n_seg: int, neurons: dict, form: str, direction: str, base: str, alpha=0.9, whole: bool = False) -> list[str]:
+def units(layers, n_seg: int, neurons: dict, form: str, direction: str, base: str, alpha=0.9, whole: bool = False,
+          cap=None) -> list[str]:
     """層 × 区切りごとのユニット(書き方の文字列)。neurons は {層: [番号, …]}(層ごとに needed 個。区切り 0 から順に使う)。
     alpha は強さ(数 1 つなら全部の区切りに同じ値。"1,1,0.8" か [1, 1, 0.8] なら区切りごと。alphas_of)。
+    cap は上限つきの形のしきい値(caps_of。省くとユニットに書かない = 既定の 0.4-0.8。渡すと、区切りごとに !cap<a-b> を付ける)。
     whole(書く位置が before:<正規表現> のとき): 方向は区切りに分けず、direction をそのまま使う。"""
     _form(form)
     al = alphas_of(alpha, n_seg)
+    caps = caps_of(cap, n_seg, form)
     names = key_names(base, n_seg, form)
     per = PER_SEGMENT[form]
     out = []
@@ -160,7 +199,7 @@ def units(layers, n_seg: int, neurons: dict, form: str, direction: str, base: st
             pk = names["position"][i]
             head = f"{L}:N{js[i * per]}" + (f"+N{js[i * per + 1]}" if form == "cap" else "")
             keys = f"#{names['scene']}&{pk}" if form == "two" else (f"#{pk}&{names['one']}" if form == "cap" else f"#{pk}")
-            out.append(f"{head}:nw:a{al[i]:g}@{direction}{'' if whole else f'.seg{i}'}{keys}")
+            out.append(f"{head}:nw:a{al[i]:g}@{direction}{'' if whole else f'.seg{i}'}{keys}" + (f"!cap{caps[i]}" if caps else ""))
     return out
 
 
@@ -246,23 +285,33 @@ def keys_step(session, contrast: str, *, base: str, layers=None, segments=None, 
             if n not in notes and "build_auc" not in n:
                 notes.append(n)
 
-    for i, sg in enumerate(segs):
-        r = session.direction_key(contrast, target="mlpin", layers=Ls, positions=sg if sg.startswith("before:") else f"pos:{sg}",
-                                  name=names["position"][i],
-                                  subset=subset, max_tokens=int(max_tokens), pseudo=int(pseudo), iv=iv, seed=int(seed),
-                                  progress=session.progress)
+    # 区切りごとの位置の鍵は、同じ返事の違う位置から作る。返事の生成と読み取りは 1 回だけにして、全部の区切りの鍵を作る
+    # (1 本ずつ作ったときと同じ鍵になる。keyed_build.build_keys_multi)。場面の鍵・ほぼ 1 を返す鍵も、同じ返事を使い回す
+    cache: dict = {}
+    stage = {}
+    t = time.perf_counter()
+    rs = session.direction_keys(contrast, [(names["position"][i], sg if sg.startswith("before:") else f"pos:{sg}")
+                                           for i, sg in enumerate(segs)],
+                                target="mlpin", layers=Ls, subset=subset, max_tokens=int(max_tokens), pseudo=int(pseudo), iv=iv,
+                                seed=int(seed), progress=session.progress, gen_cache=cache)
+    for sg, r in zip(segs, rs, strict=True):
         add("position", sg, r)
+    stage["position"] = time.perf_counter() - t
     if names["scene"]:
+        t = time.perf_counter()
         add("scene", None, session.direction_key(contrast, role="scene", layers=Ls, name=names["scene"], subset=subset,
                                                  max_tokens=int(max_tokens), pseudo=int(pseudo), iv=iv, seed=int(seed),
-                                                 progress=session.progress))
+                                                 progress=session.progress, gen_cache=cache))
+        stage["scene"] = time.perf_counter() - t
     if names["one"]:
+        t = time.perf_counter()
         add("one", None, session.direction_key(contrast, role="one", layers=Ls, name=names["one"], subset=subset,
-                                               max_tokens=int(max_tokens), iv=iv, progress=session.progress))
+                                               max_tokens=int(max_tokens), iv=iv, progress=session.progress, gen_cache=cache))
+        stage["one"] = time.perf_counter() - t
     return {"base": base, "form": form, "segments": segs, "layers": Ls, "names": names, "rows": rows, "subset": subset,
             "pseudo": int(pseudo), "max_tokens": int(max_tokens), "iv": _iv_text(iv),
             "notes": notes + ["比べは作成に使った例での値です(甘い)。実際に足す量は「確かめる」の表で見ます"],
-            "seconds": time.perf_counter() - t0}
+            "key_seconds": stage, "seconds": time.perf_counter() - t0}
 
 
 def iv_units(session, iv, extra: list[str]):
@@ -295,14 +344,54 @@ def verify_step(session, specs: list[str], *, iv=None, texts=None) -> dict:
 
 
 def check_step(session, specs: list[str], contrast: str, *, subset: str = "all", max_tokens: int = 96, iv=None,
-               replies: str = "own", n_pos: int = 8, segments=None) -> dict:
+               replies: str = "own", n_pos: int = 8, segments=None, low: float | None = None, over: float | None = None,
+               leak: float | None = None, top: int | None = None, save: str | None = None) -> dict:
     """足した量。書く位置が before:<正規表現> のときは、無介入の返事をレシピを当てて読み(書くと一致する文字が出なくなるので)、
-    一致の直前の位置と、それ以外の位置に分けて出す。"""
+    一致の直前の位置と、それ以外の位置に分けて出す。質問ごとの値(nwrite.check の questions・by_question・question_summary)も
+    入る。low・over・leak・top はその目安と件数(省くと nwrite の既定)、save は結果のファイルの名前。"""
     r = session.recipe(units=[str(x) for x in specs], name="fish")
+    kw = {k: v for k, v in {"low": low, "over": over, "leak": leak, "top": top, "save": save}.items() if v is not None and v != ""}
     if segments is not None and before_mode(segments):
         return session.nw_check(r, contrast, subset=subset, max_tokens=int(max_tokens), iv=iv, replies="base",
-                                positions=_segments(segments)[0])
-    return session.nw_check(r, contrast, subset=subset, max_tokens=int(max_tokens), iv=iv, replies=replies, n_pos=int(n_pos))
+                                positions=_segments(segments)[0], **kw)
+    return session.nw_check(r, contrast, subset=subset, max_tokens=int(max_tokens), iv=iv, replies=replies, n_pos=int(n_pos), **kw)
+
+
+def reuse_direction(session, direction: str, *, layers, segments, stack: bool = True) -> dict:
+    """すでにある方向を、作り直さずに使えるかを確かめて、direction_step と同じ形の表(層 × 区切りごとの長さ)を返す。
+    合わなければはっきりしたエラー: 区切りが違う、層が方向に無い、重ねる層(--stack-layers)が書く層と違う。"""
+    Ls = _layers(layers)
+    segs = _segments(segments)
+    whole = before_mode(segs)
+    ds = session.direction_set(str(direction))
+    have_segs = list(ds.segments)
+    how = "方向を作り直す(direction を渡さない)か、作ったときと同じ区切り・層を渡してください"
+    if whole:
+        if have_segs:
+            session.warn(f"方向 {ds.name} は区切りつき({','.join(have_segs)})ですが、書く位置が before:<正規表現> なので、区切らない方向"
+                         "(返事の全部の位置の平均)を使います")
+        src = [ds.raw]
+    else:
+        if have_segs != segs:
+            raise GneError("BAD_DIRECTION", f"方向 {ds.name} の区切り({','.join(have_segs) if have_segs else '区切りなし'})が、"
+                                            f"いまの区切り({','.join(segs)})と違います", how)
+        src = [ds.seg[i] for i in range(len(segs))]
+    lack = [L for L in Ls if any(L not in x for x in src)]
+    if lack:
+        raise GneError("BAD_DIRECTION", f"方向 {ds.name} に層 {','.join(map(str, lack))} がありません", how)
+    made = sorted(int(L) for L in (ds.meta.get("stack_layers") or []))
+    if made and made != Ls:
+        raise GneError("BAD_DIRECTION", f"方向 {ds.name} は層 {','.join(map(str, made))} に重ねて書く前提で作ってあります。いまの層"
+                                        f"({','.join(map(str, Ls))})と違うので、そのままでは足す量がずれます",
+                       "同じ層を渡すか、いまの層で方向を作り直してください(direction を渡さない)")
+    if not made and stack and not whole and len(Ls) > 1:
+        raise GneError("BAD_DIRECTION", f"方向 {ds.name} は、重ねて書く前提(--stack-layers)で作られていません。複数の層に書くと足し過ぎになります",
+                       "重ねる前提で作り直す(direction を渡さない)か、そのまま使うなら stack を切ってください(--no-stack)")
+    rows = [{"layer": L, "segment": i, "positions": sg, "direction": ds.name if whole else f"{ds.name}.seg{i}",
+             "norm": float(np.linalg.norm(src[i][L])), "cos_old": None, "norm_old": None}
+            for L in Ls for i, sg in enumerate(segs)]
+    return {"name": ds.name, "segments": segs, "layers": Ls, "same_reply": bool(ds.meta.get("same_reply")), "stack": bool(made),
+            "method": ds.meta.get("method"), "compare": None, "rows": rows, "n_prompts": None, "reused": True, "seconds": 0.0}
 
 
 def behave_step(session, specs: list[str], contrast: str, *, name: str, prompts=None, n: int = 12, max_tokens: int = 120,
@@ -353,10 +442,13 @@ def behave_step(session, specs: list[str], contrast: str, *, name: str, prompts=
 def pipeline(session, contrast: str, *, name: str, layers=None, segments=None, form: str = "cap", alpha=0.9,
              same_reply: bool = True, stack: bool = True, compare: bool = True, pseudo: int = 4, max_tokens: int = 96,
              response_tokens: int = 96, iv=None, rekey: bool = True, neurons: dict | None = None, top: int = 20,
-             save: str | Path | None = None) -> dict:
+             save: str | Path | None = None, direction: str | None = None, cap=None) -> dict:
     """方向 → ニューロンの表 → 鍵 → ユニット →(そのユニットを当てた状態で鍵を作り直す)→ 式どおりか → 足した量、を順に回す。
     ニューロンは既定の候補(表の上から)を使う(neurons を渡せばそれ)。層と強さは渡されたものをそのまま使う。
     alpha は数 1 つ(全部の区切りに同じ値)か、区切りごとの "1,1,0.8"・[1, 1, 0.8]。
+    cap は上限つきの形のしきい値(caps_of): "0.4-0.8"(全部の区切りに同じ値)か、区切りごとの "0.4-0.8,0.3-0.7,0.3-0.7"。省くと既定(0.4-0.8)。
+    direction(すでにある方向の名前)を渡すと、方向を作り直さずにそれを使う(reuse_direction。区切り・層・重ねる層が合わなければ
+    エラー。same_reply・response_tokens・compare は使わない)。鍵の名前は今までどおり name から付ける。
     save を渡すと、できたユニットをレシピのファイルに書く(save_recipe。.yaml / .yml で終わればそのパス、そうでなければ名前として
     <root>/recipes/<名前>.yaml)。結果の recipe_path が、gne nw verify --recipe などにそのまま渡せるパス。省くと書かない(今までどおり)。
     結果は大きい(ニューロンの表・鍵の表・足した量の細目)ので、短く見るなら結果の summary(summary() と同じ)か summary_text()。"""
@@ -365,6 +457,7 @@ def pipeline(session, contrast: str, *, name: str, layers=None, segments=None, f
     segs = _segments(segments)
     _form(form)
     al = alphas_of(alpha, len(segs))            # 数が区切りと合わなければ、モデルを流す前に止める
+    caps = caps_of(cap, len(segs), form)
     save_to = None if save is None or not str(save).strip() else recipe_file(session, save)   # 名前が悪ければ、モデルを流す前に止める
     stage = {}
 
@@ -372,8 +465,14 @@ def pipeline(session, contrast: str, *, name: str, layers=None, segments=None, f
         stage[k] = time.perf_counter() - t
 
     t = time.perf_counter()
-    d = direction_step(session, contrast, name=name, layers=Ls, segments=segs, same_reply=same_reply, stack=stack,
-                       response_tokens=response_tokens, compare=compare)
+    notes = []
+    if direction is not None and str(direction).strip():
+        d = reuse_direction(session, str(direction).strip(), layers=Ls, segments=segs, stack=stack)
+        notes.append(f"方向は作り直さず、すでにある {d['name']} を使いました")
+    else:
+        d = direction_step(session, contrast, name=name, layers=Ls, segments=segs, same_reply=same_reply, stack=stack,
+                           response_tokens=response_tokens, compare=compare)
+    dname = d["name"]
     lap("direction", t)
     t = time.perf_counter()
     usage = session.nw_neurons(Ls, top=max(int(top), needed(len(segs), form)), iv=iv)
@@ -382,10 +481,9 @@ def pipeline(session, contrast: str, *, name: str, layers=None, segments=None, f
     t = time.perf_counter()
     keys = keys_step(session, contrast, base=name, layers=Ls, segments=segs, form=form, pseudo=pseudo, max_tokens=max_tokens, iv=iv)
     whole = before_mode(segs)
-    specs = units(Ls, len(segs), picked, form, name, name, al, whole)
+    specs = units(Ls, len(segs), picked, form, dname, name, al, whole, caps)
     lap("keys", t)
     keys2 = None
-    notes = []
     if whole:
         # 文字の直前に書く形: 書くとその文字が出なくなり、当てた状態の返事には書き込みたい位置がほとんど残らないので、作り直さない
         rekey = False
@@ -395,15 +493,16 @@ def pipeline(session, contrast: str, *, name: str, layers=None, segments=None, f
         base2 = f"{name}_r"
         keys2 = keys_step(session, contrast, base=base2, layers=Ls, segments=segs, form=form, pseudo=pseudo, max_tokens=max_tokens,
                           iv=iv_units(session, iv, specs))
-        specs = units(Ls, len(segs), picked, form, name, base2, al, whole)
+        specs = units(Ls, len(segs), picked, form, dname, base2, al, whole, caps)
         lap("rekey", t)
     t = time.perf_counter()
     ver = verify_step(session, specs, iv=iv)
     lap("verify", t)
     t = time.perf_counter()
-    chk = check_step(session, specs, contrast, max_tokens=max_tokens, iv=iv, segments=segs)
+    chk = check_step(session, specs, contrast, max_tokens=max_tokens, iv=iv, segments=segs, save=name)
     lap("check", t)
     res = {"name": name, "contrast_path": contrast, "layers": Ls, "segments": segs, "form": form, "alpha": alpha_out(al), "alphas": al,
+           "cap": cap_out(caps), "caps": caps, "direction_name": dname, "direction_reused": bool(d.get("reused")),
            "direction": d, "usage": usage, "neurons": picked, "neurons_default": neurons is None, "keys": keys, "rekeyed": keys2,
            "key_base": f"{name}_r" if rekey else name, "units": specs, "unit_rows": unit_rows(session, specs),
            "verify": ver, "check": chk, "iv": keys["iv"], "notes": notes, "stage_seconds": stage}
@@ -455,12 +554,20 @@ def summary(d: dict) -> dict:
         groups[g] = {"n": x.get("n"), "loops": x.get("loops"),
                      "amount": {b: {"mean": round(sum(a["mean"] for a in v) / len(v), 3), "min": round(min(a["min"] for a in v), 3),
                                     "max": round(max(a["max"] for a in v), 3)} for b, v in pos.items()}}
+        if x.get("by_question") is not None:                  # 質問ごとの値の数(区間ごと。ほとんど書けていない・超えた・書いてしまった)
+            groups[g]["by_question"] = {sg: {k: (round(v, 3) if isinstance(v, float) else v) for k, v in c.items()}
+                                        for sg, c in x["by_question"].items()}
+    qs = (d.get("check") or {}).get("question_summary")
     ver = d.get("verify") or {}
     return {"name": d.get("name"), "ok": bool(ver.get("ok")), "layers": list(d.get("layers") or []), "segments": list(d.get("segments") or []),
-            "form": d.get("form"), "alpha": d.get("alpha"), "n_units": len(d.get("units") or []),
+            "form": d.get("form"), "alpha": d.get("alpha"), "cap": d.get("cap"), "n_units": len(d.get("units") or []),
             "n_neurons": sum(1 + (1 if r.get("pair") is not None else 0) for r in rows),
-            "direction": d.get("name"), "key_base": d.get("key_base"), "rekeyed": d.get("rekeyed") is not None,
-            "recipe_path": d.get("recipe_path"), "check": groups, "notes": list(d.get("notes") or []),
+            "direction": d.get("direction_name") or d.get("name"), "direction_reused": bool(d.get("direction_reused")),
+            "key_base": d.get("key_base"), "rekeyed": d.get("rekeyed") is not None,
+            "recipe_path": d.get("recipe_path"), "check": groups,
+            "questions": None if not qs else {**{k: qs[k] for k in ("low", "over", "leak", "segments", "cap", "n_low")},
+                                              "worst": [{**q, "amount": round(q["amount"], 3), "rho": round(q["rho"], 3)} for q in qs["worst"]]},
+            "check_path": (d.get("check") or {}).get("path"), "notes": list(d.get("notes") or []),
             "stage_seconds": {k: round(float(v), 1) for k, v in (d.get("stage_seconds") or {}).items()},
             "seconds": None if d.get("seconds") is None else round(float(d["seconds"]), 1)}
 
@@ -471,13 +578,21 @@ def summary_text(d: dict) -> str:
     al = s["alpha"]
     lines = [f"{s['name']}: 層 {','.join(map(str, s['layers']))}、区切り {','.join(s['segments'])}、形 {s['form']}、強さ "
              + (",".join(f"{a:g}" for a in al) if isinstance(al, list) else f"{al:g}")
+             + (f"、しきい値 {','.join(s['cap']) if isinstance(s['cap'], list) else s['cap']}" if s.get("cap") else "")
              + (f"({s['seconds']:.0f} 秒)" if s.get("seconds") is not None else ""),
-             f"ユニット {s['n_units']} 個、上書きするニューロン {s['n_neurons']} 個、鍵 {s['key_base']}_*"
+             f"ユニット {s['n_units']} 個、上書きするニューロン {s['n_neurons']} 個、方向 {s['direction']}"
+             + ("(すでにあるものを使った)" if s.get("direction_reused") else "") + f"、鍵 {s['key_base']}_*"
              + ("(レシピを当てた状態で作り直した)" if s.get("rekeyed") else ""),
              "式どおりか: " + ("合格" if s["ok"] else "不合格(gne nw verify で層ごとの誤差を見てください)")]
     for g, x in s["check"].items():
         cells = "  ".join(f"{b}: {a['mean']:+.2f}({a['min']:+.2f}〜{a['max']:+.2f})" for b, a in x["amount"].items())
         lines.append(f"足した量 [{g}] {x['n']} 問、繰り返し {x['loops']}: {cells}")
+    q = s.get("questions")
+    if q:
+        from .nwrite import question_lines
+        lines += question_lines({"question_summary": q, "groups": s["check"]})
+        if s.get("check_path"):
+            lines.append(f"質問ごとの値: {s['check_path']}")
     lines.append(f"レシピ: {s['recipe_path']}" if s.get("recipe_path") else "レシピは保存していません(save に名前か .yaml のパスを渡すと書きます)")
     lines += [f"注: {n}" for n in s["notes"]]
     return "\n".join(lines)

@@ -100,6 +100,10 @@ direction で作った方向は "L:dir:NAME:dose"、attention ヘッドの gain 
    作る前に、nw_try(direction, contrast, layers, alpha)で、同じ方向を層の出力に直接足した返事を見て、層と強さを比べられる。
    Qwen3.5-4B の 1 例では、離れた 3 層より続いた 13 層(11〜23)・強さ 1 / 1 / 0.8 のほうが良かった(口調らしい返事 27〜29% → 53%)。
    層の番号はモデルで違う。同じ語句から抜けられなくなる返事(繰り返し)が質問によって 1〜8% 出る(docs/fish.md §8)。
+   鍵を作る質問は多いほうがよい(狙う場面の質問は 100 問以上を勧める)。返事の書き出し方が何通りかあるとき(かぎかっこで始まる、
+   など)、少ない質問で作った鍵はその一部を拾えない。nw_check の位置ごとの値は平均で、一部の質問でまったく書けていないことが
+   隠れるので、質問ごとの値(by_question の low、question_summary.worst の質問と返事の出だし)も見る。fish_pipeline は、direction で
+   すでにある方向を使い回せ(作り直さない)、cap で上限つきの形のしきい値を区切りごとに変えられる。
 """
 
 
@@ -655,18 +659,26 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
 
     @srv.tool()
     async def nw_check(contrast: str, units: list[str] | None = None, recipe: str | None = None, subset: str = "odd",
-                       replies: str = "own", max_tokens: int = 96, n_pos: int = 8, iv: str | list[str] | None = None) -> dict:
+                       replies: str = "own", max_tokens: int = 96, n_pos: int = 8, iv: str | list[str] | None = None,
+                       low: float = 0.4, over: float = 1.2, top: int = 5, save: str | None = None) -> dict:
         """nw のレシピについて、位置の種類ごとの鍵の反応と実際に足した量(α·d を 1 として)を測るジョブを投げる(job_status で結果)。
         対照集合の質問(狙う場面 = groups.scene)と dont_touch の群(書き込みたくない場面)で、返事の位置 0(書き始める直前)〜
         n_pos−1 とそれ以降について、ユニットごとに amount・rho_gate・rho_up の平均・最小・最大。replies="own" はレシピを当てて
         作った返事を当てたまま読む(実際に起きること。groups.<名前>.loops に繰り返しの数)、"base" は無介入の返事を読む。
-        見るところ: 狙う場面で足す量が 1 から大きく外れる位置、書き込みたくない場面で 0 から離れる位置、負(逆向き)の位置。"""
+        見るところ: 狙う場面で足す量が 1 から大きく外れる位置、書き込みたくない場面で 0 から離れる位置、負(逆向き)の位置。
+        平均だけでは、一部の質問でまったく書けていないことが隠れるので、質問ごとの値も返す。区間 = ユニットが担当する返事の位置の
+        範囲(位置の鍵の pos:<範囲>)。groups.<名前>.questions は質問ごとの行(prompt・reply_start = 返事の出だし・segments.<区間> の
+        amount = その区間で書いた量(狙った量 = 1)、total = 全部のユニットの合計、rho = 鍵の反応)。groups.<名前>.by_question は区間ごとの
+        数(狙う場面は low = amount が low 未満の質問、over = total が over を超えた質問。書き込みたくない場面は leak = 書いてしまった質問)。
+        question_summary.worst は、ほとんど書けていない質問の上位 top 件。書けていない質問が、返事の書き出し方(かぎかっこで始まる、
+        など)でまとまっていたら、鍵を作る質問を増やす。save(名前)で <root>/behave/<model_id>/<名前>_check.json にも書く。"""
         try:
             if bool(recipe) == bool(units):
                 raise GneError("BAD_ARGS", "recipe(保存したレシピの名前)か units のどちらかを渡してください")
             r = str(session.recipe_path(recipe)) if recipe else session.recipe(units=units)
             return jobs.start("nw_check", {"recipe": r, "contrast": str(_contrast_path(session, contrast, None, None, None, None)),
                                            "subset": subset, "replies": replies, "max_tokens": max_tokens, "n_pos": n_pos,
+                                           "low": low, "over": over, "top": top, **({"save": save} if save else {}),
                                            **({"iv": iv} if iv is not None else {})}).view()
         except Exception as e:  # noqa: BLE001
             return _err(e)
@@ -691,7 +703,8 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
                             same_reply: bool | None = None, stack: bool | None = None, rekey: bool | None = None,
                             pseudo: int | None = None, max_tokens: int | None = None, response_tokens: int | None = None,
                             iv: str | list[str] | None = None, neurons: dict[str, list[int]] | None = None, top: int = 20,
-                            save: str | None = None, summary: bool = False) -> dict:
+                            save: str | None = None, summary: bool = False, direction: str | None = None,
+                            cap: str | list[str] | None = None) -> dict:
         """FiSH を最初から最後まで 1 回のジョブで作る(job_status で結果。UI の FiSH のタブの「まとめて作る」と同じ): 方向 → ニューロンの表 →
         鍵 → ユニット → そのユニットを当てた状態で鍵を作り直す → 式どおりか → 足した量。contrast は対照集合の表(name・system_a・
         user_prompts・dont_touch と、設定の fish)か、configs/contrast/ の名前・パス、configs/fish/ のひな形の名前。
@@ -704,7 +717,12 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
         save(名前か .yaml で終わるパス)を渡すと、できたユニットをレシピのファイルに書く(名前なら <root>/recipes/<名前>.yaml。結果の
         recipe_path。nw_verify・nw_check・nw_export の recipe にその名前を渡せる)。省くと書かない。
         結果は数十万字になる(ニューロンの表・鍵の表・足した量の細目)。summary=True なら、代わりに短い要約だけを返す: ok(式どおりか)・
-        n_units・n_neurons・recipe_path・check(場面の群 × 位置ごとの足した量の平均・最小・最大)・units(ユニットの書き方)。"""
+        n_units・n_neurons・recipe_path・check(場面の群 × 位置ごとの足した量の平均・最小・最大と、by_question = 区間ごとの、ほとんど
+        書けていない質問・狙った量を超えた質問の数)・questions(書けていない質問の上位)・units(ユニットの書き方)。
+        direction(すでにある方向の名前)を渡すと、方向を作り直さずにそれを使う(区切り・層・重ねる層が合わなければ BAD_DIRECTION)。
+        cap は上限つきの形のしきい値 "a-b"(既定 0.4-0.8。鍵の反応が a より小さいとほぼ書かず、b より大きいと狙った量で頭打ち)。1 つなら
+        全部の区切りに同じ値、区切りごとに変えるなら区切りの順に ["0.4-0.8", "0.3-0.7", "0.3-0.7"] か "0.4-0.8,0.3-0.7,0.3-0.7"。
+        鍵は、返事を 1 回だけ作って読み、全部の区切りの分を作る。鍵を作る質問は多いほうがよい(狙う場面の質問は 100 問以上を勧める)。"""
         from .jobs import _layers
         try:
             if not _layers(layers):
@@ -712,7 +730,7 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
             p = {**_fish_contrast(contrast), "layers": layers, "alpha": alpha, "segments": segments, "form": form, "name": name,
                  "same_reply": same_reply, "stack": stack, "rekey": rekey, "pseudo": pseudo, "max_tokens": max_tokens,
                  "response_tokens": response_tokens, "iv": iv, "neurons": neurons, "top": top, "save": save,
-                 "summary": True if summary else None}
+                 "direction": direction, "cap": cap, "summary": True if summary else None}
             return jobs.start("fish_pipeline", {k: v for k, v in p.items() if v is not None}).view()
         except Exception as e:  # noqa: BLE001
             return _err(e)

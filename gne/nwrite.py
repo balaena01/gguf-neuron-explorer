@@ -321,12 +321,14 @@ SCENE_BUCKETS = ("pos:0", "pos:1-3", "pos:4-15", "pos:16-")
 
 def build_role_key(session, contrast, *, role: str, layers, name: str | None = None, subset: str = "even",
                    max_tokens: int = 96, pseudo: int = 16, iv=None, seed: int = 0, q_energy: float = 0.99,
-                   progress=None) -> dict:
+                   progress=None, gen_cache: dict | None = None) -> dict:
     """role = scene: 対照集合の質問(user_prompts)への返事の位置で反応し、dont_touch の群の質問への返事では反応しない鍵。
       返事の位置を 0 / 1〜3 / 4〜15 / 16 以降に分けた例ごとの平均を行にして、keyed と同じ式(κ = k/(μᵀk)、k = μ − QQᵀμ)で作る。
       比較用の鍵は、質問のラベル(狙う質問か、dont_touch か)をでたらめに入れ替えて同じ手順で作る。
     role = one: どの位置でもほぼ 1 を返す鍵(κ1ᵀh ≈ 1 の最小二乗)。上限つきの形で、バイアスの代わりに使う。
-    どちらも推論時と同じ文脈(system_b。省けば system なし)で、モデル自身の返事(iv があればそれを当てた状態)を読む。"""
+    どちらも推論時と同じ文脈(system_b。省けば system なし)で、モデル自身の返事(iv があればそれを当てた状態)を読む。
+    gen_cache(dict)を渡すと、生成した返事を覚えておいて使い回す(keyed_build.collect_acts。位置の鍵と同じ質問・同じ長さ・
+    同じ介入なら、返事を作り直さない)。"""
     from .keyed_build import (MlpInCapture, _as_spec, balanced_split, collect_acts, intervention)
     from .direction import _subset
     from .reverse import _conv
@@ -353,11 +355,14 @@ def build_role_key(session, contrast, *, role: str, layers, name: str | None = N
         sets.append((f"dt:{dt.name}", dt.convs(_subset(len(dt.prompts), subset))))
     pos = {f"s{i}": b for i, b in enumerate(SCENE_BUCKETS)}
     tc = MlpInCapture(session, Ls)
-    _, _, iv_desc = intervention(session, iv)
+    # 先に当てておく介入は、ここで 1 回だけ LoRA・ベクトルにして、質問の群ごとの読み取りに同じものを渡す(群ごとに作り直すと、
+    # ユニットの書き方で渡した nw の介入では、層ごとの重みを毎回 float に戻して LoRA を組み直すことになり、大きいモデルで遅い)
+    iv_vecs, iv_lora, iv_desc = intervention(session, iv)
+    iv_once = None if iv is None else (iv_vecs, iv_lora)
     got = {}
     for k, (label, convs) in enumerate(sets):
-        got[label] = collect_acts(session, convs, layers=Ls, positions=pos, max_tokens=max_tokens, iv=iv, target=tc,
-                                  samples=2048 if role == "one" else 0, seed=seed)
+        got[label] = collect_acts(session, convs, layers=Ls, positions=pos, max_tokens=max_tokens, iv=iv_once, target=tc,
+                                  samples=2048 if role == "one" else 0, seed=seed, gen_cache=gen_cache)
         if progress:
             progress(k + 1, len(sets), f"key: {label}")
     n_q = {label: len(convs) for label, convs in sets}
@@ -528,24 +533,80 @@ def verify(session, recipe, *, texts: Sequence[str] | None = None, iv=None) -> d
             "thresholds": {"gate_err": 0.05, "up_err": 0.05, "act_err": 1e-3, "others_changed_max": 1e-4, "out_rel_err_median": 0.05}}
 
 
+LOW_DEFAULT, OVER_DEFAULT, LEAK_DEFAULT = 0.4, 1.2, 0.2      # 質問ごとの値の目安: ほとんど書けていない / 狙った量を超えた / 書いてしまった
+
+
+def unit_segment(session, r: dict) -> str:
+    """ユニット(nw_plan の行)が担当する返事の位置の区間。鍵の positions(pos:<範囲>。上限つき・鍵 1 つの形は 1 本目の鍵、
+    鍵 2 つの形は入力の側の鍵)から読む。位置の鍵でなければ方向の名前の .seg<i>、それも無ければ返事の全部("0-")。"""
+    from .direction import parse_segments, segment_text
+    for nm in (r["key"], r["key2"]):
+        if not nm:
+            continue
+        try:
+            pos = str(session._key_of(nm).positions or "")
+        except GneError:
+            continue
+        if pos.startswith("pos:"):
+            return segment_text(parse_segments(pos[4:])[0])
+    m = re.search(r"^(.*)\.seg(\d+)$", str(r["direction"] or ""))
+    if m:
+        try:
+            segs = list(session.direction_set(m.group(1)).segments)
+            return segment_text(parse_segments(segs[int(m.group(2))])[0])
+        except (GneError, IndexError):
+            pass
+    return "0-"
+
+
+def _question_summary(rows: list[dict], segs: list[str], wanted: bool, low: float, over: float, leak: float) -> dict:
+    """質問ごとの行 → 区間ごとの数: n(その区間の位置があった質問)、low(書いた量が low 未満)、over(合計が over を超えた)、
+    leak(合計の大きさが leak 以上)、書いた量の最小・中央値。low・over は狙う場面で、leak は書き込みたくない場面で見る。"""
+    out = {}
+    for sg in segs:
+        xs = [q["segments"][sg] for q in rows if q["segments"].get(sg)]
+        am = [x["amount"] for x in xs]
+        out[sg] = {"n": len(xs), "low": sum(a < low for a in am) if wanted else None,
+                   "over": sum(x["total"] > over for x in xs) if wanted else None,
+                   "leak": None if wanted else sum(abs(x["total"]) >= leak for x in xs),
+                   "amount_min": float(min(am)) if am else None, "amount_median": float(np.median(am)) if am else None}
+    return out
+
+
 def check(session, recipe, contrast, *, subset: str = "odd", max_tokens: int = 96, replies: str = "own", n_pos: int = 8,
-          iv=None, positions: str | None = None) -> dict:
+          iv=None, positions: str | None = None, low: float = LOW_DEFAULT, over: float = OVER_DEFAULT,
+          leak: float = LEAK_DEFAULT, top: int = 5, save: str | None = None) -> dict:
     """位置の種類ごとに、鍵の反応と実際に足した量を出す。対照集合の質問(狙う場面)と dont_touch の群(書き込みたくない場面)に
     ついて、返事の位置 0〜n_pos−1 とそれ以降で、ユニットごとの「鍵の反応(ゲートの鍵・入力の鍵)」と「足した量(α·d を 1 として)」の
     平均・最小・最大を返す。replies = own: レシピを当てて作った返事を、当てたまま読む(実際に起きること)。base: 無介入の返事を、
     レシピを当てて読む(書く前の状態での見積もり)。iv を渡すと、その介入(レシピかユニット)を先に当てた状態で測る
     (返事の生成にも読むときにも掛かる。base の返事は iv だけを当てて作る)。
     positions(before:<正規表現>): 返事の位置の番号ではなく、「正規表現に一致する文字の直前の位置(match)」と「それ以外の位置(other)」に
-    分けて出す(文字の直前に書く鍵用。書くとその文字が出なくなるので、replies="base" と一緒に使う)。"""
-    from .direction import _subset
+    分けて出す(文字の直前に書く鍵用。書くとその文字が出なくなるので、replies="base" と一緒に使う)。
+
+    質問ごとの値(groups.<群>.questions): 平均だけでは、一部の質問でまったく書けていないことが隠れるので、質問 1 つずつ・区間ごとに
+    出す。区間は、ユニットが担当する返事の位置の範囲(unit_segment。位置の鍵の pos:<範囲>。positions を渡したときは "match" の 1 つ)。
+    - amount: その区間の位置での、その区間を担当するユニットの書いた量(狙った量 = 1。層ごとのユニットの平均を、位置で平均)。
+    - total: 同じ位置で、全部のユニットが書いた量の合計(区間ごとの、層の平均の和。隣の区間のユニットが重ねて書いた分も入る)。
+    - rho: その区間の鍵の反応の平均(上限つきの形は「鍵の反応 ÷ ほぼ 1 を返す鍵の反応」で、しきい値 a・b と比べる値)。
+    groups.<群>.by_question は区間ごとの数: 狙う場面では low(amount が low 未満 = ほとんど書けていない質問)と over(total が over を
+    超えた = 狙った量を超えて書いた質問)、書き込みたくない場面では leak(total の大きさが leak 以上 = 書いてしまった質問)。
+    question_summary.worst は、狙う場面でほとんど書けていない質問の、量の小さい順の上位 top 件(質問と、返事の出だし)。
+    save(名前)を渡すと、結果を <root>/behave/<model_id>/<名前>_check.json に書く(結果の path)。"""
+    from .direction import _subset, parse_segments
     from .keyed_build import intervention
     iv_vecs, iv_lora, iv_desc = intervention(session, iv)
     iv_lora = list(iv_lora or [])
+    from .behave import loop_like
     from .evalx import _generate
     from .keyed_build import _as_spec
-    from .reverse import _conv
+    from .reverse import _conv, question_text
     if replies not in ("own", "base"):
         raise GneError("BAD_ARGS", f"replies は own / base です({replies!r})")
+    if not (0 <= float(low) and float(over) > 0 and float(leak) > 0 and int(top) >= 0):
+        raise GneError("BAD_ARGS", "low は 0 以上、over・leak は 0 より大きい数、top は 0 以上にしてください")
+    if save is not None and not re.fullmatch(r"[\w.\-]+", str(save)):
+        raise GneError("BAD_ARGS", f"結果の名前 {save!r} は英数字・_・-・. だけにしてください")
     t0 = time.perf_counter()
     e, w = session.engine, session.weights
     rows = nw_plan(w, recipe, session._key_of, session.direction_set)
@@ -555,8 +616,11 @@ def check(session, recipe, contrast, *, subset: str = "odd", max_tokens: int = 9
     spec = _as_spec(contrast)
     cs = spec.contrast
     prompts = cs.prompts("B")
-    groups = [("scene", [_conv(cs.system_b, prompts[i]) for i in _subset(len(prompts), subset)])]
-    groups += [(f"dont_touch:{dt.name}", dt.convs(_subset(len(dt.prompts), subset))) for dt in spec.dont_touch]
+    idx = _subset(len(prompts), subset)
+    groups = [("scene", [_conv(cs.system_b, prompts[i]) for i in idx], [question_text(prompts[i]) for i in idx])]
+    for dt in spec.dont_touch:
+        di = _subset(len(dt.prompts), subset)
+        groups.append((f"dont_touch:{dt.name}", dt.convs(di), [question_text(dt.prompts[i]) for i in di]))
     Ls = sorted({r["layer"] for r in rows})
     names = None
     buckets = [str(k) for k in range(n_pos)] + [f"{n_pos}+"]
@@ -565,41 +629,119 @@ def check(session, recipe, contrast, *, subset: str = "odd", max_tokens: int = 9
         if parse_positions(positions).kind != "before":
             raise GneError("BAD_ARGS", f"check の positions は before:<正規表現> です({positions!r})")
         buckets = ["match", "other"]
+    # 質問ごとの値の区間: ユニットごとに、担当する返事の位置の範囲(positions を渡したときは、一致の直前の位置 "match" の 1 つ)
+    seg_of = {id(r): ("match" if positions is not None else unit_segment(session, r)) for r in rows}
+    seg_names = list(dict.fromkeys(seg_of.values()))
+    if positions is None:
+        seg_names.sort(key=lambda sg: parse_segments(sg)[0][0])
+    seg_range = {sg: (None if positions is not None else parse_segments(sg)[0]) for sg in seg_names}
     res = {}
-    for label, convs in groups:
+    for label, convs, qtexts in groups:
         outs = _generate(session, [(c, int(max_tokens)) for c in convs], iv_vecs, lora if replies == "own" else (iv_lora or None),
                          "all", lambda k: None)
         acc = {id(r): {b: {"amount": [], "rho_gate": [], "rho_up": []} for b in buckets} for r in rows}
         loops = 0
-        for c, o in zip(convs, outs, strict=True):
+        qrows = []
+        for qi, (c, o) in enumerate(zip(convs, outs, strict=True)):
             p = e.tokenize_prompt(e.render_chat(c))
             rid = [t for t in o["token_ids"] if not e.is_eog(t)]
-            from .behave import loop_like
-            loops += bool(loop_like(o["token_ids"]))
+            looped = bool(loop_like(o["token_ids"]))
+            loops += looped
             ids = p + rid
             if names is None:
                 names = {L: _capture_names(session, ids, L) for L in Ls}
             got = _run_capture(session, ids, {names[L][k] for L in Ls for k in ("h", "a")}, lora, iv_vecs)
+            hit = None
+            if positions is not None:                           # 列の番号 → 返事の位置 k = 番号 − (P − 1)
+                hit = {int(x) - (len(p) - 1) for x in select_positions(e, rid, positions, n_prompt=len(p))}
+            per = {sg: {"amount": [], "rho": []} for sg in seg_names}       # 区間 → その区間を担当するユニットごとの、位置の並び
             for r in rows:
                 L = r["layer"]
                 h = got[names[L]["h"]][len(p) - 1:]
                 a = got[names[L]["a"]][len(p) - 1:]
                 amt = sum(g * a[:, j] for (j, _, _, _, g) in r["parts"])
                 rg, ru = h @ r["kappa_gate"], h @ r["kappa_up"]
-                hit = None
-                if positions is not None:                       # 列の番号 → 返事の位置 k = 番号 − (P − 1)
-                    hit = {int(x) - (len(p) - 1) for x in select_positions(e, rid, positions, n_prompt=len(p))}
                 for k in range(amt.shape[0]):
                     b = ("match" if k in hit else "other") if hit is not None else (str(k) if k < n_pos else f"{n_pos}+")
                     acc[id(r)][b]["amount"].append(float(amt[k]))
                     acc[id(r)][b]["rho_gate"].append(float(rg[k]))
                     acc[id(r)][b]["rho_up"].append(float(ru[k]))
+                # 区間の鍵の反応: 上限つきの形は、ほぼ 1 を返す鍵の反応で割った値(しきい値 a・b と比べる値)。鍵 2 つの形は入力の側の鍵
+                rho = (rg / np.where(np.abs(ru) > 1e-6, ru, 1.0)) if r["form"] == "cap" else (ru if r["form"] == "two" else rg)
+                per[seg_of[id(r)]]["amount"].append(np.asarray(amt, dtype=np.float64))
+                per[seg_of[id(r)]]["rho"].append(np.asarray(rho, dtype=np.float64))
+            n_k = len(rid) + 1
+            own = {sg: np.mean(per[sg]["amount"], axis=0) for sg in seg_names}       # 区間ごとの、ユニット(層)の平均
+            total = np.sum([own[sg] for sg in seg_names], axis=0)
+            ks = np.arange(n_k)
+            qsegs = {}
+            for sg in seg_names:
+                if positions is not None:
+                    mask = np.isin(ks, sorted(hit))
+                else:
+                    lo, hi = seg_range[sg]
+                    mask = (ks >= lo) & ((ks < hi) if hi is not None else True)
+                qsegs[sg] = None if not mask.any() else {
+                    "amount": float(own[sg][mask].mean()), "total": float(total[mask].mean()),
+                    "rho": float(np.mean(per[sg]["rho"], axis=0)[mask].mean()), "n_pos": int(mask.sum())}
+            qrows.append({"i": qi, "prompt": qtexts[qi], "reply_start": (o["text"] or "")[:40], "n_tokens": len(rid), "loop": looped,
+                          "segments": qsegs})
         st = lambda v: None if not v else {"mean": float(np.mean(v)), "min": float(np.min(v)), "max": float(np.max(v)), "n": len(v)}
         res[label] = {"n": len(convs), "loops": loops,
                       "units": [{"unit": spec_of(r["unit"]), "layer": r["layer"], "form": r["form"],
-                                 "positions": {b: {k: st(v) for k, v in d.items()} for b, d in acc[id(r)].items()}} for r in rows]}
-    return {"contrast": cs.name, "subset": subset, "replies": replies, "max_tokens": int(max_tokens), "iv": iv_desc, "groups": res,
-            "positions": positions,
-            "notes": ["amount は、その位置で実際に足した量(α·d を 1 として。負は逆向き)。rho_gate・rho_up は鍵の反応です。",
-                      "scene は狙う場面(対照集合の質問)、dont_touch:<名前> は書き込みたくない場面です。"],
-            "seconds": time.perf_counter() - t0}
+                                 "positions": {b: {k: st(v) for k, v in d.items()} for b, d in acc[id(r)].items()}} for r in rows],
+                      "by_question": _question_summary(qrows, seg_names, label == "scene", float(low), float(over), float(leak)),
+                      "questions": qrows}
+    worst = sorted(({"group": "scene", "segment": sg, "i": q["i"], "prompt": q["prompt"], "reply_start": q["reply_start"],
+                     "amount": q["segments"][sg]["amount"], "rho": q["segments"][sg]["rho"], "loop": q["loop"]}
+                    for q in res["scene"]["questions"] for sg in seg_names
+                    if q["segments"].get(sg) and q["segments"][sg]["amount"] < float(low)), key=lambda x: x["amount"])
+    caps = sorted({(r["a"], r["b"]) for r in rows if r["form"] == "cap"})
+    out = {"contrast": cs.name, "subset": subset, "replies": replies, "max_tokens": int(max_tokens), "iv": iv_desc, "groups": res,
+           "positions": positions,
+           "question_summary": {"low": float(low), "over": float(over), "leak": float(leak), "segments": seg_names,
+                                "cap": [list(x) for x in caps], "n_low": len(worst), "worst": worst[:int(top)]},
+           "notes": ["amount は、その位置で実際に足した量(α·d を 1 として。負は逆向き)。rho_gate・rho_up は鍵の反応です。",
+                     "scene は狙う場面(対照集合の質問)、dont_touch:<名前> は書き込みたくない場面です。",
+                     "平均だけでは、一部の質問でまったく書けていないことが隠れます。質問ごとの値(by_question・questions)で、"
+                     "ほとんど書けていない質問が無いかを見てください。"],
+           "seconds": time.perf_counter() - t0}
+    if save is not None:
+        path = session.store.root / "behave" / session.meta.model_id / f"{save}_check.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
+        out = {**out, "path": str(path)}
+    return out
+
+
+def question_lines(d: dict) -> list[str]:
+    """check の結果の、質問ごとの値の要約(画面に出す行)。区間ごとに、ほとんど書けていない質問の数と、狙った量を超えて書いた質問の数、
+    書けていない質問の上位(質問と、返事の出だし 20 字)。書き込みたくない場面は、書いてしまった質問の数。"""
+    qs = d.get("question_summary")
+    if not qs:
+        return []
+    lines = ["質問ごとの値(平均だけでは、一部の質問でまったく書けていないことが隠れます)"]
+    cap = "・".join(f"{a:g}-{b:g}" for a, b in qs.get("cap") or [])
+    for g, x in d["groups"].items():
+        bq = x.get("by_question") or {}
+        if g == "scene":
+            for sg, c in bq.items():
+                lines.append(f"  [{g}] 区間 {sg}: {c['n']} 問のうち、ほとんど書けていない(量が {qs['low']:g} 未満){c['low']} 問、"
+                             f"狙った量を超えた(合計が {qs['over']:g} 超){c['over']} 問"
+                             + ("" if c["amount_min"] is None else f"(量の最小 {c['amount_min']:+.2f}・中央値 {c['amount_median']:+.2f})"))
+        else:
+            lines.append(f"  [{g}] 書いてしまった質問(合計の大きさが {qs['leak']:g} 以上): "
+                         + "、".join(f"区間 {sg} {c['leak']} / {c['n']} 問" for sg, c in bq.items()))
+    if qs["worst"]:
+        lines.append(f"  書けていない質問(量の小さい順に {len(qs['worst'])} 件。全部で {qs['n_low']} 件):")
+        for q in qs["worst"]:
+            lines.append(f"    区間 {q['segment']}  量 {q['amount']:+.2f}  鍵の反応 {q['rho']:+.2f}  Q: {q['prompt'][:40]}  A: {q['reply_start'][:20]}"
+                         + ("  [繰り返し]" if q.get("loop") else ""))
+        lines.append("  書けていない質問が、返事の書き出し方(かぎかっこで始まる、など)でまとまっていないかを見ます。まとまっていれば、"
+                     "鍵を作る質問を増やします(その書き出し方の返事が、鍵を作る質問に少ない)。")
+    else:
+        lines.append("  狙う場面に、ほとんど書けていない質問はありません。")
+    if cap:
+        lines.append(f"  目安: 上限つきの形(しきい値 {cap})は、鍵の反応が下のしきい値より小さいとほぼ書かず、2 つのしきい値の真ん中で狙った量の半分、"
+                     "上のしきい値より大きいと狙った量で頭打ちになります。量が小さい質問は、鍵の反応が下のしきい値の近くか、それより下です。")
+    return lines

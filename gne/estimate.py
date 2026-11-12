@@ -506,9 +506,14 @@ def _fish_cost(session, sp: Speed, kind: str, p: dict) -> dict:
         # 32 問・120 トークン・3 層で方向 244 秒のうち約 170 秒、40 問・96 トークン・13 層で方向 906 秒のうち約 800 秒)
         dir_s = 2 * sp.gen(n_a, rt) + 2 * n_a * read + ((len(Ls) - 1) * n_a * rt * 2 * sp.step(1) / 1000 if get("stack") else 0.0) \
             + (sp.gen(n_a, rt) + 2 * n_a * read if p.get("compare", True) else 0.0)
-        # 鍵: 鍵 1 本ごとに全部の質問の返事を作って読む分と、層ごとに鍵と比較用の鍵を計算する分(層の数と質問の数に比例)。
-        # 係数は Qwen3.5-4B Q8_0 の 2 つの実測に合わせた(44 問・3 層・4 本で 96 秒、76 問・13 層・4 本で 271 秒)
-        keys_s = 1.4 * n_keys * (sp.gen(n_all, mt) + n_all * read) + n_keys * len(Ls) * 0.035 * n_all
+        if kind == "fish_pipeline" and p.get("direction"):     # すでにある方向を使う: 方向は作らない
+            dir_s = 0.0
+        # 鍵: 返事を作るのは 1 回(全部の鍵で同じ返事を使う)。読むのは、区切りごとの位置の鍵をまとめて 1 回と、形に要る鍵
+        # (場面の鍵・ほぼ 1 を返す鍵)で 1 回。ほかに、層ごとに鍵と比較用の鍵を計算する分(層の数と質問の数に比例)。
+        # 係数 1.4 と 0.035 は、鍵 1 本ごとに返事を作っていたときの Qwen3.5-4B Q8_0 の実測(44 問・3 層・4 本で 96 秒、76 問・13 層・
+        # 4 本で 271 秒)に合わせた値のまま。作るのを 1 回にした後の形では、まだ GPU で測り直していない
+        n_reads = 1 + (1 if form in ("two", "cap") else 0)
+        keys_s = 1.4 * (sp.gen(n_all, mt) + n_reads * n_all * read) + n_keys * len(Ls) * 0.035 * n_all
         check_s = sp.gen(n_all, mt) + n_all * read
         neur_s = sp.gen(44, 96) + 88 * read
         if kind == "fish_behave":

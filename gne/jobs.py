@@ -294,7 +294,8 @@ def _fish_direction(s, contrast=None, spec: dict | None = None, **p) -> dict:
 
 def _fish_keys(s, contrast=None, spec: dict | None = None, with_units=None, **p) -> dict:
     """FiSH の鍵をまとめて作る(区切りごとの位置の鍵、形に要る場面の鍵・ほぼ 1 を返す鍵)。with_units(ユニットのリスト)を渡すと、
-    それを当てた状態で作る(iv に足す。レシピを当てた状態で鍵を作り直すとき)。"""
+    それを当てた状態で作る(iv に足す。レシピを当てた状態で鍵を作り直すとき)。返事は質問の群ごとに 1 回だけ作り、区切りごとの
+    位置の鍵は 1 回の読み取りから全部作る(1 本ずつ作ったときと同じ鍵になる)。"""
     from . import fish
     path, q, cname = _fish_args(s, contrast, spec, p, ("layers", "segments", "form", "pseudo", "max_tokens", "iv"))
     if with_units:
@@ -310,7 +311,8 @@ def _fish_verify(s, units, iv=None, texts=None) -> dict:
 
 
 def _fish_check(s, units, contrast=None, spec: dict | None = None, **p) -> dict:
-    """FiSH のユニットが、場面・返事の位置ごとに実際に足した量(gne nw check)。"""
+    """FiSH のユニットが、場面・返事の位置ごとに実際に足した量(gne nw check)。質問ごとの値(区間ごとに、ほとんど書けていない
+    質問の数・狙った量を超えた質問の数と、質問ごとの行)も入る。low・over・leak・top でその目安と件数、save で結果のファイルの名前。"""
     from . import fish
     path, q, _ = _fish_args(s, contrast, spec, p, ("max_tokens", "iv", "segments"))
     return {**fish.check_step(s, list(units), path, **q), "contrast_path": path}
@@ -336,7 +338,9 @@ def _fish_pipeline(s, contrast=None, spec: dict | None = None, summary: bool = F
     層(layers)は必須("11-23" のような範囲でもよい)。ニューロンは既定の候補(表の上から)か neurons({層: [番号…]})。強さ alpha は
     渡した値をそのまま使う(数 1 つなら全部の区切りに同じ値、"1,1,0.8" か [1, 1, 0.8] なら区切りごと)。
     save(名前か .yaml のパス)を渡すと、できたユニットをレシピのファイルに書く(結果の recipe_path)。summary=True なら、結果の
-    代わりに短い要約(fish.summary: 式どおりか・ユニットとニューロンの数・保存先・足した量)と、ユニットの書き方のリストだけを返す。"""
+    代わりに短い要約(fish.summary: 式どおりか・ユニットとニューロンの数・保存先・足した量・質問ごとの値の数)と、ユニットの書き方の
+    リストだけを返す。direction(すでにある方向の名前)を渡すと、方向を作り直さずにそれを使う(層・区切りが合わなければエラー)。
+    cap は上限つきの形のしきい値("0.4-0.8" か、区切りごとに "0.4-0.8,0.3-0.7,0.3-0.7"・リスト。省くと既定)。"""
     from . import fish
     path, q, cname = _fish_args(s, contrast, spec, p, fish.SETTINGS)
     if isinstance(q.get("neurons"), dict):

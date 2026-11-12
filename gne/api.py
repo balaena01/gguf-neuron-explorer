@@ -2735,7 +2735,7 @@ round_01.scores.txt に「番号 P C」を 1 行ずつ書く(例: 17 3 4)。全�
             from .nwrite import build_role_key
             if str(kw.pop("target", "mlpin") or "mlpin") != "mlpin":
                 raise GneError("BAD_ARGS", "role scene / one の鍵は target mlpin だけです")
-            keep = ("layers", "name", "subset", "max_tokens", "pseudo", "iv", "seed", "q_energy", "progress")
+            keep = ("layers", "name", "subset", "max_tokens", "pseudo", "iv", "seed", "q_energy", "progress", "gen_cache")
             extra = sorted(k for k, v in kw.items() if k not in keep and v not in (None, False))
             if extra:
                 raise GneError("BAD_ARGS", f"role {role} の鍵では {', '.join(extra)} は使えません")
@@ -2744,6 +2744,12 @@ round_01.scores.txt に「番号 P C」を 1 行ずつ書く(例: 17 3 4)。全�
             raise GneError("BAD_ARGS", f"role は position / scene / one です({role!r})")
         from .keyed_build import build_keys
         return build_keys(self, contrast, **kw)
+
+    def direction_keys(self, contrast: str | Path, entries, **kw) -> list[dict]:
+        """書き込みたい位置だけが違う鍵を何本か、返事を 1 回だけ作って読んで作る(keyed_build.build_keys_multi)。entries は
+        [(鍵の名前, positions), …]。ほかの引数は direction_key と同じ。できる鍵は 1 本ずつ作ったときと同じ。"""
+        from .keyed_build import build_keys_multi
+        return build_keys_multi(self, contrast, entries, **kw)
 
     def direction_key_experts(self, contrast: str | Path, **kw) -> dict:
         """expert:e の鍵の専門家を選ぶ: 鍵と同じ対照集合・位置で、書き込みたい位置・書き込みたくない位置で各専門家が選ばれた

@@ -174,9 +174,10 @@ gne nw neurons --layers 11-23 [--top 20] [--sort sum|max|mean] [--iv R]         
 gne direction key --contrast C --target mlpin --layers L --positions pos:1-3 --name K   # 位置の鍵(この場面の返事の位置 1〜3。pos:0、pos:4- も)
 gne nw key --contrast C --layers L --role scene|one [--iv R]                             # 場面の鍵 / ほぼ 1 を返す鍵
 gne nw verify --recipe R | --unit 11:N2045:nw:a1@NAME.seg1#SCENE&POS [--iv R]            # LoRA が式どおりか(数秒)
-gne nw check --recipe R --contrast C [--subset odd] [--replies own|base] [--iv R]        # 位置ごとの鍵の反応と足した量(狙う場面・dont_touch)
+gne nw check --recipe R --contrast C [--subset odd] [--replies own|base] [--iv R] [--low 0.4] [--over 1.2] [--top 5] [--name N]   # 位置ごとの鍵の反応と足した量(狙う場面・dont_touch)。続けて、質問ごとの値の要約
 gne nw export --recipe R -o FILE.lora.gguf [--strip-meta] [--name N]                     # LoRA(nw だけ)。--bake はエラー。--strip-meta は gne の記録と元のモデルの名前・識別子を書かない(名前の欄は adapter か --name)
 gne nw pipeline --contrast C --layers 11-23 --alpha 1,1,0.8 --save R.yaml                # 方向 → ニューロン → 鍵 → ユニット → 鍵の作り直し → verify → check を 1 回で。短い要約が出る。--save でレシピを書く
+gne nw pipeline --contrast C2 --layers 11-23 --alpha 1,1,0.8 --direction NAME --name N2 [--cap 0.4-0.8,0.3-0.7,0.3-0.7]   # すでにある方向を使い回す(作り直さない)。しきい値を区切りごとに
 gne headproj export --recipe R                                                           # proj・keyed・gain と nw を 1 つの LoRA に(--bake は nw があるとエラー)
 ```
 
@@ -187,9 +188,13 @@ gne headproj export --recipe R                                                  
 - **`nw pipeline` / `fish.pipeline` の結果**は大きい(ニューロンの表まで入る)。CLI は要約だけを出す(`--json --full` で全部)。Python は戻り値の `summary`・`gne.fish.summary_text(結果)`、ジョブ・MCP は `summary: true`。レシピは `--save`(`save`)を渡したときだけ書く(名前なら `<root>/recipes/<名前>.yaml`)。
 - **層と強さ**: 層は範囲(`11-23`)でも並び(`11,18,23`)でも書ける。強さは区切りごとに書ける(`--alpha 1,1,0.8`、ジョブ・MCP は `alpha: [1, 1, 0.8]`。1 つだけなら全部の区切りに同じ値)。Qwen3.5-4B の 1 例では、離れた 3 層より続いた 13 層が良く、生成なしの指標の上位の数層に絞ると悪くなった。作る前に `gne nw try` で、層の組と強さを返事で比べる(足すのは狙う場面の質問の返事だけ。層 0 と最終層には足せない。数は繰り返し・空・正規表現の一致で、口調と話のかみ合いは読んで確かめる)。
 - 見るところ: verify の「ほかのニューロンの変化」が 0、check の狙う場面の量が 1 前後・dont_touch が 0 前後・負が小さいこと。最後は返事を読む。
-- MCP: `direction(same_reply, segments, stack_layers)`、`direction_key(target="mlpin", positions="pos:1-3" | role="scene"|"one", iv)`、`nw_neurons`・`nw_check`・`nw_try(direction, contrast, layers, alpha)`(ジョブ)、`nw_verify`、`nw_export`、`fish_pipeline(contrast, layers, alpha)`(まとめて作るジョブ)、`direction_key_pipeline(same_reply)`。
+- **check は平均の表だけで判断しない。** 平均だけでは、一部の質問でまったく書けていないことが隠れる。平均の表の後に出る質問ごとの値で、区間ごとの「ほとんど書けていない質問の数」(書いた量が 0.4 未満)と「狙った量を超えて書いた質問の数」(合計が 1.2 超)、書けていない質問の上位(質問と、返事の出だし)を見る。書けていない質問が、返事の書き出し方(かぎかっこで始まる、など)でまとまっていたら、鍵がその書き出し方を拾えていない → 鍵を作る質問を増やして作り直す。質問ごとの行は `--json`(`groups.<群>.questions`・`by_question`、`question_summary.worst`)と `<root>/behave/<model_id>/<名前>_check.json`。
+- **鍵を作る質問の数**: 多いほうがよい。狙う場面の質問は 100 問以上を勧める(ひな形の 32 問は流れを見るための数)。少ない質問では、返事の書き出し方の一部を鍵が拾えない。
+- **`--direction NAME`**(`fish.pipeline(direction=…)`、ジョブ・MCP の `direction`): すでにある方向を作り直さない。区切り・層・重ねる層が合わなければ BAD_DIRECTION(重ねる前提で作っていない方向を複数の層に書くなら `--no-stack`)。**`--cap`**(`cap`): 上限つきの形のしきい値を区切りごとに(`0.3-0.7` = 全部同じ、`0.4-0.8,0.3-0.7,0.3-0.7` = 区切りごと。既定 0.4-0.8)。
+- 鍵づくり(`fish.keys_step`・pipeline)は、返事を質問の群ごとに 1 回だけ作り、区切りごとの位置の鍵を 1 回の読み取りから作る(1 本ずつ作った鍵と同じ)。Python は `Session.direction_keys(contrast, [(名前, "pos:0"), (名前, "pos:1-3"), …], target="mlpin", …)`。
+- MCP: `direction(same_reply, segments, stack_layers)`、`direction_key(target="mlpin", positions="pos:1-3" | role="scene"|"one", iv)`、`nw_neurons`・`nw_check`(質問ごとの値つき。low・over・top・save)・`nw_try(direction, contrast, layers, alpha)`(ジョブ)、`nw_verify`、`nw_export`、`fish_pipeline(contrast, layers, alpha, direction, cap)`(まとめて作るジョブ)、`direction_key_pipeline(same_reply)`。
 
-Web UI(direction ビューの「FiSH」タブ)と同じ段は、ジョブとしても使える(MCP の `job_start`): `fish_pipeline`(spec か contrast、layers 必須、segments・form・alpha(数 1 つか区切りごとの並び)・same_reply・stack・rekey・neurons・iv)、`fish_direction`、`fish_try`(direction・layers・alpha・prompts・n・temperature)、`nw_neurons`、`fish_keys`(with_units でユニットを当てた状態)、`fish_verify`(units)、`fish_check`(units)、`fish_behave`(units、prompts・n・match)。ひな形は `configs/fish/`。
+Web UI(direction ビューの「FiSH」タブ)と同じ段は、ジョブとしても使える(MCP の `job_start`): `fish_pipeline`(spec か contrast、layers 必須、segments・form・alpha(数 1 つか区切りごとの並び)・cap(しきい値。1 つか区切りごと)・direction(すでにある方向)・same_reply・stack・rekey・neurons・iv)、`fish_direction`、`fish_try`(direction・layers・alpha・prompts・n・temperature)、`nw_neurons`、`fish_keys`(with_units でユニットを当てた状態)、`fish_verify`(units)、`fish_check`(units。質問ごとの値つき)、`fish_behave`(units、prompts・n・match)。ひな形は `configs/fish/`。
 
 ### 鍵つきの書き込み(keyed write、CHANGE-07、`docs/keyed-write.md`)
 

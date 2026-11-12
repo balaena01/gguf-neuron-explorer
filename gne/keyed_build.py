@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import bisect
 import hashlib
+import json
 import re
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -785,11 +786,28 @@ def _as_conv(c) -> list[dict]:
     return [{"role": "user", "content": c}] if isinstance(c, str) else list(c)
 
 
+def gen_key(convs, max_tokens: int, vecs, lora) -> str:
+    """生成した返事を覚えておくときの見出し: 会話の組(順番も)・生成する長さ・当てている介入(control vector の中身、LoRA の
+    ファイルと倍率)が同じなら同じ値。greedy の生成はこの 3 つで決まるので、同じ見出しなら同じ返事になる。"""
+    h = hashlib.sha256()
+    h.update(json.dumps([_as_conv(c) for c in convs], ensure_ascii=False, sort_keys=True, default=str).encode("utf-8"))
+    h.update(f"|{int(max_tokens)}|".encode())
+    for L in sorted(vecs or {}):
+        v = np.ascontiguousarray(np.asarray(vecs[L], dtype=np.float32))
+        h.update(f"v{int(L)}|".encode())
+        h.update(v.tobytes())
+    for x in lora or []:
+        h.update(f"l{x[0]}|{float(x[1])!r}|".encode())
+    return h.hexdigest()
+
+
 def collect_acts(session, convs, *, layers, positions="response", skip: int = 0, max_tokens: int = 96,
                  replies: Sequence[str] | None = None, iv=None, target: str = "ffn", samples: int = 0,
                  project: Mapping[int, np.ndarray] | None = None, rms_groups: Sequence[str] = ("A",), seed: int = 0,
-                 start: int = 0, tick: Callable[[str], None] | None = None) -> dict:
+                 start: int = 0, tick: Callable[[str], None] | None = None, gen_cache: dict | None = None) -> dict:
     """会話 convs(メッセージのリストか、1 ターンの質問の文字列)を読み、指定した層の書き込み先の入力活性を位置で選んで集める。
+    gen_cache(dict)を渡すと、生成した返事(トークン列と文面)をそこに覚え、同じ会話の組・同じ長さ・同じ介入の 2 回目からは
+    生成し直さずに使う(同じ返事から何本も鍵を作るとき。gen_key)。
     返事: replies を与えればそれを読ませる(生成しない)。無ければ iv を当てて greedy で max_tokens まで生成する(位置が
     返事を要らないもの(assistant・last)だけなら生成しない)。iv(intervention を参照)は生成と捕捉の両方に当てる。
     positions は 1 つの書き方(群の名前 "A")か {群の名前: 書き方}(同じ返事から複数の群を一度の捕捉で取る。mode same の
@@ -849,10 +867,15 @@ def collect_acts(session, convs, *, layers, positions="response", skip: int = 0,
         resp = [e.tokenize(str(r), add_special=False, parse_special=False) for r in replies]
         texts, mode = [str(r) for r in replies], "given"
     else:
-        from .evalx import _generate
-        outs = _generate(session, [(c, int(max_tokens)) for c in convs], vecs, lora, "all", lambda k: None)
-        resp = [[t for t in o["token_ids"] if not e.is_eog(t)] for o in outs]
-        texts, mode = [o["text"] for o in outs], "generated"
+        key = gen_key(convs, max_tokens, vecs, lora) if gen_cache is not None else None
+        hit = gen_cache.get(key) if key is not None else None
+        if hit is None:
+            from .evalx import _generate
+            outs = _generate(session, [(c, int(max_tokens)) for c in convs], vecs, lora, "all", lambda k: None)
+            hit = ([[t for t in o["token_ids"] if not e.is_eog(t)] for o in outs], [o["text"] for o in outs])
+            if key is not None:
+                gen_cache[key] = hit
+        resp, texts, mode = [list(r) for r in hit[0]], list(hit[1]), "generated"
         tick("返事の生成")
     seqs = [p + r for p, r in zip(pids, resp, strict=True)]
     need = max(len(s) for s in seqs) if seqs else 1
@@ -1073,7 +1096,7 @@ def _plan(session, spec: KeySpec, mode: str, pos_a: Positions, pos_b: Positions,
 
 def _run_plan(session, sets: list[_Set], *, layers, target, skip, max_tokens, samples, project=None, seed=0,
               rms_groups: Sequence[str] = ("A",), progress: Progress | None = None, extra_steps: int = 0,
-              start: int = 0) -> dict:
+              start: int = 0, gen_cache: dict | None = None) -> dict:
     """_plan の会話の組を順に捕捉して、群 → collect_acts の群(と、群の例のハッシュ hashes)にまとめる。start は
     collect_acts の返事の書き出しの位置の数(0 なら見ない)。"""
     def gen_steps(s: _Set) -> int:
@@ -1094,7 +1117,7 @@ def _run_plan(session, sets: list[_Set], *, layers, target, skip, max_tokens, sa
             continue
         r = collect_acts(session, s.convs, layers=layers, positions=s.groups, skip=skip, max_tokens=max_tokens,
                          replies=s.replies, iv=s.iv, target=target, samples=samples, project=project, seed=seed,
-                         rms_groups=rms_groups, start=start, tick=tick)
+                         rms_groups=rms_groups, start=start, tick=tick, gen_cache=gen_cache)
         for g, d in r["groups"].items():
             d["hashes"] = [s.hashes[i] for i in d["index"]]
             d["n_examples"] = len(s.convs)
@@ -1223,7 +1246,8 @@ def build_keys(session, contrast, *, name: str | None = None, layers, positions:
                positions_b: str | None = None, skip: int | None = None, max_tokens: int = 96, q_mode: str = "examples",
                q_energy: float = 0.99, q_max_rank: int | None = None, q_max_samples: int = 4096, subset: str = "even",
                pseudo: int = 16, replies_a=None, replies_b=None, iv=None, target: str = "ffn", seed: int = 0,
-               dont_touch_start: bool | None = None, progress: Progress | None = None) -> dict:
+               dont_touch_start: bool | None = None, progress: Progress | None = None,
+               gen_cache: dict | None = None) -> dict:
     """対照集合(contrast: パス・ContrastSet・KeySpec)から層ごとの鍵 κ を作り、<root>/keys/<model_id>/<name>.npz に保存する。
 
     positions(側 A の位置。省くと対照集合の positions、無ければ response)が before:<re> なら mode same(推論時と同じ文脈の
@@ -1240,13 +1264,32 @@ def build_keys(session, contrast, *, name: str | None = None, layers, positions:
     専門家 e が選ばれた位置の行だけで作り、ルーターの重みの平均を gate_a に。層ごとに行と例の数が違う → info の counts_l・
     rows_l。expert_usage で側 A の位置でよく選ばれる専門家を選ぶ)。
     μ・Q が鍵にならない層(keyed.make_key の BAD_KEY)は警告して外す。戻り値は層ごとの kn・gain・q_rank・作成に使った例での
-    AUC などの要約と path。"""
-    t0 = time.perf_counter()
-    warnings: list[str] = []
+    AUC などの要約と path。gen_cache は collect_acts の、生成した返事の覚え書き(同じ返事から続けて鍵を作るとき)。
+    同じ返事の違う位置から何本も作るなら build_keys_multi(返事を 1 回だけ作って読む)。"""
+    return build_keys_multi(session, contrast, [(name, positions)], layers=layers, positions_b=positions_b, skip=skip,
+                            max_tokens=max_tokens, q_mode=q_mode, q_energy=q_energy, q_max_rank=q_max_rank,
+                            q_max_samples=q_max_samples, subset=subset, pseudo=pseudo, replies_a=replies_a, replies_b=replies_b,
+                            iv=iv, target=target, seed=seed, dont_touch_start=dont_touch_start, progress=progress,
+                            gen_cache=gen_cache)[0]
 
-    def warn(msg: str) -> None:
-        warnings.append(msg)
-        session.warn(msg)
+
+
+def build_keys_multi(session, contrast, entries, *, layers, positions_b: str | None = None, skip: int | None = None,
+                     max_tokens: int = 96, q_mode: str = "examples", q_energy: float = 0.99, q_max_rank: int | None = None,
+                     q_max_samples: int = 4096, subset: str = "even", pseudo: int = 16, replies_a=None, replies_b=None,
+                     iv=None, target: str = "ffn", seed: int = 0, dont_touch_start: bool | None = None,
+                     progress: Progress | None = None, gen_cache: dict | None = None) -> list[dict]:
+    """同じ対照集合・同じ設定で、書き込みたい位置だけが違う鍵を何本か作る。entries は [(鍵の名前, positions), …]。
+    戻り値は build_keys の結果のリスト(entries の順)。build_keys はこれを 1 本で呼ぶ。
+    何本かのとき、返事の生成と読み取り(活性の捕捉)は 1 回だけ行い、同じ読み取りから全部の鍵を計算する(返事の位置の区切り
+    0 / 1-3 / 4- ごとの鍵のように、同じ返事の違う位置から作る鍵)。1 本ずつ作ったときと同じ返事・同じ活性の行を使うので、
+    できる鍵は同じ(tests/test_nwrite.py の test_keys_from_one_read で、鍵・比較用の鍵とも一致することを確かめている)。
+    まとめて読めない組み合わせ(q_mode samples = 行の間引きが群の順番で決まる、位置の種類が混ざっている)は 1 本ずつ作る
+    (そのときも gen_cache があれば返事は使い回す)。"""
+    t0 = time.perf_counter()
+    entries = [(n, p) for n, p in entries]
+    if not entries:
+        raise GneError("BAD_ARGS", "作る鍵がありません")
     if q_mode not in Q_MODES:
         raise GneError("BAD_ARGS", f"q_mode は {' / '.join(Q_MODES)} です({q_mode!r})")
     if subset not in SUBSETS:
@@ -1264,21 +1307,85 @@ def build_keys(session, contrast, *, name: str | None = None, layers, positions:
     target_capture(session, target, Ls)                     # まだ捕捉できない書き込み先はここで断る
     spec = _as_spec(contrast)
     cs = spec.contrast
-    name = name or cs.name
-    if not _KEY_NAME_RE.fullmatch(name):
-        raise GneError("BAD_ARGS", f"鍵の名前 {name!r} が不正です(英数字・_・.・- だけ)")
-    pos_a = parse_positions(positions or spec.positions or "response")
-    mode, pos_b = _resolve_mode(pos_a, positions_b or spec.positions_b)
     skip = int(skip if skip is not None else (spec.skip or 0))
-    vecs0, lora0, iv_desc = intervention(session, iv, warn)
     dts_on = bool(dont_touch_start if dont_touch_start is not None else
                   (spec.dont_touch_start if spec.dont_touch_start is not None else True))
-    sets, pinfo = _plan(session, spec, mode, pos_a, pos_b, subset, replies_a, replies_b, vecs0, lora0, warn,
-                        dt_start=dts_on)
     samples = q_max_samples if q_mode == "samples" else 0
-    run = _run_plan(session, sets, layers=Ls, target=target, skip=skip, max_tokens=max_tokens, samples=samples,
-                    seed=seed, progress=progress, extra_steps=len(Ls), start=START_TOKENS if mode == "same" else 0)
-    G = run["groups"]
+    multi = len(entries) > 1
+    plans = []
+    vecs0 = lora0 = iv_desc = None
+    for k, (name, positions) in enumerate(entries):
+        warnings: list[str] = []
+
+        def warn(msg: str, warnings=warnings) -> None:
+            warnings.append(msg)
+            session.warn(msg)
+        name = name or cs.name
+        if not _KEY_NAME_RE.fullmatch(name):
+            raise GneError("BAD_ARGS", f"鍵の名前 {name!r} が不正です(英数字・_・.・- だけ)")
+        pos_a = parse_positions(positions or spec.positions or "response")
+        mode, pos_b = _resolve_mode(pos_a, positions_b or spec.positions_b)
+        if k == 0:
+            vecs0, lora0, iv_desc = intervention(session, iv, warn)
+        sets, pinfo = _plan(session, spec, mode, pos_a, pos_b, subset, replies_a, replies_b, vecs0, lora0, warn,
+                            dt_start=dts_on)
+        plans.append({"name": name, "pos_a": pos_a, "pos_b": pos_b, "mode": mode, "sets": sets, "pinfo": pinfo,
+                      "warnings": warnings, "warn": warn})
+    if len({p["name"] for p in plans}) != len(plans):
+        raise GneError("BAD_ARGS", "鍵の名前が重なっています(1 本ずつ別の名前にしてください)")
+    common = dict(layers=Ls, positions_b=positions_b, skip=skip, max_tokens=max_tokens, q_mode=q_mode, q_energy=q_energy,
+                  q_max_rank=q_max_rank, q_max_samples=q_max_samples, subset=subset, pseudo=pseudo, replies_a=replies_a,
+                  replies_b=replies_b, iv=iv, target=target, seed=seed, dont_touch_start=dont_touch_start, progress=progress)
+    # まとめて読む: 同じ会話の組(同じ文脈・同じ返事)ごとに、全部の鍵の群を 1 回の読み取りに入れる。位置が同じ群(dont_touch の
+    # 返事の全部の位置など)は 1 つにまとめる
+    merged: dict[str, _Set] = {}
+    alias: list[dict[str, str]] = []
+    ok = not (multi and (samples or len({p["mode"] for p in plans}) != 1))
+    for k, pl in enumerate(plans):
+        al = {}
+        for st in pl["sets"]:
+            m = merged.get(st.label)
+            if m is None:
+                m = merged[st.label] = _Set(st.label, st.convs, st.hashes, {}, st.replies, st.iv)
+            elif m.convs != st.convs or m.replies != st.replies:
+                ok = False
+            for g, pos in st.groups.items():
+                canon = next((c for c, cp in m.groups.items() if cp == pos and c.split("\x1f")[0] == g), None)
+                if canon is None:
+                    canon = f"{g}\x1f{k}" if multi else g
+                    m.groups[canon] = pos
+                al[g] = canon
+        alias.append(al)
+    if not ok:                                                # まとめて読めない: 1 本ずつ(返事は覚えておいて使い回す)
+        cache = gen_cache if gen_cache is not None else {}
+        return [build_keys(session, contrast, name=n, positions=p, gen_cache=cache, **common) for n, p in entries]
+    mode = plans[0]["mode"]
+    rms = tuple(c for m in merged.values() for c in m.groups if c.split("\x1f")[0] == "A")
+    run = _run_plan(session, list(merged.values()), layers=Ls, target=target, skip=skip, max_tokens=max_tokens,
+                    samples=samples, seed=seed, progress=progress, extra_steps=len(Ls) * len(plans),
+                    start=START_TOKENS if mode == "same" else 0, gen_cache=gen_cache, rms_groups=rms)
+    read_s = time.perf_counter() - t0
+    out = []
+    for pl, al in zip(plans, alias, strict=True):
+        t1 = time.perf_counter()
+        G = {g: run["groups"][c] for g, c in al.items() if c in run["groups"]}
+        r = _keys_from_groups(session, spec, G, run, name=pl["name"], Ls=Ls, kind=kind, expert=expert, mode=mode,
+                              pos_a=pl["pos_a"], pos_b=pl["pos_b"], skip=skip, max_tokens=max_tokens, q_mode=q_mode,
+                              q_energy=q_energy, q_max_rank=q_max_rank, q_max_samples=q_max_samples, samples=samples,
+                              subset=subset, pseudo=pseudo, seed=seed, dts_on=dts_on, pinfo=pl["pinfo"], iv_desc=iv_desc,
+                              warnings=pl["warnings"], warn=pl["warn"])
+        r["seconds"] = read_s / len(plans) + (time.perf_counter() - t1)
+        if multi:
+            r["shared_read"] = {"keys": len(plans), "seconds": read_s}     # 返事の生成と読み取りは、この本数の鍵で 1 回
+        out.append(r)
+    return out
+
+
+def _keys_from_groups(session, spec: KeySpec, G: dict, run: dict, *, name, Ls, kind, expert, mode, pos_a, pos_b, skip,
+                      max_tokens, q_mode, q_energy, q_max_rank, q_max_samples, samples, subset, pseudo, seed, dts_on, pinfo,
+                      iv_desc, warnings, warn) -> dict:
+    """読み取った群 G(collect_acts の群。"A"・"B"・"dt:<名前>"・"dts:<名前>")から鍵 1 本を計算して保存する(build_keys の後半)。"""
+    cs = spec.contrast
     ga, gb = G.get("A"), G.get("B")
     dt_keys = [g for g in G if g.startswith("dt:")]
     dts_keys = [g for g in G if g.startswith("dts:") and G[g]["index"]]      # dont_touch の質問の返事の冒頭(Q だけに使う)
@@ -1440,7 +1547,7 @@ def build_keys(session, contrast, *, name: str | None = None, layers, positions:
             "samples": [t[:240] for t in texts.get(sample_side, [])[:4]],
             "notes": pinfo["notes"] + ["build_auc は作成に使った例での値です(甘い)。key-check を保留集合(subset odd か別の対照集合)で"
                                        "回してください"],
-            "warnings": warnings, "sha": ks.sha, "seconds": time.perf_counter() - t0}
+            "warnings": warnings, "sha": ks.sha, "seconds": 0.0}
 
 
 # --- 専門家の選び方(expert:e の鍵の前に)---------------------------------------------------------------------
