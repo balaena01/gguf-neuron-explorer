@@ -369,6 +369,8 @@ UI では、direction ビューの「鍵(keyed)」タブで、ボタン 1 つで
 
 ここで説明する手法を **FiSH**(Formula-instantiated Scene-gated Hidden units)と呼びます。すでにある MLP のニューロン(隠れユニット)を、学習なしで、式から計算した重みで書き換えて、決まった場面でだけ方向を書くようにします。ニューロンは足さず、書き換えます。コマンドとユニットの名前は、中身を表す `nw` のままです。
 
+FiSH の記事は [FiSH: ほとんど働いていないニューロンを書き換えて、決まった場面でだけ口調を変える](https://balaena01.github.io/fish-steering/#ja) です。4B と 27B のモデルでの実測、すべての返事、読み手による分類、LoRA のファイルがあります。
+
 keyed write は線形の書き込みなので、鍵の反応が小さい位置にも少しずつ書き、反応が負の位置では逆向きに書きます。`nw` のユニットは、ふだんあまり働いていない MLP のニューロン 1 個を、学習なしで計算した重みで上書きします。ゲートの行を `s·κ`、入力の行を鍵、出力の列を方向にします。ゲートが閉じるので、小さい反応は潰れ、負の反応ではほとんど書きません。これが鍵 1 つの形です。形はあと 2 つあります。2 つの鍵を掛け合わせる形(ゲートの行と入力の行に別の鍵を入れ、「この場面」かつ「返事のこの位置」の両方で反応する位置でだけ書く)と、ニューロン 2 個を組にして足す量に上限を付ける形です。既定の形は上限つきの 2 個組で、下の 100 問ずつの結果はすべてこの形のものです。上限つきの 2 個組では、ゲートの行に「この場面 かつ 返事のこの区切り」を 1 本にまとめた鍵から、どの位置でもほぼ 1 を返す鍵の何倍か(1 個目は a 倍、2 個目は b 倍)を引いたものを入れ、入力の行にはほぼ 1 を返す鍵を入れます。2 個の差を取るので、鍵の反応が小さいとほぼ書かず、大きくなっても一定の量で頭打ちになります(場面と返事の位置を見る鍵で開閉する、しきい値と上限のあるスイッチ)。鍵 2 つの形は 12 問ほどの小さな確かめで試しただけで、100 問の評価には使っていません。
 
 ```bash
@@ -568,6 +570,7 @@ python -m pytest -q
 - [docs/agent_playbook.md](docs/agent_playbook.md): 結果の読み方
 - [docs/setup.md](docs/setup.md): WSL での CUDA・ROCm、GPU ごとの環境とワーカー
 - [CHiPS: 知っているのに答えられない、を数本のヘッドで減らす](https://balaena01.github.io/chips-steering/#ja): CHiPS の記事。実測とデータつき
+- [FiSH: ほとんど働いていないニューロンを書き換えて、決まった場面でだけ口調を変える](https://balaena01.github.io/fish-steering/#ja): FiSH の記事。実測とデータつき
 - [docs/qwen4exp.md](docs/qwen4exp.md): Qwen3.8-Flash-Next(`qwen4exp`)。分割ファイルの GGUF、4 本の残差ストリーム、control vector なしで使えるもの
 - [docs/head-component-steering.md](docs/head-component-steering.md): CHiPS。因果で選んだ数個の attention ヘッドの、方向に沿った成分だけを変える手法(`mode: proj`、`gne direction score`、`gne heads causal`、`gne heads allocate`、`gne eval --compare-methods`)と、全層の射影消去との関係
 - [docs/keyed-write.md](docs/keyed-write.md): 鍵つきの書き込み。残差に書き込む重み行列の入力に、対照集合から作った鍵が反応するときだけ効くランク 1 の書き込み(`mode: keyed`、`gne direction key`、`gne direction key-check`)と、語尾の例、CHiPS との使い分け、効く場所の探し方(`gne direction key-causal`)
