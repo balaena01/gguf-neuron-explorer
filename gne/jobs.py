@@ -101,7 +101,9 @@ class Job:
                 "total": self.total, "stage": self.stage, "eta_s": eta, "yields": self.yields,
                 "seconds": (self.finished or time.monotonic()) - self.started if self.started else None,
                 "result": self.result, "error": self.error,
-                "estimate_s": None if self.estimate is None else self.estimate.get("seconds")}
+                "estimate_s": None if self.estimate is None else self.estimate.get("seconds"),
+                # 層を重ねる読み直しを「1 つずつ読む」場合で数えた見積もり(初回。実際はこれより短いことが多い)
+                "estimate_stack_first": bool(self.estimate and (self.estimate.get("detail") or {}).get("stack_first"))}
 
 
 class _Cancelled(Exception):
@@ -284,9 +286,10 @@ def _fish_args(s, contrast, spec, p: dict, keys) -> tuple[str, dict, str]:
 
 
 def _fish_direction(s, contrast=None, spec: dict | None = None, **p) -> dict:
-    """FiSH の方向(docs/fish.md): 返事の位置で分けた方向を作り、層 × 区切りごとの長さと、今までの作り方との向きの近さを返す。"""
+    """FiSH の方向(docs/fish.md): 返事の位置で分けた方向を作り、層 × 区切りごとの長さと、今までの作り方との向きの近さを返す。
+    stack_fast=True で、層を重ねる読み直しを速い読み方にする(既定は切。方向が既定の読み方とわずかに違う。結果の stack_fast に残る)。"""
     from . import fish
-    path, q, cname = _fish_args(s, contrast, spec, p, ("layers", "segments", "same_reply", "stack", "response_tokens"))
+    path, q, cname = _fish_args(s, contrast, spec, p, ("layers", "segments", "same_reply", "stack", "stack_fast", "response_tokens"))
     q.pop("iv", None)
     d = fish.direction_step(s, path, name=q.pop("name", None) or cname, **q)
     return {**d, "contrast_path": path}
@@ -340,7 +343,9 @@ def _fish_pipeline(s, contrast=None, spec: dict | None = None, summary: bool = F
     save(名前か .yaml のパス)を渡すと、できたユニットをレシピのファイルに書く(結果の recipe_path)。summary=True なら、結果の
     代わりに短い要約(fish.summary: 式どおりか・ユニットとニューロンの数・保存先・足した量・質問ごとの値の数)と、ユニットの書き方の
     リストだけを返す。direction(すでにある方向の名前)を渡すと、方向を作り直さずにそれを使う(層・区切りが合わなければエラー)。
-    cap は上限つきの形のしきい値("0.4-0.8" か、区切りごとに "0.4-0.8,0.3-0.7,0.3-0.7"・リスト。省くと既定)。"""
+    cap は上限つきの形のしきい値("0.4-0.8" か、区切りごとに "0.4-0.8,0.3-0.7,0.3-0.7"・リスト。省くと既定)。
+    stack_fast=True で、方向を作る段の読み直しを速い読み方にする(既定は切。方向がわずかに変わる。探索向け。direction と一緒に
+    渡すと効かず、注意が出る)。どちらの読み方の方向を使ったかは、結果・要約の direction_stack_fast。"""
     from . import fish
     path, q, cname = _fish_args(s, contrast, spec, p, fish.SETTINGS)
     if isinstance(q.get("neurons"), dict):

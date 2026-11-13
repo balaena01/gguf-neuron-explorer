@@ -1879,4 +1879,11 @@ export const EN = {
   "鍵の反応": "Key response",
   "返事の出だし": "Start of the reply",
   "書けていない質問が、返事の書き出し方(かぎかっこで始まる、など)でまとまっていたら、鍵を作る質問を増やします(狙う場面の質問は 100 問以上を勧めます)": "If the questions with almost nothing written share a way of starting the reply (for example, an opening quotation mark), add more questions for building the keys (100 or more target-scene questions are recommended)",
+  // FiSH のタブ: 速い読み方(方向づくりで、層ごとの読み直しを区切りごとにまとめて読む)
+  "速い読み方(区切りごとにまとめて読む。探索向け。方向がわずかに変わる)": "Fast reading (one read per segment; for exploring; the direction changes slightly)",
+  "速い読み方(区切りごとにまとめて読む)。大きいモデルで方向づくりがずっと速くなるが、方向がわずかに変わる(今までの方向との cos 0.999 以上)。層や強さを比べる探索向け。配るものを作るときは切のまま。この読み方の方向での口調・正答は測っていない。効くのは方向を作る段だけで、「すでにある方向を使う」に名前を入れたときは効かない": "Fast reading (one read per segment). Building the direction gets much faster on large models, but the direction changes slightly (cosine of 0.999 or more with the default direction). Meant for exploring layers and strengths. Keep it off when you build something to distribute. Tone and correct answers with such a direction have not been measured. It only affects the direction step, and has no effect when a name is entered in \"Use an existing direction\"",
+  "(初回は長めに出ます。層ごとの読み直しを、いちばん遅い場合で数えています)": "(the first estimate on a model runs long: re-reading per layer is counted for the slowest case)",
+  "速い読み方で作った方向(探索向け。配るものは既定の読み方で作り直す)": "Direction built with fast reading (for exploring; rebuild with the default reading before distributing)",
+  "既定の読み方で作った方向": "Direction built with the default reading",
+  "すでにあるものを使った": "reused an existing one",
 };

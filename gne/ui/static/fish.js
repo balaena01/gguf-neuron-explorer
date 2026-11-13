@@ -29,7 +29,7 @@ const NAME_RE = /^[\w.-]+$/;
 const DRAFT = "gne.fish.draft";                                   // 入力欄の下書き(このブラウザだけ)
 const SRC = "gne.fish.src";
 const PER = { one: 1, two: 1, cap: 2 };                           // 区切り 1 つに要るニューロンの数(gne/fish.py の PER_SEGMENT)
-const FISH_KEYS = ["layers", "segments", "form", "alpha", "cap", "same_reply", "stack", "pseudo", "max_tokens", "response_tokens", "iv", "rekey"];
+const FISH_KEYS = ["layers", "segments", "form", "alpha", "cap", "same_reply", "stack", "stack_fast", "pseudo", "max_tokens", "response_tokens", "iv", "rekey"];
 const CAP_RE = /^\d+(\.\d+)?-\d+(\.\d+)?$/;                       // 上限つきの形のしきい値 a-b
 export const AMOUNT_HIGH = 0.2;                                   // 書き込みたくない場面・区切りの外で、足した量の平均がこれ以上なら赤
 export const AMOUNT_LOW = 0.5;                                    // 狙う場面の区切りの中で、足した量の平均がこれ未満なら黄
@@ -127,6 +127,7 @@ export class FishPanel {
           <button id="fx-all" title="${t("方向 → ニューロンの表 → 鍵 → レシピ → 当てた状態で鍵を作り直す → 確かめ、を 1 回のジョブで回す。ニューロンは既定の候補(表の上から)を使い、あとで選び直せる")}">${t("まとめて作る")}</button>
           <label class="muted" title="${t("レシピを当てた状態で鍵を作り直す段を入れる(例ではこのほうがよかった)")}"><input type="checkbox" id="fx-rekey-on" checked> ${t("当てた状態で鍵を作り直す")}</label>
           <label class="muted" title="${t("前に作った方向の名前を入れると、「まとめて作る」は方向を作り直さずにそれを使う(層が多いと、方向づくりがいちばん時間がかかる)。区切り・層・重ねる層が合わなければエラーになる。空なら作る")}">${t("すでにある方向を使う")} <input id="fx-usedir" size="14" spellcheck="false"></label>
+          <label class="muted" title="${t("速い読み方(区切りごとにまとめて読む)。大きいモデルで方向づくりがずっと速くなるが、方向がわずかに変わる(今までの方向との cos 0.999 以上)。層や強さを比べる探索向け。配るものを作るときは切のまま。この読み方の方向での口調・正答は測っていない。効くのは方向を作る段だけで、「すでにある方向を使う」に名前を入れたときは効かない")}"><input type="checkbox" class="fx-fast" id="fx-fast-all"> ${t("速い読み方(区切りごとにまとめて読む。探索向け。方向がわずかに変わる)")}</label>
           <span class="muted note" id="fx-status-all"></span></div>
         <div id="fx-prog-all" class="note mono"></div>
         <div id="fx-pipe"></div>
@@ -136,6 +137,7 @@ export class FishPanel {
           <label class="muted" title="${t("今まで = それぞれの条件で作った返事を読む。同じ返事 = 指示を付けて作った返事を、指示あり・なしの両方で読む(読んでいる言葉の違いが方向に入らない)")}">${t("作り方")}
             <select id="fx-method"><option value="same">${t("同じ返事を両方の条件で読む")}</option><option value="own">${t("今までの作り方")}</option></select></label>
           <label class="muted" title="${t("下の層に書いた後に残る差を、上の層の方向にする(上の欄の層に重ねて書く前提)")}"><input type="checkbox" id="fx-stack" checked> ${t("下の層に書いた後の残りを使う")}</label>
+          <label class="muted" title="${t("速い読み方(区切りごとにまとめて読む)。大きいモデルで方向づくりがずっと速くなるが、方向がわずかに変わる(今までの方向との cos 0.999 以上)。層や強さを比べる探索向け。配るものを作るときは切のまま。この読み方の方向での口調・正答は測っていない。効くのは方向を作る段だけで、「すでにある方向を使う」に名前を入れたときは効かない")}"><input type="checkbox" class="fx-fast" id="fx-fast"> ${t("速い読み方(区切りごとにまとめて読む。探索向け。方向がわずかに変わる)")}</label>
           <label class="muted" title="${t("今までの作り方の方向も作って、向きの近さ(cos)を表に出す")}"><input type="checkbox" id="fx-compare" checked> ${t("今までの作り方と比べる")}</label>
           <label class="muted" title="${t("方向を作るとき、返事を生成する長さ")}">${t("方向の返事の長さ")} <input id="fx-rt" type="number" min="1" max="2048" value="96" style="width:5em"></label>
         </div>
@@ -222,6 +224,8 @@ export class FishPanel {
     for (const id of ["#fx-layers", "#fx-seg", "#fx-form", "#fx-cap"]) this.$(id).addEventListener("input", () => this.settingsChanged());
     this.$("#fx-form").addEventListener("change", () => this.settingsChanged());
     root.addEventListener("input", (ev) => { if (ev.target.closest("input[data-fxa]")) this.compose(); });
+    // 「速い読み方」のチェックは 2 か所(まとめて作る・2. 方向を作る)にあり、同じ 1 つの設定を表す
+    for (const b of root.querySelectorAll("input.fx-fast")) b.addEventListener("change", () => this.setFast(b.checked));
     this.$("#fx-try-go").addEventListener("click", () => this.runTry());
     this.$("#fx-try-use").addEventListener("click", () => this.useTry());
     this.$("#fx-all").addEventListener("click", () => this.runAll());
@@ -380,6 +384,7 @@ export class FishPanel {
       // 書いていない設定は既定に戻す(前に選んだひな形の値を残さない)
       this.$("#fx-method").value = fish.same_reply === false ? "own" : "same";
       this.$("#fx-stack").checked = fish.stack !== false;
+      this.setFast(fish.stack_fast === true);
       this.$("#fx-rekey-on").checked = fish.rekey !== false;
       if (fish.iv === undefined || fish.iv === null) this.$("#fx-iv").value = "";
       if (fish.layers !== undefined && fish.layers !== null && !this.$("#fx-layers").value.trim()) put("#fx-layers", Array.isArray(fish.layers) ? fish.layers.join(",") : fish.layers);
@@ -472,7 +477,9 @@ export class FishPanel {
       const j = await this.onRun(kind, p);
       if (!j) { this.status(which, t("やめました")); return; }
       this.jobs[which] = j.id;                                 // この欄は、最後に投げたこのジョブの結果だけを受け取る
-      const est = Number.isFinite(+j.estimate_s) && j.estimate_s !== null ? ` ${t("(見積もり 約 {s} 秒)", { s: Math.round(+j.estimate_s) })}` : "";
+      const est = (Number.isFinite(+j.estimate_s) && j.estimate_s !== null ? ` ${t("(見積もり 約 {s} 秒)", { s: Math.round(+j.estimate_s) })}` : "")
+        // 層を重ねる読み直しを 1 つずつ読む場合で数えた見積もり(このモデルでまだ読み直していない)。実際は短いことが多い
+        + (j.estimate_stack_first ? ` ${t("(初回は長めに出ます。層ごとの読み直しを、いちばん遅い場合で数えています)")}` : "");
       this.status(which, running + est);
       this.follow(which, j.id);
     } catch (e) { this.status(which, `${t("エラー")}: ${e.message}`, true); }
@@ -555,6 +562,15 @@ export class FishPanel {
     await this.compose();
   }
 
+  // 「速い読み方」: 2 か所のチェックをそろえる
+  setFast(on) {
+    for (const b of this.root.querySelectorAll("input.fx-fast")) b.checked = !!on;
+  }
+
+  fast() {
+    return this.$("#fx-fast").checked;
+  }
+
   async runAll() {
     const s = this.source("all"), c = this.common("all");
     if (!s || !c) return;
@@ -564,7 +580,7 @@ export class FishPanel {
     if (cap === null) { this.status("all", t("しきい値は 0.4-0.8 のように書きます(下 < 上)。区切りごとに変えるなら、区切りの数だけカンマ区切りで"), true); return; }
     const rt = +this.$("#fx-rt").value, ps = +this.$("#fx-pseudo").value, top = +this.$("#fx-top").value;
     const p = { ...s, ...c.p, alpha: a, same_reply: this.$("#fx-method").value === "same", stack: this.$("#fx-stack").checked,
-                compare: this.$("#fx-compare").checked, rekey: this.$("#fx-rekey-on").checked,
+                stack_fast: this.fast(), compare: this.$("#fx-compare").checked, rekey: this.$("#fx-rekey-on").checked,
                 pseudo: Number.isInteger(ps) && ps >= 0 ? ps : 4, response_tokens: Number.isInteger(rt) && rt > 0 ? rt : 96,
                 top: Number.isInteger(top) && top > 0 ? top : 20 };
     if (c.name) p.name = c.name;
@@ -582,7 +598,7 @@ export class FishPanel {
     if (!s || !c) return;
     const rt = +this.$("#fx-rt").value;
     const p = { ...s, layers: c.p.layers, segments: c.p.segments, same_reply: this.$("#fx-method").value === "same", stack: this.$("#fx-stack").checked,
-                compare: this.$("#fx-compare").checked, response_tokens: Number.isInteger(rt) && rt > 0 ? rt : 96 };
+                stack_fast: this.fast(), compare: this.$("#fx-compare").checked, response_tokens: Number.isInteger(rt) && rt > 0 ? rt : 96 };
     if (c.name) p.name = c.name;
     await this.launch("dir", "fish_direction", p, t("方向を作っています(返事を生成します)…"));
   }
@@ -795,7 +811,7 @@ export class FishPanel {
     if (!r) { el.innerHTML = ""; return; }
     const rows = (r.rows || []).map((x) => `<tr><td>L${x.layer}</td><td>${esc(x.positions)}</td><td>${esc(x.direction)}</td><td>${fmt(x.norm, 2)}</td><td>${fmt(x.norm_old, 2)}</td>
       <td title="${t("1 に近いほど、今までの作り方と同じ向き")}">${fmt(x.cos_old, 2)}</td></tr>`).join("");
-    el.innerHTML = `<p class="note">${t("方向")} <b class="mono">${esc(r.name)}</b> · ${r.same_reply ? t("同じ返事を両方の条件で読む") : t("今までの作り方")}${r.stack ? ` · ${t("下の層に書いた後の残りを使う")}` : ""} · ${r.n_prompts ?? "—"} ${t("問")}</p>
+    el.innerHTML = `<p class="note">${t("方向")} <b class="mono">${esc(r.name)}</b> · ${r.same_reply ? t("同じ返事を両方の条件で読む") : t("今までの作り方")}${r.stack ? ` · ${t("下の層に書いた後の残りを使う")}` : ""}${r.stack && (r.layers || []).length > 1 ? ` · <span id="fx-dir-read"${r.stack_fast ? ' class="pp-warn"' : ""}>${r.stack_fast ? t("速い読み方で作った方向(探索向け。配るものは既定の読み方で作り直す)") : t("既定の読み方で作った方向")}</span>` : ""}${r.reused ? ` · ${t("すでにあるものを使った")}` : ""} · ${r.n_prompts ?? "—"} ${t("問")}</p>
       <div class="evx-scroll"><table class="evx mono fx-tab" id="fx-dir-tab"><thead><tr><th>${t("層")}</th><th>${t("区切り")}</th><th>${t("方向の名前")}</th><th title="${t("その区切りの方向の長さ(α = 1 で書く量)")}">${t("長さ")}</th>
         <th>${t("今までの作り方の長さ")}</th><th>${t("今までの作り方との cos")}</th></tr></thead><tbody>${rows}</tbody></table></div>
       ${r.compare ? `<p class="muted note">${t("今までの作り方(それぞれの条件で作った返事を読む・下の層を考えない)の方向は {n} に保存しました", { n: esc(r.compare) })}</p>` : ""}`;

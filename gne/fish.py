@@ -11,6 +11,9 @@
 層・強さは使う人が決める(ここでは選ばない)。強さは区切りごとに変えられる(alpha に "1,1,0.8" か [1, 1, 0.8]。1 つなら全区切りに同じ値)。
 上限つきの形のしきい値も同じ(cap に "0.4-0.8" か、区切りごとに "0.4-0.8,0.3-0.7,0.3-0.7"。省くと既定の 0.4-0.8)。
 pipeline に direction(すでにある方向の名前)を渡すと、方向は作り直さずにそれを使う(層・区切りが合わなければエラー)。
+stack_fast(既定は切): 層を重ねる方向づくりの読み直しを、区切りが続く範囲ごとに 1 回で読む(Session.direction の stack_fast。速いが、
+方向が既定の読み方とわずかに違う)。効くのは方向を作る段だけ。どちらの読み方で作った方向かは、方向のファイル(stack_read)と、
+結果・要約(direction_stack_fast)に残る。すでにある方向を使うときは効かない(一緒に渡すと注意を出す)。
 重みに入れる前に試す(try_step): 区切りつきの方向を、狙う場面の質問の返事の位置どおりに、層の出力へ直接足して生成する
 (control vector を生成の途中で付け替える。ニューロンも鍵も使わない)。層・区切りごとの強さを、作る前に返事で比べるのに使う。
 """
@@ -25,8 +28,9 @@ from .steer import GneError
 
 FORMS = ("one", "two", "cap")                 # 鍵 1 つ / 鍵 2 つ(場面 かつ 位置)/ 上限つきの 2 個組
 PER_SEGMENT = {"one": 1, "two": 1, "cap": 2}  # 区切り 1 つに要るニューロンの数
-SETTINGS = ("layers", "segments", "form", "alpha", "cap", "same_reply", "stack", "pseudo", "max_tokens", "response_tokens", "iv", "rekey")
-DEFAULTS = {"segments": "0,1-3,4-", "form": "cap", "alpha": 0.9, "same_reply": True, "stack": True, "pseudo": 4,
+SETTINGS = ("layers", "segments", "form", "alpha", "cap", "same_reply", "stack", "stack_fast", "pseudo", "max_tokens",
+            "response_tokens", "iv", "rekey")
+DEFAULTS = {"segments": "0,1-3,4-", "form": "cap", "alpha": 0.9, "same_reply": True, "stack": True, "stack_fast": False, "pseudo": 4,
             "max_tokens": 96, "response_tokens": 96}
 
 
@@ -212,17 +216,28 @@ def unit_rows(session, specs: list[str]) -> list[dict]:
 
 
 def direction_step(session, contrast: str, *, name: str, layers=None, segments=None, same_reply: bool = True, stack: bool = True,
-                   response_tokens: int = 96, compare: bool = True) -> dict:
+                   response_tokens: int = 96, compare: bool = True, stack_fast: bool = False) -> dict:
     """方向を作り、層 × 区切りごとの長さと、今までの作り方(それぞれ自分の返事を読む・重ねない)との向きの近さを返す。
-    stack なら、下の層に書いた後の残りを上の層の方向にする(layers の層に重ねて書く前提)。"""
+    stack なら、下の層に書いた後の残りを上の層の方向にする(layers の層に重ねて書く前提)。
+    stack_fast なら、その読み直しを速い読み方にする(区切りが続く範囲ごとに 1 回で読む。方向が既定の読み方とわずかに違う)。
+    読み直しが無いとき(stack が切、層が 1 つ、書く位置が before:<正規表現>)は使わず、注(notes)で知らせる。
+    結果の stack_fast が、実際に速い読み方で作ったか。"""
     t0 = time.perf_counter()
     Ls = _layers(layers)
     segs = _segments(segments)
     whole = before_mode(segs)                    # 文字の直前に書く: 方向は返事の全部の位置の平均(区切らない・重ねない)
     if whole:
         stack = False
+    notes = []
+    fast = bool(stack_fast) and bool(stack) and bool(same_reply) and len(Ls) > 1
+    if stack_fast and not fast:
+        notes.append("速い読み方(stack_fast)は使っていません(層を重ねる読み直しが無いため: 重ねない設定・層が 1 つ・"
+                     "同じ返事を両方の条件で読む作り方でない・書く位置が before:<正規表現> のどれか)")
     r = session.direction(contrast=contrast, name=name, positions="response", same_reply=bool(same_reply),
-                          segments=None if whole else segs, stack_layers=Ls if stack else None, response_tokens=int(response_tokens))
+                          segments=None if whole else segs, stack_layers=Ls if stack else None, response_tokens=int(response_tokens),
+                          stack_fast=fast)
+    if fast:
+        notes.append(f"方向 {name} は" + FAST_NOTE)
     ds = session.direction_set(name)
     old = None
     old_name = f"{name}_old"
@@ -244,8 +259,8 @@ def direction_step(session, contrast: str, *, name: str, layers=None, segments=N
             rows.append({"layer": L, "segment": i, "positions": sg, "direction": name if whole else f"{name}.seg{i}", "norm": n,
                          "cos_old": cos, "norm_old": None if old is None else float(np.linalg.norm(vec(old, i, L)))})
     return {"name": name, "segments": segs, "layers": Ls, "same_reply": bool(same_reply), "stack": bool(stack),
-            "method": r.get("method"), "compare": old_name if old is not None else None, "rows": rows,
-            "n_prompts": r.get("n_prompts"), "seconds": time.perf_counter() - t0}
+            "stack_fast": bool(r.get("stack_fast")), "method": r.get("method"), "compare": old_name if old is not None else None,
+            "rows": rows, "notes": notes, "n_prompts": r.get("n_prompts"), "seconds": time.perf_counter() - t0}
 
 
 def _build_stats(session, name: str) -> dict:
@@ -357,6 +372,14 @@ def check_step(session, specs: list[str], contrast: str, *, subset: str = "all",
     return session.nw_check(r, contrast, subset=subset, max_tokens=int(max_tokens), iv=iv, replies=replies, n_pos=int(n_pos), **kw)
 
 
+FAST_NOTE = "速い読み方(--stack-fast)で作った方向です。層や強さを比べる探索向けで、この読み方の方向での口調・正答は測っていません。配るものを作るときは、既定の読み方で方向を作り直してください"
+
+
+def stack_read_fast(ds) -> bool:
+    """方向 ds が、速い読み方(stack_fast)で作ったものか(方向のファイルの stack_read。既定の読み方のファイルには項目が無い)。"""
+    return str(ds.meta.get("stack_read") or "") == "fast"
+
+
 def reuse_direction(session, direction: str, *, layers, segments, stack: bool = True) -> dict:
     """すでにある方向を、作り直さずに使えるかを確かめて、direction_step と同じ形の表(層 × 区切りごとの長さ)を返す。
     合わなければはっきりしたエラー: 区切りが違う、層が方向に無い、重ねる層(--stack-layers)が書く層と違う。"""
@@ -390,8 +413,10 @@ def reuse_direction(session, direction: str, *, layers, segments, stack: bool = 
     rows = [{"layer": L, "segment": i, "positions": sg, "direction": ds.name if whole else f"{ds.name}.seg{i}",
              "norm": float(np.linalg.norm(src[i][L])), "cos_old": None, "norm_old": None}
             for L in Ls for i, sg in enumerate(segs)]
+    fast = stack_read_fast(ds)
     return {"name": ds.name, "segments": segs, "layers": Ls, "same_reply": bool(ds.meta.get("same_reply")), "stack": bool(made),
-            "method": ds.meta.get("method"), "compare": None, "rows": rows, "n_prompts": None, "reused": True, "seconds": 0.0}
+            "stack_fast": fast, "method": ds.meta.get("method"), "compare": None, "rows": rows,
+            "notes": [f"方向 {ds.name} は" + FAST_NOTE] if fast else [], "n_prompts": None, "reused": True, "seconds": 0.0}
 
 
 def behave_step(session, specs: list[str], contrast: str, *, name: str, prompts=None, n: int = 12, max_tokens: int = 120,
@@ -442,13 +467,16 @@ def behave_step(session, specs: list[str], contrast: str, *, name: str, prompts=
 def pipeline(session, contrast: str, *, name: str, layers=None, segments=None, form: str = "cap", alpha=0.9,
              same_reply: bool = True, stack: bool = True, compare: bool = True, pseudo: int = 4, max_tokens: int = 96,
              response_tokens: int = 96, iv=None, rekey: bool = True, neurons: dict | None = None, top: int = 20,
-             save: str | Path | None = None, direction: str | None = None, cap=None) -> dict:
+             save: str | Path | None = None, direction: str | None = None, cap=None, stack_fast: bool = False) -> dict:
     """方向 → ニューロンの表 → 鍵 → ユニット →(そのユニットを当てた状態で鍵を作り直す)→ 式どおりか → 足した量、を順に回す。
     ニューロンは既定の候補(表の上から)を使う(neurons を渡せばそれ)。層と強さは渡されたものをそのまま使う。
     alpha は数 1 つ(全部の区切りに同じ値)か、区切りごとの "1,1,0.8"・[1, 1, 0.8]。
     cap は上限つきの形のしきい値(caps_of): "0.4-0.8"(全部の区切りに同じ値)か、区切りごとの "0.4-0.8,0.3-0.7,0.3-0.7"。省くと既定(0.4-0.8)。
     direction(すでにある方向の名前)を渡すと、方向を作り直さずにそれを使う(reuse_direction。区切り・層・重ねる層が合わなければ
-    エラー。same_reply・response_tokens・compare は使わない)。鍵の名前は今までどおり name から付ける。
+    エラー。same_reply・response_tokens・compare・stack_fast は使わない)。鍵の名前は今までどおり name から付ける。
+    stack_fast(既定は切): 方向を作る段の、層を重ねる読み直しを速い読み方にする(direction_step。方向が既定の読み方とわずかに違う。
+    探索向け)。ほかの段には効かない。direction と一緒に渡すと、効かないことを警告と注(notes)で知らせる。どちらの読み方で作った
+    方向を使ったかは、結果の direction_stack_fast と要約に出る(すでにある方向を使ったときも、方向のファイルの記録から出す)。
     save を渡すと、できたユニットをレシピのファイルに書く(save_recipe。.yaml / .yml で終わればそのパス、そうでなければ名前として
     <root>/recipes/<名前>.yaml)。結果の recipe_path が、gne nw verify --recipe などにそのまま渡せるパス。省くと書かない(今までどおり)。
     結果は大きい(ニューロンの表・鍵の表・足した量の細目)ので、短く見るなら結果の summary(summary() と同じ)か summary_text()。"""
@@ -469,9 +497,15 @@ def pipeline(session, contrast: str, *, name: str, layers=None, segments=None, f
     if direction is not None and str(direction).strip():
         d = reuse_direction(session, str(direction).strip(), layers=Ls, segments=segs, stack=stack)
         notes.append(f"方向は作り直さず、すでにある {d['name']} を使いました")
+        if stack_fast:
+            msg = ("速い読み方(stack_fast)は、すでにある方向を使うとき(direction)には効きません(方向を作り直さないため)。"
+                   f"方向 {d['name']} は" + ("速い読み方" if d["stack_fast"] else "既定の読み方") + "で作ったものです")
+            session.warn(msg)
+            notes.append(msg)
     else:
         d = direction_step(session, contrast, name=name, layers=Ls, segments=segs, same_reply=same_reply, stack=stack,
-                           response_tokens=response_tokens, compare=compare)
+                           response_tokens=response_tokens, compare=compare, stack_fast=stack_fast)
+    notes += [n for n in d.get("notes") or [] if n not in notes]
     dname = d["name"]
     lap("direction", t)
     t = time.perf_counter()
@@ -503,6 +537,7 @@ def pipeline(session, contrast: str, *, name: str, layers=None, segments=None, f
     lap("check", t)
     res = {"name": name, "contrast_path": contrast, "layers": Ls, "segments": segs, "form": form, "alpha": alpha_out(al), "alphas": al,
            "cap": cap_out(caps), "caps": caps, "direction_name": dname, "direction_reused": bool(d.get("reused")),
+           "direction_stack_fast": bool(d.get("stack_fast")),
            "direction": d, "usage": usage, "neurons": picked, "neurons_default": neurons is None, "keys": keys, "rekeyed": keys2,
            "key_base": f"{name}_r" if rekey else name, "units": specs, "unit_rows": unit_rows(session, specs),
            "verify": ver, "check": chk, "iv": keys["iv"], "notes": notes, "stage_seconds": stage}
@@ -563,6 +598,7 @@ def summary(d: dict) -> dict:
             "form": d.get("form"), "alpha": d.get("alpha"), "cap": d.get("cap"), "n_units": len(d.get("units") or []),
             "n_neurons": sum(1 + (1 if r.get("pair") is not None else 0) for r in rows),
             "direction": d.get("direction_name") or d.get("name"), "direction_reused": bool(d.get("direction_reused")),
+            "direction_stack_fast": bool(d.get("direction_stack_fast")),
             "key_base": d.get("key_base"), "rekeyed": d.get("rekeyed") is not None,
             "recipe_path": d.get("recipe_path"), "check": groups,
             "questions": None if not qs else {**{k: qs[k] for k in ("low", "over", "leak", "segments", "cap", "n_low")},
@@ -581,7 +617,8 @@ def summary_text(d: dict) -> str:
              + (f"、しきい値 {','.join(s['cap']) if isinstance(s['cap'], list) else s['cap']}" if s.get("cap") else "")
              + (f"({s['seconds']:.0f} 秒)" if s.get("seconds") is not None else ""),
              f"ユニット {s['n_units']} 個、上書きするニューロン {s['n_neurons']} 個、方向 {s['direction']}"
-             + ("(すでにあるものを使った)" if s.get("direction_reused") else "") + f"、鍵 {s['key_base']}_*"
+             + ("(すでにあるものを使った)" if s.get("direction_reused") else "")
+             + ("(速い読み方で作った方向)" if s.get("direction_stack_fast") else "") + f"、鍵 {s['key_base']}_*"
              + ("(レシピを当てた状態で作り直した)" if s.get("rekeyed") else ""),
              "式どおりか: " + ("合格" if s["ok"] else "不合格(gne nw verify で層ごとの誤差を見てください)")]
     for g, x in s["check"].items():

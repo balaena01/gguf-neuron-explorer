@@ -1160,7 +1160,8 @@ def direction(c: Common, holder: dict,
                          else "それぞれ自分の条件の文を読んだ差(今までの作り方)"),
              *([("区切りつきの方向: " + "、".join(f"{x['name']}(位置 {x['positions']})" for x in d["segments"])
                  + (f"。層 {','.join(map(str, d['stack_layers']))} は、下の層に足した後の残り" if d.get("stack_layers") else "")
-                 + ("(速い読み方 --stack-fast。既定の読み方の方向とわずかに違う)" if d.get("stack_fast") else ""))]
+                 + ("(速い読み方 --stack-fast。既定の読み方の方向とわずかに違う。探索向け)" if d.get("stack_fast")
+                    else ("(既定の読み方)" if len(d.get("stack_layers") or []) > 1 else "")))]
                if d.get("segments") else []),
              "層ごとの ‖平均差‖/ρ(rel dose に直した大きさ)と前の層との cos:"]
     lines.append("  " + " ".join(f"L{r['layer']}:{r['rel']:.2f}" if r["rel"] is not None else f"L{r['layer']}:—"
@@ -1392,7 +1393,8 @@ def _gate(s, kind: str, params: dict, yes: bool, budget: Optional[str]) -> dict:
         raise e.error from e
     if est is not None and est.get("seconds"):
         b = est.get("budget")
-        sys.stderr.write(f"見積もり: {fmt_seconds(est['seconds'])}" + (f"(予算で絞った: {b})" if b else "") + "\n")
+        first = "(層を重ねる読み直しを 1 つずつ読む場合で数えています。初回は長めに出ます)" if (est.get("detail") or {}).get("stack_first") else ""
+        sys.stderr.write(f"見積もり: {fmt_seconds(est['seconds'])}" + (f"(予算で絞った: {b})" if b else "") + first + "\n")
     return p
 
 
@@ -3173,6 +3175,7 @@ def nw_pipeline(c: Common, holder: dict,
                 save: Optional[str] = typer.Option(None, "--save", help="できたユニットをレシピのファイルに書く(.yaml で終わるパスか、名前 = <root>/recipes/<名前>.yaml)。そのまま gne nw verify --recipe に渡せる。省くと書かない"),
                 same_reply: Optional[bool] = typer.Option(None, "--same-reply/--no-same-reply", help="方向を、同じ返事を両方の条件で読ませた差で作る(既定は作る)"),
                 stack: Optional[bool] = typer.Option(None, "--stack/--no-stack", help="上の層の方向を、下の層に書いた後の残りにする(既定はする。層の数に比例して時間がかかる)"),
+                stack_fast: Optional[bool] = typer.Option(None, "--stack-fast/--no-stack-fast", help="方向を作る段の、層ごとの読み直しを速い読み方にする(区切りが続く範囲ごとに 1 回で読む。既定は切)。大きいモデルで方向づくりがずっと速くなるが、方向がわずかに変わる(既定の読み方の方向との cos 0.999 以上)。層や強さを比べる探索向けで、配るものを作るときは付けない。--direction と一緒に渡すと効かない(注意が出る)"),
                 rekey: Optional[bool] = typer.Option(None, "--rekey/--no-rekey", help="できたユニットを当てた状態で鍵を作り直す(既定は作り直す)"),
                 pseudo: Optional[int] = typer.Option(None, "--pseudo", help="比較用の鍵の本数(既定 4)"),
                 max_tokens: Optional[int] = typer.Option(None, "--max-tokens", help="鍵と足した量で返事を生成する長さ(既定 96)"),
@@ -3185,7 +3188,8 @@ def nw_pipeline(c: Common, holder: dict,
     当てた状態で鍵を作り直す → 式どおりか → 足した量。層と強さは渡したものをそのまま使う(自動では決めない)。ニューロンは、働きの小さい順の
     表の上から使う(選び直すなら gne nw neurons の表を見てレシピを書く)。出るのは短い要約(式どおりか、ユニットとニューロンの数、
     足した量、質問ごとの値の数、レシピの保存先)。--save を付けると、gne nw verify / check / export の --recipe にそのまま渡せるレシピを書く。
-    --direction NAME で、すでにある方向を作り直さずに使う。--cap で、上限つきの形のしきい値を区切りごとに決める。"""
+    --direction NAME で、すでにある方向を作り直さずに使う。--cap で、上限つきの形のしきい値を区切りごとに決める。
+    --stack-fast で、方向を作る段だけ速い読み方にする(探索向け。方向がわずかに変わる。どちらの読み方の方向を使ったかは要約に出る)。"""
     from . import fish
     from .jobs import _fish_pipeline
     if not parse_layers(layers):
@@ -3193,8 +3197,8 @@ def nw_pipeline(c: Common, holder: dict,
     s = holder["session"] = c.session()
     p = {"contrast": str(contrast), "layers": layers, "alpha": alpha, "cap": cap, "direction": direction, "segments": segments,
          "form": form, "name": name, "save": save,
-         "same_reply": same_reply, "stack": stack, "rekey": rekey, "pseudo": pseudo, "max_tokens": max_tokens,
-         "response_tokens": response_tokens, "top": top, "iv": _iv_arg(iv)}
+         "same_reply": same_reply, "stack": stack, "stack_fast": stack_fast, "rekey": rekey, "pseudo": pseudo,
+         "max_tokens": max_tokens, "response_tokens": response_tokens, "top": top, "iv": _iv_arg(iv)}
     p = {k: v for k, v in p.items() if v is not None}
     if save is not None:
         fish.recipe_file(s, save)                    # 保存先が読めなければ、見積もりの前に止める

@@ -105,6 +105,10 @@ direction で作った方向は "L:dir:NAME:dose"、attention ヘッドの gain 
    質問を増やして効くのは、書けていない質問があるときだけ(すでに書けていれば、増やしても口調は増えない。docs/fish.md §3)。nw_check の位置ごとの値は平均で、一部の質問でまったく書けていないことが
    隠れるので、質問ごとの値(by_question の low、question_summary.worst の質問と返事の出だし)も見る。fish_pipeline は、direction で
    すでにある方向を使い回せ(作り直さない)、cap で上限つきの形のしきい値を区切りごとに変えられる。
+   層を重ねる方向づくり(stack_layers、fish_pipeline の方向の段)は層の数だけ返事を読み直す。direction・fish_pipeline の
+   stack_fast=True で速い読み方にできる(大きいモデルで約 10 倍速い)が、方向がわずかに変わり(cos 0.999 以上)、その方向での
+   口調・正答は測っていない。層や強さを比べる探索は速い読み方、配るものを作るときは既定の読み方、と使い分ける。どちらで
+   作ったかは方向のファイル(stack_read)と結果(stack_fast・direction_stack_fast)に残る。
 """
 
 
@@ -215,7 +219,8 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
     async def direction(contrast: str, name: str | None = None, select: str | None = None, mode: str = "ablate",
                         layers: str | None = None, dose: float = 1.0, positions: str = "last",
                         random_controls: int = 16, same_reply: bool = False, segments: str | None = None,
-                        stack_layers: str | list[int] | None = None, response_tokens: int = 96) -> dict:
+                        stack_layers: str | list[int] | None = None, response_tokens: int = 96,
+                        stack_fast: bool = False) -> dict:
         """対照集合(configs/contrast/ の名前かパス。system_a / system_b / user_prompts、層選びには validate.match)から
         全層の方向 r_L = mean_A − mean_B(生成プロンプトの最終トークン)を作って保存する(§6.17)。
         select="auto" なら候補層ごとに効果を測ってジョブで層を選ぶ(job_status で結果)。mode="add" は層 L に平均差の dose 倍を
@@ -228,12 +233,16 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
         それぞれ自分の返事を読んだ差。same_reply=True は、同じ返事(A 側の返事)を A 側の条件と B 側の条件の両方で読ませた差
         (条件の違いだけの成分。読んでいる語の違いから来る成分が入らない)。segments="0,1-3,4-" で返事の位置で分けた方向も作る
         (位置 0 = 返事を書き始める直前。区切り i は "NAME.seg<i>" という名前でユニットに書ける)。stack_layers="11-23"(範囲)・"11,18,23"・[11, 18, 23] は、
-        区切りつきの方向をその層に重ねて書く前提の値にする(上の層は、下の層に足した後の残り。時間がかかる)。"""
+        区切りつきの方向をその層に重ねて書く前提の値にする(上の層は、下の層に足した後の残り。時間がかかる)。
+        stack_fast=True(stack_layers と一緒に。既定は False)は、その読み直しを速い読み方にする(区切りが続く範囲ごとに 1 回で読む)。
+        大きいモデルで方向づくりがずっと速くなる(RTX 3080 の 27B・13 層・40 問で約 40 分 → 3 分半)が、方向がわずかに変わる
+        (既定の読み方の方向との cos 0.999 以上、長さの 1〜3%。この方向での口調・正答は測っていない)。層や強さを比べる探索向けで、
+        配るものを作るときは既定のまま。結果の stack_fast と、方向のファイルの stack_read: fast に残る。"""
         try:
             params = {"contrast": str(_contrast_path(session, contrast, None, None, None, name)), "name": name,
                       "select": select, "mode": mode, "layers": layers, "dose": dose, "positions": positions,
                       "random_controls": random_controls, "same_reply": same_reply, "segments": segments,
-                      "stack_layers": stack_layers, "response_tokens": response_tokens}
+                      "stack_layers": stack_layers, "response_tokens": response_tokens, "stack_fast": stack_fast}
         except Exception as e:  # noqa: BLE001
             return _err(e)
         if select == "auto":
@@ -705,7 +714,7 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
                             pseudo: int | None = None, max_tokens: int | None = None, response_tokens: int | None = None,
                             iv: str | list[str] | None = None, neurons: dict[str, list[int]] | None = None, top: int = 20,
                             save: str | None = None, summary: bool = False, direction: str | None = None,
-                            cap: str | list[str] | None = None) -> dict:
+                            cap: str | list[str] | None = None, stack_fast: bool | None = None) -> dict:
         """FiSH を最初から最後まで 1 回のジョブで作る(job_status で結果。UI の FiSH のタブの「まとめて作る」と同じ): 方向 → ニューロンの表 →
         鍵 → ユニット → そのユニットを当てた状態で鍵を作り直す → 式どおりか → 足した量。contrast は対照集合の表(name・system_a・
         user_prompts・dont_touch と、設定の fish)か、configs/contrast/ の名前・パス、configs/fish/ のひな形の名前。
@@ -723,6 +732,11 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
         direction(すでにある方向の名前)を渡すと、方向を作り直さずにそれを使う(区切り・層・重ねる層が合わなければ BAD_DIRECTION)。
         cap は上限つきの形のしきい値 "a-b"(既定 0.4-0.8。鍵の反応が a より小さいとほぼ書かず、b より大きいと狙った量で頭打ち)。1 つなら
         全部の区切りに同じ値、区切りごとに変えるなら区切りの順に ["0.4-0.8", "0.3-0.7", "0.3-0.7"] か "0.4-0.8,0.3-0.7,0.3-0.7"。
+        stack_fast=True(既定は切。表の fish.stack_fast でも書ける)は、方向を作る段の、層ごとの読み直しを速い読み方にする(区切りが
+        続く範囲ごとに 1 回で読む)。大きいモデルで方向づくりがずっと速くなるが、方向がわずかに変わる(既定の読み方の方向との cos
+        0.999 以上。この方向での口調・正答は測っていない)。層や強さを比べる探索向けで、配るものを作るときは既定のまま。ほかの段には
+        効かない。direction と一緒に渡すと効かず、notes に注意が出る。どちらの読み方で作った方向を使ったかは、結果・要約の
+        direction_stack_fast(すでにある方向を使ったときも、方向のファイルの記録から出す)。
         鍵は、返事を 1 回だけ作って読み、全部の区切りの分を作る。鍵を作る質問は、狙う場面も変えたくない場面も多めに用意する(狙う場面の質問は 100 問以上を勧める)。"""
         from .jobs import _layers
         try:
@@ -731,7 +745,7 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
             p = {**_fish_contrast(contrast), "layers": layers, "alpha": alpha, "segments": segments, "form": form, "name": name,
                  "same_reply": same_reply, "stack": stack, "rekey": rekey, "pseudo": pseudo, "max_tokens": max_tokens,
                  "response_tokens": response_tokens, "iv": iv, "neurons": neurons, "top": top, "save": save,
-                 "direction": direction, "cap": cap, "summary": True if summary else None}
+                 "direction": direction, "cap": cap, "stack_fast": stack_fast, "summary": True if summary else None}
             return jobs.start("fish_pipeline", {k: v for k, v in p.items() if v is not None}).view()
         except Exception as e:  # noqa: BLE001
             return _err(e)

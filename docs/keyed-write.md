@@ -844,7 +844,7 @@ gne direction --contrast C --positions response --same-reply --segments 0,1-3,4-
   (全位置の平均、`layer_L`)は今までどおり入り、区切りつきの方向は別の項目に入る。区切り i は `NAME.seg<i>` という名前で、
   add・keyed・nw のユニットにそのまま書ける(例 `18:ffn:keyed:a1@NAME.seg2#KEY`)。
 - `--stack-layers` は、区切りつきの方向を複数の層に重ねて書く前提の値にする(上の層は、下の層に足した後の残り)。層は
-  `11-23`・`11,18,23`・`11,14-16,23` のどれでも書ける。層ごとに返事を読み直すので、層の数に比例して時間がかかる(見積もりに入る)。`--stack-fast` を付けると速く読むが、上の層の方向が既定とわずかに違う(`docs/fish.md` §5)。
+  `11-23`・`11,18,23`・`11,14-16,23` のどれでも書ける。層ごとに返事を読み直すので、層の数に比例して時間がかかる(見積もりに入る)。`--stack-fast` を付けると速く読むが、上の層の方向が既定とわずかに違う(層や強さを比べる探索向け。配るものは既定の読み方で作る。`docs/fish.md` §5)。
 - 一括(`direction_key_pipeline`、表の `keyed.same_reply`)と CHiPS の一括(`pipeline.same_reply`、positions response のとき)でも選べる。
 - 両側の質問の数が同じ対照集合で使う。
 

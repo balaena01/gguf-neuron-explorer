@@ -158,6 +158,8 @@ def test_template_file():
     assert len(d["user_prompts"]) >= 24 and d["system_a"] and {g["name"] for g in d["dont_touch"]} == {"tasks", "ordinary"}
     assert d["fish"]["form"] == "cap" and d["fish"]["segments"] == "0,1-3,4-" and d["fish"]["alpha"] == [1, 1, 0.8]
     assert "layers" not in d["fish"]                                       # 層は使う人が入れる
+    assert d["fish"]["stack_fast"] is False                                # 速い読み方は、書けるが既定は切
+    assert "stack_fast" in d["about"]["ja"]["text"] and "stack_fast" in d["about"]["en"]["text"] and "探索" in d["about"]["ja"]["text"]
 
 
 def test_units_and_names_without_model():
@@ -246,6 +248,9 @@ def test_pipeline_job(served, piped):
     c, s = served["client"], served["session"]
     r = piped["result"]
     assert piped["estimate_s"] and piped["estimate_s"] > 0                  # 見積もりが付く
+    assert piped["estimate_stack_first"] is True                            # このセッションで初めての読み直し: 1 つずつ読む場合で数えた見積もり
+    assert r["direction_stack_fast"] is False and r["direction"]["stack_fast"] is False and r["summary"]["direction_stack_fast"] is False
+    assert "stack_read" not in s.direction_set("fish_job").meta              # 既定の読み方の方向のファイルは今までの項目のまま
     assert r["name"] == "fish_job" and r["layers"] == [8, 12] and r["segments"] == ["0", "1-3", "4-"] and r["form"] == "cap"
     assert r["alphas"] == [1.0, 1.0, 0.8] and r["alpha"] == [1.0, 1.0, 0.8]             # ひな形の強さ(区切りごと)
     assert Path(r["contrast_path"]).name == "fish_job.yaml"
@@ -341,6 +346,18 @@ def test_step_jobs(served, piped):
     assert e["status"] == "error" and e["error"]["code"] == "BAD_DIRECTION" and "8,12" in e["error"]["message"]
     e = _run_job(c, "fish_pipeline", {"spec": st, "layers": LAYERS, "cap": "0.4-0.8,0.3-0.7"}, ok=False)
     assert e["status"] == "error" and e["error"]["code"] == "BAD_ARGS" and "しきい値" in e["error"]["message"]
+    # 速い読み方(stack_fast): 方向の段のジョブと、まとめて作るジョブ(表の fish.stack_fast)。見積もりは、チェックの有無で変わる
+    fd = _run_job(c, "fish_direction", {"spec": small_spec("fish_fast"), "layers": LAYERS, "compare": False, "stack_fast": True})
+    sd = _run_job(c, "fish_direction", {"spec": small_spec("fish_slow"), "layers": LAYERS, "compare": False})
+    assert fd["result"]["stack_fast"] is True and sd["result"]["stack_fast"] is False and fd["params"]["stack_fast"] is True
+    ss = served["session"]
+    assert ss.direction_set("fish_fast").meta["stack_read"] == "fast" and "stack_read" not in ss.direction_set("fish_slow").meta
+    assert fd["estimate_s"] < sd["estimate_s"] and fd["estimate_stack_first"] is False
+    sf = small_spec("fish_fast")
+    sf["fish"] = {**sf["fish"], "stack_fast": True}
+    fu = _run_job(c, "fish_pipeline", {"spec": sf, "layers": LAYERS, "direction": "fish_fast", "name": "fish_fast_use", "rekey": False, "summary": True})
+    assert fu["result"]["direction_reused"] and fu["result"]["direction_stack_fast"] is True             # 使い回した方向の読み方が要約に出る
+    assert any("効きません" in n for n in fu["result"]["notes"]) and any("速い読み方(--stack-fast)で作った方向" in n for n in fu["result"]["notes"])
     b = _run_job(c, "fish_behave", {"spec": spec, "units": u, "n": 2, "max_tokens": 8})
     assert b["estimate_s"] and b["result"]["scene"]["counts"]["n"] == 2 and b["result"]["others"]["counts"]["n"] == 2
     assert len(b["result"]["scene"]["replies"]) == 2 and b["result"]["scene"]["replies"][0]["prompt"] == spec["user_prompts"][0]
@@ -526,8 +543,27 @@ def test_fish_steps_in_browser(served, browser, piped):
     assert "層 1 つに 2 個" in pg.evaluate("document.querySelector('#fx-need').textContent")
     assert pg.evaluate("document.querySelector('#fx-add').disabled")
     pg.uncheck("#fx-compare")
+    # 「速い読み方」のチェックは 2 か所(まとめて作る・2. 方向を作る)にあり、片方を変えるともう片方もそろう。既定は切。表の fish.stack_fast で入る
+    fast = "[...document.querySelectorAll('input.fx-fast')].map((x) => x.checked)"
+    assert pg.evaluate(fast) == [False, False]
+    assert "探索向け" in pg.evaluate("document.querySelector('#fx-fast').parentElement.textContent")
+    tip = pg.evaluate("document.querySelector('#fx-fast-all').parentElement.title")
+    assert "cos 0.999 以上" in tip and "配るものを作るときは切のまま" in tip and "大きいモデル" in tip
+    _put_spec(pg, {**spec, "fish": {**spec["fish"], "stack_fast": True}})
+    assert pg.evaluate(fast) == [True, True]
+    _put_spec(pg, spec)                                                     # 書いていない設定は既定(切)に戻る
+    assert pg.evaluate(fast) == [False, False]
+    pg.check("#fx-fast-all")
+    assert pg.evaluate(fast) == [True, True]
+    pg.uncheck("#fx-fast")
+    assert pg.evaluate(fast) == [False, False]
+    pg.check("#fx-fast")
     pg.click("#fx-dir-go")
     pg.wait_for_function("document.querySelectorAll('#fx-dir-tab tbody tr').length === 2", timeout=900000)
+    sent = [j for j in served["client"].get("/api/jobs").json() if j["kind"] == "fish_direction" and (j["params"].get("spec") or {}).get("name") == "fish_steps"]
+    assert sent and sent[-1]["params"]["stack_fast"] is True                 # チェックがジョブの引数に入る(層が 1 つなので、読み直しは無い)
+    assert sent[-1]["result"]["stack_fast"] is False and not pg.evaluate("!!document.querySelector('#fx-dir-read')")
+    pg.uncheck("#fx-fast")
     assert "まだ無いもの" in pg.evaluate("document.querySelector('#fx-units').textContent")
     # 重みに入れる前に試す: 方向を層 8 の出力に直接足して返事を作る。強さを変えてもう 1 回 → 回ごとの数が並ぶ
     pg.fill("#fx-try-n", "2")
@@ -619,6 +655,22 @@ def test_fish_tab_in_english(served, browser, piped):
     assert "Target scene" in pg.evaluate("document.querySelector('#fx-check').textContent")
     assert "Values per question" in pg.evaluate("document.querySelector('#fx-check').textContent")
     assert "Use an existing direction" in pg.evaluate("document.querySelector('#fx-usedir').parentElement.textContent")
+    # 速い読み方: チェックの文言、できた方向の読み方の表示、見積もりに添える「初回は長めに出ます」
+    assert [x.split("(")[0].strip() for x in pg.evaluate("[...document.querySelectorAll('input.fx-fast')].map((x) => x.parentElement.textContent)")] == ["Fast reading"] * 2
+    tip = pg.evaluate("document.querySelector('#fx-fast').parentElement.title")
+    assert "cosine of 0.999 or more" in tip and "Keep it off when you build something to distribute" in tip and "large models" in tip
+    assert pg.evaluate("document.querySelector('#fx-dir-read').textContent") == "Direction built with the default reading"
+    assert not pg.evaluate("document.querySelector('#fx-dir-read').classList.contains('pp-warn')")
+    pg.evaluate(f"(d) => {{ const p = {f}; const was = p.st.dir; p.st.dir = {{ ...d, stack_fast: true, reused: true }}; p.renderDirection(); window._fxRead = document.querySelector('#fx-dir').textContent; window._fxWarn = document.querySelector('#fx-dir-read').classList.contains('pp-warn'); p.st.dir = was; p.renderDirection(); }}", piped["result"]["direction"])
+    assert "Direction built with fast reading (for exploring" in pg.evaluate("window._fxRead") and "reused an existing one" in pg.evaluate("window._fxRead")
+    assert pg.evaluate("window._fxWarn") is True
+    pg.evaluate(f"""(async () => {{ const p = {f}; const run = p.onRun, follow = p.follow; p.follow = () => {{}};
+        p.onRun = async () => ({{ id: 'est1', estimate_s: 900, estimate_stack_first: true }}); await p.launch('dir', 'fish_direction', {{}}, 'run');
+        window._fxEst1 = document.querySelector('#fx-status-dir').textContent;
+        p.onRun = async () => ({{ id: 'est2', estimate_s: 80, estimate_stack_first: false }}); await p.launch('dir', 'fish_direction', {{}}, 'run');
+        window._fxEst2 = document.querySelector('#fx-status-dir').textContent; p.onRun = run; p.follow = follow; p.jobs.dir = null; }})()""")
+    assert "about 900 s" in pg.evaluate("window._fxEst1") and "the first estimate on a model runs long" in pg.evaluate("window._fxEst1")
+    assert "about 80 s" in pg.evaluate("window._fxEst2") and "runs long" not in pg.evaluate("window._fxEst2")
     box = pg.evaluate("document.querySelector('.fx-neu-tab input:checked').dataset.fxn")
     pg.uncheck(f".fx-neu-tab input[data-fxn=\"{box}\"]")                   # 数が合わない文・「既定の候補に戻す」
     pg.wait_for_function("document.querySelector('#fx-add').disabled", timeout=5000)
@@ -681,6 +733,8 @@ def test_all_templates_are_readable(tmp_path):
         assert "誤差" in a["ja"]["text"] and "Qwen3.5-4B" in a["ja"]["text"] and "Qwen3.5-4B" in a["en"]["text"], name
         st = d.pop("fish")
         assert set(st) <= set(fish.SETTINGS) and "layers" not in st, name       # 層は使う人が入れる
+        assert st.get("stack_fast", False) is False and ("stack_fast" in st) == bool(st.get("stack")), name    # 速い読み方: 重ねる形にだけ書いてあり、切
+        assert ("stack_fast" in a["ja"]["text"]) == ("stack_fast" in a["en"]["text"]) == bool(st.get("stack")), name
         assert st["form"] in fish.FORMS, name
         segs = fish._segments(st["segments"])
         al = fish.alphas_of(st["alpha"], len(segs))                             # 数 1 つか、区切りごと

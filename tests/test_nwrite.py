@@ -131,9 +131,9 @@ def test_help_lists_new_commands():
     r = CliRunner().invoke(app, ["nw", "--help"])
     assert r.exit_code == 0 and all(x in r.output for x in ("neurons", "key", "verify", "check", "try", "pipeline", "export"))
     r = CliRunner().invoke(app, ["direction", "--help"])
-    assert "--same-reply" in r.output and "--segments" in r.output and "--stack-layers" in r.output
+    assert "--same-reply" in r.output and "--segments" in r.output and "--stack-layers" in r.output and "--stack-fast" in r.output
     r = CliRunner().invoke(app, ["nw", "pipeline", "--help"])
-    assert r.exit_code == 0 and "--save" in r.output and "--layers" in r.output
+    assert r.exit_code == 0 and "--save" in r.output and "--layers" in r.output and "--stack-fast" in r.output
     r = CliRunner().invoke(app, ["nw", "export", "--help"])
     assert "--strip-meta" in r.output and "--name" in r.output
 
@@ -205,6 +205,13 @@ def test_pipeline_summary_and_recipe_file(tmp_path):
     assert "ほとんど書けていない質問はありません" in "\n".join(NW.question_lines({"question_summary": {**d2["check"]["question_summary"], "worst": [], "n_low": 0},
                                                                     "groups": d2["check"]["groups"]}))
     assert sm["questions"] is None and sm["cap"] is None and sm["direction"] == "tt" and "質問ごとの値" not in text      # 前の形の結果もそのまま要約できる
+    # どちらの読み方で作った方向か: 速い読み方(stack_fast)で作った方向は、作ったときも、使い回したときも要約に出る
+    assert sm["direction_stack_fast"] is False and sm2["direction_stack_fast"] is False and "速い読み方" not in text + t2
+    for extra, word in (({}, "方向 tt(速い読み方で作った方向)"), ({"direction_name": "old_dir", "direction_reused": True},
+                                                          "方向 old_dir(すでにあるものを使った)(速い読み方で作った方向)")):
+        d3 = {**d, **extra, "direction_stack_fast": True}
+        assert fish.summary(d3)["direction_stack_fast"] is True and word in fish.summary_text(d3) and fish.summary_text(fish.summary(d3)) == fish.summary_text(d3)
+    assert "stack_fast" in fish.SETTINGS and fish.DEFAULTS["stack_fast"] is False                  # 既定は切。表の fish にも書ける
     s = SimpleNamespace(store=SimpleNamespace(recipes_dir=lambda: tmp_path / "recipes"))
     assert fish.recipe_file(s, "tt_nw") == tmp_path / "recipes" / "tt_nw.yaml"
     assert fish.recipe_file(s, str(tmp_path / "x" / "tt_nw.yaml")) == tmp_path / "x" / "tt_nw.yaml"
@@ -933,6 +940,116 @@ def test_cli_and_jobs(built):
 
 
 @pytest.mark.model
+def test_stack_fast_from_every_entry(built):
+    """速い読み方(stack_fast)を、まとめて作る所(Python・CLI・ジョブ)と方向のジョブから指定できる。効くのは方向を作る段だけで、
+    どちらの読み方で作った方向かが、方向のファイル・結果・要約に残る。すでにある方向を使うときは効かず、注意が出る。"""
+    from gne import fish
+    from gne.cli import app
+    from gne.estimate import Speed, _fish_cost, estimate
+    from gne.jobs import GpuArbiter, JobRunner, standard_kinds
+    s, root, c = built["s"], built["root"], str(built["contrast"])
+    small = dict(segments="0,1-", max_tokens=8, response_tokens=8, pseudo=2, top=6)
+    # Python: 方向の段だけが速い読み方になり、できた方向は gne direction --stack-fast(Session.direction)で作ったものと同じ
+    p = fish.pipeline(s, c, name="pf", layers="8,12", alpha="1,0.8", stack_fast=True, compare=False, rekey=False, **small)
+    ds = s.direction_set("pf")
+    assert p["direction_stack_fast"] is True and p["direction"]["stack_fast"] is True and ds.meta["stack_read"] == "fast"
+    assert p["summary"]["direction_stack_fast"] is True and p["summary"]["direction_reused"] is False and p["verify"]["ok"]
+    text = fish.summary_text(p)
+    assert "方向 pf(速い読み方で作った方向)" in text and "注: 方向 pf は速い読み方" in text and "配るもの" in text
+    ref = s.direction(contrast=c, name="pf_ref", positions="response", response_tokens=8, same_reply=True, segments="0,1-",
+                      stack_layers="8,12", stack_fast=True)
+    rs = s.direction_set("pf_ref")
+    assert ref["stack_fast"] is True and all(np.array_equal(ds.seg[i][L], rs.seg[i][L]) for i in range(2) for L in (8, 12))
+    # 既定(渡さない)は今までどおり: 既定の読み方で、方向のファイルに読み方の項目は無い
+    q = fish.pipeline(s, c, name="pd", layers="8,12", alpha="1,0.8", compare=False, rekey=False, **small)
+    assert q["direction_stack_fast"] is False and "stack_read" not in s.direction_set("pd").meta and "速い読み方" not in fish.summary_text(q)
+    # 速い読み方で作った方向を使い回す: stack_fast を渡していなくても、要約に「速い読み方で作った方向」と出る
+    n_warn = len(s.warnings)
+    r1 = fish.pipeline(s, c, name="pf_use", layers="8,12", alpha="1,0.8", direction="pf", rekey=False, **small)
+    assert r1["direction_reused"] and r1["direction_stack_fast"] is True and not any("効きません" in w for w in s.warnings[n_warn:])
+    t1 = fish.summary_text(r1)
+    assert "方向 pf(すでにあるものを使った)(速い読み方で作った方向)" in t1 and "注: 方向 pf は速い読み方" in t1 and "効きません" not in t1
+    # すでにある方向と一緒に stack_fast を渡す: 効かないことを警告と注で知らせる(方向は作り直さない。読み方は方向のファイルの記録のまま)
+    r2 = fish.pipeline(s, c, name="pd_use", layers="8,12", alpha="1,0.8", direction="pd", stack_fast=True, rekey=False, **small)
+    assert r2["direction_reused"] and r2["direction_stack_fast"] is False and "stack_read" not in s.direction_set("pd").meta
+    assert any("効きません" in w and "既定の読み方" in w for w in s.warnings[n_warn:]) and any("効きません" in n for n in r2["notes"])
+    assert "速い読み方で作った方向)" not in fish.summary_text(r2) and "注: 速い読み方(stack_fast)は、すでにある方向を使うとき" in fish.summary_text(r2)
+    # 読み直しが無いとき(層が 1 つ・重ねない)は使わず、注で知らせる。方向のファイルにも残さない
+    one = fish.direction_step(s, c, name="pf_one", layers="8", segments="0,1-", response_tokens=8, compare=False, stack_fast=True)
+    assert one["stack_fast"] is False and any("使っていません" in n for n in one["notes"]) and "stack_read" not in s.direction_set("pf_one").meta
+    flat = fish.direction_step(s, c, name="pf_flat", layers="8,12", segments="0,1-", response_tokens=8, compare=False, stack=False, stack_fast=True)
+    assert flat["stack_fast"] is False and flat["stack"] is False and any("使っていません" in n for n in flat["notes"])
+    # CLI: gne nw pipeline --stack-fast。要約(--json)と文の両方に読み方が出る。--direction と一緒なら注意
+    common = ["-m", str(MODEL), "--root", str(root), "--n-gpu-layers", str(NGL)]
+    args = ["nw", "pipeline", "--contrast", c, "--layers", "8,12", "--alpha", "1,0.8", "--segments", "0,1-", "--max-tokens", "8",
+            "--response-tokens", "8", "--pseudo", "2", "--top", "6", "--no-rekey"]
+    r = CliRunner().invoke(app, [*args, "--name", "cli_fastpipe", "--stack-fast", *common, "--json"])
+    d = json.loads(r.output.strip().splitlines()[-1])
+    assert r.exit_code == 0 and d["direction_stack_fast"] is True and d["direction"] == "cli_fastpipe" and d["ok"] is True, r.output
+    fs = s.direction_set("cli_fastpipe")
+    assert fs.meta["stack_read"] == "fast" and all(np.array_equal(fs.seg[i][L], ds.seg[i][L]) for i in range(2) for L in (8, 12))
+    r = CliRunner().invoke(app, [*args, "--name", "cli_fastuse", "--direction", "cli_fastpipe", "--stack-fast", *common])
+    assert r.exit_code == 0 and "方向 cli_fastpipe(すでにあるものを使った)(速い読み方で作った方向)" in r.output, r.output
+    assert "効きません" in r.output and "方向 cli_fastpipe は速い読み方で作ったものです" in r.output
+    r = CliRunner().invoke(app, [*args, "--name", "cli_slowuse", "--direction", "pd", "--no-stack-fast", *common, "--json"])
+    d = json.loads(r.output.strip().splitlines()[-1])
+    assert r.exit_code == 0 and d["direction_stack_fast"] is False and not any("効きません" in n for n in d["notes"]), r.output
+    # ジョブ: 方向(direction)・FiSH の方向の段(fish_direction)・まとめて作る(fish_pipeline)。表の fish.stack_fast でも書ける
+    runner = JobRunner(s, GpuArbiter(), standard_kinds())
+
+    def run(kind, params):
+        import time
+        j = runner.start(kind, params)
+        t0 = time.time()
+        while j.status in ("queued", "running") and time.time() - t0 < 600:
+            time.sleep(0.2)
+        assert j.status == "done", j.view()
+        return j
+    jd = run("direction", {"contrast": c, "name": "job_fastdir", "positions": "response", "response_tokens": 8, "same_reply": True,
+                           "segments": "0,1-", "stack_layers": "8,12", "stack_fast": True})
+    assert jd.result["stack_fast"] is True and s.direction_set("job_fastdir").meta["stack_read"] == "fast"
+    assert jd.view()["estimate_stack_first"] is False
+    jf = run("fish_direction", {"contrast": c, "name": "job_fishdir", "layers": "8,12", "segments": "0,1-", "response_tokens": 8,
+                                "compare": False, "stack_fast": True})
+    assert jf.result["stack_fast"] is True and s.direction_set("job_fishdir").meta["stack_read"] == "fast"
+    assert all(np.array_equal(s.direction_set("job_fishdir").seg[1][L], ds.seg[1][L]) for L in (8, 12))
+    jp = run("fish_pipeline", {"spec": {**CONTRAST, "name": "job_fastpipe", "fish": {"segments": "0,1-", "stack_fast": True, "rekey": False,
+                                                                                     "max_tokens": 8, "response_tokens": 8, "pseudo": 2}},
+                               "layers": "8,12", "alpha": "1,0.8", "compare": False, "top": 6, "summary": True})
+    assert jp.result["direction_stack_fast"] is True and jp.result["ok"] is True and s.direction_set("job_fastpipe").meta["stack_read"] == "fast"
+    jo = run("fish_pipeline", {"contrast": c, "name": "job_fastoff", "layers": "8,12", "alpha": "1,0.8", "direction": "job_fastpipe",
+                               "stack_fast": False, "rekey": False, "summary": True, **{k: v for k, v in small.items() if k != "response_tokens"}})
+    assert jo.result["direction_stack_fast"] is True and jo.result["direction_reused"] is True
+    # 見積もり: 速い読み方なら、層を重ねる読み直しを「区切りが続く範囲ごとに 1 回」で数える(短くなる)。既定の読み方は、まとめて読める
+    # 数をまだ確かめていないセッションでは 1 つずつで数え、そのことを見積もりに残す(表示に「初回は長めに出ます」と添える)
+    memo = getattr(s, "_stack_chunk", None)
+    try:
+        s._stack_chunk = None
+        sp, ep = Speed(s), {"contrast": c, "layers": "8-20", "segments": "0,1-3,4-"}
+        slow, fast = _fish_cost(s, sp, "fish_pipeline", ep), _fish_cost(s, sp, "fish_pipeline", {**ep, "stack_fast": True})
+        assert slow["stack_first"] is True and fast["stack_first"] is False and fast["direction_seconds"] < 0.5 * slow["direction_seconds"]
+        assert slow["seconds"] - fast["seconds"] == pytest.approx(slow["direction_seconds"] - fast["direction_seconds"])   # ほかの段は同じ
+        dslow, dfast = _fish_cost(s, sp, "fish_direction", ep), _fish_cost(s, sp, "fish_direction", {**ep, "stack_fast": True})
+        assert dslow["stack_first"] is True and dfast["stack_first"] is False and dfast["seconds"] < dslow["seconds"]
+        assert dslow["stack_seconds"] - dfast["stack_seconds"] == pytest.approx(dslow["seconds"] - dfast["seconds"])
+        spec_fast = {"spec": {**CONTRAST, "name": "est_fast", "fish": {"stack_fast": True}}, "layers": "8-20"}       # 表の fish.stack_fast
+        assert _fish_cost(s, sp, "fish_pipeline", spec_fast)["direction_seconds"] == pytest.approx(fast["direction_seconds"])
+        for off in ({"stack": False}, {"layers": "8"}, {"direction": "pf"}):     # 読み直しが無い・方向を作らないときは、添えない
+            assert _fish_cost(s, sp, "fish_pipeline", {**ep, **off})["stack_first"] is False, off
+        base = {"contrast": c, "positions": "response", "same_reply": True, "segments": "0,1-3,4-", "stack_layers": "8-20"}
+        assert estimate(s, "direction", base)["detail"]["stack_first"] is True
+        assert estimate(s, "direction", {**base, "stack_fast": True})["detail"]["stack_first"] is False
+        s._stack_chunk = 4                                                       # このセッションで確かめた数があれば、それで数える(添えない)
+        known = _fish_cost(s, sp, "fish_pipeline", ep)
+        assert known["stack_first"] is False and fast["direction_seconds"] < known["direction_seconds"] < slow["direction_seconds"]
+        assert estimate(s, "direction", base)["detail"]["stack_first"] is False
+    finally:
+        s._stack_chunk = memo
+    r = CliRunner().invoke(app, ["nw", "pipeline", "--contrast", c, "--layers", "8", "--save", "bad name", "--stack-fast", *common, "--json"])
+    assert r.exit_code != 0 and json.loads(r.output.strip().splitlines()[-1])["error"]["code"] == "BAD_ARGS"
+
+
+@pytest.mark.model
 def test_mcp_tools(tmp_path):
     import anyio
     from mcp.client.session import ClientSession
@@ -945,18 +1062,24 @@ def test_mcp_tools(tmp_path):
         async with stdio_client(params) as (read, write):
             async with ClientSession(read, write) as c:
                 init = await c.initialize()
-                assert "nw" in (init.instructions or "") and "same_reply" in (init.instructions or "")
+                assert "nw" in (init.instructions or "") and "same_reply" in (init.instructions or "") and "stack_fast" in (init.instructions or "")
                 tools = {t.name: t for t in (await c.list_tools()).tools}
                 assert {"nw_neurons", "nw_verify", "nw_check", "nw_export", "nw_try", "fish_pipeline"} <= set(tools)
                 assert {"direction", "layers", "alpha", "temperature"} <= set(tools["nw_try"].input_schema["properties"])
-                assert {"alpha", "save", "summary", "direction", "cap"} <= set(tools["fish_pipeline"].input_schema["properties"])
+                assert {"alpha", "save", "summary", "direction", "cap", "stack_fast"} <= set(tools["fish_pipeline"].input_schema["properties"])
+                assert "探索" in tools["fish_pipeline"].description and "direction_stack_fast" in tools["fish_pipeline"].description
                 assert {"low", "over", "top", "save"} <= set(tools["nw_check"].input_schema["properties"])
                 assert {"strip_meta", "adapter_name"} <= set(tools["nw_export"].input_schema["properties"])
                 r = await c.call_tool("fish_pipeline", {"contrast": "tone_in_scene", "layers": []})       # 層は必須
                 sc = getattr(r, "structured_content", None)
                 d = (sc.get("result", sc) if isinstance(sc, dict) else None) or json.loads(r.content[0].text)
                 assert d["error"]["code"] == "BAD_ARGS"
-                assert {"same_reply", "segments", "stack_layers"} <= set(tools["direction"].input_schema["properties"])
+                assert {"same_reply", "segments", "stack_layers", "stack_fast"} <= set(tools["direction"].input_schema["properties"])
+                assert tools["direction"].input_schema["properties"]["stack_fast"].get("default") is False and "stack_read" in tools["direction"].description
+                r = await c.call_tool("direction", {"contrast": "evil", "positions": "response", "stack_fast": True})   # stack_layers が要る
+                sc = getattr(r, "structured_content", None)
+                d = (sc.get("result", sc) if isinstance(sc, dict) else None) or json.loads(r.content[0].text)
+                assert d["error"]["code"] == "BAD_ARGS" and "stack_fast" in d["error"]["message"]
                 assert "role" in tools["direction_key"].input_schema["properties"]
                 assert "same_reply" in tools["direction_key_pipeline"].input_schema["properties"]
                 r = await c.call_tool("nw_verify", {"units": ["8:N5:nw:a1@nope#nokey"]})
