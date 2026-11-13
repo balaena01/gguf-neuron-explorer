@@ -1128,6 +1128,7 @@ def direction(c: Common, holder: dict,
               same_reply: bool = typer.Option(False, "--same-reply", help="--positions response: B 側も A 側の返事を読む(同じ返事を両方の条件で読ませた差。読んでいる語の違いから来る成分が入らない)。既定は今までどおり、それぞれ自分の返事を読んだ差"),
               segments: Optional[str] = typer.Option(None, "--segments", help="--positions response: 返事の位置で分けた方向も作る(例 0,1-3,4-。位置 0 = 返事を書き始める直前)。区切り i の方向は NAME.seg<i> という名前で使える"),
               stack_layers: Optional[str] = typer.Option(None, "--stack-layers", help="--same-reply と --segments と一緒に: 区切りつきの方向を、これらの層(例 11-23 か 11,18,23。11,14-16 のように混ぜてもよい)に重ねて書く前提の値にする(上の層は、下の層に足した後の残り)。層ごとに返事を読み直すので時間がかかる(層の数 − 1 に比例。見積もりに入る)"),
+              stack_fast: bool = typer.Option(False, "--stack-fast", help="--stack-layers と一緒に: 層ごとの読み直しを、区切りが続く範囲ごとに 1 回で読む(速い。27B の IQ2_XS で約 11 倍)。上の層の方向は既定の読み方とわずかに違い(cos 0.9996 以上)、作った LoRA の返事も同じにはならない。既定の読み方は、値が変わらない範囲でまとめて読む"),
               yes: bool = _YES):
     """対照集合から全層の方向 r_L(mean_A − mean_B)を作って保存し、--select auto で効果の大きい層を選ぶ(§6.17)。
     作った方向は L:dir:NAME:dose のユニットで足せる(gne steer / chat / eval / export-cvec)。
@@ -1148,16 +1149,18 @@ def direction(c: Common, holder: dict,
     _gate(s, "direction", {"contrast": str(contrast), "positions": positions, "select": select, "mode": mode,
                            "layers": layers, "max_tokens": max_tokens, "response_tokens": response_tokens,
                            "random_controls": random_controls, "same_reply": same_reply, "segments": segments,
-                           "stack_layers": stack_layers}, yes, None)
+                           "stack_layers": stack_layers, "stack_fast": stack_fast}, yes, None)
     d = s.direction(contrast=contrast, name=name, positions=positions, select=select, mode=mode, layers=layers,
                     dose=dose, max_tokens=max_tokens, kl_max=kl_max, min_distinct=min_distinct, per_layer=per_layer,
                     judge_model=judge_model, judge_target=judge_target, response_tokens=response_tokens,
-                    random_controls=random_controls, same_reply=same_reply, segments=segments, stack_layers=stack_layers)
+                    random_controls=random_controls, same_reply=same_reply, segments=segments, stack_layers=stack_layers,
+                    stack_fast=stack_fast)
     lines = [f"{d['path']}(A/B 各 {d['n_prompts']} 会話、行数 {d['n_rows']}、位置 {d['positions']}、{d['seconds']:.0f} 秒)",
              "作り方: " + ("同じ返事(A 側の返事)を A 側・B 側の条件の両方で読ませた差(--same-reply)" if d.get("same_reply")
                          else "それぞれ自分の条件の文を読んだ差(今までの作り方)"),
              *([("区切りつきの方向: " + "、".join(f"{x['name']}(位置 {x['positions']})" for x in d["segments"])
-                 + (f"。層 {','.join(map(str, d['stack_layers']))} は、下の層に足した後の残り" if d.get("stack_layers") else ""))]
+                 + (f"。層 {','.join(map(str, d['stack_layers']))} は、下の層に足した後の残り" if d.get("stack_layers") else "")
+                 + ("(速い読み方 --stack-fast。既定の読み方の方向とわずかに違う)" if d.get("stack_fast") else ""))]
                if d.get("segments") else []),
              "層ごとの ‖平均差‖/ρ(rel dose に直した大きさ)と前の層との cos:"]
     lines.append("  " + " ".join(f"L{r['layer']}:{r['rel']:.2f}" if r["rel"] is not None else f"L{r['layer']}:—"

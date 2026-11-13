@@ -85,7 +85,7 @@ class DirectionSet:
         scale = {int(k[6:]): z[k] for k in z.files if k.startswith("scale_")}
         meta = {k: (z[k].item() if z[k].ndim == 0 else z[k].tolist()) for k in
                 ("method", "positions", "contrast_sha", "source", "n_rows_A", "n_rows_B", "base_layer", "base_positions",
-                 "same_reply", "stack_layers")
+                 "same_reply", "stack_layers", "stack_read")
                 if k in z.files}
         segments = [str(x) for x in z["segments"].tolist()] if "segments" in z.files else []
         seg = {i: {int(L): z[f"seg{i}_layer_{L}"].astype(np.float32) for L in z["layers"] if f"seg{i}_layer_{L}" in z.files}
@@ -156,6 +156,8 @@ def save_directions(path: Path, cr, cs: ContrastSet, source: str) -> None:
             extra.update({f"seg{i}_layer_{L}": v for L, v in dct.items()})
         if getattr(cr, "stack_layers", None):
             extra["stack_layers"] = np.array(sorted(cr.stack_layers), dtype=np.int32)
+            if getattr(cr, "stack_fast", False):        # 既定の読み方で作った方向のファイルは今までと同じ項目のまま
+                extra["stack_read"] = "fast"
     extra["same_reply"] = bool(getattr(cr, "same_reply", False))
     U = np.stack([cr.directions[L] / max(float(np.linalg.norm(cr.directions[L])), 1e-30) for L in Ls])
     np.savez(path, layers=np.array(Ls, dtype=np.int32), **{f"layer_{L}": cr.directions[L] for L in Ls},
@@ -493,7 +495,7 @@ def top_writer_neurons(session, ds: DirectionSet, n: int) -> list[tuple[int, int
 
 def response_directions(session, cs: ContrastSet, *, max_tokens: int = 96, with_act: bool = True,
                         progress: Progress | None = None, same_reply: bool = False, segments=None,
-                        stack_layers: Sequence[int] | None = None):
+                        stack_layers: Sequence[int] | None = None, stack_fast: bool = False):
     """返事のトークンから作る方向(positions="response"、persona vector の作り方)。
     A(system_a)と B(system_b)で各プロンプトに greedy で返事を生成し、その会話(system・プロンプト・返事)を流して
     返事のトークンでの l_out-L の平均の差を取る。「指示の直後」ではなく「その性格で話している最中」の状態の差になる。
@@ -508,7 +510,9 @@ def response_directions(session, cs: ContrastSet, *, max_tokens: int = 96, with_
       返事のトークンを読んだ位置(位置 1 以降)から作る。
     stack_layers: 区切りつきの方向を、これらの層に重ねて書く前提の値にする(same_reply のときだけ)。いちばん下の層は平均差
       そのまま、上の層は「下の層に区切りどおりに足して読ませた後の状態」と A 側の状態との差(下の層に足した分が上の層に伝わる
-      ので、平均差をそのまま各層に足すと足し過ぎになる)。層ごとに返事を読み直すので、層の数に比例して時間がかかる(_stack_segments)。"""
+      ので、平均差をそのまま各層に足すと足し過ぎになる)。層ごとに返事を読み直すので、層の数に比例して時間がかかる(_stack_segments)。
+    stack_fast: その読み直しを、区切りが続く範囲ごとに 1 回で読む(速い)。まとめて読むと llama.cpp の計算方法が変わる組み合わせでは、
+      上の層の方向が既定の読み方とわずかに違う(4B の Q8_0 で相対誤差 1.2% まで、27B の IQ2_XS で 2.8% まで。docs/verification.md §22.18)。"""
     from .capture import Capture, pick_act_name
     from .evalx import _generate
     from .reverse import ContrastResult
@@ -518,6 +522,8 @@ def response_directions(session, cs: ContrastSet, *, max_tokens: int = 96, with_
     stack = sorted({int(L) for L in (stack_layers or [])})
     if stack and not (segs and same_reply):
         raise GneError("BAD_ARGS", "stack_layers は same_reply と segments を両方指定したときだけ使えます")
+    if stack_fast and not stack:
+        raise GneError("BAD_ARGS", "stack_fast は stack_layers と一緒に使います")
     if stack and cs.has_recipes:
         raise GneError("BAD_ARGS", "stack_layers は recipe_a / recipe_b を持つ対照集合では使えません")
     for L in stack:
@@ -614,8 +620,11 @@ def response_directions(session, cs: ContrastSet, *, max_tokens: int = 96, with_
         cr.stack_layers = stack
         if stack:
             mean_a = {L: [seg_sum["A"][i][L] / seg_cnt["A"][i] for i in range(len(segs))] for L in stack}
-            cr.stack_chunk = _stack_segments(session, cs, replies_a, segs, stack, mean_a, cr.seg_dirs, progress)
-            session._stack_chunk = cr.stack_chunk               # 次の見積もり(estimate._stack_seconds)が使う
+            cr.stack_fast = bool(stack_fast)
+            cr.stack_chunk = _stack_segments(session, cs, replies_a, segs, stack, mean_a, cr.seg_dirs, progress,
+                                             chunk=None if stack_fast else "auto")
+            if not stack_fast:
+                session._stack_chunk = cr.stack_chunk           # 次の見積もり(estimate._stack_seconds)が使う
     return cr
 
 

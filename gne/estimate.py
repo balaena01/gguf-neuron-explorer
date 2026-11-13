@@ -150,10 +150,11 @@ def estimate(session, kind: str, params: dict) -> dict:
             # 層を重ねる(stack_layers)とき: いちばん下の層を除く層ごとに、A 側の全部の質問の返事を 1 本ずつ読み直す(_stack_seconds)
             n_stack = _n_stack_layers(p.get("stack_layers"), m.n_layer)
             if n_stack > 1 and p.get("same_reply") and p.get("segments"):
-                ck = getattr(session, "_stack_chunk", None) or 1
+                ck = None if p.get("stack_fast") else getattr(session, "_stack_chunk", None) or 1   # 速い読み方は範囲を丸ごと 1 回
                 stack_s, evals = _stack_seconds(sp, n_stack, len(cs.prompts("A")), p.get("segments"), rt, ck)
                 sec += stack_s
-                detail = {"stack_layers": n_stack, "stack_evals": evals, "stack_seconds": round(stack_s, 1), "stack_chunk": ck}
+                detail = {"stack_layers": n_stack, "stack_evals": evals, "stack_seconds": round(stack_s, 1),
+                          "stack_chunk": ck or "run"}
         if p.get("select") == "auto":
             layers = p.get("layers")
             n_l = len(candidate_layers(m.n_layer, layers if isinstance(layers, str) else None))

@@ -354,7 +354,7 @@ STACK_CASES = [("0,1-3,4-", False, (None, 8, 3)), ("0,1-3,4-", True, (8,)), ("0-
 def test_stack_segments_chunked_matches_per_token(built, monkeypatch):
     s = built["s"]
     rec = _stack_args(s, built["contrast"], monkeypatch, name="nw_stk", response_tokens=20, segments="0,1-3,4-", stack_layers="8,10,12")
-    assert rec["kw"] == {} and rec["stack"] == [8, 10, 12]                        # ふだんは既定のまとめ方(auto)
+    assert rec["kw"] in ({}, {"chunk": "auto"}) and rec["stack"] == [8, 10, 12]                        # ふだんは既定のまとめ方(auto)
     full = rec["replies"]
     assert min(len(r) for r in full) >= 12
     short = [r[:n] for r, n in zip(full, (1, 2, 3, 4, 9, 20), strict=True)]       # 区切りの境目より短い返事を混ぜる
@@ -416,6 +416,39 @@ def test_stack_segments_exact_where_batching_is_exact(tmp_path, monkeypatch):
         assert _stack_diff(off, _stack_run(s, rec, "0,1-3,4-", full, 1))[0] > 0.05
     finally:
         s.close()
+
+
+@pytest.mark.model
+def test_direction_stack_fast(built):
+    """--stack-fast: 層を重ねる読み直しを、区切りが続く範囲ごとに 1 回で読む。既定ではなく、方向のファイルに読み方が残る。"""
+    from gne.estimate import estimate
+    s = built["s"]
+    kw = dict(contrast=built["contrast"], positions="response", response_tokens=20, same_reply=True, segments="0,1-3,4-")
+    d = s.direction(name="nw_fast", **kw, stack_layers="8,12", stack_fast=True)
+    fs, ds = s.direction_set("nw_fast"), s.direction_set("nw_scene")                # nw_scene は同じ設定の既定の読み方
+    assert d["stack_fast"] is True and d["stack_layers"] == [8, 12] and fs.meta["stack_read"] == "fast"
+    assert "stack_fast" not in built["dir"] and "stack_read" not in ds.meta         # 既定の読み方の結果・ファイルは今までの項目のまま
+    for i in range(3):
+        assert np.array_equal(fs.seg[i][8], ds.seg[i][8]) and np.array_equal(fs.raw[12], ds.raw[12])   # いちばん下の層と全位置の平均は同じ
+        a, b = fs.seg[i][12].astype(np.float64), ds.seg[i][12].astype(np.float64)
+        assert np.linalg.norm(a - b) / np.linalg.norm(b) < 0.1, i                    # 上の層は、まとめ方の違いの分だけ違ってよい
+    with pytest.raises(GneError):
+        s.direction(name="nw_bad", **kw, stack_fast=True)                             # stack_layers が要る
+    base = {"contrast": str(built["contrast"]), "positions": "response", "response_tokens": 96, "same_reply": True,
+            "segments": "0,1-3,4-", "stack_layers": "8-20"}
+    fast, slow = estimate(s, "direction", {**base, "stack_fast": True}), estimate(s, "direction", base)
+    assert fast["detail"]["stack_chunk"] == "run" and fast["detail"]["stack_evals"] == 12 * len(CONTRAST["user_prompts"]) * 4
+    assert fast["seconds"] < slow["seconds"]
+    r = CliRunner().invoke(_app(), ["direction", "--contrast", str(built["contrast"]), "--name", "cli_fast", "--positions", "response",
+                                    "--response-tokens", "6", "--same-reply", "--segments", "0,1-", "--stack-layers", "8-10", "--stack-fast",
+                                    "-m", str(MODEL), "--root", str(built["root"]), "--n-gpu-layers", str(NGL), "--json"])
+    out = json.loads(r.output.strip().splitlines()[-1])
+    assert r.exit_code == 0 and out["stack_fast"] is True and out["stack_layers"] == [8, 9, 10], r.output
+
+
+def _app():
+    from gne.cli import app
+    return app
 
 
 @pytest.mark.model
