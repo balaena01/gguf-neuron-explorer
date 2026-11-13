@@ -508,7 +508,7 @@ def response_directions(session, cs: ContrastSet, *, max_tokens: int = 96, with_
       返事のトークンを読んだ位置(位置 1 以降)から作る。
     stack_layers: 区切りつきの方向を、これらの層に重ねて書く前提の値にする(same_reply のときだけ)。いちばん下の層は平均差
       そのまま、上の層は「下の層に区切りどおりに足して読ませた後の状態」と A 側の状態との差(下の層に足した分が上の層に伝わる
-      ので、平均差をそのまま各層に足すと足し過ぎになる)。control vector を 1 トークンずつ付け替えて読むので時間がかかる。"""
+      ので、平均差をそのまま各層に足すと足し過ぎになる)。層ごとに返事を読み直すので、層の数に比例して時間がかかる(_stack_segments)。"""
     from .capture import Capture, pick_act_name
     from .evalx import _generate
     from .reverse import ContrastResult
@@ -614,15 +614,85 @@ def response_directions(session, cs: ContrastSet, *, max_tokens: int = 96, with_
         cr.stack_layers = stack
         if stack:
             mean_a = {L: [seg_sum["A"][i][L] / seg_cnt["A"][i] for i in range(len(segs))] for L in stack}
-            _stack_segments(session, cs, replies_a, segs, stack, mean_a, cr.seg_dirs, progress)
+            cr.stack_chunk = _stack_segments(session, cs, replies_a, segs, stack, mean_a, cr.seg_dirs, progress)
+            session._stack_chunk = cr.stack_chunk               # 次の見積もり(estimate._stack_seconds)が使う
     return cr
 
 
+STACK_CHUNK_MAX = 8     # 層を重ねるときに、1 回の読み取りにまとめる返事の位置の数の上限(_stack_segments、_exact_chunk)
+
+
+def segment_runs(segs: list[tuple[int, int | None]], n_pos: int, chunk: int | None = None) -> list[tuple[int, int, int | None]]:
+    """返事の位置 0..n_pos−1 を、同じ区切りが続く範囲に分ける: [(始め, 終わり, 区切りの番号)](終わりは含まない)。
+    どの区切りにも入らない位置は番号 None(隣り合う None は 1 つの範囲)。chunk を渡すと、1 つの範囲を chunk 個までに切る。"""
+    idx = [segment_of(segs, k) for k in range(n_pos)]
+    runs, a = [], 0
+    for k in range(1, n_pos + 1):
+        if k == n_pos or idx[k] != idx[a]:
+            step = (k - a) if not chunk else max(1, int(chunk))
+            runs += [(c, min(c + step, k), idx[a]) for c in range(a, k, step)]
+            a = k
+    return runs
+
+
+def _read_reply(e, ctx, cap, L: int, seq: list[int], n0: int, segs, done: dict, chunk: int | None) -> np.ndarray:
+    """1 本の列 seq(質問 + 返事)を読み、返事の位置 0..(位置 k は seq の n0 + k 番目)での層 L の出力 (位置の数, n_embd) を返す。
+    done の層には、位置の区切りどおりにベクトルを control vector で足す。質問の部分(seq の n0 番目より前)は何も足さずに 1 回で読み、
+    返事の位置は、同じ区切りが続く範囲を chunk 個までまとめて読む(1 なら 1 つずつ、None なら範囲を丸ごと)。control vector を
+    付け替えるのは区切りが変わるときだけ(付け替えの直後の読み取りは遅い。同じベクトルを付け直しても値は変わらない)。"""
+    name = f"l_out-{L}"
+    e.set_lora(ctx, None)
+    e.set_cvec(ctx, None)
+    e.clear_memory(ctx)
+    out = []
+    try:
+        if n0 > 0:
+            e.prefill(ctx, [seq[:n0]])
+            cap.take()
+        cur = None                                              # いま足している区切り(None = 何も足していない)
+        for a, b, i in segment_runs(segs, len(seq) - n0, chunk):
+            if i != cur:
+                e.set_cvec(ctx, None if i is None else {l2: v[i] for l2, v in done.items()})
+                cur = i
+            e.prefill(ctx, [seq[n0 + a:n0 + b]], pos0=n0 + a)
+            rows = cap.take()[name]
+            if len(rows) != b - a:
+                raise GneError("INTERNAL", f"{name} の行の数 {len(rows)} が、読んだトークンの数 {b - a} と合いません")
+            out.append(rows)
+    finally:
+        e.set_cvec(ctx, None)
+    return np.concatenate(out, axis=0)
+
+
+def _exact_chunk(e, ctx, cap, L: int, seq: list[int], n0: int, segs, done: dict) -> int:
+    """返事の位置を何個までまとめて読んでも、1 つずつ読んだときと層の出力が完全に同じか(1〜STACK_CHUNK_MAX)。
+    llama.cpp は 1 回に読むトークンの数で行列の掛け算の計算方法を変えるので、まとめると値がわずかに変わる組み合わせがある
+    (バックエンドと量子化の形式で違う。CUDA では、Qwen3.5-4B の Q8_0 は 4 個まで同じで、27B の IQ2_XS は 2 個で変わった)。
+    1 本の列で、まとめる数を 2, 3, … と増やして読み、配列が完全に一致しなくなる手前の数を返す。その数だけ続く範囲が列に無ければ、
+    確かめられないのでそこで止める。"""
+    ref = _read_reply(e, ctx, cap, L, seq, n0, segs, done, 1)
+    longest = max((b - a for a, b, _ in segment_runs(segs, len(seq) - n0)), default=0)
+    c = 1
+    while c < STACK_CHUNK_MAX and c + 1 <= longest and np.array_equal(_read_reply(e, ctx, cap, L, seq, n0, segs, done, c + 1), ref):
+        c += 1
+    return c
+
+
 def _stack_segments(session, cs: ContrastSet, replies: list[list[int]], segs, stack: list[int], mean_a: dict, seg_dirs: dict,
-                    progress: Progress | None) -> None:
+                    progress: Progress | None, *, chunk: int | str | None = "auto") -> int | None:
     """stack の層の区切りつきの方向を「下の層に足した後の残り」に置き換える(seg_dirs を書き換える)。
-    B 側の文脈で A 側の返事を 1 トークンずつ読み、もう決めた下の層のベクトルを区切りどおりに control vector で足しながら、
-    次の層の出力を捕捉する。その区切りごとの平均と、A 側の状態の平均の差が、その層に足す量。"""
+    B 側の文脈で A 側の返事を読み、もう決めた下の層のベクトルを区切りどおりに control vector で足しながら、次の層の出力を
+    捕捉する。その区切りごとの平均と、A 側の状態の平均の差が、その層に足す量。
+
+    control vector は 1 回の読み取りに 1 組しか足せないが、切り替わるのは区切りの境目だけなので、付け替えるのは区切りが
+    変わるときだけにし、同じ区切りが続く位置を数個ずつまとめて読む(_read_reply。前の読み取りの結果は KV キャッシュに残る
+    ので、計算は 1 つずつ読むのと同じ)。chunk は 1 回にまとめる位置の数:
+    - "auto"(既定): 1 つずつ読んだときと層の出力が完全に同じになる、いちばん大きい数(_exact_chunk。いちばん長い返事 1 本で
+      確かめる。まとめると値が変わる組み合わせでは 1)。できる方向は、1 つずつ読んで毎回付け替えていたとき(v0.3.3 まで)と
+      配列が完全に同じ(docs/verification.md §22.18)。
+    - 数: その数までまとめる(1 なら 1 つずつ)。None: 区切りが続く範囲を丸ごと 1 回で読む(いちばん速い)。まとめると値が
+      変わる組み合わせでは、方向が 1 つずつ読んだときとわずかに違う(層の出力で 1〜4%)。
+    戻り値は使った chunk(読み直す層が無かったときの "auto" は 1)。"""
     from .capture import Capture
     e = session.engine
     if not e.cvec_supported:
@@ -630,39 +700,32 @@ def _stack_segments(session, cs: ContrastSet, replies: list[list[int]], segs, st
     convs = cs.convs("B")
     done: dict[int, list[np.ndarray]] = {stack[0]: [seg_dirs[i][stack[0]] for i in range(len(segs))]}
     total, step = (len(stack) - 1) * len(convs), 0
+    seqs = [(e.tokenize_prompt(e.render_chat(c)), list(r)) for c, r in zip(convs, replies, strict=True)]
     for L in stack[1:]:
         cap = Capture()
         cap.set_wanted(lambda n, L=L: n == f"l_out-{L}")
+        if chunk == "auto":                                     # いちばん長い返事で、何個までまとめても値が変わらないかを確かめる
+            p, r = max(seqs, key=lambda x: len(x[1]))
+            chunk = _exact_chunk(e, e.probe_ctx(cap), cap, L, p + r, len(p) - 1, segs, done) if r else 1
         sums = [np.zeros(e.n_embd) for _ in segs]
         cnts = [0 for _ in segs]
-        for c, r in zip(convs, replies, strict=True):
+        for p, r in seqs:
             step += 1
             if not r:
                 continue
-            p = e.tokenize_prompt(e.render_chat(c))
-            ctx = e.probe_ctx(cap)
-            e.set_lora(ctx, None)
-            e.set_cvec(ctx, None)
-            e.clear_memory(ctx)
-            try:
-                if len(p) > 1:
-                    e.prefill(ctx, [p[:-1]])
-                    cap.take()
-                for k in range(len(r) + 1):
-                    i = segment_of(segs, k)
-                    e.set_cvec(ctx, None if i is None else {l2: v[i] for l2, v in done.items()})
-                    e.prefill(ctx, [[p[-1] if k == 0 else r[k - 1]]], pos0=len(p) - 1 + k)
-                    row = cap.take()[f"l_out-{L}"][0]
-                    if i is not None:
-                        sums[i] += row
-                        cnts[i] += 1
-            finally:
-                e.set_cvec(ctx, None)
+            # 返事の位置 k(0 = 質問の最後のトークン = 返事を書き始める直前)は、列 p + r の len(p) − 1 + k 番目
+            rows = _read_reply(e, e.probe_ctx(cap), cap, L, p + r, len(p) - 1, segs, done, chunk)
+            for k, row in enumerate(rows):                      # 1 行ずつ足す(1 つずつ読んでいたときと同じ順で足し、同じ値にする)
+                i = segment_of(segs, k)
+                if i is not None:
+                    sums[i] += row
+                    cnts[i] += 1
             if progress:
                 progress(step, total, f"direction: stack L{L}")
         done[L] = [(mean_a[L][i] - sums[i] / max(cnts[i], 1)).astype(np.float32) for i in range(len(segs))]
         for i in range(len(segs)):
             seg_dirs[i][L] = done[L][i]
+    return 1 if chunk == "auto" else chunk
 
 
 # --- 速い指標(CHANGE-06 B、`gne direction score`)------------------------------------------------------

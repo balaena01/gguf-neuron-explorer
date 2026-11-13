@@ -1127,7 +1127,7 @@ def direction(c: Common, holder: dict,
               random_controls: int = typer.Option(16, "--random-controls", help="--select auto: 層ごとの同じ大きさのランダムな向きの対照の本数(0 で対照なし)"),
               same_reply: bool = typer.Option(False, "--same-reply", help="--positions response: B 側も A 側の返事を読む(同じ返事を両方の条件で読ませた差。読んでいる語の違いから来る成分が入らない)。既定は今までどおり、それぞれ自分の返事を読んだ差"),
               segments: Optional[str] = typer.Option(None, "--segments", help="--positions response: 返事の位置で分けた方向も作る(例 0,1-3,4-。位置 0 = 返事を書き始める直前)。区切り i の方向は NAME.seg<i> という名前で使える"),
-              stack_layers: Optional[str] = typer.Option(None, "--stack-layers", help="--same-reply と --segments と一緒に: 区切りつきの方向を、これらの層(例 11-23 か 11,18,23。11,14-16 のように混ぜてもよい)に重ねて書く前提の値にする(上の層は、下の層に足した後の残り)。1 トークンずつ読むので時間がかかる(層の数 − 1 に比例。見積もりに入る)"),
+              stack_layers: Optional[str] = typer.Option(None, "--stack-layers", help="--same-reply と --segments と一緒に: 区切りつきの方向を、これらの層(例 11-23 か 11,18,23。11,14-16 のように混ぜてもよい)に重ねて書く前提の値にする(上の層は、下の層に足した後の残り)。層ごとに返事を読み直すので時間がかかる(層の数 − 1 に比例。見積もりに入る)"),
               yes: bool = _YES):
     """対照集合から全層の方向 r_L(mean_A − mean_B)を作って保存し、--select auto で効果の大きい層を選ぶ(§6.17)。
     作った方向は L:dir:NAME:dose のユニットで足せる(gne steer / chat / eval / export-cvec)。

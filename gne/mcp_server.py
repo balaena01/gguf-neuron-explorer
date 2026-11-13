@@ -712,7 +712,7 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
         layers は必須で、使う人が決める(リストか "11-23"・"11,18,23"。モデルで違う)。alpha は強さで、数 1 つなら全部の区切りに同じ値、
         区切りごとに変えるなら区切りの順に [1, 1, 0.8] か "1,1,0.8"(segments "0,1-3,4-" に対して)。form は cap(上限つきの 2 個組、既定)/
         two / one。渡していない引数は、表の fish の設定、その次に既定(segments "0,1-3,4-"、form cap、alpha 0.9、same_reply・stack・rekey あり)。
-        層を増やすと、要るニューロンの数(層 × 区切り × 形の個数)と作成時間が増える(Qwen3.5-4B の 13 層で 78 個、方向と鍵に 16 分ほど)。
+        層を増やすと、要るニューロンの数(層 × 区切り × 形の個数)と作成時間が増える(Qwen3.5-4B の 13 層で 78 個、40 問で、方向に 3 分、鍵と確かめに 2〜3 分ほど)。
         結果: units(レシピのユニットの書き方)、direction・usage・neurons・keys・rekeyed・verify(ok)・check(groups.scene と
         dont_touch:<名前> の、位置ごとの足した量)、stage_seconds、summary。作る前に層と強さを比べるなら nw_try。
         save(名前か .yaml で終わるパス)を渡すと、できたユニットをレシピのファイルに書く(名前なら <root>/recipes/<名前>.yaml。結果の

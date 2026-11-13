@@ -1830,7 +1830,7 @@ export const EN = {
   "この層と強さを上の欄に入れる": "Use these layers and strengths above",
   "層を入れてください(0〜{m} の数をカンマ区切りか、11-23 のような範囲で)。層はモデルで違うので、使う人が決めます": "Enter the layers (numbers 0–{m}, comma-separated or a range such as 11-23). Layers differ by model, so you choose them",
   "{l} 層で合わせて {m} 個のニューロンを書き換える": "{l} {l|layer|layers}: {m} neurons rewritten in total",
-  "層が多いと作成に時間がかかります(Qwen3.5-4B の 13 層で 20〜30 分ほど)。見積もりは「まとめて作る」を押すと出ます": "Many layers take long to build (about 20–30 minutes for 13 layers on Qwen3.5-4B). The estimate appears when you press Build everything",
+  "層が多いと作成に時間がかかります(Qwen3.5-4B の 13 層で 5〜6 分ほど)。見積もりは「まとめて作る」を押すと出ます": "Many layers take long to build (about 5–6 minutes for 13 layers on Qwen3.5-4B). The estimate appears when you press Build everything",
   "強さを、区切りごとに全部入れてください(例 1 / 1 / 0.8)": "Enter a strength for every segment (e.g. 1 / 1 / 0.8)",
   "先に方向を作ってください(2. か「まとめて作る」)": "Build the direction first (step 2 or Build everything)",
   "足す層を入れてください(1〜{m}。層 0 と最終層には足せません)": "Enter the layers to add to (1–{m}; layer 0 and the last layer cannot be used)",

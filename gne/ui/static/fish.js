@@ -452,7 +452,7 @@ export class FishPanel {
     this.$("#fx-need").textContent = n === null ? "" : t("層 1 つに {n} 個(区切り {s} 個 × {p} 個)", { n, s: segs.length, p: PER[this.$("#fx-form").value] })
       + (layers ? ` · ${t("{l} 層で合わせて {m} 個のニューロンを書き換える", { l: layers.length, m: layers.length * n })}` : "")
       // 層が多いとき: 時間がかかることを、押す前に伝える(見積もりの秒数は、ジョブを投げると出る)
-      + (layers && layers.length >= 6 ? ` · ${t("層が多いと作成に時間がかかります(Qwen3.5-4B の 13 層で 20〜30 分ほど)。見積もりは「まとめて作る」を押すと出ます")}` : "");
+      + (layers && layers.length >= 6 ? ` · ${t("層が多いと作成に時間がかかります(Qwen3.5-4B の 13 層で 5〜6 分ほど)。見積もりは「まとめて作る」を押すと出ます")}` : "");
   }
 
   // 層・区切り・形を変えた: 必要な個数と候補を出し直し、ユニットを組み直す
