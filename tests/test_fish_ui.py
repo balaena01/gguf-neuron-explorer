@@ -79,6 +79,12 @@ def _free_port() -> int:
         so.bind(("127.0.0.1", 0))
         return so.getsockname()[1]
 
+def _recipe_tab(pg, tab="units"):
+    """右のレシピのパネルを開いて、タブを選ぶ(units 中身 / try 試す / out 書き出す)。中身は保存したレシピの一覧も取り直す。"""
+    if pg.evaluate("document.querySelector('#recipe').classList.contains('collapsed')"):
+        pg.click("#recipe .toggle")
+    pg.click(f"#recipe-tabs button[data-rtab={tab}]")
+
 
 @pytest.fixture(scope="module")
 def served(tmp_path_factory):
@@ -143,7 +149,7 @@ def _open(browser, url, lang):
 def _open_fish(pg):
     pg.click("#views button[data-view=direction]")
     pg.wait_for_function("window.gne.directionView && window.gne.directionView.mode", timeout=60000)
-    pg.click("#dv-mode button[data-m=fish]")
+    pg.click("#views button[data-view=fish]")
     pg.wait_for_function("window.gne.directionView.fish.loaded", timeout=30000)
 
 
@@ -510,6 +516,7 @@ def test_fish_tab_end_to_end_in_browser(served, browser):
     assert "nw" in row and "fish_web.seg0" in row and "fish_web_r_p0" in row and "上限つき" in row
     assert pg.evaluate("window.gne.recipe.addSpecs()") == []                                                     # cvec には入らない
     # α を変える(数の欄)。保存
+    _recipe_tab(pg)
     pg.fill("#recipe-list tr.rc-nw input.num", "0.6")
     pg.dispatch_event("#recipe-list tr.rc-nw input.num", "change")
     pg.wait_for_function("window.gne.recipe.nws()[0].alpha === 0.6", timeout=5000)
@@ -521,6 +528,7 @@ def test_fish_tab_end_to_end_in_browser(served, browser):
     nw = [u for u in saved["units"] if u.get("mode") == "nw"]
     assert len(nw) == 6 and nw[0]["alpha"] == 0.6 and nw[0]["pair"] is not None and nw[0]["key2"] == "fish_web_r_one"
     # LoRA の書き出し
+    _recipe_tab(pg, "out")
     pg.click("#rc-nw")
     pg.wait_for_function("document.querySelector('#rc-result a[download]')", timeout=120000)
     assert pg.evaluate("document.querySelector('#rc-result a[download]').textContent") == "fish_web_r-nw.lora.gguf"
@@ -531,7 +539,7 @@ def test_fish_tab_end_to_end_in_browser(served, browser):
     pg.reload()
     pg.wait_for_function("window.gne && window.gne.recipe && window.gne.arch", timeout=120000)
     pg.evaluate("document.querySelector('#list').classList.remove('collapsed')")
-    pg.click("#list-tabs button[data-tab=recipe]")
+    _recipe_tab(pg)
     pg.wait_for_function("[...document.querySelectorAll('#rc-load option')].some(o => o.value === 'fish_web_r')", timeout=30000)
     pg.select_option("#rc-load", "fish_web_r")
     pg.wait_for_function("document.querySelectorAll('#recipe-list tr.rc-nw').length === 6", timeout=10000)

@@ -140,6 +140,7 @@ button.small { font-size: var(--fs-s); padding: 1px var(--sp-4); }
 .tabs { display: flex; gap: var(--sp-6); margin-bottom: var(--sp-4); border-bottom: 1px solid var(--line); overflow-x: auto; }
 .tabs button { position: relative; flex: none; background: transparent; border: 0; border-radius: 0; color: var(--muted); font-size: var(--fs-m); padding: var(--sp-2) 0; }
 .tabs button:hover:not(:disabled) { color: var(--text); }
+.tabs button:disabled { color: var(--disabled); }
 .tabs button:is(.on, [aria-selected="true"]) { color: var(--text-hi); }
 .tabs button:is(.on, [aria-selected="true"])::after { content: ""; position: absolute; inset: auto 0 -1px; border-bottom: 2px solid var(--accent); }
 /* 表 */
@@ -163,34 +164,52 @@ input.w4 { width: 4em; } input.w45 { width: 4.5em; } input.w5 { width: 5em; }   
 #lang button { font-size: var(--fs-s); padding: var(--sp-1) var(--sp-4); letter-spacing: 0.04em; }
 #header > * { flex: 0 0 auto; white-space: nowrap; }
 #layer-select, #jump { font-family: var(--mono); }
-#layer-select { max-width: 280px; }
+#layer-select { max-width: 240px; }
 #color-select { max-width: 200px; }
-@media (max-width: 1760px) { #header .lbl { display: none; } #views button { padding: var(--ctl-py) var(--sp-2); } }   /* 幅が足りなければ layer / layout / color / jump の字を省き(欄の title に残る)、ビューのボタンを詰める */
-@media (max-width: 1560px) { #layer-select { max-width: 170px; } #color-select { max-width: 140px; } #search-q { width: 130px; } }
-@media (max-width: 1340px) { #header { gap: var(--sp-4); } #layer-select { max-width: 140px; } #color-select { max-width: 120px; } #search-q { width: 100px; } #jump { width: 92px; } }
+/* 画面の切り替え: 探す / 作る / 確かめる の 3 群。いまの画面は aria-current と下線(色だけに頼らない) */
+#views { display: flex; align-items: center; gap: var(--sp-6); }
+#views .grp { display: flex; align-items: center; gap: var(--sp-3); }
+#views .grp-l { font-size: var(--fs-s); color: var(--muted); letter-spacing: 0.08em; }
+#views .nav { display: inline-flex; }
+#views .nav button { position: relative; border-radius: 0; margin-left: -1px; color: var(--text-2); }
+#views .nav button:first-child { border-radius: var(--r-m) 0 0 var(--r-m); margin-left: 0; }
+#views .nav button:last-child { border-radius: 0 var(--r-m) var(--r-m) 0; }
+#views .nav button[aria-current="true"] { background: var(--on); color: var(--sel); border-color: var(--line-strong); z-index: 1; }
+#views .nav button[aria-current="true"]::after { content: ""; position: absolute; inset: auto 0 -1px; border-bottom: 2px solid var(--accent); }
+@media (max-width: 1500px) { #header .lbl { display: none; } #views { gap: var(--sp-4); } #views .nav button { padding: var(--ctl-py) var(--sp-3); } }   /* 狭ければ jump の字を省き(欄の title に残る)、ボタンを詰める */
+@media (max-width: 1280px) { #header { gap: var(--sp-4); } #views .grp-l { display: none; } #search-q { width: 110px; } #jump { width: 92px; } }
 #status { margin-left: auto; color: var(--muted); display: flex; min-width: 0; flex: 0 1 auto; justify-content: flex-end; gap: var(--sp-5); }
 #status-main { color: var(--text-2); }
 #status-main { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 #perf { color: var(--muted); }
 
-#main { display: grid; grid-template-columns: auto 1fr auto auto auto; min-height: 0; }
+#main { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; min-height: 0; }
 .panel { background: var(--panel); border-right: 1px solid var(--line); width: 300px; display: flex; flex-direction: column; min-height: 0; }
-#neuron.panel { border-right: 0; border-left: 1px solid var(--line); width: 470px; }
-#neuron.panel.wide { width: min(56vw, 900px); }
-#head.panel { border-right: 0; border-left: 1px solid var(--line); width: 470px; }
-#head.panel.wide { width: min(56vw, 900px); }
-#expert.panel { border-right: 0; border-left: 1px solid var(--line); width: 430px; }
-#expert.panel.wide { width: min(56vw, 900px); }
-.panel.collapsed, #neuron.panel.collapsed, #neuron.panel.wide.collapsed, #head.panel.collapsed, #head.panel.wide.collapsed,
-#expert.panel.collapsed, #expert.panel.wide.collapsed { width: 34px; }
-.panel.collapsed #neuron-wide, .panel.collapsed #head-wide, .panel.collapsed #expert-wide { display: none; }
+.panel.side { border-right: 0; border-left: 1px solid var(--line); }
+#detail.panel { width: 470px; }
+#detail.panel.wide { width: min(56vw, 900px); }
+#recipe.panel { width: 320px; }
+#recipe.panel.wide { width: min(46vw, 640px); }
+:is(.panel, #detail.panel, #recipe.panel).collapsed { width: 34px; }
+.panel.collapsed :is(#detail-wide, #recipe-wide, #detail-kinds) { display: none; }
 .panel.collapsed .panel-body { display: none; }
 .panel.collapsed .panel-head { writing-mode: vertical-rl; }
-.panel-head { padding: var(--sp-3); display: flex; gap: var(--sp-3); }
+.panel-head { padding: var(--sp-3); display: flex; gap: var(--sp-3); align-items: center; }
 .panel-head .toggle { font-family: var(--mono); font-size: var(--fs-s); letter-spacing: 0.1em; }
+.panel-head :is(#detail-wide, #recipe-wide) { margin-left: auto; }
+#detail-kinds button { font-size: var(--fs-s); padding: 1px var(--sp-4); }
+#detail .panel-body { overflow: auto; }
+.pill { font-family: var(--mono); font-size: var(--fs-s); padding: 0 var(--sp-3); border-radius: 9px; border: 1px solid currentColor; color: var(--accent); white-space: nowrap; }
+.pill:empty { display: none; }
 .panel-body { padding: var(--sp-4) var(--sp-6); overflow: auto; min-height: 0; }
 
-#map-wrap { position: relative; min-width: 0; min-height: 0; }
+#map-wrap { position: relative; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+#map-bar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-3) var(--sp-5); padding: var(--sp-2) var(--sp-6); border-bottom: 1px solid var(--line); background: var(--panel); }
+#map-bar label { display: flex; align-items: center; gap: var(--sp-3); color: var(--muted); }
+#map-bar #reset-view { margin-left: auto; }
+#map-stage { position: relative; flex: 1 1 auto; min-height: 0; }
+#map-wrap { container-type: inline-size; }
+@container (max-width: 900px) { #map-bar .lbl { display: none; } #map-bar #layer-select { max-width: 170px; } #map-bar #color-select { max-width: 150px; } }   /* 狭い地図では欄の名前を省き(title に残る)、1 行に収める */
 #map { position: absolute; inset: 0; }
 #map canvas { display: block; }
 #tooltip { position: absolute; pointer-events: none; background: var(--scrim); border: 1px solid var(--line-mid);
@@ -211,7 +230,7 @@ input.w4 { width: 4em; } input.w45 { width: 4.5em; } input.w5 { width: 5em; }   
 #legend .it { display: inline-block; white-space: nowrap; margin-left: var(--sp-6); }
 #legend { max-width: calc(100% - 24px); }                                 /* 地図の幅を越えて隣のパネルに重ならない */
 #legend .it.long { display: inline; white-space: normal; }
-#map-wrap { container-type: inline-size; }
+#map-stage { container-type: inline-size; }
 @container (max-width: 720px) { #legend .note, #legend .it.long { display: none; } }   /* 地図が狭いときは色と印の見本だけ(説明で地図を覆わない) */
 #legend .note { color: var(--text-4); font-size: var(--fs-m); }
 #legend .detail-row { pointer-events: auto; color: var(--text-hi); margin-bottom: var(--sp-2); }   /* 正面ビューでも狭い地図でも、戻るボタンは隠さない */
@@ -288,7 +307,6 @@ table.rank tr.sel td { background: var(--row-sel); color: var(--sel); }
 #rank-empty { margin: var(--sp-3) 0 0; }
 
 /* NEURON */
-#neuron .panel-body { overflow: auto; }
 .n-head { margin-bottom: var(--sp-4); }
 .n-id { font-size: var(--fs-xl); font-weight: 700; color: var(--sel); }
 .n-stats { margin: var(--sp-1) 0 var(--sp-3); font-size: var(--fs-m); }
@@ -313,7 +331,7 @@ table.ex td.cell.open .txt { display: block; -webkit-line-clamp: unset; }
   padding: 0 var(--sp-2); margin: 0 var(--sp-2) var(--sp-2) 0; }
 .badge.plus { border-color: var(--plus-line); }
 .badge.minus { border-color: var(--minus-line); }
-#neuron h4, #head h4, #expert h4 { margin: var(--sp-6) 0 var(--sp-3); font-size: var(--fs-m); color: var(--muted); font-weight: 400; letter-spacing: 0.04em; }
+#detail h4 { margin: var(--sp-6) 0 var(--sp-3); font-size: var(--fs-m); color: var(--muted); font-weight: 400; letter-spacing: 0.04em; }
 .chips { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
 .chip { background: var(--chip); border-radius: var(--r-s); padding: 0 var(--sp-3); font-family: var(--mono); font-size: var(--fs-m); }
 .chip i { font-style: normal; color: var(--muted); margin-left: var(--sp-2); font-size: var(--fs-xs); }
@@ -339,8 +357,8 @@ table.kv th { color: var(--muted); }
   background: var(--sunk); border: 1px solid var(--line); border-radius: var(--r-m); }
 
 /* LIST の fires と recipe、NEURON の Chat、ジョブ、地図の印 */
-#fires-list, #recipe-list { display: flex; flex-direction: column; min-height: 0; flex: 1 1 auto; overflow: auto; }
-#fires-list > *, #recipe-list > * { flex-shrink: 0; }              /* 一覧の表だけが縮む(ほかが潰れて重ならないように) */
+#fires-list { display: flex; flex-direction: column; min-height: 0; flex: 1 1 auto; overflow: auto; }
+#fires-list > * { flex-shrink: 0; }              /* 一覧の表だけが縮む(ほかが潰れて重ならないように) */
 #fires-list > .rank-wrap { flex: 1 1 auto; flex-shrink: 1; min-height: 120px; }
 a { color: var(--link); }
 a:visited { color: var(--link-visited); }
@@ -531,7 +549,7 @@ table:is(.tbl, .evx) td:is(.ok, .ng) { text-align: left; }
 .rc-ablate .sl input { flex: 1 1 auto; min-width: 60px; }
 .n-eval .note { margin-top: 1px; }
 #evx-sample p { margin: var(--sp-2) 0; line-height: 1.5; max-width: 980px; }
-#map-wrap.not-map #overlay, #map-wrap.not-map #legend, #map-wrap.not-map #tooltip { display: none; }   /* 地図の札・凡例を他のビューに透かさない */
+#map-wrap.not-map :is(#overlay, #legend, #tooltip, #map-bar) { display: none; }   /* 地図の札・凡例を他のビューに透かさない */
 .ev-tools { display: flex; gap: var(--sp-6); align-items: center; padding: var(--sp-5) var(--sp-6) var(--sp-2); flex-wrap: wrap; }
 #ev-info { margin: var(--sp-2) var(--sp-6); padding: var(--sp-3) var(--sp-5); height: 96px; flex: 0 0 auto; overflow: auto; font-size: var(--fs-m); line-height: 1.5;   /* 高さ固定(本文で伸びると図がずれる) */
   background: var(--sunk); border: 1px solid var(--line); border-radius: var(--r-m); }
@@ -543,7 +561,6 @@ table:is(.tbl, .evx) td:is(.ok, .ng) { text-align: left; }
 #ev-legend .sw.dia { width: 9px; height: 9px; background: var(--raised); border: 1.5px solid var(--sel); transform: rotate(45deg); margin: 0 var(--sp-3) 0 var(--sp-1); }
 #ev-empty { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; color: var(--text-4); line-height: 1.8; padding: var(--sp-8); }
 #ev-legend:empty { display: none; }
-body.view-other .map-only { opacity: 0.35; }
 #ev-legend .it { display: inline-block; white-space: nowrap; margin-left: var(--sp-6); }
 #ev-legend .note { color: var(--text-4); }
 
@@ -577,24 +594,23 @@ body.view-other .map-only { opacity: 0.35; }
 #agent-pop .ag-head .muted { flex: 1 1 100%; order: 3; }
 
 /* HEAD パネル、地図のヘッドの印、recipe タブのヘッドの行 */
-#head .panel-body { overflow: auto; }
-#head .h-kind { font-size: var(--fs-m); font-weight: 400; }
-#head .h-cur { align-self: center; font-size: var(--fs-s); white-space: nowrap; }
-#head .hp-opts label { display: inline-flex; gap: var(--sp-2); align-items: center; }
-#head .hp-sys { width: 100%; padding: var(--sp-2) var(--sp-3); margin-bottom: var(--sp-3); }
-#head .hp-sys:disabled { opacity: 0.45; }
-#head .list-tools input { flex: 1 1 auto; min-width: 0; }
-#head .hp-view { margin: var(--sp-2) 0 var(--sp-3); }
-#head .hp-view button { font-size: var(--fs-m); padding: var(--sp-1) var(--sp-4); }
+#head-body .h-kind { font-size: var(--fs-m); font-weight: 400; }
+#head-body .h-cur { align-self: center; font-size: var(--fs-s); white-space: nowrap; }
+#head-body .hp-opts label { display: inline-flex; gap: var(--sp-2); align-items: center; }
+#head-body .hp-sys { width: 100%; padding: var(--sp-2) var(--sp-3); margin-bottom: var(--sp-3); }
+#head-body .hp-sys:disabled { opacity: 0.45; }
+#head-body .list-tools input { flex: 1 1 auto; min-width: 0; }
+#head-body .hp-view { margin: var(--sp-2) 0 var(--sp-3); }
+#head-body .hp-view button { font-size: var(--fs-m); padding: var(--sp-1) var(--sp-4); }
 .hp-wrap { overflow-x: auto; }
 #hp-canvas { display: block; cursor: crosshair; }
 .hp-info { font-size: var(--fs-m); min-height: 1.6em; margin: var(--sp-2) 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .hp-info b { color: var(--sel); font-weight: 400; }
 table.hp-trig td, table.hp-trig th { padding-right: var(--sp-4); }
 /* HEAD パネルの Listen: 文脈のトークンを注目・運んだ量で塗る */
-#head .ls-opts { display: flex; flex-wrap: wrap; gap: var(--sp-3); align-items: center; }
-#head .ls-opts input#ls-heads { width: 120px; }
-#head .ls-num { width: 56px; }
+#head-body .ls-opts { display: flex; flex-wrap: wrap; gap: var(--sp-3); align-items: center; }
+#head-body .ls-opts input#ls-heads { width: 120px; }
+#head-body .ls-num { width: 56px; }
 .ls-toks, .ls-reply { font-family: var(--sans); font-size: var(--fs-base); line-height: 1.75; margin: var(--sp-3) 0; padding: var(--sp-3) var(--sp-4); background: var(--sunk);
   border: 1px solid var(--line); border-radius: var(--r-m); word-break: break-word; }
 .ls-toks .lt { border-radius: var(--r-xs); color: var(--text-hi); white-space: pre-wrap; }
@@ -634,24 +650,23 @@ table.cz-alloc tr.on td { background: var(--row-on); }
 table.rc tr.rc-head td.id a { color: var(--link-3); }
 
 /* EXPERT パネル、NEURON パネルの MoE の行、recipe タブの方向押しの印、fires の選ばれた専門家 */
-#expert .panel-body { overflow: auto; }
-#expert .h-kind { font-size: var(--fs-m); font-weight: 400; }
-#expert .h-cur { align-self: center; font-size: var(--fs-s); white-space: nowrap; }
-#expert .x-act { flex-wrap: wrap; }
-#expert h4 button { margin-left: var(--sp-3); }
-#expert table.x-use td { padding-right: var(--sp-6); }
-#expert table.x-use td.hot, #expert .x-c h4 .hot { color: var(--accent); }
-#expert table.x-met td { padding-right: var(--sp-5); }
-#expert table.x-met td.muted { font-size: var(--fs-s); }
-#expert .x-few { margin: var(--sp-2) 0; }
-#expert .x-toks { margin-top: var(--sp-2); }
+#expert-body .h-kind { font-size: var(--fs-m); font-weight: 400; }
+#expert-body .h-cur { align-self: center; font-size: var(--fs-s); white-space: nowrap; }
+#expert-body .x-act { flex-wrap: wrap; }
+#expert-body h4 button { margin-left: var(--sp-3); }
+#expert-body table.x-use td { padding-right: var(--sp-6); }
+#expert-body table.x-use td.hot, #expert-body .x-c h4 .hot { color: var(--accent); }
+#expert-body table.x-met td { padding-right: var(--sp-5); }
+#expert-body table.x-met td.muted { font-size: var(--fs-s); }
+#expert-body .x-few { margin: var(--sp-2) 0; }
+#expert-body .x-toks { margin-top: var(--sp-2); }
 .x-wrap { overflow-x: auto; }
 table.x-top { table-layout: auto; width: auto; }
 table.x-top th, table.x-top td { padding-right: var(--sp-5); }
-#neuron .n-moe { margin-top: var(--sp-3); flex-wrap: wrap; }
-#neuron .n-moe .h-cur { align-self: center; font-size: var(--fs-s); white-space: nowrap; }
-#neuron .n-moe-note { margin: var(--sp-2) 0 0; }
-#neuron .n-flat { font-size: var(--fs-m); font-weight: 400; }
+#neuron-body .n-moe { margin-top: var(--sp-3); flex-wrap: wrap; }
+#neuron-body .n-moe .h-cur { align-self: center; font-size: var(--fs-s); white-space: nowrap; }
+#neuron-body .n-moe-note { margin: var(--sp-2) 0 0; }
+#neuron-body .n-flat { font-size: var(--fs-m); font-weight: 400; }
 .badge.push { border-color: var(--agent-line); color: var(--link-3); margin: 0 0 0 var(--sp-3); }
 table.rc tr.rc-moe td.id a { color: var(--link-3); }
 .fi-routed { margin: var(--sp-2) 0 var(--sp-3); }
@@ -660,8 +675,8 @@ table.rc tr.rc-moe td.id a { color: var(--link-3); }
 .fi-routed-list .muted { display: inline-block; width: 30px; }
 #legend .sw.tile { background: transparent; border-width: 2px; border-radius: 1px; }
 table.fi-tab.moe th:nth-child(1) { width: 52px; } table.fi-tab.moe th:nth-child(2) { width: 80px; }   /* MoE は E37 N511 の形 */
-#stale-banner { position: fixed; top: 0; left: 50%; transform: translateX(-50%); z-index: 50; display: flex; gap: var(--sp-5); align-items: center;
-  max-width: 90vw; background: var(--accent-bg); color: var(--accent-hi); border: 1px solid var(--accent-line); border-top: none; border-radius: 0 0 var(--r-l) var(--r-l); padding: var(--sp-3) var(--sp-6); font-size: var(--fs-base); }
+#stale-banner { position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%); z-index: 50; display: flex; gap: var(--sp-5); align-items: center;
+  max-width: 90vw; background: var(--accent-bg); color: var(--accent-hi); border: 1px solid var(--accent-line); border-bottom: none; border-radius: var(--r-l) var(--r-l) 0 0; padding: var(--sp-3) var(--sp-6); font-size: var(--fs-base); }
 .rc-lx { border: 1px solid var(--line-mid); border-radius: var(--r-m); padding: var(--sp-3) var(--sp-4); margin: var(--sp-3) 0; background: var(--raised); }
 .rc-lx-row { display: flex; flex-wrap: wrap; gap: var(--sp-3) var(--sp-5); align-items: center; margin: var(--sp-2) 0; }
 .rc-lx-row.off { opacity: 0.5; }

@@ -34,9 +34,10 @@ const SP_KEY = "gne.chat.sampling";            // このブラウザに覚えて
 const COLS_KEY = "gne.chat.single";            // 1 列(+ の列だけ)で話すか
 
 export class ChatPanel {
-  constructor({ recipe, onStatus }) {
+  constructor({ recipe, onStatus, onAdded }) {
     this.recipe = recipe;
     this.onStatus = onStatus || (() => {});
+    this.onAdded = onAdded || (() => {});    // レシピに足したとき(app.js がレシピのパネルを開く。どの入口でも同じ)
     this.mode = "writes";
     this.target = "neuron";
     this.dose = 0.8;
@@ -115,8 +116,8 @@ export class ChatPanel {
     if (!v) return sel;
     const fields = SP_FIELDS.map(([k, label, step]) => `<span class="muted">${k === "temperature" ? tr(label) : label}</span><input class="sp-v" data-k="${k}" type="number" step="${step}" min="${k === "presence_penalty" ? -2 : 0}" value="${v[k]}">`).join("");
     return `${sel}</div><div class="ch-tools ch-sp">${fields}
-      <label class="muted" title="${tr("固定すると、強さやレシピだけ変えて送り直したときに違いが介入だけになる。切ると毎回変える")}"><input type="checkbox" id="ch-seed-fixed"${this.seedFixed ? " checked" : ""}> seed ${tr("固定")}</label><input id="ch-seed" type="number" min="0" step="1" value="${this.seed}"${this.seedFixed ? "" : " disabled"}>
-      ${this.target === "recipe" && this.spPreset !== "recipe" ? `<button class="small" id="ch-sp-to-recipe" title="${tr("この値をレシピに入れる(レシピのタブで保存するとファイルに入る)")}">${tr("レシピに入れる")}</button>` : ""}`;
+      <label class="muted" title="${tr("固定すると、強さやレシピだけ変えて送り直したときに違いが介入だけになる。切ると毎回変える")}"><input type="checkbox" id="ch-seed-fixed"${this.seedFixed ? " checked" : ""}> ${tr("種を固定")}</label><input id="ch-seed" type="number" min="0" step="1" value="${this.seed}"${this.seedFixed ? "" : " disabled"}>
+      ${this.target === "recipe" && this.spPreset !== "recipe" ? `<button class="small" id="ch-sp-to-recipe" title="${tr("このサンプリングをレシピに足す(レシピを保存するとファイルに入る)")}">${tr("レシピに足す")}</button>` : ""}`;
   }
 
   // 送る本文の sampling(greedy なら無し)。seed は固定か、毎回新しく引く
@@ -172,9 +173,9 @@ export class ChatPanel {
   writesHTML() {
     const cols = this.columns();
     const amount = this.target === "recipe"
-      ? `${tr("倍率")} <button class="small" data-step="-0.25" title="${tr("小さく")}">▼</button><input id="ch-dose" type="number" step="0.25" value="${this.scale}"><button class="small" data-step="0.25" title="${tr("大きく")}">▲</button>`
-      : `dose <button class="small" data-step="-0.1" title="${tr("小さく")}">▼</button><input id="ch-dose" type="number" step="0.1" value="${this.dose}"><button class="small" data-step="0.1" title="${tr("大きく")}">▲</button>
-         <span class="seg"><button class="on" title="${tr("本体設計の rel dose(残差ノルムの中央値に対する大きさ)を足す")}">add</button><button disabled title="${tr("活性の倍率は本体設計で未対応")}">×</button></span>${
+      ? `${tr("強さ")} <button class="small" data-step="-0.25" title="${tr("小さく")}">▼</button><input id="ch-dose" type="number" step="0.25" value="${this.scale}"><button class="small" data-step="0.25" title="${tr("大きく")}">▲</button>`
+      : `${tr("強さ")} <button class="small" data-step="-0.1" title="${tr("小さく")}">▼</button><input id="ch-dose" type="number" step="0.1" value="${this.dose}"><button class="small" data-step="0.1" title="${tr("大きく")}">▲</button>
+         <span class="seg"><button class="on" title="${tr("rel(残差ノルムの中央値に対する大きさ)で足す")}">add</button><button disabled title="${tr("活性を何倍にするやり方は、まだ使えません")}">×</button></span>${
           this.detail && this.detail.expert !== undefined && this.detail.expert !== null
             ? `<span class="badge push" title="${tr("MoE の専門家のニューロンの add は書き込み方向の押し(専門家が選ばれたかに関係なく全トークンに足す)。選ばれたときだけ効く gain は NEURON の ×0 / ×2 からレシピで試す")}">${tr("方向押し")}</span>` : ""}`;
     const turns = this.turns.map((t, ti) => `
@@ -183,7 +184,7 @@ export class ChatPanel {
     const colSeg = `<span class="seg" title="${tr("3 列: −・無介入・+ を並べて比べる / 1 列: + の列(レシピありか、このニューロンを + で押した返事)だけで話す。1 列は生成が 3 分の 1 で、長い会話を試すのに向く")}">${
       [["3", tr("3 列")], ["1", tr("1 列")]].map(([v, l]) => `<button data-cols="${v}"${(this.single ? "1" : "3") === v ? ' class="on"' : ""}${this.busy ? " disabled" : ""}>${l}</button>`).join("")}</span>`;
     return `
-      <div class="ch-tools">${colSeg}${amount}<span class="muted">max</span><input id="ch-max" type="number" min="1" max="2048" value="${this.maxTokens}">
+      <div class="ch-tools">${colSeg}${amount}<span class="muted">${tr("返事の長さ")}</span><input id="ch-max" type="number" min="1" max="2048" value="${this.maxTokens}">
         <span class="muted" title="${tr("足す位置: all = 全位置 / gen = 生成中だけ(プロンプトの理解を壊さない)/ assistant = assistant の発話だけ / skip-replies = 過去の返事以外(過去の返事は素のまま読む)/ after = 出力にその文字列が出てから / ramp = 倍率を a から b へ変える")}">when</span><select id="ch-when">${
           ["all", "gen", "assistant", "skip-replies", "after", "ramp"].map((w) => `<option value="${w}"${this.when === w ? " selected" : ""}>${w}</option>`).join("")}</select>${
           this.when === "after" || this.when === "ramp" ? `<input id="ch-when-x" size="8" value="${esc(this.whenArg)}" placeholder="${this.when === "after" ? tr("結論:") : "1.5-0.5"}">` : ""}</div>
@@ -249,7 +250,7 @@ export class ChatPanel {
     const sd = $("#ch-seed");
     if (sd) sd.addEventListener("change", (ev) => { this.seed = Math.max(0, Math.floor(+ev.target.value || 0)); this.saveSp(); });
     const tor = $("#ch-sp-to-recipe");
-    if (tor) tor.addEventListener("click", () => { this.recipe.setSampling(this.spValues()); this.spPreset = "recipe"; this.saveSp(); this.render(); });
+    if (tor) tor.addEventListener("click", () => { this.recipe.setSampling(this.spValues()); this.spPreset = "recipe"; this.saveSp(); this.render(); this.onAdded(); });
     $("#ch-when").addEventListener("change", (ev) => { this.when = ev.target.value; this.render(); });
     const wx = $("#ch-when-x");
     if (wx) wx.addEventListener("change", (ev) => { this.whenArg = ev.target.value.trim(); });

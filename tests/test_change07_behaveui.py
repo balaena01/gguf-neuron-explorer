@@ -366,7 +366,7 @@ def _key_tab(browser, url, lang, routes=()):
     pg.wait_for_function("window.gne && window.gne.recipe && window.gne.arch", timeout=120000)
     pg.click("#views button[data-view=direction]")
     pg.wait_for_function("window.gne.directionView && window.gne.directionView.mode", timeout=60000)
-    pg.click("#dv-mode button[data-m=key]")
+    pg.click("#views button[data-view=keys]")
     pg.wait_for_function("window.gne.directionView.key.loaded && document.querySelector(\"#kb-dir option[value='polite_left']\")",
                          timeout=60000)
     pg.click("#kb-wrap > summary")

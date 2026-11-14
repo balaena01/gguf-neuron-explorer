@@ -48,9 +48,10 @@ export function setLang(lang) {
   location.replace(u.toString());
 }
 
-// index.html の静的な文言: data-i18n(中身)、data-i18n-title、data-i18n-placeholder
+// index.html の静的な文言: data-i18n(中身)、data-i18n-title、data-i18n-placeholder、data-i18n-aria-label
 export function translateDOM(root = document) {
   for (const el of root.querySelectorAll("[data-i18n]")) el.textContent = t(el.dataset.i18n);
   for (const el of root.querySelectorAll("[data-i18n-title]")) el.title = t(el.dataset.i18nTitle);
   for (const el of root.querySelectorAll("[data-i18n-placeholder]")) el.placeholder = t(el.dataset.i18nPlaceholder);
+  for (const el of root.querySelectorAll("[data-i18n-aria-label]")) el.setAttribute("aria-label", t(el.dataset.i18nAriaLabel));
 }

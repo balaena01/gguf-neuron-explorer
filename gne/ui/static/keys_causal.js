@@ -354,7 +354,7 @@ export class KeyCausal {
         hasProbe ? alphas.map((a) => effCell((ba[a] || {}).probe, (ba[a] || {}).probe_mark, (ba[a] || {}).probe_pseudo)).join("") + `<td>${x.all_marked_probe ? `<span class="kx-ok">○</span>` : ""}</td>` : ""}
         <td>${b.ratio === null || b.ratio === undefined ? "—" : fmt(b.ratio, 1)}</td><td>${b.side_b ? sgn(b.side_b.mean) : "—"}</td><td>${sgn(b.dt_min)}</td>
         <td class="muted">${sgn((x.key_check || {}).margin)}</td><td>${linS}</td>
-        <td><button class="small" data-kzadd="${i}" title="${t("この候補の keyed のユニットをレシピに足す")}">${t("+ レシピ")}</button></td></tr>`;
+        <td><button class="small" data-kzadd="${i}" title="${t("この候補の keyed のユニットをレシピに足す")}">${t("レシピに足す")}</button></td></tr>`;
     }).join("");
     const dropped = (r.dropped || []).map((d) => `${esc(targetWho(d.target))} L${d.layer}: ${esc(d.error)}`);
     el.innerHTML = `<div class="kx-res">${head}${note}<ul class="evx-notes kz-marks">${marks}</ul>

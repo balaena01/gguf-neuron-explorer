@@ -216,6 +216,12 @@ def _free_port() -> int:
         so.bind(("127.0.0.1", 0))
         return so.getsockname()[1]
 
+def _recipe_tab(pg, tab="units"):
+    """右のレシピのパネルを開いて、タブを選ぶ(units 中身 / try 試す / out 書き出す)。中身は保存したレシピの一覧も取り直す。"""
+    if pg.evaluate("document.querySelector('#recipe').classList.contains('collapsed')"):
+        pg.click("#recipe .toggle")
+    pg.click(f"#recipe-tabs button[data-rtab={tab}]")
+
 
 @pytest.fixture(scope="module")
 def ui_server(tmp_path_factory):
@@ -287,7 +293,7 @@ def test_key_panel_and_recipe_in_browser(ui_server, browser):
     pg.evaluate("window.gne.recipe.clear()")
     pg.click("#views button[data-view=direction]")
     pg.wait_for_function("window.gne.directionView && window.gne.directionView.mode", timeout=60000)
-    pg.click("#dv-mode button[data-m=key]")
+    pg.click("#views button[data-view=keys]")
     pg.wait_for_function("document.querySelector('#kx-contrast option') && window.gne.directionView.key.loaded", timeout=30000)
     # before:<re> の対照集合(一覧で最初のもの)が既定。before:<re> のものは複数あるので、この先で使う NAME を選び直す
     assert pg.evaluate("document.querySelector('#kx-contrast').selectedOptions[0].textContent").endswith(" · before")
@@ -329,7 +335,7 @@ def test_key_panel_and_recipe_in_browser(ui_server, browser):
     pg.wait_for_selector("#recipe-list tr.rc-keyed", timeout=10000)
     # レシピのタブ: 既定の鍵を使う行を足す(L8、鍵は「既定」)。既定の鍵を zk_web に
     pg.evaluate("window.gne.recipe.addKeyed({layer: 8, kind: 'ffn', alpha: 0.5, direction: null, key: null})")
-    pg.click("#list-tabs button[data-tab=recipe]")
+    _recipe_tab(pg)
     pg.wait_for_selector("#rc-kdk", timeout=10000)
     assert pg.evaluate("document.querySelectorAll('#recipe-list tr.rc-keyed .badge.warn').length") >= 1   # 鍵・方向が無い行に印
     pg.select_option("#rc-kdk", "zk_web")
@@ -348,6 +354,7 @@ def test_key_panel_and_recipe_in_browser(ui_server, browser):
     assert saved["default_key"] == "zk_web" and saved["default_direction"] == NAME
     assert {"layer": 8, "kind": "ffn", "mode": "keyed", "alpha": 0.5} in saved["units"]
     # LoRA・焼き込みの欄: keyed だけなら既定の名前は -keyed、焼き込みの型の既定は auto(Q8_0 は元のまま、ほかは F16)
+    _recipe_tab(pg, "out")
     pg.click("#rc-lora")
     pg.wait_for_selector(".rc-lx", timeout=5000)
     assert pg.evaluate("document.querySelector('#lx-file').placeholder") == "zk_web_r-keyed"
@@ -359,7 +366,7 @@ def test_key_panel_and_recipe_in_browser(ui_server, browser):
     pg.reload()
     pg.wait_for_function("window.gne && window.gne.recipe && window.gne.arch", timeout=120000)
     pg.evaluate("document.querySelector('#list').classList.remove('collapsed')")
-    pg.click("#list-tabs button[data-tab=recipe]")
+    _recipe_tab(pg)
     pg.wait_for_function("[...document.querySelectorAll('#rc-load option')].some(o => o.value === 'zk_web_r')", timeout=30000)
     pg.select_option("#rc-load", "zk_web_r")
     pg.wait_for_function("document.querySelectorAll('#recipe-list tr.rc-keyed').length === 2", timeout=10000)
@@ -380,7 +387,7 @@ def test_key_panel_in_english(ui_server, browser):
     pg.evaluate(f"window.gne.recipe.clear(); window.gne.recipe.addKeyed({{layer: 14, kind: 'ffn', alpha: 1, direction: '{NAME}', key: 'nope'}})")
     pg.click("#views button[data-view=direction]")
     pg.wait_for_function("window.gne.directionView && window.gne.directionView.mode", timeout=60000)
-    pg.click("#dv-mode button[data-m=key]")
+    pg.click("#views button[data-view=keys]")
     pg.wait_for_function("window.gne.directionView.key.loaded", timeout=30000)
     assert pg.evaluate("!!window.gne.directionView.key")
     # 保存した結果の形で key-check を描く(ジョブは回さない)
@@ -396,9 +403,10 @@ def test_key_panel_in_english(ui_server, browser):
     assert pg.evaluate("document.querySelectorAll('#kc-res svg.kx-hist').length") == 1
     assert "Overlaps the build examples" in pg.evaluate("document.querySelector('#kc-res').textContent")
     pg.evaluate("document.querySelector('#list').classList.remove('collapsed')")
-    pg.click("#list-tabs button[data-tab=recipe]")
+    _recipe_tab(pg)
     pg.wait_for_selector("#recipe-list tr.rc-keyed", timeout=10000)
     assert "key nope not found" in pg.evaluate("document.querySelector('#recipe-list tr.rc-keyed').textContent")
+    _recipe_tab(pg, "out")
     pg.click("#rc-lora")
     pg.check("input[name=lx-kind][value=bake]")
     pg.click("#views button[data-view=eval]")
@@ -508,8 +516,10 @@ def test_eval_keyed_params_and_block_in_browser(ui_server, browser):
         if lang == "ja":
             pg.evaluate("document.querySelector('#evx-body .evx-kx').scrollIntoView()")
             _shot(pg, "keyed_eval.png")
-        pg.click("#evx-body [data-krc='0']")                                                # keyed の方式のレシピを recipe タブへ
-        assert pg.evaluate("window.gne.recipe.keyed().length") == 1 and pg.evaluate("window.gne.recipe.keyed()[0].key") == "zk_web"
+        asked = []
+        pg.once("dialog", lambda dl: (asked.append(dl.message), dl.accept()))           # いまのレシピを置き換える前に確かめる
+        pg.click("#evx-body [data-krc='0']")                                                # keyed の方式のレシピでレシピを置き換える
+        assert asked and pg.evaluate("window.gne.recipe.keyed().length") == 1 and pg.evaluate("window.gne.recipe.keyed()[0].key") == "zk_web"
         # 測っていない(対照集合が分からない)
         skipped = {"skipped": "鍵の対照集合が分かりません", "hint": "--keyed-contrast で渡してください"}
         pg.evaluate(f"(() => {{ const v = window.gne.evalView; v.data = {json.dumps(_fake_eval(skipped))}; v.render(); }})()")
@@ -527,7 +537,7 @@ def test_eval_keyed_params_and_block_in_browser(ui_server, browser):
 def _key_tab(pg):
     pg.click("#views button[data-view=direction]")
     pg.wait_for_function("window.gne.directionView && window.gne.directionView.mode", timeout=60000)
-    pg.click("#dv-mode button[data-m=key]")
+    pg.click("#views button[data-view=keys]")
     pg.wait_for_function("window.gne.directionView.key.loaded && document.querySelector(\"#kx-tpl-sel option[value='sentence_endings.json']\")",
                          timeout=30000)
 

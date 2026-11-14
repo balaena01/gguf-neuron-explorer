@@ -85,18 +85,18 @@ export class ExpertPanel {
     const gb = (x, label) => {
       const on = k !== null && k === x;
       return `<button data-xk="${x}" class="${on ? `on ${x < 1 ? "minus" : "plus"}` : ""}" title="${on ? t("もう一度押すとレシピから外す")
-        : t("レシピに専門家全体の ×{k} で足す(倍率は recipe タブで変えられる)", { k: x })}">${on ? `${t("レシピ")} ×${x}` : label}</button>`;
+        : t("専門家全体を強さ ×{k} でレシピに足す(強さはレシピのパネルで変えられる)", { k: x })}">${on ? `${t("レシピ")} ×${x}` : label}</button>`;
     };
     const rb = (x) => {
       const on = r !== null && r === x;
       return `<button data-xr="${x}" class="${on ? `on ${x < 0 ? "minus" : "plus"}` : ""}" title="${on ? t("もう一度押すとレシピから外す")
-        : t("レシピにルーターのバイアス {d} で足す(選ばれやすさが変わる)", { d: sgn(x, 0) })}">${on ? `${t("レシピ")} route ${sgn(x, 1)}` : `route ${sgn(x, 0)}`}</button>`;
+        : t("レシピにルーターのバイアス {d} で足す(選ばれやすさが変わる)", { d: sgn(x, 0) })}">${on ? `${t("レシピ")} route ${sgn(x, 1)}` : t("レシピに足す(route {d})", { d: sgn(x, 0) })}</button>`;
     };
     const other = [k !== null && k !== 0 && k !== 2 ? `${t("レシピ")} ×${fmt(k, 2)}` : "", r !== null && r !== 1 && r !== -1 ? `${t("レシピ")} route ${sgn(r, 2)}` : ""]
       .filter(Boolean).map((x) => `<span class="muted mono h-cur">${x}</span>`).join("");
     const gains = document.body.dataset.split === "1"     // スケールパッチは 1 ファイルにしか当てられない
       ? `<span class="muted" title="${t("llama-gguf-split --merge で 1 つにすると使えます")}">${t("分割 GGUF なので専門家全体の ×k は使えません")}</span>`
-      : `${gb(0, t("×0(消す)"))}${gb(2, t("×2(強める)"))}`;
+      : `${gb(0, t("レシピに足す(×0 で消す)"))}${gb(2, t("レシピに足す(×2 で強める)"))}`;
     return `${gains}${this.hasBias(d.layer) ? rb(-1) + rb(1) : ""}${other}`;
   }
 
@@ -143,10 +143,10 @@ export class ExpertPanel {
   // ニューロンの上位(活性統計があれば q999 × ‖W_down‖ = 書き込みの大きさ、無ければ ‖W_down‖ の順)
   neurons(d) {
     if (!d.neurons.length) return "";
-    const rows = d.neurons.map((x) => `<tr class="pick" data-n="${x.neuron}" title="${t("NEURON パネルで開く(L{L} E{e} N{n})", { L: d.layer, e: d.expert, n: x.neuron })}">
+    const rows = d.neurons.map((x) => `<tr class="pick" data-n="${x.neuron}" title="${t("くわしく見るで開く(L{L} E{e} N{n})", { L: d.layer, e: d.expert, n: x.neuron })}">
       <td>N${x.neuron}</td><td>${fmt(x.q999, 3)}</td><td>${fmt(x.down_norm, 3)}</td><td>${fmt(x.write, 3)}</td></tr>`).join("");
     return `<h4>${d.usage ? t("ニューロンの上位(q999 × ‖W_down‖ の順)") : t("ニューロンの上位(‖W_down‖ の順)")}</h4>
       <div class="x-wrap"><table class="rank mono x-top"><thead><tr><th>N</th><th>q999</th><th>‖W_down‖</th><th title="${t("q999 × ‖W_down‖(選ばれたときに残差へ書ける大きさの目安)")}">write</th></tr></thead><tbody>${rows}</tbody></table></div>
-      <p class="muted note">${t("行をクリックすると NEURON パネル。専門家のニューロンの add は方向押し、×k の gain は選ばれたときだけ効く。")}</p>`;
+      <p class="muted note">${t("行をクリックするとくわしく見る。専門家のニューロンの add は方向押し、×k の gain は選ばれたときだけ効く。")}</p>`;
   }
 }

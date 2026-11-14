@@ -1,4 +1,4 @@
-// ジョブ(別冊 §8.3)。下のバーに実行中・待機中のジョブと進捗、層の右クリックで計算メニュー。
+// ジョブ。下のバーに実行中・待機中のジョブと進捗。層の右クリックと地図の上の「この層で計算」で計算メニュー。
 // GPU を使うジョブはユニットの切れ目で、チャットや fires に GPU を譲る(§8.1)。
 import { deleteJSON, getJSON, postJSON } from "./api.js";
 import { t as tr } from "./i18n.js";
@@ -12,7 +12,11 @@ export const KIND = { embed: tr("埋め込み"), connections: "connections", lay
                direction_key: tr("鍵の作成"), direction_key_check: tr("鍵の確認"), direction_key_experts: tr("専門家の選ばれ方"),
                direction_key_verify: tr("LoRA の確かめ(key-verify)"), direction_key_pipeline: tr("方向から key-check まで"),
                behave: tr("振る舞いを数える(behave)"), direction_key_causal: tr("効く層を探す(生成なし)"),
-               direction_key_causal_verify: tr("効く層を確かめる(生成)") };
+               direction_key_causal_verify: tr("効く層を確かめる(生成)"), writers: tr("書き手の強さ"),
+               fish_pipeline: tr("FiSH をまとめて作る"), fish_direction: tr("FiSH の方向を作る"), fish_try: tr("FiSH を重みに入れる前に試す"),
+               nw_neurons: tr("FiSH のニューロンを選ぶ"), fish_keys: tr("FiSH の鍵を作る"), fish_verify: tr("FiSH が式どおりか確かめる"),
+               fish_check: tr("FiSH の漏れを確かめる"), fish_behave: tr("FiSH の返事を読む"),
+               nw_check: tr("FiSH のユニットを確かめる(nw check)") };
 
 function eta(s) {
   if (s === null || s === undefined || !Number.isFinite(s)) return "";
@@ -111,7 +115,7 @@ export class JobsBar {
 
   render() {
     const js = [...this.jobs.values()].reverse();
-    if (!js.length) { this.root.innerHTML = `<span class="muted">${tr("jobs: なし(層の番号やラベルを右クリックすると計算を投げられます)")}</span>`; return; }
+    if (!js.length) { this.root.innerHTML = `<span class="muted">${tr("jobs: なし(地図の上の「この層で計算」か、層の番号の右クリックで計算を投げられます)")}</span>`; return; }
     const one = (j) => {
       const pct = j.total ? Math.round((j.done / j.total) * 100) : 0;
       const st = { queued: tr("待機中"), running: "", done: tr("完了"), error: tr("エラー"), cancelled: tr("中止済み") }[j.status];
@@ -159,9 +163,11 @@ export function computeMenu(ev, L, li, cov, { onStart, arch, model }) {
   m.style.left = `${Math.min(ev.clientX + 14, window.innerWidth - 400)}px`;               // 右クリックしたラベルを覆わないように
   m.style.top = `${Math.min(ev.clientY + 10, window.innerHeight - 170)}px`;
   document.body.appendChild(m);
-  const close = () => { m.remove(); document.removeEventListener("pointerdown", away, true); };
+  const close = () => { m.remove(); document.removeEventListener("pointerdown", away, true); document.removeEventListener("keydown", esc_, true); };
   const away = (e) => { if (!m.contains(e.target)) close(); };
+  const esc_ = (e) => { if (e.key === "Escape" && !e.isComposing) close(); };   // Esc でも閉じる
   document.addEventListener("pointerdown", away, true);
+  document.addEventListener("keydown", esc_, true);
   for (const el of m.querySelectorAll(".cm-item")) {
     el.addEventListener("click", () => { const [kind, p] = items[+el.dataset.i]; close(); onStart(kind, p); });
   }

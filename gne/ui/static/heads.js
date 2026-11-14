@@ -177,8 +177,8 @@ export class HeadPanel {
     const cur = this.inRecipe(d.layer, d.head);
     const b = (k) => {
       const on = cur !== null && cur === k;
-      return `<button data-hk="${k}" class="${on ? `on ${k < 1 ? "minus" : "plus"}` : ""}" title="${on ? t("もう一度押すとレシピから外す") : t("レシピに ×{k} で足す(倍率は recipe タブで変えられる)", { k })}">${
-        on ? `${t("レシピ")} ×${k}` : t("×{k} レシピ", { k })}</button>`;
+      return `<button data-hk="${k}" class="${on ? `on ${k < 1 ? "minus" : "plus"}` : ""}" title="${on ? t("もう一度押すとレシピから外す") : t("強さ ×{k} でレシピに足す(強さはレシピのパネルで変えられる)", { k })}">${
+        on ? `${t("レシピ")} ×${k}` : t("レシピに足す(×{k})", { k })}</button>`;
     };
     const other = cur !== null && cur !== 0 && cur !== 2 ? `<span class="muted mono h-cur" title="${t("レシピの中の倍率")}">${t("レシピ")} ×${fmt(cur, 2)}</span>` : "";
     return `${b(0)}${b(2)}${other}${this.projButton(d)}`;
@@ -190,11 +190,11 @@ export class HeadPanel {
     const dirs = this.projDirections();
     const cur = this.inProj(d.layer, d.head);
     if (cur) {
-      return `<button data-hp="${esc(cur.direction || "")}" class="on minus" title="${t("もう一度押すとレシピから外す(s と方向は recipe タブで変えられる)")}">${t("レシピ")} s${fmt(cur.s, 2)} @${esc(cur.direction || "")}</button>`;
+      return `<button data-hp="${esc(cur.direction || "")}" class="on minus" title="${t("もう一度押すとレシピから外す(強さ s と方向はレシピのパネルで変えられる)")}">${t("レシピ")} s${fmt(cur.s, 2)} @${esc(cur.direction || "")}</button>`;
     }
     const want = [...(d.causal || []).map((c) => c.direction), ...d.contrasts.map((c) => c.direction)].find((x) => x && dirs.includes(x)) || dirs[0];
     if (!want) return "";
-    return `<button data-hp="${esc(want)}" title="${t("このヘッドの書き込みのうち方向 {d} に沿った成分だけを消す射影(L:Hh:s1@{d})をレシピに足す(s は recipe タブで変えられる)", { d: want })}">${t("射影 s1 レシピ")}</button>`;
+    return `<button data-hp="${esc(want)}" title="${t("このヘッドの書き込みのうち方向 {d} に沿った成分だけを消す射影(L:Hh:s1@{d})をレシピに足す(強さ s はレシピのパネルで変えられる)", { d: want })}">${t("レシピに足す(射影 s1)")}</button>`;
   }
 
   // --- Pattern -------------------------------------------------------------------------------------
@@ -549,7 +549,7 @@ export class HeadPanel {
     if (!al || !(al.table || []).length) return "";
     const rows = al.table.filter((r) => !r.skipped).map((r) => `<tr class="${r.recommended ? "on" : ""}"><td>${r.n_heads}${r.recommended ? ` <span class="badge">${t("推奨")}</span>` : ""}</td>
       <td>${fmt(r.s_max, 2)}</td><td>${r.remain ?? "—"}</td><td>${fmt(r.a_max, 2)}</td><td>${fmt(r.b_drift_orth, 3)}</td><td>${fmt(r.b_side_delta, 2)}</td>
-      <td class="w">${esc((r.units || []).join(" "))}</td><td><button class="small" data-alloc="${r.n_heads}" title="${t("この組(proj のユニット)で今のレシピを置き換える")}">${t("レシピに読み込む")}</button></td></tr>`).join("");
+      <td class="w">${esc((r.units || []).join(" "))}</td><td><button class="small" data-alloc="${r.n_heads}" title="${t("この組(proj のユニット)で今のレシピを置き換える")}">${t("レシピを置き換える")}</button></td></tr>`).join("");
     return `<h4>${t("強さの配分(gne heads allocate、L{L} の射影の値を {v} まで)", { L: al.score_layer ?? "—", v: fmt(al.target, 2) })}</h4>
       <div class="cz-scroll"><table class="kv mono cz-alloc"><tr><th>${t("ヘッド数")}</th><th>s max</th><th title="${t("目標に届かず残った例の数")}">${t("残り")}</th><th title="${t("A 側の射影の値の最大")}">A max</th><th title="${t("B 側の直交成分のずれ")}">B ⊥</th><th title="${t("B 側の射影の値の変化")}">B Δ</th><th>${t("ユニット")}</th><th></th></tr>${rows}</table></div>`;
   }

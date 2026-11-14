@@ -189,7 +189,7 @@ export class NeuronPanel {
         ${rnd ? `<p class="muted note">${t("ランダム方向の対照(名前は付けられません)")}</p>` : `
         <div class="n-row"><input class="n-name" placeholder="${t("名前(入力して Enter か欄の外で保存)")}" value="${esc(d.name || "")}" spellcheck="false">
           ${this.recipeButtons(d)}</div>`}
-        ${moe ? `<div class="n-row n-moe">${this.gainButtons(d)}<button class="small" id="n-expert" title="${t("この専門家(L{L} E{e})を EXPERT パネルで開く", { L: d.layer, e: d.expert })}">${t("EXPERT パネルで開く")}</button></div>
+        ${moe ? `<div class="n-row n-moe">${this.gainButtons(d)}<button class="small" id="n-expert" title="${t("この専門家(L{L} E{e})を開く", { L: d.layer, e: d.expert })}">${t("専門家を開く")}</button></div>
         <p class="muted note n-moe-note">${document.body.dataset.cvec === "off" ? t("MoE の専門家のニューロン。×k は、この専門家が選ばれたときだけ効く gain です") : t("MoE の専門家のニューロン。+ / − は方向押し(専門家が選ばれたかに関係なく、全トークンでこのニューロンの書き込み方向を足す)。×0 / ×2 の gain は専門家が選ばれたときだけ効く本当のニューロン押し。")}</p>` : ""}
       </div>
       <div class="tabs">
@@ -290,9 +290,9 @@ export class NeuronPanel {
     const cur = this.inRecipe(d.layer, d.neuron);
     const on = (sign) => cur !== null && Math.sign(cur) === sign;
     const b = (sign, label) => `<button data-rc="${sign}" class="${on(sign) ? `on ${sign > 0 ? "plus" : "minus"}` : ""}"
-      title="${on(sign) ? t("もう一度押すとレシピから外す") : t("レシピに dose {d} で足す(dose は recipe タブで変えられる)", { d: sign > 0 ? "+1" : "−1" })}">${
+      title="${on(sign) ? t("もう一度押すとレシピから外す") : t("強さ {d} でレシピに足す(強さはレシピのパネルで変えられる)", { d: sign > 0 ? "+1" : "−1" })}">${
         on(sign) ? `${t("レシピ")} ${cur > 0 ? "+" : "−"}${Math.abs(cur).toFixed(2)}` : label}</button>`;
-    return `${b(1, t("+ レシピ"))}${b(-1, t("− レシピ"))}`;
+    return `${b(1, t("レシピに足す(+)"))}${b(-1, t("レシピに足す(−)"))}`;
   }
 
   // MoE のニューロンの gain(×0 で消す、×2 で倍)。選ばれたときだけ効く。同じ倍率でもう一度押すと外す
@@ -301,7 +301,7 @@ export class NeuronPanel {
     const b = (k) => {
       const on = cur !== null && cur === k;
       return `<button data-gk="${k}" class="small${on ? ` on ${k < 1 ? "minus" : "plus"}` : ""}" title="${on ? t("もう一度押すとレシピから外す")
-        : t("レシピに gain ×{k} で足す(専門家が選ばれたときだけ効く。倍率は recipe タブで変えられる)", { k })}">${on ? `${t("レシピ")} ×${k}` : t("×{k} レシピ", { k })}</button>`;
+        : t("強さ ×{k} でレシピに足す(専門家が選ばれたときだけ効く。強さはレシピのパネルで変えられる)", { k })}">${on ? `${t("レシピ")} ×${k}` : t("レシピに足す(×{k})", { k })}</button>`;
     };
     const other = cur !== null && cur !== 0 && cur !== 2 ? `<span class="muted mono h-cur">${t("レシピ")} ×${fmt(cur, 2)}</span>` : "";
     return `${b(0)}${b(2)}${other}`;

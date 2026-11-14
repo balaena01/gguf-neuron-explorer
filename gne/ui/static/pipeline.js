@@ -282,7 +282,7 @@ export class PipelinePanel {
       { base: esc(r.base), n: r.n_heads, k: rm.n ?? "—", nA: rm.n_a ?? "—" })}${rm.padded ? ` ${t("(残りが少ないので、射影の値の高い順に {u} 問で作りました)", { u: rm.used })}` : ""}</p>
       ${c ? `<p><b>${t("元の組と合わせた組({m} ヘッド)", { m: c.n_heads })}</b>${c.chosen_by === "fewest_remaining" ? ` <span class="muted">${t("(目標に届いた組が無いので、合わせた残りが最も少ない組)")}</span>` : ""}: ${t("残り {a} → {b} 問", { a: c.remain_before, b: c.remain_after })} ·
         ${t("A 平均 {a} → {b}", { a: fmt(c.a_mean_before, 2), b: fmt(c.a_mean_after, 2) })} · ${t("B ⊥ {a} → {b}", { a: fmt(c.b_drift_orth_base, 3), b: fmt(c.b_drift_orth, 3) })}
-        <button class="small" id="pp-rf-load" title="${t("元の組と追加の組を合わせたユニットで今のレシピを置き換える")}">${t("合わせた組をレシピに読み込む")}</button>
+        <button class="small" id="pp-rf-load" title="${t("元の組と追加の組を合わせたユニットで今のレシピを置き換える")}">${t("合わせた組でレシピを置き換える")}</button>
         <button class="small" id="pp-rf-eval" title="${t("合わせた組のレシピで eval を投げる(倍率 0 と 1、ランダムな対照 8 本)")}">${t("合わせた組で eval する")}</button></p>`
         : `<p class="muted">${t("追加の組を作れなかったので、合わせた組はありません。")}</p>`}
       <p class="muted">${t("下の比較表の「元の組と合わせて読み込む」「合わせて eval する」は、どの行も元の組とその行の組を合わせて使います(追加の組は元の組を当てた状態で探したので、単独では使いません)。")}</p></div>`;
@@ -565,7 +565,7 @@ export class PipelinePanel {
         <td>${fmt(r.s_max, 2)}</td><td>${r.remain ?? "—"}${nA ? ` / ${nA}` : ""}</td><td>${fmt(r.a_max, 2)}</td><td>${fmt(r.a_mean, 2)}</td><td>${sgn(r.b_side_delta, 2)}</td><td>${fmt(r.b_drift_orth, 3)}</td>
         <td class="${r.reached ? "ok" : "ng"}">${r.reached ? "✓" : "×"}</td>
         <td class="l">${crow(r.n_heads) ? `<div class="muted note">${t("元の組と合わせると: 残り {a} → {b} 問 · B ⊥ {c}", { a: crow(r.n_heads).remain_before, b: crow(r.n_heads).remain_after, c: fmt(crow(r.n_heads).b_drift_orth, 3) })}</div>` : ""}
-          <button class="small" data-load="${r.n_heads}" title="${crow(r.n_heads) ? t("元の組とこの組を合わせたユニットで今のレシピを置き換える(この組は元の組を当てた状態で探したので、単独では使わない)") : t("この組(proj のユニット)で今のレシピを置き換える")}">${crow(r.n_heads) ? t("元の組と合わせて読み込む") : t("レシピに読み込む")}</button>
+          <button class="small" data-load="${r.n_heads}" title="${crow(r.n_heads) ? t("元の組とこの組を合わせたユニットで今のレシピを置き換える(この組は元の組を当てた状態で探したので、単独では使わない)") : t("この組(proj のユニット)で今のレシピを置き換える")}">${crow(r.n_heads) ? t("元の組と合わせてレシピを置き換える") : t("レシピを置き換える")}</button>
           <button class="small" data-eval="${r.n_heads}" title="${crow(r.n_heads) ? t("元の組とこの組を合わせたレシピで eval を投げる(倍率 0 と 1、ランダムな対照 8 本)") : t("この組のレシピで eval を投げる(倍率 0 と 1、ランダムな対照 8 本)")}"${r.recipe ? "" : " disabled"}>${crow(r.n_heads) ? t("合わせて eval する") : t("eval する")}</button>
           <button class="small" data-refine="${r.n_heads}" title="${t("この組を当てても目標まで下がらない質問(残り)だけで、組を当てたまま方向を作り直し、因果 → 配分で足すヘッドを探す。結果は新しい一括の結果(名前 _r1 …)として出る")}"${r.remain > 0 ? "" : " disabled"}>${t("残りから追加")}</button></td></tr>`;
     }).join("");
@@ -583,7 +583,7 @@ export class PipelinePanel {
       <div class="evx-scroll"><table class="evx mono pp-cmp"><thead><tr><th>${t("ヘッド数")}</th><th class="l">${t("ヘッドと強さ")}</th><th>s max</th>
         <th title="${t("目標を超えて残った A 側の例の数")}">${t("残り")}</th><th title="${t("A 側の射影の値の最大")}">A max</th><th title="${t("A 側の射影の値の平均")}">${t("A 平均")}</th>
         <th title="${t("B 側の射影の値の変化")}">B Δ</th><th title="${t("B 側の直交成分のずれ(小さいほど他を壊さない)")}">B ⊥</th><th title="${t("射影の値が残りやすい質問の平均が目標に届いたか")}">${t("届いた")}</th><th></th></tr></thead><tbody>${cmp}</tbody></table></div>
-      <p class="muted note">${t("推奨 = 目標に届いた組のうち、残る例の数が最も少ない組と同程度(A 側の 5% まで)で、B 側のずれが最小の 1.25 倍までの組の中で、ヘッドが最も少ない組。ヘッドの名前をクリックで HEAD パネル。")}</p>
+      <p class="muted note">${t("推奨 = 目標に届いた組のうち、残る例の数が最も少ない組と同程度(A 側の 5% まで)で、B 側のずれが最小の 1.25 倍までの組の中で、ヘッドが最も少ない組。ヘッドの名前をクリックでくわしく見る。")}</p>
       ${this.candForm(d)}</section>`;
   }
 }

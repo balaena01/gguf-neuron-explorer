@@ -13,17 +13,17 @@
 <body>
 <header id="header">
   <span class="brand">gne</span>
-  <span class="seg" id="views">
-    <button data-view="map" class="on">map</button><button data-view="layers">layers</button><button data-view="direction">direction</button><button data-view="eval">eval</button><button data-view="writers">writers</button><button data-view="embed">embed</button>
-  </span>
-  <label class="map-only"><span class="lbl">layer</span> <select id="layer-select" data-i18n-title="表示する層" title="表示する層"></select></label>
-  <label class="map-only"><span class="lbl">layout</span> <select id="layout-select" data-i18n-title="シート内の並べ方(§4.4)" title="シート内の並べ方(§4.4)"><option value="index">index</option><option value="writes">writes</option><option value="lens">lens</option></select></label>
-  <label class="map-only"><span class="lbl">color</span> <select id="color-select" data-i18n-title="点の色(overlay)" title="点の色(overlay)"></select></label>
-  <span id="cos-thr-wrap" class="hidden" data-i18n-title="|cos| の閾値" title="|cos| の閾値"><input type="range" id="cos-thr" min="0" max="1" step="0.001"><span id="cos-thr-val" class="mono"></span></span>
+  <!-- 画面の切り替え: 探す / 作る / 確かめる の 3 群 -->
+  <nav id="views" aria-label="画面" data-i18n-aria-label="画面">
+    <div class="grp"><span class="grp-l" data-i18n="探す">探す</span><span class="nav">
+      <button type="button" data-view="map" class="on" aria-current="true" data-i18n="地図">地図</button><button type="button" data-view="layers" data-i18n="層">層</button><button type="button" data-view="writers" data-i18n="書き手">書き手</button><button type="button" data-view="embed" data-i18n="埋め込み">埋め込み</button></span></div>
+    <div class="grp"><span class="grp-l" data-i18n="作る">作る</span><span class="nav">
+      <button type="button" data-view="direction" data-i18n="方向">方向</button><button type="button" data-view="chips" data-i18n-title="対照の文から方向を作り、効くヘッドを探して強さを配る(CHiPS)" title="対照の文から方向を作り、効くヘッドを探して強さを配る(CHiPS)">CHiPS</button><button type="button" data-view="keys" data-i18n="鍵" data-i18n-title="鍵つきの書き込み(keyed)の鍵を作り、分かれ方を確かめる" title="鍵つきの書き込み(keyed)の鍵を作り、分かれ方を確かめる">鍵</button><button type="button" data-view="fish" data-i18n-title="すでにあるニューロンを式から計算した重みで書き換え、決まった場面の返事でだけ方向を書く(FiSH)" title="すでにあるニューロンを式から計算した重みで書き換え、決まった場面の返事でだけ方向を書く(FiSH)">FiSH</button></span></div>
+    <div class="grp"><span class="grp-l" data-i18n="確かめる">確かめる</span><span class="nav">
+      <button type="button" data-view="eval" data-i18n="評価">評価</button><button type="button" data-view="cand" data-i18n="強さの候補">強さの候補</button></span></div>
+  </nav>
   <label><span class="lbl">jump</span> <input id="jump" placeholder="L14 N8949" size="11" spellcheck="false" data-i18n-title="ニューロンへ飛ぶ(L14 N8949 の形で Enter)" title="ニューロンへ飛ぶ(L14 N8949 の形で Enter)"></label>
   <span id="search" class="seg"><select id="search-mode" data-i18n-title="検索の対象" title="検索の対象"><option value="lens">lens</option><option value="words">words</option><option value="name">name</option></select><input id="search-q" data-i18n-placeholder="検索(alien など)" placeholder="検索(alien など)" size="14" spellcheck="false"></span>
-  <button id="web-toggle" class="map-only" data-i18n-title="開いたニューロンの配線: 直接(上流・下流 14 本ずつ)→ web(多段)→ なし" title="開いたニューロンの配線: 直接(上流・下流 14 本ずつ)→ web(多段)→ なし" data-i18n="線: 直接">線: 直接</button>
-  <button id="reset-view" data-i18n-title="全体の視点に戻る" title="全体の視点に戻る" data-i18n="全体">全体</button>
   <button id="agent-btn" class="hidden">agent</button>
   <span id="lang" class="seg" title="表示の言語 / Language"><button data-lang="ja">JP</button><button data-lang="en">EN</button></span>
 </header>
@@ -31,18 +31,29 @@
   <aside id="list" class="panel collapsed">
     <div class="panel-head"><button class="toggle" data-target="list">LIST</button></div>
     <div class="panel-body">
-      <div class="tabs" id="list-tabs"><button data-tab="rank" class="on">rank</button><button data-tab="search" class="hidden" data-i18n="検索">検索</button><button data-tab="fires">fires</button><button data-tab="recipe">recipe <span id="recipe-count" class="muted"></span></button></div>
+      <div class="tabs" id="list-tabs"><button data-tab="rank" class="on">rank</button><button data-tab="search" class="hidden" data-i18n="検索">検索</button><button data-tab="fires">fires</button></div>
       <div id="rank"></div>
       <div id="search-list" class="hidden"></div>
       <div id="fires-list" class="hidden"></div>
-      <div id="recipe-list" class="hidden"></div>
     </div>
   </aside>
   <section id="map-wrap">
-    <div id="map"></div>
-    <div id="overlay" class="mono"></div>
-    <div id="tooltip" class="mono hidden"></div>
-    <div id="legend" class="mono"></div>
+    <!-- 地図だけで使う設定(層・並べ方・色・線)と、この層で計算 -->
+    <div id="map-bar">
+      <label><span class="lbl" data-i18n="層">層</span> <select id="layer-select" data-i18n-title="表示する層" title="表示する層"></select></label>
+      <label><span class="lbl" data-i18n="並べ方">並べ方</span> <select id="layout-select" data-i18n-title="シート内の並べ方" title="シート内の並べ方"><option value="index">index</option><option value="writes">writes</option><option value="lens">lens</option></select></label>
+      <label><span class="lbl" data-i18n="色">色</span> <select id="color-select" data-i18n-title="点の色(overlay)" title="点の色(overlay)"></select></label>
+      <span id="cos-thr-wrap" class="hidden" data-i18n-title="|cos| の閾値" title="|cos| の閾値"><input type="range" id="cos-thr" min="0" max="1" step="0.001"><span id="cos-thr-val" class="mono"></span></span>
+      <button id="web-toggle" data-i18n-title="開いたニューロンの配線: 直接(上流・下流 14 本ずつ)→ web(多段)→ なし" title="開いたニューロンの配線: 直接(上流・下流 14 本ずつ)→ web(多段)→ なし" data-i18n="線: 直接">線: 直接</button>
+      <button id="map-compute" class="hidden" aria-haspopup="menu" data-i18n-title="いまの層(層の選択欄)で lens・sweep・配置・connections を計算する(層の番号の右クリックと同じ)" title="いまの層(層の選択欄)で lens・sweep・配置・connections を計算する(層の番号の右クリックと同じ)" data-i18n="この層で計算 ▾">この層で計算 ▾</button>
+      <button id="reset-view" class="quiet" data-i18n-title="全体の視点に戻る" title="全体の視点に戻る" data-i18n="全体を見る">全体を見る</button>
+    </div>
+    <div id="map-stage">
+      <div id="map"></div>
+      <div id="overlay" class="mono"></div>
+      <div id="tooltip" class="mono hidden"></div>
+      <div id="legend" class="mono"></div>
+    </div>
     <div id="view-placeholder" class="hidden"></div>
     <div id="layers-view" class="hidden"></div>
     <div id="direction-view" class="hidden"></div>
@@ -51,17 +62,20 @@
     <div id="embed-view" class="hidden"></div>
     <div id="agent-pop" class="hidden"></div>
   </section>
-  <aside id="neuron" class="panel collapsed">
-    <div class="panel-head"><button class="toggle" data-target="neuron">NEURON</button><button id="neuron-wide" class="toggle" data-i18n-title="NEURON を広げる・戻す" title="NEURON を広げる・戻す" data-i18n="⇔ 広げる">⇔ 広げる</button></div>
+  <!-- くわしく見る: ニューロン・ヘッド・専門家を 1 枚で(種類で中身を切り替える) -->
+  <aside id="detail" class="panel side collapsed">
+    <div class="panel-head"><button class="toggle" data-target="detail" data-i18n="くわしく見る">くわしく見る</button>
+      <span class="seg" id="detail-kinds"><button data-kind="neuron" disabled data-i18n="ニューロン">ニューロン</button><button data-kind="head" disabled data-i18n="ヘッド">ヘッド</button><button data-kind="expert" class="hidden" disabled data-i18n="専門家">専門家</button></span>
+      <button id="detail-wide" class="quiet" data-i18n-title="くわしく見るを広げる・戻す" title="くわしく見るを広げる・戻す" data-i18n="⇔ 広げる">⇔ 広げる</button></div>
     <div class="panel-body" id="neuron-body"><p class="muted" data-i18n="マップのニューロン、または LIST の行をクリック">マップのニューロン、または LIST の行をクリック</p></div>
+    <div class="panel-body hidden" id="head-body"><p class="muted" data-i18n="マップの板の上辺の刻み(ヘッド)をクリック。jump に L21 H7 でも開けます">マップの板の上辺の刻み(ヘッド)をクリック。jump に L21 H7 でも開けます</p></div>
+    <div class="panel-body hidden" id="expert-body"><p class="muted" data-i18n="jump に L12 E37 で専門家を開けます(ニューロンの「専門家を開く」からも)">jump に L12 E37 で専門家を開けます(ニューロンの「専門家を開く」からも)</p></div>
   </aside>
-  <aside id="head" class="panel collapsed">
-    <div class="panel-head"><button class="toggle" data-target="head">HEAD</button><button id="head-wide" class="toggle" data-i18n-title="HEAD を広げる・戻す" title="HEAD を広げる・戻す" data-i18n="⇔ 広げる">⇔ 広げる</button></div>
-    <div class="panel-body" id="head-body"><p class="muted" data-i18n="マップの板の上辺の刻み(ヘッド)をクリック。jump に L21 H7 でも開けます">マップの板の上辺の刻み(ヘッド)をクリック。jump に L21 H7 でも開けます</p></div>
-  </aside>
-  <aside id="expert" class="panel collapsed hidden">
-    <div class="panel-head"><button class="toggle" data-target="expert">EXPERT</button><button id="expert-wide" class="toggle" data-i18n-title="EXPERT を広げる・戻す" title="EXPERT を広げる・戻す" data-i18n="⇔ 広げる">⇔ 広げる</button></div>
-    <div class="panel-body" id="expert-body"><p class="muted" data-i18n="jump に L12 E37 で専門家を開けます(NEURON パネルの「EXPERT パネルで開く」からも)">jump に L12 E37 で専門家を開けます(NEURON パネルの「EXPERT パネルで開く」からも)</p></div>
+  <!-- レシピ: どの画面からも足せるよう、右に常に置く(細くたたむ・広げる) -->
+  <aside id="recipe" class="panel side">
+    <div class="panel-head"><button class="toggle" data-target="recipe" data-i18n="レシピ">レシピ</button><span id="recipe-count" class="pill"></span>
+      <button id="recipe-wide" class="quiet" data-i18n-title="レシピを広げる・戻す" title="レシピを広げる・戻す" data-i18n="⇔ 広げる">⇔ 広げる</button></div>
+    <div class="panel-body" id="recipe-list"></div>
   </aside>
 </main>
 <footer id="jobs" class="mono"><span id="jobs-bar"><span class="muted" data-i18n="jobs: なし">jobs: なし</span></span><span id="status"><span id="status-main"></span></span><span id="perf"></span></footer>

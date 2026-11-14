@@ -71,7 +71,7 @@ export class EvalView {
           <label class="muted">${t("倍率")} <input id="evx-doses" value="0,0.25,0.5,0.75,1" size="16" spellcheck="false"></label>
           <label class="muted">when <select id="evx-when"><option>all</option><option>gen</option><option>assistant</option></select></label>
           <label class="muted" title="${t("各倍率で同じ大きさのランダムな向きのレシピも測る(時間はおよそ本数倍)")}">${t("対照")} <input class="w4" id="evx-rc-n" type="number" min="0" max="64" value="0"></label>
-          <label class="muted" title="${t("反応性(CHANGE-04 F): reactivity の対(トリガーあり/なし)と validate.match を持つ対照集合の YAML。空なら測らない")}">${t("反応性")} <input id="evx-react" placeholder="configs/contrast/….yaml" size="22" spellcheck="false"></label>
+          <label class="muted" title="${t("反応性: reactivity の対(トリガーあり/なし)と validate.match を持つ対照集合の YAML。空なら測らない")}">${t("反応性")} <input id="evx-react" placeholder="configs/contrast/….yaml" size="22" spellcheck="false"></label>
           <label class="muted" title="${t("レシピのヘッドを同じ k のランダムなヘッドに替えた対照で反応性も測る本数(反応性があるときだけ)")}">${t("ヘッドの対照")} <input class="w4" id="evx-hc-n" type="number" min="0" max="64" value="0"></label>
           <label class="muted" title="${t("方向を使うレシピ(ヘッドの proj など)で、方向の指標(射影の値の下がり方・ずれ・判定の一致率)も測る。外すと能力・ppl・混入・性格の変化量だけで早く終わる")}"><input type="checkbox" id="evx-dm" checked> ${t("方向の指標")}</label>
           <label class="muted" title="${t("方向の指標で読む質問の数(A・B それぞれ。一致率の返事もこの数まで)。多い対照集合は等間隔に間引く。0 で全部")}">${t("問")} <input class="w45" id="evx-dm-n" type="number" min="0" max="4096" value="64"></label>
@@ -283,7 +283,7 @@ export class EvalView {
       : `<tr class="${m.method === "keyed" ? "best" : ""}"><td class="l">${esc(label(m.method))}</td><td class="desc">${esc(m.desc || "")}</td>
           <td>${fmt(m.beta, 3)}</td><td>${m.matched === true ? `<span class="ok">○</span>` : m.matched === false ? `<span class="ng" title="${t("書き込みたい位置の変化を ±10% でそろえられなかった(b_over_a で比べる)")}">×</span>` : "—"}</td>
           <td>${sg(m.a_par)}</td><td>${sg(m.b_par)}</td><td>${fmt(m.b_norm, 3)}</td><td>${fmt(m.dt_norm, 3)}</td><td>${sg(m.selectivity)}</td><td>${fmt(m.b_over_a, 3)}</td>
-          <td>${m.recipe && (m.method === "keyed" || m.method === "proj") ? `<button class="small" data-krc="${i}" title="${t("この方式のレシピを recipe タブに読み込む")}">${t("レシピに")}</button>` : ""}</td></tr>`)).join("");
+          <td>${m.recipe && (m.method === "keyed" || m.method === "proj") ? `<button class="small" data-krc="${i}" title="${t("この方式のレシピでレシピを置き換える")}">${t("レシピを置き換える")}</button>` : ""}</td></tr>`)).join("");
     const cmp = k.compare || {};
     const ratio = (o) => Object.entries(o || {}).map(([m, v]) => `${esc(label(m))} ${fmt(v, 2)}`).join(" · ");
     const p = k.pseudo;
@@ -341,7 +341,7 @@ export class EvalView {
       : `<tr class="${r === best ? "best" : ""}"><td class="l">${esc(label(r.method))}</td><td class="desc">${esc(r.desc || "")}</td><td>${fmt(r.alpha, 3)}</td><td>${fmt(r.score_a, 2)}</td>
           <td>${fmt(r.drift_orth_b, 3)}</td><td>${fmt(r.capability_drop_pt, 1)}</td><td>${r.ppl_worse_pct >= 0 ? "+" : ""}${fmt(r.ppl_worse_pct, 1)}%</td><td>${pct(r.mix_increase, 2)}</td>${
           hasRate ? `<td>${pct(r.rate, 0)}</td><td>${pct(r.rate_drop, 0)}</td>` : ""}<td class="${r.shippable ? "ok" : "ng"}">${r.shippable ? t("配布可") : "×"}${
-          r.recipe ? ` <button class="small" data-rc="${i}" title="${t("この方式のレシピを recipe タブに読み込む")}">${t("レシピに")}</button>` : ""}</td></tr>`)).join("");
+          r.recipe ? ` <button class="small" data-rc="${i}" title="${t("この方式のレシピでレシピを置き換える")}">${t("レシピを置き換える")}</button>` : ""}</td></tr>`)).join("");
     body.innerHTML = `
       <p class="note mono">${t("方式の比較")} · ${t("方向 {d}", { d: esc(d.direction || "—") })} · ${t("射影の値を測る層 L{L}", { L: d.score_layer ?? "—" })} · ${
         t("目標の A 側の射影の値 {v}({src})", { v: fmt(d.target, 2), src: d.target_from === "match_effect" ? "--match-effect" : t("このレシピの水準") })} · ${
@@ -361,7 +361,7 @@ export class EvalView {
         <td>${fmt(r.s_max, 2)}</td><td>${r.remain ?? "—"}</td><td>${fmt(r.capability_drop_pt, 1)}</td><td>${r.ppl_worse_pct >= 0 ? "+" : ""}${fmt(r.ppl_worse_pct, 1)}%</td>
         <td>${pct(r.mix_increase, 2)}</td><td>${fmt(r.dir_drop_a, 2)}</td><td>${fmt(r.drift_orth_b, 3)}</td><td>${pct(r.rate, 0)}</td>
         <td class="${r.shippable ? "ok" : r.shippable === false ? "ng" : ""}">${r.shippable ? t("配布可") : r.shippable === false ? "×" : ""}</td>
-        <td class="units">${esc((r.units || []).join(" "))}</td><td>${(r.units || []).length ? `<button class="small" data-nh="${i}" title="${t("この組(proj のユニット)で今のレシピを置き換える")}">${t("レシピに")}</button>` : ""}</td></tr>`).join("");
+        <td class="units">${esc((r.units || []).join(" "))}</td><td>${(r.units || []).length ? `<button class="small" data-nh="${i}" title="${t("この組(proj のユニット)で今のレシピを置き換える")}">${t("レシピを置き換える")}</button>` : ""}</td></tr>`).join("");
     const notes = rows.flatMap((r) => (r.notes || []).map((x) => `${t("{n} ヘッド", { n: r.n_heads })}: ${x}`));
     body.innerHTML = `
       <p class="note mono">${t("ヘッド数の曲線")} · ${t("方向 {d}", { d: esc(d.direction || "—") })} · ${t("配分 {a}", { a: esc(String(d.alloc || "").split("/").pop()) })}${

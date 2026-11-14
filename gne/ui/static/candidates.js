@@ -128,12 +128,12 @@ export class CandidatesPanel {
           <td>${c.name === "base" ? "—" : fmt(c.scale, 2)}</td><td>${side}</td><td>${goalLabel(c.goal)}</td><td>${pct(c[`rate_${lo}`])}</td><td>${fmt(c[`d4_${lo}`], 2)}</td>
           <td>${c.name === "base" ? "—" : pct(1 - c[`same_as_base_${other}`])}</td>
           ${has ? `<td>${v ? fmt(v.P, 2) : "—"}</td><td>${v ? fmt(v.C, 2) : "—"}</td><td><b>${v ? fmt(v[g], 2) : "—"}</b></td><td>${v ? v.n : ""}</td>` : ""}
-          <td class="l">${c.name === "base" ? "" : `<button class="small" data-load="${esc(c.name)}">${t("レシピに")}</button>`}</td></tr>`);
+          <td class="l">${c.name === "base" ? "" : `<button class="small" data-load="${esc(c.name)}">${t("レシピを置き換える")}</button>`}</td></tr>`);
       }
     }
     const bests = Object.entries(best).map(([g, b]) => `<div class="cd-best"><b>${t("{goal}向きでいちばん良い: {name}", { goal: goalLabel(g), name: esc(b.name) })}</b>
       <span class="mono">${t("目的 {v}(無介入 {b})", { v: fmt(b.value, 2), b: fmt(b.base, 2) })}</span>
-      <button class="small" data-load="${esc(b.name)}">${t("レシピに読み込む")}</button> <button class="small" data-chat="${esc(b.name)}">${t("1 列チャットで試す")}</button></div>`).join("");
+      <button class="small" data-load="${esc(b.name)}">${t("レシピを置き換える")}</button> <button class="small" data-chat="${esc(b.name)}">${t("1 列チャットで試す")}</button></div>`).join("");
     const missing = (d.scores_missing || []).length;
     el.innerHTML = `${bests}
       ${!has ? `<p class="note">${t("まだ集計していません。「名前を伏せて採点する」で全部の返事に点を付けると、候補ごとに集計します。")}</p>` : missing ? `<p class="pp-warn note">${t("点の無い返事が {n} 本あります(集計はある分だけ)。", { n: missing })}</p>` : ""}
@@ -155,7 +155,7 @@ export class CandidatesPanel {
     const arg = { name: `${d.name}-${c.name}`, specs: candidateSpecs(c, d.direction), direction: d.direction, withRecipe: d.with_recipe };
     const note = await (chat ? this.onChatCandidate(arg) : this.onLoadCandidate(arg));
     const el = this.$("#cd-note");
-    if (el) el.textContent = note || t("{name} を recipe タブに読み込みました({n} ユニット)", { name: arg.name, n: arg.specs.length });
+    if (el) el.textContent = note === false ? t("やめました") : note || t("{name} でレシピを置き換えました({n} ユニット)", { name: arg.name, n: arg.specs.length });
   }
 
   // --- 返事を並べる -------------------------------------------------------------------------------

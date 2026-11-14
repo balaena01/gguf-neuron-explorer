@@ -842,10 +842,10 @@ export class KeyPanel {
       isBuild && r.matched && mode === "same" ? ` · ${t("正規表現が一致した例 {a} / {n}", { a: r.matched.A, n: r.matched.of })}` : ""}${isBuild && Number.isFinite(+r.seconds) ? ` · ${fmt(r.seconds, 1)} ${t("秒")}` : ""}</p>`;
     const add = `<div class="kx-add muted note">${t("書き込む方向")} <select id="kx-dir">${dirs.length ? dirs.map((d) => `<option${d === pick ? " selected" : ""}>${esc(d)}</option>`).join("") : `<option value="">${t("(なし)")}</option>`}</select>
       α <input class="w5" id="kx-alpha" type="number" step="0.05" value="${esc(String(alpha))}" title="${t("α = 1 で、観測した A − B の平均差 r_L をそのまま書く。負で打ち消す")}">
-      <span>${dirs.length ? t("行の「+ レシピ」で、その層の keyed のユニットをレシピに足す。「key-verify」で LoRA が式どおりに書くかを確かめる") : t("方向がありません(「方向から key-check まで」で作れます)")}</span></div>`;
+      <span>${dirs.length ? t("行の「レシピに足す」で、その層の keyed のユニットをレシピに足す。「key-verify」で LoRA が式どおりに書くかを確かめる") : t("方向がありません(「方向から key-check まで」で作れます)")}</span></div>`;
     const rows = this._rows().map((x) => `<tr${x.weak ? ` class="rnd"` : ""}><td>L${x.layer}</td><td title="${t("|k| / |μ|: μ のうち、書き込みたくない位置の部分空間に直交する割合")}">${fmt(x.kn, 3)}</td><td title="${t("1 / kn: 書き込みたくない位置への漏れが最大これだけ増える")}">${fmt(x.gain, 1)}</td><td>${x.q_rank ?? "—"}</td><td>${fmt(x.build_auc, 3)}</td>
       <td class="l">${x.weak ? `<span class="pp-warn">${t("弱い(kn < 0.05)")}</span>` : ""}</td>
-      <td><button class="small" data-kadd="${x.layer}"${dirs.length ? "" : " disabled"} title="${t("この層の keyed のユニットをレシピに足す")}">${t("+ レシピ")}</button>
+      <td><button class="small" data-kadd="${x.layer}"${dirs.length ? "" : " disabled"} title="${t("この層の keyed のユニットをレシピに足す")}">${t("レシピに足す")}</button>
         <button class="small" data-kverify="${x.layer}"${dirs.length ? "" : " disabled"} title="${t("この層で、実行時の LoRA が式 α(κᵀx)d どおりに書くかを確かめる(V30、α = 1・2、数秒)")}">key-verify</button></td></tr>`).join("");
     const dropped = isBuild ? (r.dropped || []).map((d) => `L${d.layer}: ${d.error}`) : Object.entries(info.dropped || {}).map(([L, m]) => `L${L}: ${m}`);
     const warns = isBuild ? r.warnings || [] : [];

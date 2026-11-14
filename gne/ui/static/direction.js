@@ -3,8 +3,8 @@
 // 下: 選んだ層(グラフをクリック、既定は基準層)での例ごとの A / B の射影の値の分布と、例ごとの表。
 // 基準層は「L を基準層にする」で手で上書きできる(direction_score の set_base)。初めて測るときに基準層がまだ無ければ、
 // cohen_d が最大の層が記録される(gne direction score と同じ)。基準層があれば測り直しても上書きしない。
-// 上の切り替えで「JSON から方向とヘッドを作る」(pipeline.js、head_pipeline のジョブ)と「強さの候補」(candidates.js、
-// heads_candidates のジョブの結果と名前を伏せた採点)に替わる。方向が 1 つも無ければ「JSON から作る」を開く。
+// このビューは中身を入れ替えて、上の帯の「方向」(この画面)・「CHiPS」(pipeline.js、JSON から方向とヘッドを作る head_pipeline のジョブ)・
+// 「強さの候補」(candidates.js、heads_candidates のジョブの結果と名前を伏せた採点)・「鍵」・「FiSH」を出す。どれを出すかは app.js が setMode で決める。
 // 「鍵(keyed)」(keys.js、CHANGE-07 G)は鍵つきの書き込みの鍵の作成(direction_key)・key-check(direction_key_check)・
 // 方向から key-check までの一括(direction_key_pipeline)・専門家の選ばれ方(direction_key_experts)・key-verify(direction_key_verify)。
 import { getJSON, postJSON } from "./api.js";
@@ -21,10 +21,11 @@ const L0 = 52, R0 = 52, T0 = 16, B0 = 30, LH = 250, HH = 170;
 const fmt = (x, d = 2) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : (+x).toFixed(d));
 
 export class DirectionView {
-  constructor(root, { onChanged, pipeline, candidates, keyed, fish } = {}) {
+  constructor(root, { onChanged, onModeChanged, pipeline, candidates, keyed, fish } = {}) {
     this.root = root;
     this.onChanged = onChanged || (() => {});   // 基準層を記録・上書きした → /api/model を取り直す
-    this.mode = null;                  // "dir"(方向を見る)か "pipe"(JSON から作る)。null は未選択(方向が無ければ pipe)
+    this.onModeChanged = onModeChanged || (() => {});   // 中から画面が替わった(一括の結果の「方向を見る」など)→ 上の帯の印を合わせる
+    this.mode = null;                  // dir(方向)・pipe(CHiPS)・cand(強さの候補)・key(鍵)・fish(FiSH)
     this.list = [];
     this.name = null;
     this.meta = null;                  // /api/directions/<name>(層・基準層・層どうしの cos)
@@ -32,7 +33,7 @@ export class DirectionView {
     this.sel = null;                   // 分布を見る層
     this.hoverL = null;
     this.busy = false;
-    root.innerHTML = `<div class="dv-mode"><span class="seg" id="dv-mode"><button data-m="dir">${t("方向を見る")}</button><button data-m="pipe">${t("JSON から方向とヘッドを作る")}</button><button data-m="cand">${t("強さの候補")}</button><button data-m="key" title="${t("鍵つきの書き込み(keyed)の鍵を対照集合から作り、作成に使っていない例で状態を分けているかを確かめる")}">${t("鍵(keyed)")}</button><button data-m="fish" title="${t("FiSH: すでにあるニューロンを、式から計算した重みで書き換えて、決まった場面の返事でだけ方向を書くようにする(方向・ニューロン・鍵・レシピ・確かめ)")}">FiSH</button></span></div>
+    root.innerHTML = `
       <div id="dv-dir"><div class="dv-tools">
         <label class="muted">${t("方向")} <select id="dv-pick"></select></label>
         <button id="dv-run" title="${t("対照集合の A / B のプロンプトを流して、全層の射影の値を測り直す(モデルを使う。GPU を待つことがあります)")}">${t("測り直す")}</button>
@@ -59,7 +60,6 @@ export class DirectionView {
     this.cand = new CandidatesPanel(this.$("#dv-cand"), candidates || {});
     this.key = new KeyPanel(this.$("#dv-key"), keyed || {});
     this.fish = new FishPanel(this.$("#dv-fish"), fish || {});         // FiSH(fish.js): 計算で作るニューロンを最初から最後まで
-    for (const b of root.querySelectorAll("#dv-mode button")) b.addEventListener("click", () => this.setMode(b.dataset.m));
     this.cv = this.$("#dv-line");
     this.hv = this.$("#dv-hist");
     this.$("#dv-pick").addEventListener("change", (ev) => this.select(ev.target.value));
@@ -83,14 +83,15 @@ export class DirectionView {
   }
 
   _modeUI(m) {
+    const changed = this.mode !== m;
     this.mode = m;
-    for (const b of this.root.querySelectorAll("#dv-mode button")) b.classList.toggle("on", b.dataset.m === m);
     this.$("#dv-dir").classList.toggle("hidden", m !== "dir");
     this.$("#dv-pipe").classList.toggle("hidden", m !== "pipe");
     this.$("#dv-cand").classList.toggle("hidden", m !== "cand");
     this.$("#dv-key").classList.toggle("hidden", m !== "key");
     this.$("#dv-fish").classList.toggle("hidden", m !== "fish");
     if (m === "dir") this.draw();
+    if (changed) this.onModeChanged(m);
   }
 
   // 「強さの候補」でその結果を開く
@@ -107,7 +108,7 @@ export class DirectionView {
     if (j.kind !== "heads_candidates") return;
     const mine = j.id === this.pipe.candJobId;
     this.pipe.candJobEnded(j);
-    if (j.status === "done" && mine) this.setMode("cand");
+    if (j.status === "done" && mine && this.mode === "pipe") this.setMode("cand");   // CHiPS の画面で待っていたときだけ、強さの候補に移る
     await this.cand.jobEnded(j, mine);
   }
 
@@ -120,8 +121,7 @@ export class DirectionView {
 
   async refresh() {
     try { this.list = await getJSON("/api/directions"); } catch { this.list = []; }
-    if (this.mode === null) this.setMode(this.list.length ? "dir" : "pipe");
-    else if (this.mode === "pipe") this.pipe.refreshList();
+    if (this.mode === "pipe") this.pipe.refreshList();
     else if (this.mode === "cand") this.cand.refreshList();
     else if (this.mode === "key") this.key.refresh();
     const pick = this.$("#dv-pick");
@@ -129,7 +129,7 @@ export class DirectionView {
       : `<option value="">${t("(なし)")}</option>`;
     if (!this.list.length) {
       this.name = null; this.meta = null;
-      this.$("#dv-info").innerHTML = `<p class="muted">${t("方向がありません(gne direction --contrast で作れます)")}</p>`;
+      this.$("#dv-info").innerHTML = `<p class="muted">${t("方向がありません。上の帯の「CHiPS」か「鍵」「FiSH」で作れます(gne direction --contrast でも作れます)")}</p>`;
       this.$("#dv-run").disabled = true;
       this.draw();
       return;
