@@ -14,6 +14,10 @@ pipeline に direction(すでにある方向の名前)を渡すと、方向は�
 stack_fast(既定は切): 層を重ねる方向づくりの読み直しを、区切りが続く範囲ごとに 1 回で読む(Session.direction の stack_fast。速いが、
 方向が既定の読み方とわずかに違う)。効くのは方向を作る段だけ。どちらの読み方で作った方向かは、方向のファイル(stack_read)と、
 結果・要約(direction_stack_fast)に残る。すでにある方向を使うときは効かない(一緒に渡すと注意を出す)。
+key_fit(鍵の作り方。既定は mean): 区切りごとの位置の鍵を、いまの作り方(mean)か、最小二乗の鍵(ridge。ますごとの重み。
+gne/keyed_ridge.py、docs/fish.md §3)で作る。key_c は ridge の正則化の強さ(省くと、鍵を作る質問だけを使った質問単位の 5 分割で決める)。
+場面の鍵(鍵 2 つの形)とほぼ 1 を返す鍵の作り方は変わらない。当てた状態で鍵を作り直す段にも同じ作り方を使う。どちらで作ったかは、
+鍵のファイル(info の key_fit)と、結果・要約(key_fit・ridge)、足した量の結果(key_fit)に残る。
 重みに入れる前に試す(try_step): 区切りつきの方向を、狙う場面の質問の返事の位置どおりに、層の出力へ直接足して生成する
 (control vector を生成の途中で付け替える。ニューロンも鍵も使わない)。層・区切りごとの強さを、作る前に返事で比べるのに使う。
 """
@@ -29,9 +33,9 @@ from .steer import GneError
 FORMS = ("one", "two", "cap")                 # 鍵 1 つ / 鍵 2 つ(場面 かつ 位置)/ 上限つきの 2 個組
 PER_SEGMENT = {"one": 1, "two": 1, "cap": 2}  # 区切り 1 つに要るニューロンの数
 SETTINGS = ("layers", "segments", "form", "alpha", "cap", "same_reply", "stack", "stack_fast", "pseudo", "max_tokens",
-            "response_tokens", "iv", "rekey")
+            "response_tokens", "iv", "rekey", "key_fit", "key_c")
 DEFAULTS = {"segments": "0,1-3,4-", "form": "cap", "alpha": 0.9, "same_reply": True, "stack": True, "stack_fast": False, "pseudo": 4,
-            "max_tokens": 96, "response_tokens": 96}
+            "max_tokens": 96, "response_tokens": 96, "key_fit": "mean"}
 
 
 def _form(form: str) -> str:
@@ -277,12 +281,22 @@ def _build_stats(session, name: str) -> dict:
 
 
 def keys_step(session, contrast: str, *, base: str, layers=None, segments=None, form: str = "cap", pseudo: int = 4,
-              max_tokens: int = 96, subset: str = "all", iv=None, seed: int = 0) -> dict:
+              max_tokens: int = 96, subset: str = "all", iv=None, seed: int = 0, key_fit: str | None = None, key_c=None) -> dict:
     """区切りごとの位置の鍵と、形に要る鍵(鍵 2 つの形は場面の鍵、上限つきの形はほぼ 1 を返す鍵)をまとめて作る。
-    iv(レシピの名前・パスか、ユニットの書き方のリスト)を渡すと、それを当てた状態で作る。"""
+    iv(レシピの名前・パスか、ユニットの書き方のリスト)を渡すと、それを当てた状態で作る。
+    key_fit = "ridge" で、位置の鍵を最小二乗の鍵(ますごとの重み)にする(既定は mean = いまの作り方)。key_c はその正則化の強さ
+    (省くと 5 分割で決める。選ばれた値と、候補の端だったかは、結果の ridge と notes)。書く位置が before:<正規表現> の鍵には使えない。"""
+    from .keyed_ridge import check_c, check_key_fit
     t0 = time.perf_counter()
     Ls = _layers(layers)
     segs = _segments(segments)
+    kf = check_key_fit(key_fit)
+    key_c = check_c(key_c)
+    if kf == "ridge" and before_mode(segs):
+        raise GneError("BAD_ARGS", "最小二乗の鍵(key_fit ridge)は、返事の位置の区切り(0,1-3,4- など)の鍵だけです",
+                       "書く位置が before:<正規表現> のときは、いまの作り方(key_fit mean)で作ります")
+    if key_c is not None and kf != "ridge":
+        raise GneError("BAD_ARGS", "正則化の強さ(key_c)は、最小二乗の鍵(key_fit ridge)のときだけ使います")
     names = key_names(base, len(segs), _form(form))
     rows, notes = [], []
 
@@ -308,7 +322,8 @@ def keys_step(session, contrast: str, *, base: str, layers=None, segments=None, 
     rs = session.direction_keys(contrast, [(names["position"][i], sg if sg.startswith("before:") else f"pos:{sg}")
                                            for i, sg in enumerate(segs)],
                                 target="mlpin", layers=Ls, subset=subset, max_tokens=int(max_tokens), pseudo=int(pseudo), iv=iv,
-                                seed=int(seed), progress=session.progress, gen_cache=cache)
+                                seed=int(seed), progress=session.progress, gen_cache=cache,
+                                **({"key_fit": kf, "key_c": key_c} if kf != "mean" else {}))
     for sg, r in zip(segs, rs, strict=True):
         add("position", sg, r)
     stage["position"] = time.perf_counter() - t
@@ -323,7 +338,11 @@ def keys_step(session, contrast: str, *, base: str, layers=None, segments=None, 
         add("one", None, session.direction_key(contrast, role="one", layers=Ls, name=names["one"], subset=subset,
                                                max_tokens=int(max_tokens), iv=iv, progress=session.progress, gen_cache=cache))
         stage["one"] = time.perf_counter() - t
+    ridge = rs[0].get("ridge") if kf == "ridge" else None
+    if ridge and names["scene"]:
+        notes.append("場面の鍵(鍵 2 つの形のゲートの鍵)は、いまの作り方のままです(最小二乗の鍵にするのは、区切りごとの位置の鍵だけ)")
     return {"base": base, "form": form, "segments": segs, "layers": Ls, "names": names, "rows": rows, "subset": subset,
+            "key_fit": kf, "ridge": ridge,
             "pseudo": int(pseudo), "max_tokens": int(max_tokens), "iv": _iv_text(iv),
             "notes": notes + ["比べは作成に使った例での値です(甘い)。実際に足す量は「確かめる」の表で見ます"],
             "key_seconds": stage, "seconds": time.perf_counter() - t0}
@@ -467,7 +486,8 @@ def behave_step(session, specs: list[str], contrast: str, *, name: str, prompts=
 def pipeline(session, contrast: str, *, name: str, layers=None, segments=None, form: str = "cap", alpha=0.9,
              same_reply: bool = True, stack: bool = True, compare: bool = True, pseudo: int = 4, max_tokens: int = 96,
              response_tokens: int = 96, iv=None, rekey: bool = True, neurons: dict | None = None, top: int = 20,
-             save: str | Path | None = None, direction: str | None = None, cap=None, stack_fast: bool = False) -> dict:
+             save: str | Path | None = None, direction: str | None = None, cap=None, stack_fast: bool = False,
+             key_fit: str | None = None, key_c=None) -> dict:
     """方向 → ニューロンの表 → 鍵 → ユニット →(そのユニットを当てた状態で鍵を作り直す)→ 式どおりか → 足した量、を順に回す。
     ニューロンは既定の候補(表の上から)を使う(neurons を渡せばそれ)。層と強さは渡されたものをそのまま使う。
     alpha は数 1 つ(全部の区切りに同じ値)か、区切りごとの "1,1,0.8"・[1, 1, 0.8]。
@@ -477,6 +497,9 @@ def pipeline(session, contrast: str, *, name: str, layers=None, segments=None, f
     stack_fast(既定は切): 方向を作る段の、層を重ねる読み直しを速い読み方にする(direction_step。方向が既定の読み方とわずかに違う。
     探索向け)。ほかの段には効かない。direction と一緒に渡すと、効かないことを警告と注(notes)で知らせる。どちらの読み方で作った
     方向を使ったかは、結果の direction_stack_fast と要約に出る(すでにある方向を使ったときも、方向のファイルの記録から出す)。
+    key_fit = "ridge" で、位置の鍵を最小二乗の鍵(ますごとの重み)にする(keys_step。既定は mean = いまの作り方)。当てた状態で鍵を
+    作り直す段にも同じ作り方を使う(正則化の強さは段ごとに決め直す。key_c を渡せば両方の段でその値)。結果・要約の key_fit と ridge
+    (段ごとの c・候補の端だったか)に残る。
     save を渡すと、できたユニットをレシピのファイルに書く(save_recipe。.yaml / .yml で終わればそのパス、そうでなければ名前として
     <root>/recipes/<名前>.yaml)。結果の recipe_path が、gne nw verify --recipe などにそのまま渡せるパス。省くと書かない(今までどおり)。
     結果は大きい(ニューロンの表・鍵の表・足した量の細目)ので、短く見るなら結果の summary(summary() と同じ)か summary_text()。"""
@@ -486,6 +509,15 @@ def pipeline(session, contrast: str, *, name: str, layers=None, segments=None, f
     _form(form)
     al = alphas_of(alpha, len(segs))            # 数が区切りと合わなければ、モデルを流す前に止める
     caps = caps_of(cap, len(segs), form)
+    from .keyed_ridge import check_c, check_key_fit
+    kf = check_key_fit(key_fit)                 # 作り方が読めなければ、モデルを流す前に止める
+    key_c = check_c(key_c)
+    if kf == "ridge" and before_mode(segs):
+        raise GneError("BAD_ARGS", "最小二乗の鍵(key_fit ridge)は、返事の位置の区切り(0,1-3,4- など)の鍵だけです",
+                       "書く位置が before:<正規表現> のときは、いまの作り方(key_fit mean)で作ります")
+    if key_c is not None and kf != "ridge":
+        raise GneError("BAD_ARGS", "正則化の強さ(key_c)は、最小二乗の鍵(key_fit ridge)のときだけ使います")
+    kfit = {"key_fit": kf, "key_c": key_c} if kf != "mean" else {}
     save_to = None if save is None or not str(save).strip() else recipe_file(session, save)   # 名前が悪ければ、モデルを流す前に止める
     stage = {}
 
@@ -513,7 +545,8 @@ def pipeline(session, contrast: str, *, name: str, layers=None, segments=None, f
     picked = {int(k): [int(j) for j in v] for k, v in (neurons or default_neurons(usage, len(segs), form)).items()}
     lap("neurons", t)
     t = time.perf_counter()
-    keys = keys_step(session, contrast, base=name, layers=Ls, segments=segs, form=form, pseudo=pseudo, max_tokens=max_tokens, iv=iv)
+    keys = keys_step(session, contrast, base=name, layers=Ls, segments=segs, form=form, pseudo=pseudo, max_tokens=max_tokens, iv=iv,
+                     **kfit)
     whole = before_mode(segs)
     specs = units(Ls, len(segs), picked, form, dname, name, al, whole, caps)
     lap("keys", t)
@@ -526,7 +559,7 @@ def pipeline(session, contrast: str, *, name: str, layers=None, segments=None, f
         t = time.perf_counter()
         base2 = f"{name}_r"
         keys2 = keys_step(session, contrast, base=base2, layers=Ls, segments=segs, form=form, pseudo=pseudo, max_tokens=max_tokens,
-                          iv=iv_units(session, iv, specs))
+                          iv=iv_units(session, iv, specs), **kfit)
         specs = units(Ls, len(segs), picked, form, dname, base2, al, whole, caps)
         lap("rekey", t)
     t = time.perf_counter()
@@ -535,9 +568,18 @@ def pipeline(session, contrast: str, *, name: str, layers=None, segments=None, f
     t = time.perf_counter()
     chk = check_step(session, specs, contrast, max_tokens=max_tokens, iv=iv, segments=segs, save=name)
     lap("check", t)
+    for lab, k in (("1 段目の鍵", keys), ("当てた状態で作り直した鍵", keys2)):
+        for n in (k or {}).get("notes") or []:                     # 最小二乗の鍵の注のうち、気づく必要があるもの
+            if "候補の端" in n and f"{lab}: {n}" not in notes:
+                notes.append(f"{lab}: {n}")
+            elif n.startswith("変えたくない場面(dont_touch)") and n not in notes:
+                notes.append(n)
+    ridge = None
+    if kf == "ridge":                           # 段ごとの記録(1 段目 = 無介入の返事で作った鍵、2 段目 = 当てた状態で作り直した鍵)
+        ridge = {"build": keys.get("ridge"), "rekey": keys2.get("ridge") if keys2 else None}
     res = {"name": name, "contrast_path": contrast, "layers": Ls, "segments": segs, "form": form, "alpha": alpha_out(al), "alphas": al,
            "cap": cap_out(caps), "caps": caps, "direction_name": dname, "direction_reused": bool(d.get("reused")),
-           "direction_stack_fast": bool(d.get("stack_fast")),
+           "direction_stack_fast": bool(d.get("stack_fast")), "key_fit": kf, "ridge": ridge,
            "direction": d, "usage": usage, "neurons": picked, "neurons_default": neurons is None, "keys": keys, "rekeyed": keys2,
            "key_base": f"{name}_r" if rekey else name, "units": specs, "unit_rows": unit_rows(session, specs),
            "verify": ver, "check": chk, "iv": keys["iv"], "notes": notes, "stage_seconds": stage}
@@ -574,6 +616,32 @@ def save_recipe(session, specs: list[str], path: Path) -> str:
     return str(path)
 
 
+def _ridge_short(r: dict | None) -> dict | None:
+    """最小二乗の鍵の記録(段ごと)の短い形: 使う鍵(作り直したなら 2 段目)の c・決め方・候補の端だったか・行とますの数。"""
+    if not r:
+        return None
+    out = {}
+    for stage in ("build", "rekey"):
+        x = r.get(stage)
+        if x:
+            out[stage] = {k: x.get(k) for k in ("c", "cv", "cs", "folds", "score", "edge", "rows", "questions", "cells", "bins", "groups")}
+    return out or None
+
+
+def key_fit_text(key_fit: str | None, ridge: dict | None) -> str:
+    """鍵の作り方の 1 行(要約・画面用)。ridge は _ridge_short の形(段ごと)。"""
+    if (key_fit or "mean") != "ridge":
+        return "鍵の作り方: mean(いまの作り方。書き込みたい位置の状態の平均から、書き込みたくない位置にも現れる成分を取り除く)"
+    parts = []
+    for stage, lab in (("build", "1 段目"), ("rekey", "当てた状態で作り直した鍵")):
+        x = (ridge or {}).get(stage)
+        if x:
+            how = (f"質問単位の {x['folds']} 分割で決めた。候補 {', '.join(f'{c:g}' for c in x['cs'])}" + ("。候補の端" if x.get("edge") else "")
+                   if x.get("cv") else "渡した値")
+            parts.append(f"{lab} c = {x['c']:g}({how}。行 {x['rows']}、ますの数 {x['cells']})")
+    return "鍵の作り方: ridge(最小二乗の鍵、ますごとの重み)" + ("。正則化の強さ: " + "、".join(parts) if parts else "")
+
+
 def summary(d: dict) -> dict:
     """pipeline の結果の短い要約: 式どおりか、ユニットとニューロンの数、保存先、足した量(場面の群 × 位置ごとに、ユニットの平均の
     平均と、最小・最大)。結果そのものは数十万字になるので、表示や受け渡しにはこちらを使う。"""
@@ -599,6 +667,8 @@ def summary(d: dict) -> dict:
             "n_neurons": sum(1 + (1 if r.get("pair") is not None else 0) for r in rows),
             "direction": d.get("direction_name") or d.get("name"), "direction_reused": bool(d.get("direction_reused")),
             "direction_stack_fast": bool(d.get("direction_stack_fast")),
+            "key_fit": d.get("key_fit") or "mean", "ridge": _ridge_short(d.get("ridge")),
+            "leaks": (d.get("check") or {}).get("leaks"),
             "key_base": d.get("key_base"), "rekeyed": d.get("rekeyed") is not None,
             "recipe_path": d.get("recipe_path"), "check": groups,
             "questions": None if not qs else {**{k: qs[k] for k in ("low", "over", "leak", "segments", "cap", "n_low")},
@@ -620,6 +690,7 @@ def summary_text(d: dict) -> str:
              + ("(すでにあるものを使った)" if s.get("direction_reused") else "")
              + ("(速い読み方で作った方向)" if s.get("direction_stack_fast") else "") + f"、鍵 {s['key_base']}_*"
              + ("(レシピを当てた状態で作り直した)" if s.get("rekeyed") else ""),
+             key_fit_text(s.get("key_fit"), s.get("ridge")),
              "式どおりか: " + ("合格" if s["ok"] else "不合格(gne nw verify で層ごとの誤差を見てください)")]
     for g, x in s["check"].items():
         cells = "  ".join(f"{b}: {a['mean']:+.2f}({a['min']:+.2f}〜{a['max']:+.2f})" for b, a in x["amount"].items())
@@ -627,7 +698,7 @@ def summary_text(d: dict) -> str:
     q = s.get("questions")
     if q:
         from .nwrite import question_lines
-        lines += question_lines({"question_summary": q, "groups": s["check"]})
+        lines += question_lines({"question_summary": q, "groups": s["check"], "leaks": s.get("leaks")})
         if s.get("check_path"):
             lines.append(f"質問ごとの値: {s['check_path']}")
     lines.append(f"レシピ: {s['recipe_path']}" if s.get("recipe_path") else "レシピは保存していません(save に名前か .yaml のパスを渡すと書きます)")

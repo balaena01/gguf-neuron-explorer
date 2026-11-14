@@ -592,6 +592,9 @@ def check(session, recipe, contrast, *, subset: str = "odd", max_tokens: int = 9
     groups.<群>.by_question は区間ごとの数: 狙う場面では low(amount が low 未満 = ほとんど書けていない質問)と over(total が over を
     超えた = 狙った量を超えて書いた質問)、書き込みたくない場面では leak(total の大きさが leak 以上 = 書いてしまった質問)。
     question_summary.worst は、狙う場面でほとんど書けていない質問の、量の小さい順の上位 top 件(質問と、返事の出だし)。
+    leaks は、書き込みたくない場面の群ごとの漏れの表(leak_table): 群ごと・区間ごとに、合計の大きさが leak 以上の質問の数と、書いた量
+    (合計)の平均。どれかの区間で書いた質問の数(any)と、位置 0(返事を書き始める直前)だけで見た数(pos0)も出す。
+    key_fit は、ユニットの鍵がどちらの作り方で作ったものか(mean = いまの作り方、ridge = 最小二乗の鍵。鍵ごとの値は keys)。
     save(名前)を渡すと、結果を <root>/behave/<model_id>/<名前>_check.json に書く(結果の path)。"""
     from .direction import _subset, parse_segments
     from .keyed_build import intervention
@@ -685,7 +688,7 @@ def check(session, recipe, contrast, *, subset: str = "odd", max_tokens: int = 9
                     "amount": float(own[sg][mask].mean()), "total": float(total[mask].mean()),
                     "rho": float(np.mean(per[sg]["rho"], axis=0)[mask].mean()), "n_pos": int(mask.sum())}
             qrows.append({"i": qi, "prompt": qtexts[qi], "reply_start": (o["text"] or "")[:40], "n_tokens": len(rid), "loop": looped,
-                          "segments": qsegs})
+                          "segments": qsegs, "pos0_total": float(total[0])})
         st = lambda v: None if not v else {"mean": float(np.mean(v)), "min": float(np.min(v)), "max": float(np.max(v)), "n": len(v)}
         res[label] = {"n": len(convs), "loops": loops,
                       "units": [{"unit": spec_of(r["unit"]), "layer": r["layer"], "form": r["form"],
@@ -698,7 +701,7 @@ def check(session, recipe, contrast, *, subset: str = "odd", max_tokens: int = 9
                     if q["segments"].get(sg) and q["segments"][sg]["amount"] < float(low)), key=lambda x: x["amount"])
     caps = sorted({(r["a"], r["b"]) for r in rows if r["form"] == "cap"})
     out = {"contrast": cs.name, "subset": subset, "replies": replies, "max_tokens": int(max_tokens), "iv": iv_desc, "groups": res,
-           "positions": positions,
+           "positions": positions, "key_fit": units_key_fit(session, rows), "leaks": leak_table(res, seg_names, float(leak)),
            "question_summary": {"low": float(low), "over": float(over), "leak": float(leak), "segments": seg_names,
                                 "cap": [list(x) for x in caps], "n_low": len(worst), "worst": worst[:int(top)]},
            "notes": ["amount は、その位置で実際に足した量(α·d を 1 として。負は逆向き)。rho_gate・rho_up は鍵の反応です。",
@@ -712,6 +715,63 @@ def check(session, recipe, contrast, *, subset: str = "odd", max_tokens: int = 9
         path.write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
         out = {**out, "path": str(path)}
     return out
+
+
+def units_key_fit(session, rows: list[dict]) -> dict:
+    """ユニット(nw_plan の行)の鍵が、どちらの作り方で作ったものか。{"fit": mean / ridge / mixed, "keys": {鍵の名前: 作り方},
+    "c": {鍵の名前: 最小二乗の鍵の正則化の強さ}}。ほぼ 1 を返す鍵・場面の鍵(role のある鍵)は数えない。記録の無い鍵は mean。"""
+    keys, cs = {}, {}
+    for r in rows:
+        for nm in (r["key"], r["key2"]):
+            if not nm or nm in keys:
+                continue
+            try:
+                info = session._key_of(nm).info or {}
+            except GneError:
+                continue
+            if info.get("role"):
+                continue
+            keys[nm] = str(info.get("key_fit") or "mean")
+            if keys[nm] == "ridge":
+                cs[nm] = (info.get("ridge") or {}).get("c")
+    kinds = set(keys.values())
+    return {"fit": "mean" if not kinds else (kinds.pop() if len(kinds) == 1 else "mixed"), "keys": keys, "c": cs}
+
+
+def leak_table(groups: dict, segs: list[str], leak: float) -> dict:
+    """書き込みたくない場面の群ごとの漏れ。check の groups(群 → questions)から、群ごとに:
+    n(質問の数)、any(どれかの区間で、合計の大きさが leak 以上の質問の数)、segments(区間ごとの leak = その数、n、total_mean =
+    書いた量(合計)の平均、abs_max = 大きさの最大)、pos0(位置 0 = 返事を書き始める直前の 1 位置だけで見た同じ数)。
+    all は全部の群を合わせた行。漏れが、ある区間から位置 0 に移っただけ、ということがあるので、位置 0 は別に出す。"""
+    def cell(vals):
+        return {"n": len(vals), "leak": sum(abs(v) >= leak for v in vals), "total_mean": float(np.mean(vals)) if vals else None,
+                "abs_max": float(np.max(np.abs(vals))) if vals else None}
+
+    def row(name, qs):
+        per = {sg: [q["segments"][sg]["total"] for q in qs if q["segments"].get(sg)] for sg in segs}
+        return {"group": name, "n": len(qs),
+                "any": sum(any(q["segments"].get(sg) and abs(q["segments"][sg]["total"]) >= leak for sg in segs) for q in qs),
+                "segments": {sg: cell(v) for sg, v in per.items()},
+                "pos0": cell([q["pos0_total"] for q in qs if q.get("pos0_total") is not None])}
+    rows = [row(g.split(":", 1)[1], x["questions"]) for g, x in groups.items() if g != "scene"]
+    allq = [q for g, x in groups.items() if g != "scene" for q in x["questions"]]
+    return {"leak": float(leak), "segments": list(segs), "groups": rows, "all": row("all", allq) if rows else None}
+
+
+def leak_lines(d: dict) -> list[str]:
+    """leak_table の表を、画面に出す行にする。"""
+    lk = d.get("leaks")
+    if not lk or not lk.get("groups"):
+        return []
+    f = lambda c: "—" if not c["n"] else f"{c['leak']}/{c['n']}({c['total_mean']:+.2f})"
+    lines = [f"変えたくない場面の群ごとの漏れ(狙った量の {lk['leak']:g} 以上を書いた質問の数 / 質問の数。かっこ内は書いた量の平均)",
+             f"  {'群':<12} {'どれかの区間':>10}  " + "  ".join(f"区間 {sg}" for sg in lk["segments"]) + "  位置 0 だけ"]
+    for r in lk["groups"] + ([{**lk["all"], "group": "(全部)"}] if lk.get("all") and len(lk["groups"]) > 1 else []):
+        lines.append(f"  {r['group']:<12} {str(r['any']) + '/' + str(r['n']):>10}  " + "  ".join(f(r["segments"][sg]) for sg in lk["segments"])
+                     + "  " + f(r["pos0"]))
+    lines.append("  群ごとに見ます。狙う場面と同じ形の発言(質問でない発言など)の群だけに漏れていないか、漏れがある区間から位置 0 に移っただけで"
+                 "ないかを確かめます。")
+    return lines
 
 
 def question_lines(d: dict) -> list[str]:
@@ -744,4 +804,4 @@ def question_lines(d: dict) -> list[str]:
     if cap:
         lines.append(f"  目安: 上限つきの形(しきい値 {cap})は、鍵の反応が下のしきい値より小さいとほぼ書かず、2 つのしきい値の真ん中で狙った量の半分、"
                      "上のしきい値より大きいと狙った量で頭打ちになります。量が小さい質問は、鍵の反応が下のしきい値の近くか、それより下です。")
-    return lines
+    return lines + leak_lines(d)

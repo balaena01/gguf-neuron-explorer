@@ -215,7 +215,8 @@ def _key_contrast(s, contrast, spec, params: dict, keys) -> tuple:
 
 def _direction_key(s, contrast=None, layers=None, spec: dict | None = None, **p) -> dict:
     """鍵つきの書き込みの鍵を作る(CHANGE-07、gne direction key)。contrast は対照集合のパスか、spec に対照集合の表(UI の入力欄)。
-    layers は必須(リストか "8,14,20"。spec の keyed.layers でも可)。ほかの引数は Session.direction_key(keyed_build.build_keys)と同じ。"""
+    layers は必須(リストか "8,14,20"。spec の keyed.layers でも可)。ほかの引数は Session.direction_key(keyed_build.build_keys)と同じ
+    (key_fit="ridge"・key_c は、FiSH の位置の鍵 = target mlpin・positions pos:<範囲> を最小二乗で作るとき)。"""
     contrast, p = _key_contrast(s, contrast, spec, {"layers": layers, **p},
                                 ("layers", "target", "q_mode", "subset", "pseudo", "max_tokens", "iv"))
     Ls = _layers(p.pop("layers", None))
@@ -298,9 +299,11 @@ def _fish_direction(s, contrast=None, spec: dict | None = None, **p) -> dict:
 def _fish_keys(s, contrast=None, spec: dict | None = None, with_units=None, **p) -> dict:
     """FiSH の鍵をまとめて作る(区切りごとの位置の鍵、形に要る場面の鍵・ほぼ 1 を返す鍵)。with_units(ユニットのリスト)を渡すと、
     それを当てた状態で作る(iv に足す。レシピを当てた状態で鍵を作り直すとき)。返事は質問の群ごとに 1 回だけ作り、区切りごとの
-    位置の鍵は 1 回の読み取りから全部作る(1 本ずつ作ったときと同じ鍵になる)。"""
+    位置の鍵は 1 回の読み取りから全部作る(1 本ずつ作ったときと同じ鍵になる)。
+    key_fit="ridge" で、位置の鍵を最小二乗の鍵(ますごとの重み)にする(既定は mean = いまの作り方。表の fish.key_fit でも書ける)。
+    key_c はその正則化の強さ(省くと質問単位の 5 分割で決める)。結果の key_fit・ridge に残る。"""
     from . import fish
-    path, q, cname = _fish_args(s, contrast, spec, p, ("layers", "segments", "form", "pseudo", "max_tokens", "iv"))
+    path, q, cname = _fish_args(s, contrast, spec, p, ("layers", "segments", "form", "pseudo", "max_tokens", "iv", "key_fit", "key_c"))
     if with_units:
         q["iv"] = fish.iv_units(s, q.get("iv"), [str(u) for u in with_units])
     d = fish.keys_step(s, path, base=q.pop("base", None) or cname, **q)
@@ -315,7 +318,9 @@ def _fish_verify(s, units, iv=None, texts=None) -> dict:
 
 def _fish_check(s, units, contrast=None, spec: dict | None = None, **p) -> dict:
     """FiSH のユニットが、場面・返事の位置ごとに実際に足した量(gne nw check)。質問ごとの値(区間ごとに、ほとんど書けていない
-    質問の数・狙った量を超えた質問の数と、質問ごとの行)も入る。low・over・leak・top でその目安と件数、save で結果のファイルの名前。"""
+    質問の数・狙った量を超えた質問の数と、質問ごとの行)も入る。low・over・leak・top でその目安と件数、save で結果のファイルの名前。
+    結果の leaks は、書き込みたくない場面の群ごと・区間ごとの漏れの表(leak 以上を書いた質問の数、書いた量の平均、位置 0 だけの数)、
+    key_fit は、ユニットの鍵がどちらの作り方(mean / ridge)で作ったものか。"""
     from . import fish
     path, q, _ = _fish_args(s, contrast, spec, p, ("max_tokens", "iv", "segments"))
     return {**fish.check_step(s, list(units), path, **q), "contrast_path": path}
@@ -345,7 +350,9 @@ def _fish_pipeline(s, contrast=None, spec: dict | None = None, summary: bool = F
     リストだけを返す。direction(すでにある方向の名前)を渡すと、方向を作り直さずにそれを使う(層・区切りが合わなければエラー)。
     cap は上限つきの形のしきい値("0.4-0.8" か、区切りごとに "0.4-0.8,0.3-0.7,0.3-0.7"・リスト。省くと既定)。
     stack_fast=True で、方向を作る段の読み直しを速い読み方にする(既定は切。方向がわずかに変わる。探索向け。direction と一緒に
-    渡すと効かず、注意が出る)。どちらの読み方の方向を使ったかは、結果・要約の direction_stack_fast。"""
+    渡すと効かず、注意が出る)。どちらの読み方の方向を使ったかは、結果・要約の direction_stack_fast。
+    key_fit="ridge" で、位置の鍵を最小二乗の鍵(ますごとの重み)にする(既定は mean = いまの作り方。当てた状態で鍵を作り直す段にも
+    同じ作り方を使う)。key_c はその正則化の強さ(省くと 5 分割で決める)。どちらで作ったかは、結果・要約の key_fit・ridge。"""
     from . import fish
     path, q, cname = _fish_args(s, contrast, spec, p, fish.SETTINGS)
     if isinstance(q.get("neurons"), dict):

@@ -109,6 +109,14 @@ direction で作った方向は "L:dir:NAME:dose"、attention ヘッドの gain 
    stack_fast=True で速い読み方にできる(大きいモデルで約 10 倍速い)が、方向がわずかに変わり(cos 0.999 以上)、その方向での
    口調・正答は測っていない。層や強さを比べる探索は速い読み方、配るものを作るときは既定の読み方、と使い分ける。どちらで
    作ったかは方向のファイル(stack_read)と結果(stack_fast・direction_stack_fast)に残る。
+   変えたくない場面(dont_touch)には、質問だけでなく、狙う場面と同じ形の発言(質問でない発言: 近況の報告・誘い・挨拶・頼みごと・
+   独り言)も、種類ごとに群に分けて入れる(種類ごとに数十問を勧める)。質問だけだと、鍵は質問でない発言にも反応した(Qwen3.5-4B の
+   ツンデレで、鍵が見ていない質問でない発言 105 問のうち 81 問に書き、14 問の口調が変わった)。fish_pipeline・direction_key の
+   key_fit="ridge" は、位置の鍵を最小二乗の鍵にする(位置 1 つずつを行にして、書き込みたい位置で 1・書き込みたくない位置で 0 を
+   返す鍵を閉じた式で解く。書き込みたくない位置の重みは「場面の群 × 位置の区分」のますごとに同じ)。同じ 105 問で、書いた質問
+   81 → 1、口調が変わった返事 14 → 0、狙う場面の口調は減らなかった(57 → 70。繰り返しに落ちた返事は 2 → 6 に増えた)。既定は
+   いまの作り方(mean)のまま。新しい作り方は 1 つのモデル・1 つの性格で確かめた段階(docs/fish.md §3)。nw_check の leaks(変えたく
+   ない場面の群ごと・区間ごとの、書いてしまった質問の数と書いた量の平均。位置 0 だけの数も)で、群ごとに漏れを見る。
 """
 
 
@@ -598,7 +606,8 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
                             q_max_samples: int = 4096, subset: str = "even", pseudo: int = 16,
                             replies_a: str | list[str] | None = None, replies_b: str | list[str] | None = None,
                             iv: str | list[str] | None = None, target: str = "ffn", seed: int = 0,
-                            dont_touch_start: bool | None = None, role: str | None = None) -> dict:
+                            dont_touch_start: bool | None = None, role: str | None = None, key_fit: str | None = None,
+                            key_c: float | None = None) -> dict:
         """鍵つきの書き込みの鍵 κ を作るジョブを投げる(CHANGE-07、job_status で結果)。対照集合(configs/contrast/ の名前かパス)の
         書き込みたい位置の活性の平均 μ を、書き込みたくない位置と dont_touch の活性が張る空間に直交させ、κᵀμ = 1 にして
         <root>/keys/<model_id>/<name>.npz に保存する。layers は必須(例 [8, 14, 20])。positions(省くと対照集合の値)が
@@ -619,7 +628,13 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
         FiSH(計算で作るニューロン、mode nw)の鍵は target="mlpin"(dense の MLP の入力の空間)。返事の位置の区切りで反応する鍵は
         positions="pos:1-3"(位置 0 = 返事を書き始める直前、"pos:4-" は 4 以降)。role="scene" は狙う場面の質問(user_prompts)への
         返事の間ずっと反応し、dont_touch の質問では反応しない鍵、role="one" はどの位置でもほぼ 1 を返す鍵(上限つきの形用)。
-        role を渡すと target は mlpin で、positions・q_mode などは使わない。"""
+        role を渡すと target は mlpin で、positions・q_mode などは使わない。
+        key_fit(鍵の作り方。既定 "mean" = 上の作り方): "ridge" は最小二乗の鍵(位置 1 つずつを行にして、書き込みたい位置で 1・
+        書き込みたくない位置で 0 を返す鍵を、正則化つきの閉じた式で解く。書き込みたくない位置の重みは「場面の群(dont_touch の群と、
+        狙う場面のほかの位置)× 位置の区分」のますごとに同じ)。FiSH の位置の鍵(target="mlpin"、positions="pos:<範囲>")だけで、
+        keyed write の鍵には使えない(BAD_ARGS)。key_c は正則化の強さ(省くと、鍵を作る質問だけを使った質問単位の 5 分割で 0.01〜100 の
+        5 点から決める。選ばれた値と、候補の端だったかは結果の ridge と notes)。区切りごとの鍵をまとめて作るなら fish_pipeline
+        (正則化の強さを全部の鍵で 1 つに決める)。結果の key_fit が、どちらの作り方で作った鍵か。"""
         from .jobs import _layers
         try:
             if not _layers(layers):
@@ -628,8 +643,11 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
                  "positions": positions, "positions_b": positions_b, "skip": skip, "max_tokens": max_tokens,
                  "q_mode": q_mode, "q_energy": q_energy, "q_max_rank": q_max_rank, "q_max_samples": q_max_samples,
                  "subset": subset, "pseudo": pseudo, "replies_a": replies_a, "replies_b": replies_b, "iv": iv,
-                 "target": target, "seed": seed, "dont_touch_start": dont_touch_start}
+                 "target": target, "seed": seed, "dont_touch_start": dont_touch_start, "key_fit": key_fit, "key_c": key_c}
             if role in ("scene", "one"):
+                if key_fit not in (None, "mean") or key_c is not None:
+                    raise GneError("BAD_ARGS", "key_fit=\"ridge\"・key_c は位置の鍵(role を渡さないか position)だけです",
+                                   "場面の鍵(scene)とほぼ 1 を返す鍵(one)の作り方は 1 つです")
                 p = {"contrast": p["contrast"], "layers": layers, "name": name, "max_tokens": max_tokens, "subset": subset,
                      "pseudo": pseudo, "iv": iv, "seed": seed, "role": role}
             elif role not in (None, "position"):
@@ -670,7 +688,7 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
     @srv.tool()
     async def nw_check(contrast: str, units: list[str] | None = None, recipe: str | None = None, subset: str = "odd",
                        replies: str = "own", max_tokens: int = 96, n_pos: int = 8, iv: str | list[str] | None = None,
-                       low: float = 0.4, over: float = 1.2, top: int = 5, save: str | None = None) -> dict:
+                       low: float = 0.4, over: float = 1.2, top: int = 5, save: str | None = None, leak: float = 0.2) -> dict:
         """nw のレシピについて、位置の種類ごとの鍵の反応と実際に足した量(α·d を 1 として)を測るジョブを投げる(job_status で結果)。
         対照集合の質問(狙う場面 = groups.scene)と dont_touch の群(書き込みたくない場面)で、返事の位置 0(書き始める直前)〜
         n_pos−1 とそれ以降について、ユニットごとに amount・rho_gate・rho_up の平均・最小・最大。replies="own" はレシピを当てて
@@ -681,14 +699,19 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
         amount = その区間で書いた量(狙った量 = 1)、total = 全部のユニットの合計、rho = 鍵の反応)。groups.<名前>.by_question は区間ごとの
         数(狙う場面は low = amount が low 未満の質問、over = total が over を超えた質問。書き込みたくない場面は leak = 書いてしまった質問)。
         question_summary.worst は、ほとんど書けていない質問の上位 top 件。書けていない質問が、返事の書き出し方(かぎかっこで始まる、
-        など)でまとまっていたら、鍵を作る質問を増やす。save(名前)で <root>/behave/<model_id>/<名前>_check.json にも書く。"""
+        など)でまとまっていたら、鍵を作る質問を増やす。save(名前)で <root>/behave/<model_id>/<名前>_check.json にも書く。
+        leaks は、書き込みたくない場面の群ごとの漏れの表: groups の各行に、n(質問の数)、any(どれかの区間で、合計の大きさが leak
+        (既定 0.2)以上の質問の数)、segments.<区間> の leak(その数)と total_mean(書いた量の平均)、pos0(位置 0 = 返事を書き始める
+        直前だけで見た同じ数)。all は全部の群を合わせた行。群ごとに見て、狙う場面と同じ形の発言の群だけに漏れていないか、漏れが
+        ある区間から位置 0 に移っただけでないかを確かめる。key_fit は、ユニットの鍵がどちらの作り方で作ったものか(fit: mean / ridge /
+        mixed、keys: 鍵ごと)。"""
         try:
             if bool(recipe) == bool(units):
                 raise GneError("BAD_ARGS", "recipe(保存したレシピの名前)か units のどちらかを渡してください")
             r = str(session.recipe_path(recipe)) if recipe else session.recipe(units=units)
             return jobs.start("nw_check", {"recipe": r, "contrast": str(_contrast_path(session, contrast, None, None, None, None)),
                                            "subset": subset, "replies": replies, "max_tokens": max_tokens, "n_pos": n_pos,
-                                           "low": low, "over": over, "top": top, **({"save": save} if save else {}),
+                                           "low": low, "over": over, "leak": leak, "top": top, **({"save": save} if save else {}),
                                            **({"iv": iv} if iv is not None else {})}).view()
         except Exception as e:  # noqa: BLE001
             return _err(e)
@@ -714,7 +737,8 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
                             pseudo: int | None = None, max_tokens: int | None = None, response_tokens: int | None = None,
                             iv: str | list[str] | None = None, neurons: dict[str, list[int]] | None = None, top: int = 20,
                             save: str | None = None, summary: bool = False, direction: str | None = None,
-                            cap: str | list[str] | None = None, stack_fast: bool | None = None) -> dict:
+                            cap: str | list[str] | None = None, stack_fast: bool | None = None, key_fit: str | None = None,
+                            key_c: float | None = None) -> dict:
         """FiSH を最初から最後まで 1 回のジョブで作る(job_status で結果。UI の FiSH のタブの「まとめて作る」と同じ): 方向 → ニューロンの表 →
         鍵 → ユニット → そのユニットを当てた状態で鍵を作り直す → 式どおりか → 足した量。contrast は対照集合の表(name・system_a・
         user_prompts・dont_touch と、設定の fish)か、configs/contrast/ の名前・パス、configs/fish/ のひな形の名前。
@@ -737,7 +761,18 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
         0.999 以上。この方向での口調・正答は測っていない)。層や強さを比べる探索向けで、配るものを作るときは既定のまま。ほかの段には
         効かない。direction と一緒に渡すと効かず、notes に注意が出る。どちらの読み方で作った方向を使ったかは、結果・要約の
         direction_stack_fast(すでにある方向を使ったときも、方向のファイルの記録から出す)。
-        鍵は、返事を 1 回だけ作って読み、全部の区切りの分を作る。鍵を作る質問は、狙う場面も変えたくない場面も多めに用意する(狙う場面の質問は 100 問以上を勧める)。"""
+        鍵は、返事を 1 回だけ作って読み、全部の区切りの分を作る。鍵を作る質問は、狙う場面も変えたくない場面も多めに用意する(狙う場面の質問は 100 問以上を勧める)。
+        変えたくない場面(dont_touch)には、質問だけでなく、狙う場面と同じ形の発言(質問でない発言: 近況の報告・誘い・挨拶・頼みごと・
+        独り言)も、種類ごとに群に分けて入れる(種類ごとに数十問を勧める)。
+        key_fit(鍵の作り方。既定 "mean" = いまの作り方。表の fish.key_fit でも書ける): "ridge" は、区切りごとの位置の鍵を最小二乗の
+        鍵にする(書き込みたい位置で 1・書き込みたくない位置で 0 を返す鍵を閉じた式で解く。書き込みたくない位置の重みは「場面の群
+        (dont_touch の群の name と、狙う場面のほかの区間)× 位置の区分(segments)」のますごとに同じ)。当てた状態で鍵を作り直す段にも
+        同じ作り方を使う。key_c は正則化の強さ(省くと、鍵を作る質問だけを使った質問単位の 5 分割で決める)。結果・要約の key_fit と
+        ridge(段ごとの c、候補の端だったか edge、行とますの数)に残る。鍵の計算は CPU で、Qwen3.5-4B の 13 層・576 問で 1 段あたり
+        数分かかる(見積もりに入る)。書く位置が before:<正規表現> の鍵には使えない。Qwen3.5-4B のツンデレの 1 例で、鍵が見ていない
+        質問でない発言 105 問に書いた質問が 81 → 1、口調が変わった返事が 14 → 0 になり、狙う場面の口調は減らなかった(繰り返しに
+        落ちた返事は 100 問中 2 → 6 に増えた)。1 つのモデル・1 つの性格で確かめた段階(docs/fish.md §3)。
+        要約の leaks は、書き込みたくない場面の群ごとの漏れの表(nw_check の leaks と同じ)。"""
         from .jobs import _layers
         try:
             if not _layers(layers):
@@ -745,7 +780,8 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
             p = {**_fish_contrast(contrast), "layers": layers, "alpha": alpha, "segments": segments, "form": form, "name": name,
                  "same_reply": same_reply, "stack": stack, "rekey": rekey, "pseudo": pseudo, "max_tokens": max_tokens,
                  "response_tokens": response_tokens, "iv": iv, "neurons": neurons, "top": top, "save": save,
-                 "direction": direction, "cap": cap, "stack_fast": stack_fast, "summary": True if summary else None}
+                 "direction": direction, "cap": cap, "stack_fast": stack_fast, "key_fit": key_fit, "key_c": key_c,
+                 "summary": True if summary else None}
             return jobs.start("fish_pipeline", {k: v for k, v in p.items() if v is not None}).view()
         except Exception as e:  # noqa: BLE001
             return _err(e)

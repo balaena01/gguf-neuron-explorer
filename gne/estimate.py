@@ -550,6 +550,15 @@ def _fish_cost(session, sp: Speed, kind: str, p: dict) -> dict:
         # 実際の 2〜4 倍に出た
         n_reads = 1 + (1 if form in ("two", "cap") else 0)
         keys_s = sp.gen(n_all, mt) + n_reads * n_all * read + n_keys * len(Ls) * n_all * 0.0035 * (session.meta.n_embd / 2560)
+        # 最小二乗の鍵(key_fit ridge): 位置 1 つずつの行で、層ごと・区間ごとに行列を解く CPU の計算の分を足す。行の数は、返事ごとに
+        # 多くて 24(位置 0〜15 と、それ以降の 8 位置)
+        fit_s = 0.0
+        if str(get("key_fit") or "mean") == "ridge":
+            from .keyed_ridge import KEEP_ALL, SAMPLE, estimate_seconds
+            per = min(mt + 1, KEEP_ALL + SAMPLE)
+            fit_s = estimate_seconds(n_all * per, n_a * per, session.meta.n_embd, len(Ls), n_seg, pseudo=int(get("pseudo") or 0),
+                                     cv=get("key_c") in (None, ""))
+            keys_s += fit_s
         check_s = sp.gen(n_all, mt) + n_all * read
         neur_s = sp.gen(44, 96) + 88 * read
         if kind == "fish_behave":
@@ -568,12 +577,12 @@ def _fish_cost(session, sp: Speed, kind: str, p: dict) -> dict:
         if kind == "fish_direction":
             return {"questions": n_a, "seconds": dir_s, "stack_seconds": stack_s, "stack_first": first}
         if kind == "fish_keys":
-            return {"keys": n_keys, "questions": n_all, "seconds": keys_s}
+            return {"keys": n_keys, "questions": n_all, "seconds": keys_s, "key_fit_seconds": fit_s}
         if kind == "fish_check":
             return {"questions": n_all, "seconds": check_s}
         total = dir_s + neur_s + keys_s * (2 if p.get("rekey", True) else 1) + check_s + len(Ls) * (4 * read + 1.0)
         return {"questions": n_all, "keys": n_keys, "direction_seconds": dir_s, "keys_seconds": keys_s, "check_seconds": check_s,
-                "stack_first": first, "seconds": total}
+                "key_fit_seconds": fit_s * (2 if p.get("rekey", True) else 1), "stack_first": first, "seconds": total}
     except Exception:  # noqa: BLE001  対照集合が読めなくても見積もりで止めない(本番がエラーを返す)
         return {"seconds": 60.0, "guess": True}
 
@@ -600,7 +609,18 @@ def _keyed_job(session, sp: Speed, kind: str, p: dict) -> dict:
             mt = p.get("max_tokens") or 96
             subset = p.get("subset") or "even"
         sets = _key_sets(spec, pos, pos_b, subset, p.get("replies_a"), p.get("replies_b"))
-        return _plan_cost(sp, sets, int(mt))
+        cost = _plan_cost(sp, sets, int(mt))
+        if kind == "direction_key" and str(p.get("key_fit") or "mean") == "ridge":     # 最小二乗の鍵: 行列を解く CPU の計算の分
+            from .direction import _subset
+            from .jobs import _layers
+            from .keyed_ridge import KEEP_ALL, SAMPLE, estimate_seconds
+            per = min(int(mt) + 1, KEEP_ALL + SAMPLE)
+            n_a = len(_subset(len(spec.contrast.prompts("B")), subset))
+            n_all = n_a + sum(len(_subset(len(dt.prompts), subset)) for dt in spec.dont_touch)
+            fit_s = estimate_seconds(n_all * per, n_a * per, session.meta.n_embd, len(_layers(p.get("layers")) or [0]), 1,
+                                     pseudo=int(p.get("pseudo") if p.get("pseudo") is not None else 16), cv=p.get("key_c") in (None, ""))
+            cost = {**cost, "key_fit_seconds": fit_s, "seconds": cost["seconds"] + fit_s}
+        return cost
     except Exception:  # noqa: BLE001  対照集合が読めなくても見積もりで止めない(本番がエラーを返す)
         return {"conversations": None, "seconds": 32 * sp.setprefill / 1000, "guess": True}
 

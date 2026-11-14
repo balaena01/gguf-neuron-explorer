@@ -1191,8 +1191,8 @@ class DirectionKeyLayer(_Strict):               # gne direction key の 1 層
     layer: int
     kn: float                                   # ‖k‖/‖μ‖(k = (I − QQᵀ)μ)
     gain: float                                 # 増幅率 ‖μ‖/‖k‖
-    q_rank: int
-    q_rows: int                                 # Q を作った行の数
+    q_rank: int | None = None                   # 最小二乗の鍵(key_fit ridge)には Q が無いので None
+    q_rows: int                                 # Q を作った行の数(最小二乗の鍵は、解くのに使った行の数)
     weak: bool                                  # kn < 0.05
     kappa_mu: float                             # κᵀμ(1 になる)
     build_auc: float | None                     # 作成に使った例での AUC(甘い値)
@@ -1235,6 +1235,9 @@ class DirectionKeyOut(Envelope):                # CHANGE-07 B(gne direction key)
     notes: list[str]
     sha: str
     seconds: float
+    key_fit: Literal["mean", "ridge"] = "mean"  # 鍵の作り方: mean = いまの作り方(μ から Q の成分を取り除く)、ridge = 最小二乗の鍵
+    ridge: dict[str, Any] | None = None         # key_fit ridge の記録 {c, cv, cs, folds, score, edge, rows, cells, bins, groups, …}
+    shared_read: dict[str, Any] | None = None   # 何本かの鍵を 1 回の読み取りから作ったとき {keys, seconds}
 
 
 class KeyCheckLayer(_Strict):                   # gne direction key-check の 1 層

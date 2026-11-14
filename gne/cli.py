@@ -1883,6 +1883,12 @@ def _replies_text(replies: dict | None) -> str:
     return "、返事 " + "・".join(f"{g} {_REPLY_KIND.get(v, 'なし')}" for g, v in replies.items())
 
 
+_KEY_FIT = ("鍵の作り方: mean(既定。いまの作り方 = 書き込みたい位置の状態の平均から、書き込みたくない位置にも現れる成分を取り除く)/ "
+            "ridge(最小二乗の鍵。位置 1 つずつを行にして、書き込みたい位置で 1・書き込みたくない位置で 0 を返す鍵を閉じた式で解く。"
+            "書き込みたくない位置の重みは「場面の群 × 位置の区分」のますごとに同じ。FiSH の位置の鍵 = --target mlpin --positions pos:<範囲> だけ)")
+_KEY_C = "--key-fit ridge の正則化の強さ(行列の対角の平均の何倍か。例 1)。省くと、鍵を作る質問だけを使った質問単位の 5 分割で、0.01・0.1・1・10・100 から決める"
+
+
 @gne_command(direction_app, "key", "direction key")
 def direction_key(c: Common, holder: dict,
                   contrast: Path = typer.Option(..., "--contrast", help="対照集合 YAML(system_a・system_b と質問、任意で dont_touch・positions・replies。例 configs/contrast/zundamon_endings.yaml)"),
@@ -1903,10 +1909,13 @@ def direction_key(c: Common, holder: dict,
                   replies_b: Optional[Path] = typer.Option(None, "--replies-b", help=_KEY_REPLIES_B),
                   iv: Optional[list[str]] = typer.Option(None, "--iv", help=_KEY_IV),
                   target: str = typer.Option("ffn", "--target", help="書き込み先: mlpin(計算で作るニューロン用。dense の MLP の入力 = 正規化の後の空間。返事の位置の鍵は --positions pos:1-3 のように書く)/ ffn(dense の ffn_down の入力)/ attn(attn_output・ssm_out の入力 = ヘッド出力の連結)/ shared(MoE の層の shared expert の ffn_down_shexp の入力)/ expert:e(ffn_down_exps の専門家 e の入力。専門家 e が選ばれた位置だけで作る)"),
-                  dont_touch_start: Optional[bool] = typer.Option(None, "--dont-touch-start/--no-dont-touch-start", help="dont_touch の各群の質問の、返事を書き始める直前の位置も Q に入れる(既定は対照集合の dont_touch_start、無ければ入れる)。書き込みたくない側の質問のこの位置は入れない")):
+                  dont_touch_start: Optional[bool] = typer.Option(None, "--dont-touch-start/--no-dont-touch-start", help="dont_touch の各群の質問の、返事を書き始める直前の位置も Q に入れる(既定は対照集合の dont_touch_start、無ければ入れる)。書き込みたくない側の質問のこの位置は入れない"),
+                  key_fit: str = typer.Option("mean", "--key-fit", help=_KEY_FIT),
+                  key_c: Optional[float] = typer.Option(None, "--key-c", help=_KEY_C)):
     """keyed write の鍵 κ_L を作る(CHANGE-07)。書き込みたい位置の活性の平均 μ_L を、書き込みたくない位置と dont_touch の
     活性が張る空間 Q_L に直交させ、κ_Lᵀμ_L = 1 に正規化して保存する(方向とは別のファイル)。鍵は無介入で作る(--iv は重ねるときだけ)。
-    作ったら gne direction key-check で、作成に使っていない例(既定 subset odd)で分離を確かめる。"""
+    作ったら gne direction key-check で、作成に使っていない例(既定 subset odd)で分離を確かめる。
+    --key-fit ridge は、FiSH の位置の鍵(--target mlpin --positions pos:<範囲>)を最小二乗で作る(docs/fish.md §3。keyed write の鍵には使えない)。"""
     Ls = parse_layers(layers)
     if not Ls:
         raise GneError("BAD_ARGS", "--layers に層を指定してください(all は使えません)", "例 --layers 8,14,20")
@@ -1915,14 +1924,14 @@ def direction_key(c: Common, holder: dict,
                         max_tokens=max_tokens, q_mode=q_mode, q_energy=q_energy, q_max_rank=q_max_rank,
                         q_max_samples=q_max_samples, subset=subset, pseudo=pseudo, replies_a=replies_a,
                         replies_b=replies_b, iv=_iv_arg(iv), target=target, seed=c.seed, dont_touch_start=dont_touch_start,
-                        progress=s.progress)
+                        progress=s.progress, key_fit=key_fit, key_c=key_c)
     d.pop("warnings", None)                        # 警告はエンベロープの warnings に入っている
     n = d["counts"]
     moe = any("rows_a" in r for r in d["layers"])            # 書き込み先 shared・expert:e の鍵(層ごとの行の数を出す)
     how = "推論時と同じ文脈の返事" if d["mode"] == "same" else "system・recipe の文脈"
     lines = [f"{d['path']}(鍵 {d['name']}、書き込み先 {d['target']}、書き込みたい位置は{how}(mode {d['mode']})、{d['seconds']:.1f} 秒)",
              f"  位置: 書き込みたい位置 {d['positions']}・書き込みたくない位置 {d['positions_b']}、skip {d['skip']}、subset {d['subset']}、"
-             f"q_mode {d['q_mode']}、比較用の鍵 {d['n_pseudo']} 本",
+             + ("鍵の作り方 ridge(最小二乗、ますごとの重み)" if d.get("key_fit") == "ridge" else f"q_mode {d['q_mode']}") + f"、比較用の鍵 {d['n_pseudo']} 本",
              f"  例: 書き込みたい側 {n['a']} 例({n['rows_a']} 位置、書き込みたい位置のある例 {d['matched']['A']}/{d['matched']['of']})・"
              f"書き込みたくない側 {n['b']} 例({n['rows_b']} 位置)" + (f"・dont_touch {n['dt']} 例({n['rows_dt']} 位置)" if n.get("dt") else "")
              + _replies_text(d.get("replies"))]
@@ -1941,10 +1950,11 @@ def direction_key(c: Common, holder: dict,
     lines += [f"  {'層':>4} {'kn':>6} {'増幅率':>7} {'q_rank':>6} {'作成時AUC':>9}"
              + (f" {'rows_a':>6} {'rows_b':>6} {'gate_a':>7}" if moe else "")]
     for r in d["layers"]:
-        lines.append(f"  {r['layer']:>4} {r['kn']:>6.3f} {r['gain']:>7.2f} {r['q_rank']:>6} {_fc(r['build_auc'], '>9.3f')}"
+        lines.append(f"  {r['layer']:>4} {r['kn']:>6.3f} {r['gain']:>7.2f} {'—' if r['q_rank'] is None else r['q_rank']:>6} {_fc(r['build_auc'], '>9.3f')}"
                      + (f" {r['rows_a']:>6} {r['rows_b']:>6} {_fc(r.get('gate_a'), '>7.3f')}" if moe else "")
                      + ("  ← 弱い(kn < 0.05、書き込みたくない位置に漏れやすい)" if r["weak"] else ""))
-    lines.append("  kn = ‖k‖/‖μ‖(1 に近いほど、書き込みたい位置の平均が書き込みたくない位置の部分空間の外にある)、増幅率 = 1/kn"
+    lines.append(("  kn = 1/(‖κ‖‖μ‖)、増幅率 = 1/kn(最小二乗の鍵には Q が無いので q_rank は出ません)" if d.get("key_fit") == "ridge" else
+                  "  kn = ‖k‖/‖μ‖(1 に近いほど、書き込みたい位置の平均が書き込みたくない位置の部分空間の外にある)、増幅率 = 1/kn")
                  + ("。rows_a・rows_b = この層で書き込み先の行があった書き込みたい位置・書き込みたくない位置の数(専門家は"
                     "選ばれた位置だけ)、gate_a = 書き込みたい位置でのゲート・ルーターの重みの平均(LoRA の B をこれで割る)" if moe else ""))
     for x in d["dropped"]:
@@ -3033,18 +3043,39 @@ def nw_neurons(c: Common, holder: dict,
 def nw_key(c: Common, holder: dict,
            contrast: Path = typer.Option(..., "--contrast", help="対照集合(user_prompts = 狙う場面の質問、dont_touch = 反応させたくない質問の群)"),
            layers: str = typer.Option(..., "--layers", help="鍵を作る層(例 11-23 か 11,18,23)"),
-           role: str = typer.Option("scene", "--role", help="scene(狙う場面の質問への返事の間ずっと反応する鍵)/ one(どの位置でもほぼ 1 を返す鍵。上限つきの形で使う)"),
+           role: str = typer.Option("scene", "--role", help="scene(狙う場面の質問への返事の間ずっと反応する鍵)/ one(どの位置でもほぼ 1 を返す鍵。上限つきの形で使う)/ position(返事の位置の区切りで反応する位置の鍵。--positions pos:<範囲> と一緒に。gne direction key --target mlpin と同じ)"),
+           positions: Optional[str] = typer.Option(None, "--positions", help="--role position のとき: 鍵が反応する返事の位置(pos:0 / pos:1-3 / pos:4-。位置 0 = 返事を書き始める直前)"),
+           key_fit: str = typer.Option("mean", "--key-fit", help=_KEY_FIT + "。--role position のときだけ"),
+           key_c: Optional[float] = typer.Option(None, "--key-c", help=_KEY_C),
            name: Optional[str] = typer.Option(None, "--name", help="鍵の名前(既定 <対照集合の name>_<role>)"),
            subset: str = typer.Option("even", "--subset", help="使う質問: even(既定)/ odd / all"),
            max_tokens: int = typer.Option(96, "--max-tokens", help="返事を生成するときの長さ"),
            pseudo: int = typer.Option(16, "--pseudo", help="比較用の鍵(質問のラベルをでたらめに入れ替えて同じ手順で作った鍵)の本数(scene だけ)"),
            iv: Optional[list[str]] = typer.Option(None, "--iv", help="この介入(レシピの名前かパス、またはユニットの書き方)を当てた状態の返事と活性で作る")):
     """計算で作るニューロンの「場面の鍵」と「ほぼ 1 を返す鍵」を作る(MLP の入力の空間、target mlpin)。
-    返事の位置の区切りで反応する「位置の鍵」は gne direction key --target mlpin --positions pos:1-3 で作る。"""
+    返事の位置の区切りで反応する「位置の鍵」は --role position --positions pos:1-3(gne direction key --target mlpin --positions pos:1-3 と
+    同じ)。位置の鍵は --key-fit ridge で、最小二乗の鍵(ますごとの重み。docs/fish.md §3)にできる。区切りごとの鍵をまとめて作るなら
+    gne nw pipeline --key-fit ridge(正則化の強さを全部の鍵で 1 つに決める)。"""
+    from .keyed_ridge import check_key_fit
     Ls = parse_layers(layers)
     if not Ls:
         raise GneError("BAD_ARGS", "--layers に層を指定してください", "例 --layers 11-23")
+    kf = check_key_fit(key_fit)
+    if role != "position" and (kf != "mean" or key_c is not None or positions is not None):
+        raise GneError("BAD_ARGS", "--key-fit ridge・--key-c・--positions は、位置の鍵(--role position)のときだけ使います",
+                       "場面の鍵(scene)とほぼ 1 を返す鍵(one)の作り方は 1 つです")
     s = holder["session"] = c.session()
+    if role == "position":
+        if not positions or not positions.strip().startswith("pos:"):
+            raise GneError("BAD_ARGS", "--role position には --positions pos:<範囲> が要ります", "例 --positions pos:1-3")
+        d = s.direction_key(contrast, name=name, layers=Ls, positions=positions, subset=subset, max_tokens=max_tokens, pseudo=pseudo,
+                            iv=_iv_arg(iv), seed=c.seed, target="mlpin", progress=s.progress, key_fit=kf, key_c=key_c)
+        d.pop("warnings", None)
+        lines = [f"{d['path']}(鍵 {d['name']}、位置の鍵 {d['positions']}、MLP の入力の空間、鍵の作り方 {d['key_fit']}、{d['seconds']:.1f} 秒)"]
+        for r in d["layers"]:
+            lines.append(f"  L{r['layer']}: kn {r['kn']:.3f}、作成に使った例での AUC {_fc(r['build_auc'], '.3f')}")
+        lines += [f"注: {n}" for n in d["notes"]]
+        return {**d, "role": "position"}, "\n".join(lines), 0
     d = s.direction_key(contrast, role=role, name=name, layers=Ls, subset=subset, max_tokens=max_tokens, pseudo=pseudo,
                         iv=_iv_arg(iv), seed=c.seed, progress=s.progress)
     lines = [f"{d['path']}(鍵 {d['name']}、{d['role']}、MLP の入力の空間、{d['seconds']:.1f} 秒)"]
@@ -3088,6 +3119,7 @@ def nw_check(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Op
              max_tokens: int = typer.Option(96, "--max-tokens"),
              n_pos: int = typer.Option(8, "--positions", help="位置 0 からいくつまで 1 位置ずつ出すか(それ以降はまとめる)"),
              low: float = typer.Option(0.4, "--low", help="質問ごとの値: 区間の書いた量(狙った量 = 1)がこれ未満の質問を「ほとんど書けていない」と数える"),
+             leak: float = typer.Option(0.2, "--leak", help="質問ごとの値: 書き込みたくない場面で、区間の位置で全部のユニットが書いた量の合計の大きさがこれ以上の質問を「書いてしまった」と数える(群ごとの漏れの表も同じ目安)"),
              over: float = typer.Option(1.2, "--over", help="質問ごとの値: 区間の位置で全部のユニットが書いた量の合計がこれを超えた質問を「狙った量を超えて書いた」と数える"),
              top: int = typer.Option(5, "--top", help="書けていない質問を、量の小さい順に何件出すか"),
              name: Optional[str] = typer.Option(None, "--name", help="結果のファイルの名前(<root>/behave/<model_id>/<名前>_check.json。質問ごとの行が入る)。省くとレシピの名前"),
@@ -3097,15 +3129,21 @@ def nw_check(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Op
     離れる位置、負(逆向き)になる位置が無いかを見る。
     平均の表の後に、質問ごとの値の要約を出す: 区間(ユニットが担当する返事の位置の範囲)ごとに、ほとんど書けていない質問の数、
     狙った量を超えて書いた質問の数、書けていない質問の上位(質問と、返事の出だし)。平均だけでは、一部の質問でまったく書けていない
-    ことが隠れる。質問ごとの行は --json と結果のファイルに入る。"""
+    ことが隠れる。質問ごとの行は --json と結果のファイルに入る。
+    最後に、書き込みたくない場面の群ごとの漏れの表を出す: 群ごと・区間ごとに、狙った量の --leak(既定 0.2)以上を書いた質問の数と、
+    書いた量の平均。位置 0(返事を書き始める直前)だけで見た数も出す。最初の行に、ユニットの鍵がどちらの作り方(mean / ridge)かを出す。"""
     import re as _re
     from .nwrite import question_lines
     s = holder["session"] = c.session()
     r = s.recipe(units=unit, path=recipe, default_direction=direction, default_key=key)
     save = name or (r.name if r.name and _re.fullmatch(r"[\w.\-]+", r.name) else "recipe")
     d = s.nw_check(r, contrast, subset=subset, max_tokens=max_tokens, replies=replies, n_pos=n_pos, iv=_iv_arg(iv), low=low, over=over,
-                   top=top, save=save)
-    lines = [f"対照集合 {d['contrast']}(subset {d['subset']}、返事 {d['replies']}、{d['seconds']:.0f} 秒)。値は足した量の平均(α·d を 1。かっこ内は最小〜最大)"]
+                   leak=leak, top=top, save=save)
+    kf = d.get("key_fit") or {}
+    lines = [f"対照集合 {d['contrast']}(subset {d['subset']}、返事 {d['replies']}、{d['seconds']:.0f} 秒)。値は足した量の平均(α·d を 1。かっこ内は最小〜最大)",
+             "鍵の作り方: " + {"mean": "mean(いまの作り方)", "ridge": "ridge(最小二乗の鍵、ますごとの重み"
+                               + (f"。正則化の強さ c = {'・'.join(sorted({format(v, 'g') for v in (kf.get('c') or {}).values() if v is not None}))}" if kf.get("c") else "") + ")",
+                               "mixed": "mean と ridge が混ざっています(" + "、".join(f"{k} {v}" for k, v in (kf.get("keys") or {}).items()) + ")"}.get(kf.get("fit"), "mean(いまの作り方)")]
     for g, x in d["groups"].items():
         lines.append(f"[{g}] {x['n']} 問、ループ {x['loops']}")
         for u in x["units"]:
@@ -3177,6 +3215,8 @@ def nw_pipeline(c: Common, holder: dict,
                 stack: Optional[bool] = typer.Option(None, "--stack/--no-stack", help="上の層の方向を、下の層に書いた後の残りにする(既定はする。層の数に比例して時間がかかる)"),
                 stack_fast: Optional[bool] = typer.Option(None, "--stack-fast/--no-stack-fast", help="方向を作る段の、層ごとの読み直しを速い読み方にする(区切りが続く範囲ごとに 1 回で読む。既定は切)。大きいモデルで方向づくりがずっと速くなるが、方向がわずかに変わる(既定の読み方の方向との cos 0.999 以上)。層や強さを比べる探索向けで、配るものを作るときは付けない。--direction と一緒に渡すと効かない(注意が出る)"),
                 rekey: Optional[bool] = typer.Option(None, "--rekey/--no-rekey", help="できたユニットを当てた状態で鍵を作り直す(既定は作り直す)"),
+                key_fit: Optional[str] = typer.Option(None, "--key-fit", help="位置の鍵の作り方: mean(既定。いまの作り方)/ ridge(最小二乗の鍵。位置 1 つずつを行にして、書き込みたい位置で 1・書き込みたくない位置で 0 を返す鍵を閉じた式で解く。書き込みたくない位置の重みは「場面の群(dont_touch の群の name と、狙う場面のほかの区間)× 位置の区分(--segments)」のますごとに同じ)。当てた状態で鍵を作り直す段にも同じ作り方を使う。鍵の計算は CPU で、層・質問が多いと数分かかる(見積もりに入る)。1 つのモデル・1 つの性格で確かめた段階(docs/fish.md §3)"),
+                key_c: Optional[float] = typer.Option(None, "--key-c", help=_KEY_C),
                 pseudo: Optional[int] = typer.Option(None, "--pseudo", help="比較用の鍵の本数(既定 4)"),
                 max_tokens: Optional[int] = typer.Option(None, "--max-tokens", help="鍵と足した量で返事を生成する長さ(既定 96)"),
                 response_tokens: Optional[int] = typer.Option(None, "--response-tokens", help="方向で返事を生成する長さ(既定 96)"),
@@ -3189,7 +3229,10 @@ def nw_pipeline(c: Common, holder: dict,
     表の上から使う(選び直すなら gne nw neurons の表を見てレシピを書く)。出るのは短い要約(式どおりか、ユニットとニューロンの数、
     足した量、質問ごとの値の数、レシピの保存先)。--save を付けると、gne nw verify / check / export の --recipe にそのまま渡せるレシピを書く。
     --direction NAME で、すでにある方向を作り直さずに使う。--cap で、上限つきの形のしきい値を区切りごとに決める。
-    --stack-fast で、方向を作る段だけ速い読み方にする(探索向け。方向がわずかに変わる。どちらの読み方の方向を使ったかは要約に出る)。"""
+    --stack-fast で、方向を作る段だけ速い読み方にする(探索向け。方向がわずかに変わる。どちらの読み方の方向を使ったかは要約に出る)。
+    --key-fit ridge で、位置の鍵を最小二乗の鍵(ますごとの重み)にする(既定は今までの作り方)。変えたくない場面(dont_touch)には、
+    質問でない発言(近況の報告・誘い・挨拶・頼みごと・独り言)も、種類ごとの群に分けて入れておく。要約に、鍵の作り方と、変えたくない
+    場面の群ごとの漏れの表が出る。"""
     from . import fish
     from .jobs import _fish_pipeline
     if not parse_layers(layers):
@@ -3198,12 +3241,15 @@ def nw_pipeline(c: Common, holder: dict,
     p = {"contrast": str(contrast), "layers": layers, "alpha": alpha, "cap": cap, "direction": direction, "segments": segments,
          "form": form, "name": name, "save": save,
          "same_reply": same_reply, "stack": stack, "stack_fast": stack_fast, "rekey": rekey, "pseudo": pseudo,
-         "max_tokens": max_tokens, "response_tokens": response_tokens, "top": top, "iv": _iv_arg(iv)}
+         "max_tokens": max_tokens, "response_tokens": response_tokens, "top": top, "iv": _iv_arg(iv), "key_fit": key_fit, "key_c": key_c}
     p = {k: v for k, v in p.items() if v is not None}
     if save is not None:
         fish.recipe_file(s, save)                    # 保存先が読めなければ、見積もりの前に止める
     if cap is not None:                              # しきい値が読めなければ、見積もりの前に止める
         fish.caps_of(cap, len(fish._segments(segments)), form or fish.DEFAULTS["form"])
+    from .keyed_ridge import check_c, check_key_fit
+    check_key_fit(key_fit)                           # 鍵の作り方が読めなければ、見積もりの前に止める
+    check_c(key_c)
     _gate(s, "fish_pipeline", p, yes, None)
     d = _fish_pipeline(s, **p)
     out = d if full else {**d["summary"], "units": d["units"], "contrast_path": d["contrast_path"]}
