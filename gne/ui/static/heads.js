@@ -11,7 +11,7 @@
 //   ratio・効率 η・B 側への影響、射影の値を測る層ごと)と、選んだスクリーニングの上位のヘッドの表(並べ替え・表示する測る層)、
 //   強さの配分(gne heads allocate)の組。見出しの「射影 s1」でこのヘッドの方向成分の射影(L:Hh:s1@方向)をレシピに足す。
 import { getJSON, postJSON } from "./api.js";
-import { t } from "./i18n.js";
+import { t, tl } from "./i18n.js";
 import { esc, toksHTML } from "./panels.js";
 import { plainEnter, noteHTML } from "./ui.js";
 
@@ -144,7 +144,7 @@ export class HeadPanel {
         <div class="n-row"><input class="n-name h-name" placeholder="${t("名前(入力して Enter か欄の外で保存)")}" value="${esc(d.name || "")}" spellcheck="false">
           ${this.recipeButtons(d)}</div>
       </div>
-      <div class="tabs"><button data-tab="pattern">Pattern</button><button data-tab="contrast">Contrast${d.contrasts.length ? ` <span class="muted">${d.contrasts.length}</span>` : ""}</button><button data-tab="details">Details</button><button data-tab="listen">Listen</button><button data-tab="causal">Causal${(d.causal || []).length ? ` <span class="muted">${d.causal.length}</span>` : ""}</button></div>
+      <div class="tabs"><button data-tab="pattern">${tl("注目", "Pattern")}</button><button data-tab="contrast">${tl("対照分析", "Contrast")}${d.contrasts.length ? ` <span class="muted">${d.contrasts.length}</span>` : ""}</button><button data-tab="details">${tl("くわしく", "Details")}</button><button data-tab="listen">${tl("聞く", "Listen")}</button><button data-tab="causal">${tl("効き目", "Causal")}${(d.causal || []).length ? ` <span class="muted">${d.causal.length}</span>` : ""}</button></div>
       <div class="n-tab" id="h-tab"></div>`;
     for (const b of this.root.querySelectorAll(".tabs button")) {
       b.classList.toggle("on", b.dataset.tab === this.tab);

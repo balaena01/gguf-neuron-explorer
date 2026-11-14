@@ -26,7 +26,7 @@ import { KeyCausal } from "./keys_causal.js";
 import { LANG, t } from "./i18n.js";
 import { esc } from "./panels.js";
 import { Steps } from "./steps.js";
-import { noteHTML } from "./ui.js";
+import { noteHTML, askConfirm, layersInput } from "./ui.js";
 
 const fmt = (x, d = 2) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : (+x).toFixed(d));
 const short = (s, n = 60) => { const x = String(s ?? ""); return x.length > n ? `${x.slice(0, n - 1)}…` : x; };
@@ -264,8 +264,7 @@ export class KeyPanel {
         <div class="pp-in"><span class="muted">${t("対照集合")}</span>
           <span class="seg" id="kx-src"><button data-src="file" title="${t("configs/contrast/ か <root>/contrasts/ の YAML を選ぶ")}">${t("ファイルを選ぶ")}</button><button data-src="json" title="${t("用途別のひな形(configs/keyed/)から始めて、入力欄の JSON を手で直す")}">${t("JSON を書く(ひな形から)")}</button></span>
           <label class="muted" title="${t("用途別のひな形(configs/keyed/)と、自分で作ったひな形(<root>/keyed/)。選ぶと入力欄に入る")}">${t("ひな形")}
-            <select id="kx-tpl-sel"><option value="">${t("(ひな形を選ぶ)")}</option></select></label>
-          <button class="small" id="kx-tpl" title="${t("選んだひな形を入力欄に入れる")}">${t("入れる")}</button></div>
+            <select id="kx-tpl-sel"><option value="">${t("(ひな形を選ぶ)")}</option></select></label></div>
         <div id="kx-src-file">
           <div class="pp-in">
             <select id="kx-contrast" aria-label="${t("対照集合")}"></select>
@@ -283,25 +282,25 @@ export class KeyPanel {
         </div>
         <div class="pp-set">
           <label class="muted" title="${t("鍵の名前(<root>/keys/<model_id>/<名前>.npz)。空なら対照集合の名前")}">${t("名前")} <input id="kx-name" size="16" spellcheck="false"></label>
-          <label class="muted" title="${t("鍵を作る層(カンマ区切りか 10-16)。層ごとに κ を作る")}">${t("層")} <input id="kx-layers" size="12" value="${sug}" placeholder="8,14,20" spellcheck="false"></label>
+          <label class="muted" title="${t("鍵を作る層(カンマ区切りか 10-16)。層ごとに κ を作る")}">${t("層")} ${layersInput("kx-layers", { value: sug, placeholder: "8,14,20" })}</label>
           <label class="muted" title="${t("鍵が入力を読む、残差に書き込む重み行列。ffn = ffn_down(ニューロンの活性)、attn = attn_output(ヘッドの出力の連結)、shared = shared expert、expert = 専門家 e(選ばれた位置だけ)")}">${t("書き込み先")}
             <select id="kx-target"><option value="ffn">ffn</option><option value="attn">attn</option><option value="shared">shared</option><option value="expert">expert</option></select>
             <input id="kx-expert" type="number" min="0" class="w4 hidden" placeholder="e"></label>
-          <label class="muted" title="${t("書き込みたい位置。空なら対照集合の値(無ければ response)。before:<正規表現> は一致の直前のトークン(推論時と同じ文脈の返事で、そのトークンを決める位置 = 作り方 (b))。response・last・assistant は system_a の文脈(作り方 (a))")}">positions <input id="kx-pos" size="22" list="kx-pos-list" spellcheck="false"></label>
+          <label class="muted" title="${t("書き込みたい位置。空なら対照集合の値(無ければ response)。before:<正規表現> は一致の直前のトークン(推論時と同じ文脈の返事で、そのトークンを決める位置 = 作り方 (b))。response・last・assistant は system_a の文脈(作り方 (a))")}">${t("書く位置")} <input id="kx-pos" size="22" list="kx-pos-list" spellcheck="false"></label>
           <datalist id="kx-pos-list"><option value="response"><option value="last"><option value="assistant"><option value="before:(です|ます)。"></datalist>
-          <label class="muted" title="${t("Q(書き込みたくない位置の活性が張る部分空間の基底)の作り方。examples = 例ごとの平均、means = 群ごとの平均(よく効くが選択性は粗い)、samples = トークンの標本(選択性が高いが、標本が多いと鍵が消える)")}">q_mode
-            <select id="kx-qmode"><option>examples</option><option>means</option><option>samples</option></select></label>
+          <label class="muted" title="${t("Q(書き込みたくない位置の活性が張る部分空間の基底)の作り方。examples = 例ごとの平均、means = 群ごとの平均(よく効くが選択性は粗い)、samples = トークンの標本(選択性が高いが、標本が多いと鍵が消える)")}">${t("書かない位置のまとめ方")}
+            <select id="kx-qmode"><option value="examples">${t("例ごと")}</option><option value="means">${t("平均")}</option><option value="samples">${t("サンプル")}</option></select></label>
           <label class="muted" title="${t("鍵を作るのに使う質問。even = 偶数番目(key-check は odd で確かめる)、all = 全部(保留集合が残らない)")}">subset
-            <select id="kx-subset"><option>even</option><option>odd</option><option>all</option></select></label>
+            <select id="kx-subset"><option value="even">${t("偶数番目")}</option><option value="odd">${t("奇数番目")}</option><option value="all">${t("全部")}</option></select></label>
           <label class="muted" title="${t("比較用の鍵の本数。書き込みたい位置・書き込みたくない位置のラベルを、偏らないように例ごとにシャッフルして、同じ手順で作るランダムな対照。key-check の p95 に使う")}">${t("比較用の鍵")} <input class="w45" id="kx-pseudo" type="number" min="0" max="256" value="16"></label>
-          <label class="muted" title="${t("返事を生成するときの長さ(返事を与えるなら関係ない)")}">max_tokens <input class="w5" id="kx-mt" type="number" min="1" max="2048" value="96"></label>
+          <label class="muted" title="${t("返事を生成するときの長さ(返事を与えるなら関係ない)")}">${t("返事の長さ")} <input class="w5" id="kx-mt" type="number" min="1" max="2048" value="96"></label>
         </div>
         <details class="kx-adv"><summary class="muted note">${t("細かい設定")}</summary><div class="pp-set">
-          <label class="muted" title="${t("書き込みたくない位置。空なら before:<re> のとき not-before:<re>、それ以外は positions と同じ")}">positions_b <input id="kx-posb" size="22" spellcheck="false"></label>
-          <label class="muted" title="${t("返事の最初の何トークンを飛ばすか。空なら対照集合の値(無ければ 0)")}">skip <input class="w4" id="kx-skip" type="number" min="0"></label>
+          <label class="muted" title="${t("書き込みたくない位置。空なら before:<re> のとき not-before:<re>、それ以外は positions と同じ")}">${t("書かない位置")} <input id="kx-posb" size="22" spellcheck="false"></label>
+          <label class="muted" title="${t("返事の最初の何トークンを飛ばすか。空なら対照集合の値(無ければ 0)")}">${t("飛ばすトークン数")} <input class="w4" id="kx-skip" type="number" min="0"></label>
           <label class="muted" title="${t("モデル自身の返事のファイル(YAML / JSON のリストか {プロンプト: 返事}、サーバの作業場所からの相対)。空なら対照集合の replies か、無介入で生成")}">${t("返事のファイル")} <input id="kx-replies" size="26" spellcheck="false"></label>
           <label class="muted" title="${t("他の介入を当てた状態で鍵を作る(保存したレシピの名前か、ユニット 14:8949:+1 などを空白区切りで)。空なら無介入")}">${t("介入(iv)")} <input id="kx-iv" size="18" spellcheck="false"></label>
-          <label class="muted" title="${t("比較用の鍵のシャッフルの種")}">seed <input class="w45" id="kx-seed" type="number" value="0"></label>
+          <label class="muted" title="${t("比較用の鍵のシャッフルの種")}">${t("種(比較用の鍵)")} <input class="w45" id="kx-seed" type="number" value="0"></label>
           <label class="muted" title="${t("「方向から key-check まで」で方向を作るとき、A・B の返事を生成する長さ")}">${t("方向の返事の長さ")} <input class="w5" id="kx-rt" type="number" min="1" max="2048" value="96"></label>
         </div></details>
         </div>
@@ -327,11 +326,11 @@ export class KeyPanel {
         <div class="pp-set">
           <label class="muted">${t("鍵")} <select id="kc-key"></select></label>
           <label class="muted" title="${t("確かめる対照集合。鍵を作ったものと同じなら、作成と反対側の subset で(重なると AUC が甘くなる)。なしなら鍵に保存した作成時の例で測る(甘い)")}">${t("対照集合")} <select id="kc-contrast"></select></label>
-          <label class="muted">subset <select id="kc-subset"><option>odd</option><option>even</option><option>all</option></select></label>
-          <label class="muted" title="${t("空なら鍵の全層")}">${t("層")} <input id="kc-layers" size="10" spellcheck="false"></label>
-          <label class="muted" title="${t("空なら鍵の作成と同じ")}">max_tokens <input class="w5" id="kc-mt" type="number" min="1" max="2048"></label>
+          <label class="muted">${t("使う質問")} <select id="kc-subset"><option value="odd">${t("奇数番目")}</option><option value="even">${t("偶数番目")}</option><option value="all">${t("全部")}</option></select></label>
+          <label class="muted" title="${t("空なら鍵の全層")}">${t("層")} ${layersInput("kc-layers", { placeholder: t("空なら鍵の全層") })}</label>
+          <label class="muted" title="${t("空なら鍵の作成と同じ")}">${t("返事の長さ")} <input class="w5" id="kc-mt" type="number" min="1" max="2048"></label>
           <label class="muted" title="${t("鍵を作ったときに返事を与えたなら、同じファイル")}">${t("返事のファイル")} <input id="kc-replies" size="22" spellcheck="false"></label>
-          <label class="muted" title="${t("作成に使った例と重なっていたら測らずに止める")}"><input type="checkbox" id="kc-strict"> strict</label>
+          <label class="muted" title="${t("作成に使った例と重なっていたら測らずに止める")}"><input type="checkbox" id="kc-strict"> ${t("作成の例と重なれば止める")}</label>
         </div>
         <div class="pp-go"><button class="main" id="kc-go">${t("key-check を回す")}</button> <span class="muted note" id="kc-status"></span></div>
         <div id="kc-prog" class="note mono"></div>
@@ -341,13 +340,13 @@ export class KeyPanel {
     this.$ = (s) => root.querySelector(s);
     this.chips = new ChipsLeft(this.$("#kb-wrap"), {
       onRun: (kind, p) => this.onRun(kind, p), dirs: () => this.dirs, contrasts: () => this.contrasts,
-      putSpec: (spec, text, file) => {                       // 作った JSON を入力欄に入れ、ひな形の一覧にも出す
-        const ok = this.putSpec(spec, `${t("自分で作ったひな形(<root>/keyed/{f})", { f: file })} ${text}`, `<root>/keyed/${file}`,
+      putSpec: async (spec, text, file) => {                 // 作った JSON を入力欄に入れ、ひな形の一覧にも出す
+        const ok = await this.putSpec(spec, `${t("自分で作ったひな形(<root>/keyed/{f})", { f: file })} ${text}`, `<root>/keyed/${file}`,
                                 t("入力欄の JSON を、作った JSON で置き換えます。よいですか?"));
         this.loadTemplates().then(() => { if (ok) this.$("#kx-tpl-sel").value = `root/${file}`; });
         return ok;
       },
-      runPipeline: () => { this.$("#kx-pipe-go").scrollIntoView({ block: "nearest" }); this.runPipeline(); },
+      runPipeline: () => { if (this.steps) this.steps.select("make"); this.$("#kx-pipe-go").scrollIntoView({ block: "nearest" }); this.runPipeline(); },   // 結果は「鍵を作る」に出るので、そこを開く
     });
     this.causal = new KeyCausal(this.$("#kz-wrap"), {
       onRun: (kind, p) => this.onRun(kind, p), onAddKeyed: (u) => this.onAddKeyed(u), moe: this.moe.size > 0,
@@ -381,7 +380,6 @@ export class KeyPanel {
       this.checkJSON();
     });
     const sel = this.$("#kx-tpl-sel");
-    this.$("#kx-tpl").addEventListener("click", () => this.insertTemplate(sel.value, false));
     sel.addEventListener("change", () => this.insertTemplate(sel.value, true));
     this.loadTemplates();
     let src = "file";
@@ -521,11 +519,11 @@ export class KeyPanel {
 
   // ひな形を入力欄に入れる(configs/keyed/ のファイル名か、root/<<root>/keyed/ のファイル名>)。選び直したときは、書きかけの JSON を
   // 消す前に確かめる
-  insertTemplate(key, ask) {
+  async insertTemplate(key, ask) {
     const x = this.templates.find((y) => y.key === key);
     if (!x) return;
     const text = (x[LANG] && x[LANG].text) || (x.ja && x.ja.text) || "";
-    const ok = this.putSpec(x.spec, x.src === "root" ? `${t("自分で作ったひな形(<root>/keyed/{f})", { f: x.file })} ${text}` : text,
+    const ok = await this.putSpec(x.spec, x.src === "root" ? `${t("自分で作ったひな形(<root>/keyed/{f})", { f: x.file })} ${text}` : text,
                             x.src === "root" ? `<root>/keyed/${x.file}` : `configs/keyed/${x.file}`,
                             ask ? t("入力欄の JSON をひな形で置き換えます。よいですか?") : null);
     if (!ok) this.$("#kx-tpl-sel").value = "";
@@ -533,10 +531,10 @@ export class KeyPanel {
 
   // 表を入力欄に入れて「JSON を書く」にする。confirm(確かめの文)を渡すと、書き換えた入力欄を消す前に確かめる(書き換えていなければ
   // 確かめない)。入れたら true
-  putSpec(spec, aboutText, aboutTitle, confirm = null) {
+  async putSpec(spec, aboutText, aboutTitle, confirm = null) {
     const ta = this.$("#kx-text"), about = this.$("#kx-tpl-about");
     const cur = ta.value.trim();
-    if (confirm && cur && cur !== this.tplText && !window.confirm(confirm)) return false;
+    if (confirm && cur && cur !== this.tplText && !(await askConfirm(confirm))) return false;
     ta.value = JSON.stringify(spec, null, 2);
     this.tplText = ta.value.trim();
     about.textContent = aboutText;
@@ -766,9 +764,7 @@ export class KeyPanel {
     const el = this.$(sel);
     const show = (j) => {
       if (!["queued", "running"].includes(j.status)) { el.innerHTML = ""; return; }
-      const pct = j.total ? Math.round((j.done / j.total) * 100) : 0;
-      el.innerHTML = j.status === "queued" ? `<span class="muted">${t("待機中")}</span>`
-        : `<span class="jb-bar"><span style="width:${pct}%"></span></span> ${pct}% <span class="muted">${esc(j.stage || "")}</span>`;
+      el.innerHTML = `<span class="muted note">${t(j.status === "queued" ? "待機中(進み具合と「止める」は下の帯)" : "実行中(進み具合と「止める」は下の帯)")}</span>`;
     };
     show({ status: "queued" });
     let es;

@@ -10,7 +10,7 @@ import { getJSON } from "./api.js";
 import { LANG, t } from "./i18n.js";
 import { esc } from "./panels.js";
 import { Steps } from "./steps.js";
-import { noteHTML } from "./ui.js";
+import { noteHTML, askConfirm } from "./ui.js";
 
 const fmt = (x, d = 2) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : (+x).toFixed(d));
 const sgn = (x, d = 2) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : `${x >= 0 ? "+" : "−"}${Math.abs(x).toFixed(d)}`);
@@ -121,7 +121,7 @@ export class PipelinePanel {
     this.onShowDirection = onShowDirection || (() => {});   // (名前) → 上の「方向を見る」でその方向を開く
     this.onOpenHead = onOpenHead || (() => {});   // ({ layer, head, tab }) → HEAD パネル
     this.onLoadProj = onLoadProj || (() => {});   // (名前, ["L:Hh:sS@NAME"], 方向) → レシピを置き換える
-    this.onEval = onEval || (async () => null);   // (params) → ジョブ eval。投げたジョブ(やめたら null)を返す
+    this.onEval = onEval || (() => {});           // (params, 名前) → 評価の画面へ送る(そこで設定を見て、変えて、始める)
     this.onOverlay = onOverlay || (() => {});     // (field) → 地図の色(causal:<name>)
     this.onOpenCandidates = onOpenCandidates || (() => {});   // (名前) → 「強さの候補」で開く
     this.list = [];
@@ -139,8 +139,7 @@ export class PipelinePanel {
       <div class="pp-in">
         <label class="muted">${t("JSON ファイル")} <input type="file" id="pp-file" accept=".json,application/json"></label>
         <label class="muted" title="${t("用途別のテンプレート(configs/pipeline/)。選ぶと入力欄に入る")}">${t("ひな形")}
-          <select id="pp-tpl-sel"><option value="small">${t("小さな例(海賊、system を両側に)")}</option></select></label>
-        <button class="small" id="pp-tpl" title="${t("選んだひな形を入力欄に入れる")}">${t("入れる")}</button>
+          <select id="pp-tpl-sel"><option value="">${t("(ひな形を選ぶ)")}</option><option value="small">${t("小さな例(海賊、system を両側に)")}</option></select></label>
         <span class="muted note">${t("または下に貼り付け")}</span></div>
       <div id="pp-tpl-about" class="muted note"></div>
       <textarea id="pp-text" class="mono" rows="9" spellcheck="false" placeholder='{"name": "…", "system_a": "…", "system_b": "…", "user_prompts": ["…", "…", "…", "…"]}'></textarea>
@@ -148,12 +147,12 @@ export class PipelinePanel {
       </div>
       <div id="pp-shared"><p class="stage-shared-h">${t("共通の設定(方向とヘッドを作る が使う)")}</p>
       <div class="pp-set">
-        <label class="muted" title="${t("配分で A 側の射影の値をここまで下げる(射影の値を測る最後の層)。数か、B(B 側の平均まで = 消し切る)。空なら A と B の平均の真ん中(半分ほど消す)")}">${t("目標")} <input id="pp-target" size="7" placeholder="${t("真ん中")}" spellcheck="false"></label>
+        <label class="muted" title="${t("配分で A 側の射影の値をここまで下げる(射影の値を測る最後の層)。数か、B(B 側の平均まで = 消し切る)。空なら A と B の平均の真ん中(半分ほど消す)")}">${t("射影の目標")} <input id="pp-target" size="7" placeholder="${t("真ん中")}" spellcheck="false"></label>
         <label class="muted" title="${t("比べる組のヘッドの数(カンマ区切り)。少ない組ほど 1 ヘッドの強さが大きくなる")}">${t("ヘッド数")} <input id="pp-nheads" size="8" value="${DEFAULTS.n_heads}" spellcheck="false"></label>
-        <label class="muted" title="${t("射影の値を測る段(基準層・因果・配分)で使う質問の数(等間隔に間引く)。方向づくりには全部使う")}">max_examples <input id="pp-mx" type="number" min="4" max="4096" value="${DEFAULTS.max_examples}"></label>
-        <label class="muted" title="${t("方向を作る位置。last = 質問の最後のトークン、response = 返事を書かせてその位置(遅い)")}">positions <select id="pp-pos"><option>last</option><option>response</option></select></label>
-        <label class="muted" title="${t("層ごとのスクリーニングのあと、ヘッドを 1 個ずつ止めて測る層の数")}">top_layers <input id="pp-tl" type="number" min="1" max="64" value="${DEFAULTS.top_layers}"></label>
-        <label class="muted" title="${t("効率を測るときの、射影の値が残りやすい質問の数")}">hard <input id="pp-hard" type="number" min="1" max="1024" value="${DEFAULTS.hard}"></label>
+        <label class="muted" title="${t("射影の値を測る段(基準層・因果・配分)で使う質問の数(等間隔に間引く)。方向づくりには全部使う")}">${t("測る質問の数")} <input id="pp-mx" type="number" min="4" max="4096" value="${DEFAULTS.max_examples}"></label>
+        <label class="muted" title="${t("方向を作る位置。last = 質問の最後のトークン、response = 返事を書かせてその位置(遅い)")}">${t("方向を作る位置")} <select id="pp-pos"><option>last</option><option>response</option></select></label>
+        <label class="muted" title="${t("層ごとのスクリーニングのあと、ヘッドを 1 個ずつ止めて測る層の数")}">${t("ヘッドを測る層の数")} <input id="pp-tl" type="number" min="1" max="64" value="${DEFAULTS.top_layers}"></label>
+        <label class="muted" title="${t("効率を測るときの、射影の値が残りやすい質問の数")}">${t("残りやすい質問の数")} <input id="pp-hard" type="number" min="1" max="1024" value="${DEFAULTS.hard}"></label>
         <label class="muted" title="${t("同じ JSON・同じ設定で作り済みの方向と因果の結果があっても使い回さず、最初から作り直す(止めて流し直すときは外したままにすると配分からやり直せる)")}"><input type="checkbox" id="pp-fresh"> ${t("最初から作り直す")}</label></div>
       </div>
       <div class="pp-go" id="pp-run"><button class="main" id="pp-go" disabled>${t("方向とヘッドを作る")}</button> <span class="muted note" id="pp-status"></span></div>
@@ -174,7 +173,6 @@ export class PipelinePanel {
     this.templates = [];                         // 用途別のテンプレート(/api/pipeline-templates)
     this.tplText = null;                         // 最後に入れたひな形の文字列(書き換えていなければ確かめずに差し替える)
     const sel = this.$("#pp-tpl-sel");
-    this.$("#pp-tpl").addEventListener("click", () => this.insertTemplate(sel.value, false));
     sel.addEventListener("change", () => this.insertTemplate(sel.value, true));
     getJSON("/api/pipeline-templates").then((list) => {
       this.templates = Array.isArray(list) ? list : [];
@@ -220,12 +218,13 @@ export class PipelinePanel {
   status(s, err = false) { const el = this.$("#pp-status"); el.textContent = s; el.classList.toggle("err", err); }
 
   // ひな形を入力欄に入れる(key = "small" か configs/pipeline/ のファイル名)。選び直したときは、書きかけの JSON を消す前に確かめる
-  insertTemplate(key, ask) {
+  async insertTemplate(key, ask) {
+    if (!key) return;
     const ta = this.$("#pp-text"), about = this.$("#pp-tpl-about");
     const x = this.templates.find((y) => y.file === key);
     const spec = x ? x.spec : TEMPLATE;
     const cur = ta.value.trim();
-    if (ask && cur && cur !== this.tplText && !window.confirm(t("入力欄の JSON をひな形で置き換えます。よいですか?"))) return;
+    if (ask && cur && cur !== this.tplText && !(await askConfirm(t("入力欄の JSON をひな形で置き換えます。よいですか?")))) return;
     ta.value = JSON.stringify(spec, null, 2);
     this.tplText = ta.value.trim();
     const a = x ? (x[LANG] && x[LANG].text) || (x.ja && x.ja.text) || "" : "";
@@ -320,7 +319,7 @@ export class PipelinePanel {
       ${c ? `<p><b>${t("元の組と合わせた組({m} ヘッド)", { m: c.n_heads })}</b>${c.chosen_by === "fewest_remaining" ? ` <span class="muted">${t("(目標に届いた組が無いので、合わせた残りが最も少ない組)")}</span>` : ""}: ${t("残り {a} → {b} 問", { a: c.remain_before, b: c.remain_after })} ·
         ${t("A 平均 {a} → {b}", { a: fmt(c.a_mean_before, 2), b: fmt(c.a_mean_after, 2) })} · ${t("B ⊥ {a} → {b}", { a: fmt(c.b_drift_orth_base, 3), b: fmt(c.b_drift_orth, 3) })}
         <button class="small" id="pp-rf-load" title="${t("元の組と追加の組を合わせたユニットで今のレシピを置き換える")}">${t("合わせた組でレシピを置き換える")}</button>
-        <button class="small" id="pp-rf-eval" title="${t("合わせた組のレシピで eval を投げる(倍率 0 と 1、ランダムな対照 8 本)")}">${t("合わせた組で eval する")}</button></p>`
+        <button class="small" id="pp-rf-eval" title="${t("合わせた組のレシピを評価の画面へ送る(強さ 0 と 1、ランダムな向きの比べる用 8 本が入る。始める前に変えられる)")}">${t("合わせた組を評価へ送る")}</button></p>`
         : `<p class="muted">${t("追加の組を作れなかったので、合わせた組はありません。")}</p>`}
       <p class="muted">${t("下の比較表の「元の組と合わせて読み込む」「合わせて eval する」は、どの行も元の組とその行の組を合わせて使います(追加の組は元の組を当てた状態で探したので、単独では使いません)。")}</p></div>`;
   }
@@ -431,24 +430,15 @@ export class PipelinePanel {
     const rf = d.refine && d.refine.combined;
     const rl = $("#pp-rf-load"), re = $("#pp-rf-eval");
     if (rf && rl) rl.addEventListener("click", () => this.onLoadProj(`${d.name}-combined`, rf.units, d.name));
-    if (rf && re) re.addEventListener("click", () => this.fireEval(re, { recipe: rf.recipe, doses: [0, 1], random_controls: 8 }));
+    if (rf && re) re.addEventListener("click", () => this.onEval({ recipe: rf.recipe, doses: [0, 1], random_controls: 8 }, `${d.name}-combined`));
     for (const b of out.querySelectorAll("[data-eval]")) {
       b.addEventListener("click", () => {
         const r = table.find((x) => String(x.n_heads) === b.dataset.eval);
         if (!r || !r.recipe) return;
         const c = crow(b.dataset.eval);
-        this.fireEval(b, { recipe: c ? c.recipe : r.recipe, doses: [0, 1], random_controls: 8 });
+        this.onEval({ recipe: c ? c.recipe : r.recipe, doses: [0, 1], random_controls: 8 }, c ? `${d.name}-n${c.n_new}-combined` : `${d.name}-n${r.n_heads}`);
       });
     }
-  }
-
-  // eval を投げる。見積もりの確認でやめたとき・投げられなかったときは、ボタンを元に戻す(もう一度押せる)
-  async fireEval(btn, params) {
-    btn.disabled = true;
-    let j = null;
-    try { j = await this.onEval(params); } catch (e) { btn.title = e.message; }
-    if (j) btn.textContent = t("eval を投げました");
-    else btn.disabled = false;
   }
 
   // 「候補を作る」: 組 × 全体の倍率で返事を作り、名前を伏せて採点する(heads_candidates のジョブ)
@@ -459,12 +449,12 @@ export class PipelinePanel {
     return `<div class="pp-cand"><h4 class="pp-sub">${t("強さの候補を作る(名前を伏せて採点する)")}</h4>
       ${noteHTML(t("比較表の組それぞれに全体の倍率を何段か掛けて、A 側(振る舞いが出ている状態)と B 側(ふつうの状態)で返事を作ります。正の倍率は A 側で振る舞いを消す向き(A 側の返事を採点)、負の倍率は符号を返して B 側で強める向き(B 側の返事を採点)。無介入(base)は必ず入ります。どの候補の返事か伏せて採点し、候補ごとに集計します。調整に使っていない質問で作ると、強さを決めるのに使えます。"), "muted note")}
       <div class="pp-set">
-        <label class="muted" title="${t("カンマ区切り。正 = A 側で消す向き、負 = B 側で強める向き。0 は使えない(無介入は base)")}">${t("倍率")} <input id="pc-scales" size="16" value="${esc(f.scales)}" spellcheck="false"></label>
+        <label class="muted" title="${t("カンマ区切り。正 = A 側で消す向き、負 = B 側で強める向き。0 は使えない(無介入は base)")}">${t("強さ")} <input id="pc-scales" size="16" value="${esc(f.scales)}" spellcheck="false"></label>
         <label class="muted" title="${t("比較表のどの組を使うか(ヘッド数、カンマ区切り)。空なら全部")}">${t("組(ヘッド数)")} <input id="pc-nheads" size="6" value="${esc(f.n_heads)}" placeholder="${t("全部")}" spellcheck="false"></label>
-        <label class="muted" title="${t("各側の質問の数の上限(多ければ等間隔に間引く)")}">max_prompts <input id="pc-mp" type="number" min="1" max="1000" value="${f.max_prompts}"></label>
-        <label class="muted" title="${t("返事の長さの上限(トークン)")}">max_tokens <input id="pc-mt" type="number" min="1" max="2048" value="${f.max_tokens}"></label>
+        <label class="muted" title="${t("各側の質問の数の上限(多ければ等間隔に間引く)")}">${t("質問の数")} <input id="pc-mp" type="number" min="1" max="1000" value="${f.max_prompts}"></label>
+        <label class="muted" title="${t("返事の長さの上限(トークン)")}">${t("返事の長さ")} <input id="pc-mt" type="number" min="1" max="2048" value="${f.max_tokens}"></label>
         <label class="muted" title="${t("全部の候補(無介入も)で同じ種を使うので、違いは介入だけになる")}">${t("サンプリング")} <select id="pc-sp">${sp.map(([k, l]) => `<option value="${k}"${f.sampling === k ? " selected" : ""}>${esc(l)}</option>`).join("")}</select></label>
-        <label class="muted">seed <input id="pc-seed" type="number" min="0" value="${f.seed}"></label>
+        <label class="muted">${t("種")} <input id="pc-seed" type="number" min="0" value="${f.seed}"></label>
         <label class="muted" title="${t("全部の候補の両側の返事を採点する(既定は、消す向きは A 側、強める向きは B 側だけ)")}"><input type="checkbox" id="pc-jb"${f.judge_b ? " checked" : ""}> ${t("両側を採点する")}</label></div>
       <div class="pp-cand-q"><textarea id="pc-qa" rows="4" spellcheck="false" placeholder="${t("A 側の質問(調整に使っていないもの。1 行に 1 つ。空なら対照集合の質問)")}">${esc(f.qa)}</textarea>
         <textarea id="pc-qb" rows="4" spellcheck="false" placeholder="${t("B 側の質問(空なら A と同じ質問)")}">${esc(f.qb)}</textarea></div>
@@ -614,7 +604,7 @@ export class PipelinePanel {
         <td class="${r.reached ? "ok" : "ng"}">${r.reached ? "✓" : "×"}</td>
         <td class="l">${crow(r.n_heads) ? `<div class="muted note">${t("元の組と合わせると: 残り {a} → {b} 問 · B ⊥ {c}", { a: crow(r.n_heads).remain_before, b: crow(r.n_heads).remain_after, c: fmt(crow(r.n_heads).b_drift_orth, 3) })}</div>` : ""}
           <button class="small" data-load="${r.n_heads}" title="${crow(r.n_heads) ? t("元の組とこの組を合わせたユニットで今のレシピを置き換える(この組は元の組を当てた状態で探したので、単独では使わない)") : t("この組(proj のユニット)で今のレシピを置き換える")}">${crow(r.n_heads) ? t("元の組と合わせてレシピを置き換える") : t("レシピを置き換える")}</button>
-          <button class="small" data-eval="${r.n_heads}" title="${crow(r.n_heads) ? t("元の組とこの組を合わせたレシピで eval を投げる(倍率 0 と 1、ランダムな対照 8 本)") : t("この組のレシピで eval を投げる(倍率 0 と 1、ランダムな対照 8 本)")}"${r.recipe ? "" : " disabled"}>${crow(r.n_heads) ? t("合わせて eval する") : t("eval する")}</button>
+          <button class="small" data-eval="${r.n_heads}" title="${crow(r.n_heads) ? t("元の組とこの組を合わせたレシピを評価の画面へ送る(強さ 0 と 1、ランダムな向きの比べる用 8 本が入る。始める前に変えられる)") : t("この組のレシピを評価の画面へ送る(強さ 0 と 1、ランダムな向きの比べる用 8 本が入る。始める前に変えられる)")}"${r.recipe ? "" : " disabled"}>${crow(r.n_heads) ? t("合わせて評価へ送る") : t("評価へ送る")}</button>
           <button class="small" data-refine="${r.n_heads}" title="${t("この組を当てても目標まで下がらない質問(残り)だけで、組を当てたまま方向を作り直し、因果 → 配分で足すヘッドを探す。結果は新しい一括の結果(名前 _r1 …)として出る")}"${r.remain > 0 ? "" : " disabled"}>${t("残りから追加")}</button></td></tr>`;
     }).join("");
     const hp = hard.prompts || [], hs = hard.scores || [];

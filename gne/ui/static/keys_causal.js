@@ -14,7 +14,7 @@
 import { getJSON } from "./api.js";
 import { t } from "./i18n.js";
 import { esc } from "./panels.js";
-import { noteHTML } from "./ui.js";
+import { noteHTML, layersInput } from "./ui.js";
 
 const fmt = (x, d = 3) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : (+x).toFixed(d));
 const sgn = (x, d = 3) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : `${+x >= 0 ? "+" : "−"}${Math.abs(+x).toFixed(d)}`);
@@ -89,7 +89,7 @@ export class KeyCausal {
     root.innerHTML = `<h4>${t("効く層を探す")} <span class="muted note">${t("(keyed の効く場所: 生成なしのふるい分け → 生成での確かめ)")}</span></h4>
       ${noteHTML(t("key-check は鍵が場面を分けるか(鍵の反応の強さ)しか見ません。どの層・どの書き込み先に書けば振る舞いが変わるかは別の問題です。第 1 段は、上の「鍵を作る」の対照集合で、候補(層 × 書き込み先)ごとに鍵を作り(偶数番目)、作成に使っていない奇数番目の返事で、keyed を当てたときに振る舞いの部分(positions の正規表現に一致した文字)の対数確率がどれだけ下がるかを、比較用の鍵と並べて生成なしで測ります。生成なしの値は保証ではないので、表から候補を数行選び、第 2 段の生成で振る舞いの数を確かめます。介入(iv)と返事の長さは「鍵を作る」の欄のものを使います。"), "muted note pp-help")}
       <div class="pp-set">
-        <label class="muted" title="${t("候補の層(カンマ区切りか 10-16)。空なら全層(最終層と MTP の層は除く)")}">${t("層")} <input id="kz-layers" size="12" placeholder="${t("空なら全層")}" spellcheck="false"></label>
+        <label class="muted" title="${t("候補の層(カンマ区切りか 10-16)。空なら全層(最終層と MTP の層は除く)")}">${t("層")} ${layersInput("kz-layers", { placeholder: t("空なら全層") })}</label>
         <span class="muted" title="${t("候補の書き込み先。ffn = ffn_down、attn = attn_output。書けない書き込み先・層は外す")}">${t("書き込み先")}
           <label><input type="checkbox" id="kz-t-ffn" checked> ffn</label> <label><input type="checkbox" id="kz-t-attn" checked> attn</label>
           <span class="${this.moe ? "" : "hidden"}"><label><input type="checkbox" id="kz-t-shared"> shared</label>
@@ -97,7 +97,7 @@ export class KeyCausal {
         <label class="muted" title="${t("α の段(カンマ区切り)。空なら 1,2,4 に表の keyed.alpha の符号を掛けたもの")}">${t("α の段")} <input id="kz-alphas" size="10" spellcheck="false"></label>
         <label class="muted" title="${t("候補ごとに測る比較用の鍵(ラベルをシャッフルして作った鍵)の本数。全候補の比較用の鍵をまとめた分布の 5% 点が印の基準")}">${t("比較用の鍵")} <input class="w4" id="kz-pseudo" type="number" min="1" max="16" value="3"></label>
         <label class="muted" title="${t("効き目を測る振る舞いの部分の正規表現。空なら positions の before: の正規表現")}">${t("効き目の正規表現")} <input id="kz-match" size="18" spellcheck="false"></label>
-        <label class="muted" title="${t("選択式の振る舞い向け: 1 行 1 問の JSONL({\"prompt\", \"prefix\": \"Answer:\", \"behavior\": \" B\", \"desired\": \" C\"}。書き込みたくない場面の行は \"group\" に群の名前)。その位置での log p(振る舞いの答え) − log p(望む答え) の変化を測る")}">probe <input type="file" id="kz-probe" accept=".jsonl,.json,application/json"></label>
+        <label class="muted" title="${t("選択式の振る舞い向け: 1 行 1 問の JSONL({\"prompt\", \"prefix\": \"Answer:\", \"behavior\": \" B\", \"desired\": \" C\"}。書き込みたくない場面の行は \"group\" に群の名前)。その位置での log p(振る舞いの答え) − log p(望む答え) の変化を測る")}">${t("測る文のファイル")} <input type="file" id="kz-probe" accept=".jsonl,.json,application/json"></label>
         <span class="muted note" id="kz-pinfo"></span>
         <label class="muted" title="${t("結果と鍵の名前。空なら <対照集合の名前>-causal(鍵は <名前>-ffn などで保存)")}">${t("名前")} <input id="kz-name" size="16" spellcheck="false"></label>
       </div>
@@ -115,8 +115,8 @@ export class KeyCausal {
           <label class="muted" title="${t("書き込みたくない場面(dont_touch)の質問にも答えさせ、返事が変わった数を数える")}"><input type="checkbox" id="kz-vdt" checked> dont_touch</label>
         </div>
         <details class="kz-adv"><summary class="muted note">${t("judge・温度")}</summary><div class="pp-set">
-          <label class="muted" title="${t("読み手の判定の文面({q} に質問、{a} に返事)。空なら正規表現で数える")}">judge <textarea id="kz-vjudge" class="mono" rows="2" cols="40" spellcheck="false"></textarea></label>
-          <label class="muted">labels <input id="kz-vlabels" size="8" value="R,P,C" spellcheck="false"></label>
+          <label class="muted" title="${t("読み手の判定の文面({q} に質問、{a} に返事)。空なら正規表現で数える")}">${t("判定の指示")} <textarea id="kz-vjudge" class="mono" rows="2" cols="40" spellcheck="false"></textarea></label>
+          <label class="muted">${t("判定のラベル")} <input id="kz-vlabels" size="8" value="R,P,C" spellcheck="false"></label>
           <label class="muted" title="${t("振る舞いとみなすラベル(judge のとき)")}">${t("振る舞いのラベル")} <input id="kz-vlabel" size="6" spellcheck="false"></label>
           <label class="muted">${t("温度")} <input class="w45" id="kz-vtemp" type="number" min="0" max="2" step="0.1" value="0"></label>
           <label class="muted" title="${t("種(カンマ区切り。温度があるとき)")}">${t("種")} <input id="kz-vseeds" size="8" spellcheck="false"></label>
@@ -465,9 +465,7 @@ export class KeyCausal {
     const el = this.$(sel);
     const show = (j) => {
       if (!["queued", "running"].includes(j.status)) { el.innerHTML = ""; return; }
-      const pct = j.total ? Math.round((j.done / j.total) * 100) : 0;
-      el.innerHTML = j.status === "queued" ? `<span class="muted">${t("待機中")}</span>`
-        : `<span class="jb-bar"><span style="width:${pct}%"></span></span> ${pct}% <span class="muted">${esc(j.stage || "")}</span>`;
+      el.innerHTML = `<span class="muted note">${t(j.status === "queued" ? "待機中(進み具合と「止める」は下の帯)" : "実行中(進み具合と「止める」は下の帯)")}</span>`;
     };
     show({ status: "queued" });
     let es;

@@ -6,6 +6,7 @@ import { t as tr } from "./i18n.js";                 // t は会話のターン�
 import { esc, tokHTML } from "./panels.js";
 import { samplingLabel } from "./recipe.js";
 import { Mic } from "./mic.js";
+import { askConfirm } from "./ui.js";
 
 // "14:8949:+1" → "L14 N8949 +1"、ヘッドの gain "21:H7:x0" → "L21 H7 ×0"、方向 "30:dir:NAME:+0.3" → "L30 dir:NAME +0.3"。
 // MoE(CHANGE-05): "12:E37:N511:+0.8" → "L12 E37 N511 +0.8"、"12:E3:x0" → "L12 E3 ×0"、"12:E3:route:+2" → "L12 E3 route +2"、
@@ -69,9 +70,9 @@ export class ChatPanel {
   }
 
   // 列の数を切り替える。履歴は列ごとなので、会話があれば確かめてから消す
-  setSingle(on) {
+  async setSingle(on) {
     if (on === this.single || this.busy) return;
-    if (this.turns.length && !window.confirm(tr("列の数を変えると、今の会話を消します。切り替えますか?"))) { this.render(); return; }
+    if (this.turns.length && !(await askConfirm(tr("列の数を変えると、今の会話を消します。切り替えますか?")))) { this.render(); return; }
     this.single = on;
     this.turns = [];
     this.status = "";
@@ -254,8 +255,8 @@ export class ChatPanel {
     $("#ch-when").addEventListener("change", (ev) => { this.when = ev.target.value; this.render(); });
     const wx = $("#ch-when-x");
     if (wx) wx.addEventListener("change", (ev) => { this.whenArg = ev.target.value.trim(); });
-    $("#ch-reset").addEventListener("click", () => {
-      if (this.turns.length && !window.confirm(tr("いまの会話を消して、最初から話しますか?"))) return;
+    $("#ch-reset").addEventListener("click", async () => {
+      if (this.turns.length && !(await askConfirm(tr("いまの会話を消して、最初から話しますか?")))) return;
       this.turns = []; this.status = ""; this.render();
       const ta = this.el.querySelector("#ch-text");
       if (ta) ta.focus();

@@ -15,12 +15,12 @@
   <span class="brand">gne</span>
   <!-- 画面の切り替え: 探す / 作る / 確かめる の 3 群 -->
   <nav id="views" aria-label="画面" data-i18n-aria-label="画面">
-    <div class="grp"><span class="grp-l" data-i18n="探す">探す</span><span class="nav">
-      <button type="button" data-view="map" class="on" aria-current="true" data-i18n="地図">地図</button><button type="button" data-view="layers" data-i18n="層">層</button><button type="button" data-view="writers" data-i18n="書き手">書き手</button><button type="button" data-view="embed" data-i18n="埋め込み">埋め込み</button></span></div>
-    <div class="grp"><span class="grp-l" data-i18n="作る">作る</span><span class="nav">
-      <button type="button" data-view="direction" data-i18n="方向">方向</button><button type="button" data-view="chips" data-i18n-title="対照の文から方向を作り、効くヘッドを探して強さを配る(CHiPS)" title="対照の文から方向を作り、効くヘッドを探して強さを配る(CHiPS)">CHiPS</button><button type="button" data-view="keys" data-i18n="鍵" data-i18n-title="鍵つきの書き込み(keyed)の鍵を作り、分かれ方を確かめる" title="鍵つきの書き込み(keyed)の鍵を作り、分かれ方を確かめる">鍵</button><button type="button" data-view="fish" data-i18n-title="すでにあるニューロンを式から計算した重みで書き換え、決まった場面の返事でだけ方向を書く(FiSH)" title="すでにあるニューロンを式から計算した重みで書き換え、決まった場面の返事でだけ方向を書く(FiSH)">FiSH</button></span></div>
-    <div class="grp"><span class="grp-l" data-i18n="確かめる">確かめる</span><span class="nav">
-      <button type="button" data-view="eval" data-i18n="評価">評価</button><button type="button" data-view="cand" data-i18n="強さの候補">強さの候補</button></span></div>
+    <div class="grp"><span class="grp-l" data-i18n="探す" data-i18n-en="Explore">探す</span><span class="nav">
+      <button type="button" data-view="map" class="on" aria-current="true" data-i18n-en="map" data-i18n="地図">地図</button><button type="button" data-view="layers" data-i18n-en="layers" data-i18n="層">層</button><button type="button" data-view="writers" data-i18n-en="writers" data-i18n="書き手">書き手</button><button type="button" data-view="embed" data-i18n-en="embed" data-i18n="埋め込み">埋め込み</button></span></div>
+    <div class="grp"><span class="grp-l" data-i18n="作る" data-i18n-en="Build">作る</span><span class="nav">
+      <button type="button" data-view="direction" data-i18n-en="direction" data-i18n="方向">方向</button><button type="button" data-view="chips" data-i18n-title="対照の文から方向を作り、効くヘッドを探して強さを配る(CHiPS)" title="対照の文から方向を作り、効くヘッドを探して強さを配る(CHiPS)">CHiPS</button><button type="button" data-view="keys" data-i18n-en="keys" data-i18n="鍵" data-i18n-title="鍵つきの書き込み(keyed)の鍵を作り、分かれ方を確かめる" title="鍵つきの書き込み(keyed)の鍵を作り、分かれ方を確かめる">鍵</button><button type="button" data-view="fish" data-i18n-title="すでにあるニューロンを式から計算した重みで書き換え、決まった場面の返事でだけ方向を書く(FiSH)" title="すでにあるニューロンを式から計算した重みで書き換え、決まった場面の返事でだけ方向を書く(FiSH)">FiSH</button></span></div>
+    <div class="grp"><span class="grp-l" data-i18n="確かめる" data-i18n-en="Check">確かめる</span><span class="nav">
+      <button type="button" data-view="eval" data-i18n-en="eval" data-i18n="評価">評価</button><button type="button" data-view="cand" data-i18n-en="candidates" data-i18n="強さの候補">強さの候補</button></span></div>
   </nav>
   <label><span class="lbl">jump</span> <input id="jump" placeholder="L14 N8949" size="11" spellcheck="false" data-i18n-title="ニューロンへ飛ぶ(L14 N8949 の形で Enter)" title="ニューロンへ飛ぶ(L14 N8949 の形で Enter)"></label>
   <span id="search" class="seg"><select id="search-mode" data-i18n-title="検索の対象" title="検索の対象"><option value="lens">lens</option><option value="words">words</option><option value="name">name</option></select><input id="search-q" data-i18n-placeholder="検索(alien など)" placeholder="検索(alien など)" size="14" spellcheck="false"></span>
@@ -29,9 +29,9 @@
 </header>
 <main id="main">
   <aside id="list" class="panel collapsed">
-    <div class="panel-head"><button class="toggle" data-target="list">LIST</button></div>
+    <div class="panel-head"><button class="toggle" data-target="list" data-i18n="一覧" data-i18n-en="LIST">一覧</button></div>
     <div class="panel-body">
-      <div class="tabs" id="list-tabs"><button data-tab="rank" class="on">rank</button><button data-tab="search" class="hidden" data-i18n="検索">検索</button><button data-tab="fires">fires</button></div>
+      <div class="tabs" id="list-tabs"><button data-tab="rank" class="on" data-i18n="順位" data-i18n-en="rank">順位</button><button data-tab="search" class="hidden" data-i18n="検索">検索</button><button data-tab="fires" data-i18n="反応を見る" data-i18n-en="fires">反応を見る</button></div>
       <div id="rank"></div>
       <div id="search-list" class="hidden"></div>
       <div id="fires-list" class="hidden"></div>

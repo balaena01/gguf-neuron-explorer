@@ -224,6 +224,31 @@ def _recipe_tab(pg, tab="units"):
 
 _STEP_ROOT = {"fish": "#dv-fish", "keys": "#dv-key", "chips": "#dv-pipe", "eval": "#eval-view"}
 
+_ASK_JS = """([answer, once]) => {
+  window.__asked = window.__asked || [];
+  window.__askAns = window.__askAns || [];
+  window.__askAns.push({ answer, once });
+  window.gneAsk = (msg) => {
+    const h = window.__askAns[window.__askAns.length - 1];
+    window.__asked.push(msg);
+    if (h && h.once) window.__askAns.pop();
+    return !!h && h.answer === "accept";
+  };
+}"""
+
+
+def _dialogs(pg, answer="accept", once=False):
+    """確かめる窓に答える(accept = はい、dismiss = やめる。ページの window.gneAsk で、窓を出さずに答える)。once なら次の 1 回だけ。once でなければ、
+    読み直したページでも答える。出た文は _asked で読む。"""
+    if not once:
+        pg.add_init_script(f"addEventListener('DOMContentLoaded', () => ({_ASK_JS})(['{answer}', false]))")
+    pg.evaluate(_ASK_JS, [answer, once])
+
+
+def _asked(pg, clear=False):
+    """確かめる窓に出た文(_dialogs が答えたもの)。clear なら空にする。"""
+    return pg.evaluate("(c) => { if (c) window.__asked = []; return [...(window.__asked || [])]; }", clear)
+
 
 def _step(pg, screen, step):
     """作る画面の左の手順(作業の一覧)を開く(開いていれば何もしない)。step が shared なら、共通の設定が見える手順にする。"""
@@ -294,7 +319,7 @@ def _open(browser, url, lang):
     pg = browser.new_page(viewport={"width": 1600, "height": 1100}, locale="ja-JP")
     errors = []
     pg.on("pageerror", lambda e: errors.append(str(e)))
-    pg.on("dialog", lambda dl: dl.accept())
+    _dialogs(pg)
     pg.goto(url + f"/?lang={lang}")
     pg.wait_for_function("window.gne && window.gne.recipe && window.gne.arch", timeout=120000)
     return pg, errors
@@ -552,11 +577,11 @@ def test_eval_keyed_params_and_block_in_browser(ui_server, browser):
         if lang == "ja":
             pg.evaluate("document.querySelector('#evx-body .evx-kx').scrollIntoView()")
             _shot(pg, "keyed_eval.png")
-        asked = []
-        pg.once("dialog", lambda dl: (asked.append(dl.message), dl.accept()))           # いまのレシピを置き換える前に確かめる
+        _asked(pg, clear=True)
+        _dialogs(pg, "accept", once=True)           # いまのレシピを置き換える前に確かめる
         _step(pg, "eval", "main")
         pg.click("#evx-body [data-krc='0']")                                                # keyed の方式のレシピでレシピを置き換える
-        assert asked and pg.evaluate("window.gne.recipe.keyed().length") == 1 and pg.evaluate("window.gne.recipe.keyed()[0].key") == "zk_web"
+        assert _asked(pg) and pg.evaluate("window.gne.recipe.keyed().length") == 1 and pg.evaluate("window.gne.recipe.keyed()[0].key") == "zk_web"
         # 測っていない(対照集合が分からない)
         skipped = {"skipped": "鍵の対照集合が分かりません", "hint": "--keyed-contrast で渡してください"}
         pg.evaluate(f"(() => {{ const v = window.gne.evalView; v.data = {json.dumps(_fake_eval(skipped))}; v.render(); }})()")
@@ -588,14 +613,13 @@ def test_key_panel_template_pipeline_and_verify_in_browser(ui_server, browser):
     「key-verify」で V30 の表。ジョブのバーの名前。"""
     url, s = ui_server["url"], ui_server["session"]
     pg, errors = _open(browser, url, "ja")
-    dialogs = []
-    pg.on("dialog", lambda dl: dialogs.append(dl.message))                  # _open が受け入れる。ここでは数えるだけ
+    _asked(pg, clear=True)                  # _open が受け入れる。ここでは数えるだけ
     _key_tab(pg)
     assert not pg.evaluate("document.querySelector('#kx-src-file').classList.contains('hidden')")         # 既定はファイルを選ぶ
     _step(pg, "keys", "shared")
     pg.select_option("#kx-tpl-sel", "sentence_endings.json")
     assert pg.evaluate("document.querySelector('#kx-src-file').classList.contains('hidden')")             # JSON を書くに替わる
-    assert '"noda_endings"' in pg.input_value("#kx-text") and dialogs == []
+    assert '"noda_endings"' in pg.input_value("#kx-text") and _asked(pg) == []
     assert "「です。」「ます。」を書く直前" in pg.evaluate("document.querySelector('#kx-tpl-about').textContent")
     jc = pg.evaluate("document.querySelector('#kx-jcheck').textContent")
     assert "noda_endings" in jc and "質問 16 個" in jc and "作り方 (b)" in jc and "english 4 問" in jc
@@ -607,13 +631,13 @@ def test_key_panel_template_pipeline_and_verify_in_browser(ui_server, browser):
     assert "noda_web" in pg.evaluate("document.querySelector('#kx-jcheck').textContent")
     _step(pg, "keys", "shared")
     pg.select_option("#kx-tpl-sel", "system_state.json")
-    assert len(dialogs) == 1 and '"polite_state"' in pg.input_value("#kx-text")
+    assert len(_asked(pg)) == 1 and '"polite_state"' in pg.input_value("#kx-text")
     assert "作り方 (a)" in pg.evaluate("document.querySelector('#kx-jcheck').textContent")
     pg.evaluate("(() => { const k = window.gne.directionView.key; k.built = {kind: 'saved', r: {name: 'tmp', target: 'ffn', layers: [8], kn: {8: 0.5}, info: {}}}; k.renderBuilt(); })()")
     assert pg.input_value("#kx-alpha") == "-1"
     _step(pg, "keys", "shared")
     pg.select_option("#kx-tpl-sel", "sentence_endings.json")                # 書き換えていないので確かめない
-    assert len(dialogs) == 1 and '"noda_endings"' in pg.input_value("#kx-text")
+    assert len(_asked(pg)) == 1 and '"noda_endings"' in pg.input_value("#kx-text")
     # 読めない JSON: エラーを出し、ボタンを押してもジョブを投げない
     good = pg.input_value("#kx-text")
     _step(pg, "keys", "shared")

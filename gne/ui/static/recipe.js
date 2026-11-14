@@ -14,7 +14,7 @@ import { getJSON, postJSON } from "./api.js";
 import { t } from "./i18n.js";
 import { targetKind } from "./keys.js";
 import { esc } from "./panels.js";
-import { wireTabs, noteHTML } from "./ui.js";
+import { wireTabs, noteHTML, askConfirm, layersInput, useContrastList } from "./ui.js";
 
 const fmt = (x, d = 2) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : (+x).toFixed(d));
 const signed = (x, d = 2) => `${x >= 0 ? "+" : "−"}${fmt(Math.abs(x), d)}`;
@@ -301,9 +301,9 @@ export class Recipe {
 }
 
 // レシピを置き換える前に確かめる(どの入口でも同じ)。いまのレシピが空なら確かめない。置き換えてよければ true
-export function askReplace(recipe, name) {
+export async function askReplace(recipe, name) {
   if (recipe.empty()) return true;
-  return window.confirm(t("いまのレシピ({n} ユニット)を {name} で置き換えますか?", { n: recipe.units.length + (recipe.ablate ? 1 : 0), name: name || "—" }));
+  return askConfirm(t("いまのレシピ({n} ユニット)を {name} で置き換えますか?", { n: recipe.units.length + (recipe.ablate ? 1 : 0), name: name || "—" }));
 }
 
 // サンプリングの値の短い表示(温度 1.0・top-k 20・…)
@@ -436,11 +436,11 @@ export class RecipePanel {
     $("#rc-name").addEventListener("change", (ev) => r.setName(ev.target.value.trim()));
     $("#rc-save").addEventListener("click", () => this.save());
     const clr = $("#rc-clear");
-    if (clr) clr.addEventListener("click", () => { if (confirm(t("レシピの {n} ユニットをすべて外しますか", { n: r.units.length }))) { r.clear(); this.render(); } });
-    $("#rc-load").addEventListener("change", (ev) => {
+    if (clr) clr.addEventListener("click", async () => { if (await askConfirm(t("レシピの {n} ユニットをすべて外しますか", { n: r.units.length }), { ok: t("外す") })) { r.clear(); this.render(); } });
+    $("#rc-load").addEventListener("change", async (ev) => {
       const x = this.saved.find((y) => y.name === ev.target.value);
       if (!x) return;
-      if (!askReplace(r, x.name)) { ev.target.value = ""; return; }      // いまのレシピが空でなければ確かめる(やめたら選択を戻す)
+      if (!(await askReplace(r, x.name))) { ev.target.value = ""; return; }      // いまのレシピが空でなければ確かめる(やめたら選択を戻す)
       r.load(x.name, x.units, x.ablate, x.sampling, x.direction_layer, { default_direction: x.default_direction, default_key: x.default_key });
       this.onReplaced();
     });
@@ -668,7 +668,7 @@ export class RecipePanel {
     return `<div class="rc-ablate" title="${t("方向の射影消去: 選んだ方向を残差に書き込む重みから消す(LoRA で当てる)。gne direction で作った方向を使う")}">
         <span class="muted">ablate</span><select id="rc-ab-dir">${opts.join("")}</select>${a ? `
         <span class="muted">${t("強さ")}</span><span class="sl"><input type="range" id="rc-ab-scale" min="0" max="1.5" step="0.05" value="${sc}"><span class="mono" id="rc-ab-scale-v">×${fmt(sc, 2)}</span></span>
-        <span class="muted">${t("層")}</span><input id="rc-ab-layers" value="${esc(a.layers || "all")}" spellcheck="false" title="${t("all / 10-40 / 1,5,9-12")}">
+        <span class="muted">${t("層")}</span>${layersInput("rc-ab-layers", { value: a.layers || "all", placeholder: "all" })}
         <span class="muted">${t("測った層")}</span><input id="rc-ab-from" type="number" min="0" value="${a.from_layer ?? ""}" placeholder="${t("既定")}" title="${t("どの層で測った方向を使うか(空なら gne direction --select で選んだ層)")}">` : ""}
       </div>${dirs.length || a ? "" : `<p class="muted note">${t("方向がありません(gne direction --contrast で作れます)")}</p>`}`;
   }
@@ -802,6 +802,7 @@ export class RecipePanel {
     on("#lx-imatrix", "input", (ev) => { f.imatrix = ev.target.value; });
     on("#lx-verify", "change", (ev) => { f.verify = ev.target.checked; this.render(); });
     on("#lx-contrast", "input", (ev) => { f.contrast = ev.target.value; });
+    useContrastList($("#lx-contrast"));                                  // 対照集合は同じ候補の一覧から選べる
     on("#lx-strip", "change", (ev) => { f.strip = ev.target.checked; });
     on("#lx-strip", "change", (ev) => { const el = this.root.querySelector("#lx-adname"); if (el) el.placeholder = ev.target.checked ? "adapter" : ""; });
     on("#lx-adname", "input", (ev) => { f.adapterName = ev.target.value; });

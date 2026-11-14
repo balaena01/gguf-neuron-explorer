@@ -3,6 +3,7 @@
 import { deleteJSON, getJSON, postJSON } from "./api.js";
 import { t as tr } from "./i18n.js";
 import { esc } from "./panels.js";
+import { askConfirm } from "./ui.js";
 
 export const KIND = { embed: tr("埋め込み"), connections: "connections", layout: tr("配置"), lens_logit: "logit lens", lens_steer: "steer lens", sweep_rank: "sweep", sweep: "sweep", rank: "rank",
                stats_resid: tr("残差の統計"), stats_act: tr("活性の統計"), reverse: tr("逆引き"), eval: "eval",
@@ -86,7 +87,7 @@ export class JobsBar {
       if (e.code !== "NEEDS_CONFIRM") throw e;
       const est = (e.body && e.body.estimate) || {};
       const m = est.seconds ? Math.round(est.seconds / 60) : "?";
-      if (!window.confirm(tr("{kind} の見積もりは約 {m} 分です。走らせますか?", { kind, m }))) return null;
+      if (!(await askConfirm(tr("{kind} の見積もりは約 {m} 分です。走らせますか?", { kind, m }), { ok: tr("走らせる") }))) return null;
       j = await postJSON("/api/jobs", { kind, params: { ...params, yes: true } });
     }
     this.update(j);

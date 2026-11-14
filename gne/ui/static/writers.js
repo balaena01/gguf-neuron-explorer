@@ -4,7 +4,7 @@
 import { getJSON } from "./api.js";
 import { t } from "./i18n.js";
 import { esc } from "./panels.js";
-import { noteHTML } from "./ui.js";
+import { noteHTML, useContrastList } from "./ui.js";
 
 const C = { text: "#aeb9c8", muted: "#6b7686", grid: "#1a212b", mlp: "#e8b04a", mixer: "#9fb3cf", cum: "#6fcf8f", zero: "#39424f" };
 const L0 = 52, R0 = 16, T0 = 14, B0 = 30, H = 240;
@@ -35,6 +35,7 @@ export class WritersView {
       ${noteHTML(t("A(見たい状態、例 ヤンデレの system)と B(中立)の返事のトークンで、各ニューロンが残差に書き足した量(活性の差 × 書く向き)を測る。寄与は、参照の層の A − B の方向 r* への直接の成分。活性の差だけを見る「読み手」と違い、方向に実際に書いているものが上に来る。"), "muted note evx-help")}
       <div id="wrx-body"></div>`;
     this.$ = (s) => root.querySelector(s);
+    useContrastList(this.$("#wrx-contrast"));                           // 対照集合は同じ候補の一覧から選べる
     this.$("#wrx-pick").addEventListener("change", (ev) => this.load(ev.target.value));
     this.$("#wrx-go").addEventListener("click", () => this.run());
     this.$("#wrx-map").addEventListener("click", () => { if (this.data) this.onOverlay(this.data.name); });

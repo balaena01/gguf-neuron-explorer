@@ -11,7 +11,7 @@ import { t } from "./i18n.js";
 import { FieldtestPanel } from "./fieldtest.js";
 import { esc } from "./panels.js";
 import { Steps } from "./steps.js";
-import { noteHTML } from "./ui.js";
+import { noteHTML, useContrastList } from "./ui.js";
 
 const C = { text: "#aeb9c8", muted: "#6b7686", grid: "#1a212b", amber: "#e8b04a", minus: "#c94fa7", ppl: "#7c8796", judge: "#9fb3cf", ok: "#6fcf8f",
             react: "#5fd0c0" };
@@ -61,6 +61,7 @@ export class EvalView {
     this.onLoadRecipe = onLoadRecipe || (() => {});   // (レシピの dict) → 方式の比較の行のレシピを読み込む
     this.list = [];
     this.data = null;
+    this.sent = null;                  // ほかの画面から「評価へ送る」で送られたレシピ { recipe: ファイル, label }(無ければ今のレシピ)
     this.dose = null;                  // 下に出力の例を出す倍率
     // 読み込みの順番: 後から始めた読み込みがあるか、待つ間に表示が替わった(ほかの eval を選んだなど)なら、先に始めた読み込みの
     // 結果は捨てる(遅れて届いた古い結果で、選び直した表示を上書きしないように)
@@ -70,11 +71,11 @@ export class EvalView {
     root.innerHTML = `<div class="evx-tools">
         <label class="muted">${t("保存した eval")} <select id="evx-pick"></select></label>
         <span class="evx-run"><span class="muted" id="evx-rc"></span>
-          <label class="muted">${t("倍率")} <input id="evx-doses" value="0,0.25,0.5,0.75,1" size="16" spellcheck="false"></label>
-          <label class="muted">when <select id="evx-when"><option>all</option><option>gen</option><option>assistant</option></select></label>
-          <label class="muted" title="${t("各倍率で同じ大きさのランダムな向きのレシピも測る(時間はおよそ本数倍)")}">${t("対照")} <input class="w4" id="evx-rc-n" type="number" min="0" max="64" value="0"></label>
+          <label class="muted">${t("強さ")} <input id="evx-doses" value="0,0.25,0.5,0.75,1" size="16" spellcheck="false"></label>
+          <label class="muted">${t("足す位置")} <select id="evx-when"><option>all</option><option>gen</option><option>assistant</option></select></label>
+          <label class="muted" title="${t("各倍率で同じ大きさのランダムな向きのレシピも測る(時間はおよそ本数倍)")}">${t("ランダムな向きと比べる本数")} <input class="w4" id="evx-rc-n" type="number" min="0" max="64" value="0"></label>
           <label class="muted" title="${t("反応性: reactivity の対(トリガーあり/なし)と validate.match を持つ対照集合の YAML。空なら測らない")}">${t("反応性")} <input id="evx-react" placeholder="configs/contrast/….yaml" size="22" spellcheck="false"></label>
-          <label class="muted" title="${t("レシピのヘッドを同じ k のランダムなヘッドに替えた対照で反応性も測る本数(反応性があるときだけ)")}">${t("ヘッドの対照")} <input class="w4" id="evx-hc-n" type="number" min="0" max="64" value="0"></label>
+          <label class="muted" title="${t("レシピのヘッドを同じ k のランダムなヘッドに替えた対照で反応性も測る本数(反応性があるときだけ)")}">${t("ランダムなヘッドと比べる本数")} <input class="w4" id="evx-hc-n" type="number" min="0" max="64" value="0"></label>
           <label class="muted" title="${t("方向を使うレシピ(ヘッドの proj など)で、方向の指標(射影の値の下がり方・ずれ・判定の一致率)も測る。外すと能力・ppl・混入・性格の変化量だけで早く終わる")}"><input type="checkbox" id="evx-dm" checked> ${t("方向の指標")}</label>
           <label class="muted" title="${t("方向の指標で読む質問の数(A・B それぞれ。一致率の返事もこの数まで)。多い対照集合は等間隔に間引く。0 で全部")}">${t("問")} <input class="w45" id="evx-dm-n" type="number" min="0" max="4096" value="64"></label>
           <span id="evx-kx" class="evx-kx-in hidden">
@@ -82,10 +83,10 @@ export class EvalView {
             <label class="muted" title="${t("鍵の対照集合。自動 = 方向を作った対照集合が鍵と同じものならそれ(違えば測らずに理由を出す)")}">${t("鍵の対照集合")} <select id="evx-kc"><option value="">${t("自動")}</option></select></label>
             <label class="muted" title="${t("会話の組ごとに読む例の数")}">${t("例")} <input class="w45" id="evx-ke" type="number" min="1" max="4096" value="8"></label>
             <label class="muted" title="${t("比べる比較用の鍵の本数(0 で比べない)")}">${t("比較用の鍵")} <input class="w4" id="evx-kp" type="number" min="0" max="256" value="8"></label>
-            <label class="muted" title="${t("読む質問。自動 = 鍵の作成と反対側(even ↔ odd)")}">subset <select id="evx-ks"><option value="">${t("自動")}</option><option>odd</option><option>even</option><option>all</option></select></label>
+            <label class="muted" title="${t("読む質問。自動 = 鍵の作成と反対側(even ↔ odd)")}">${t("使う質問")} <select id="evx-ks"><option value="">${t("自動")}</option><option value="odd">${t("奇数番目")}</option><option value="even">${t("偶数番目")}</option><option value="all">${t("全部")}</option></select></label>
             <label class="muted" title="${t("add・gain・proj の強さを探して、書き込みたい位置の変化を keyed にそろえる(外すと同じ α の add とだけ比べて早く終わる)")}"><input type="checkbox" id="evx-kmatch" checked> ${t("大きさ合わせ")}</label>
           </span>
-          <button class="main" id="evx-go">${t("今のレシピで eval")}</button></span></div>
+          <button class="main" id="evx-go">${t("今のレシピで eval")}</button> <span class="muted note" id="evx-status"></span></span></div>
       <div class="evx-help">${noteHTML(t("倍率はレシピ全体に掛ける係数(0 = 無介入)。能力 = exact と format の正答率、ppl は参照テキスト、混入は日本語の回答に出た簡体字・ハングルなどの割合。4B で数分。"))}</div>
       <div id="evx-body"></div>
       <details class="evx-ft" id="evx-ft-wrap"><summary>${t("実地テスト(本番と同じ動かし方で、ファイルどうしを比べる)")}</summary><div id="evx-ft"></div></details>`;
@@ -94,6 +95,7 @@ export class EvalView {
     this.$("#evx-ft-wrap").addEventListener("toggle", () => { if (this.$("#evx-ft-wrap").open) this.ft.refresh(); });
     this.$("#evx-pick").addEventListener("change", (ev) => this.load(ev.target.value));
     this.$("#evx-go").addEventListener("click", () => this.run());
+    useContrastList(this.$("#evx-react"));                               // 対照集合は同じ候補の一覧から選べる
     new ResizeObserver(() => this.draw()).observe(root);
     // 左に作業の一覧(能力と ppl・実地テスト)、右に 入力 → 実行 → 結果
     this.steps = new Steps(root, {
@@ -105,9 +107,16 @@ export class EvalView {
   }
 
   async refresh(select) {
-    const r = this.recipe;
-    this.$("#evx-rc").textContent = r && r.units.length ? t("レシピ {name}({n} ユニット)", { name: r.name || "—", n: r.units.length }) : t("レシピが空です");
-    this.$("#evx-go").disabled = !(r && r.units.length);
+    const r = this.recipe, rc = this.$("#evx-rc");
+    if (this.sent) {                                                // 送られたレシピ(外すと今のレシピに戻る)
+      rc.innerHTML = `${esc(t("送られたレシピ {name}", { name: this.sent.label || this.sent.recipe }))} <button class="small quiet" id="evx-unsend" title="${t("送られたレシピを外して、今のレシピで評価する")}">${t("外す")}</button>`;
+      rc.querySelector("#evx-unsend").addEventListener("click", () => { this.sent = null; this.refresh(); });
+      this.$("#evx-go").textContent = t("送られたレシピで eval");
+    } else {
+      rc.textContent = r && r.units.length ? t("レシピ {name}({n} ユニット)", { name: r.name || "—", n: r.units.length }) : t("レシピが空です");
+      this.$("#evx-go").textContent = t("今のレシピで eval");
+    }
+    this.$("#evx-go").disabled = !this.sent && !(r && r.units.length);
     const hasKeyed = !!(r && r.keyed && r.keyed().length);            // CHANGE-07: keyed の選択性の欄はレシピに keyed があるときだけ
     this.$("#evx-kx").classList.toggle("hidden", !hasKeyed);
     if (hasKeyed && !this.contrastsLoaded) {
@@ -162,10 +171,21 @@ export class EvalView {
     this.render();
   }
 
-  run() {
+  // ほかの画面から「評価へ送る」: レシピ(ファイル)と、強さ・比べる用の数を欄に入れる。始めるのはこの画面の「eval」を押したとき
+  send({ recipe, doses = null, random_controls = null, label = null }) {
+    this.sent = { recipe, label };
+    if (doses) this.$("#evx-doses").value = doses.join(",");
+    if (random_controls !== null) this.$("#evx-rc-n").value = String(random_controls);
+    this.$("#evx-status").textContent = t("送られたレシピを評価します。強さ・比べる用の数を確かめて「eval」を押してください");
+    if (this.steps) this.steps.select("main");
+    this.refresh();
+  }
+
+  async run() {
     const doses = this.$("#evx-doses").value.split(",").map((x) => +x.trim()).filter((x) => Number.isFinite(x));
     if (!doses.length) return;
-    const p = { units: this.recipe.specs(), doses, when: this.$("#evx-when").value };
+    const sent = this.sent;
+    const p = sent ? { recipe: sent.recipe, doses, when: this.$("#evx-when").value } : { units: this.recipe.specs(), doses, when: this.$("#evx-when").value };
     const nc = Math.max(0, Math.floor(+this.$("#evx-rc-n").value || 0));
     if (nc) p.random_controls = nc;
     const react = this.$("#evx-react").value.trim(), hc = Math.max(0, Math.floor(+this.$("#evx-hc-n").value || 0));
@@ -175,7 +195,7 @@ export class EvalView {
       const dmn = Math.max(0, Math.floor(+this.$("#evx-dm-n").value || 0));
       if (dmn !== 64) p.dir_max_examples = dmn || null;                 // 0 = 全部の質問
     }
-    if (this.recipe.keyed && this.recipe.keyed().length) {          // CHANGE-07 E: keyed の選択性
+    if (!sent && this.recipe.keyed && this.recipe.keyed().length) {          // keyed の選択性(今のレシピのとき)
       p.keyed_metrics = this.$("#evx-km").checked;
       if (p.keyed_metrics) {
         const kc = this.$("#evx-kc").value, ks = this.$("#evx-ks").value;
@@ -186,8 +206,12 @@ export class EvalView {
         p.keyed_match = this.$("#evx-kmatch").checked;
       }
     }
-    if (this.recipe.name) p.name = this.recipe.name;
-    this.onRun(p);
+    if (!sent && this.recipe.name) p.name = this.recipe.name;
+    const st = this.$("#evx-status");
+    st.textContent = t("ジョブを投げています…");
+    const j = await this.onRun(p);
+    st.textContent = j ? t("eval を投げました(進み具合と「止める」は下の帯。終わるとここに出ます)") : t("やめました");
+    if (j && sent) { this.sent = null; this.refresh(); }
   }
 
   render() {
@@ -262,7 +286,7 @@ export class EvalView {
       <div class="evx-legend note">${series(d).map((s) => `<span><i style="background:${s.color}${s.thin ? ";opacity:.45;height:1px" : ""}"></i>${esc(s.label)}</span>`).join("")}
         <span><i class="dot" style="background:${C.ok}"></i>${t("配布可")}</span></div>
       <canvas id="evx-canvas"></canvas>
-      <div class="evx-scroll"><table class="evx mono"><thead><tr><th>${t("倍率")}</th><th>${t("能力")}</th><th>${t("低下pt")}</th><th>ppl</th><th>${t("悪化")}</th><th>${t("混入")}</th>
+      <div class="evx-scroll"><table class="evx mono"><thead><tr><th>${t("強さ")}</th><th>${t("能力")}</th><th>${t("低下pt")}</th><th>ppl</th><th>${t("悪化")}</th><th>${t("混入")}</th>
         <th title="${t("無介入の出力に無い語の割合(プロンプトごとの平均)")}">${t("新語")}</th><th title="distinct-4">d4</th><th title="${t("max_tokens で打ち切られた割合")}">${t("打切")}</th>${d.judge ? "<th>judge</th>" : ""}${d.random_controls ? `<th title="${t("同じ大きさのランダムな向きの対照レシピの新語の 95% 点")}">${t("対照p95")}</th><th title="${t("新語が対照の何割より多いか(0.95 未満は対照と区別できない)")}">null</th><th title="${t("対照の能力の低下(中央値、pt)")}">${t("対照低下")}</th><th title="${t("対照の ppl の悪化(中央値)")}">${t("対照悪化")}</th>` : ""}${rx ? `<th title="${t("トリガーありのプロンプトで性格の判定(validate.match)に当たった割合")}">${t("あり")}</th><th title="${t("トリガーなしのプロンプトで判定に当たった割合")}">${t("なし")}</th><th title="${t("反応性 = あり − なし({n} 対)", { n: rx.n_pairs })}">${t("反応性")}</th>${
           hc ? `<th title="${t("レシピのヘッドを同じ k のランダムなヘッドに替えた対照の反応性の 95% 点")}">${t("対照p95")}</th><th title="${t("反応性が対照の何割より大きいか(0.95 未満は対照と区別できない)")}">null</th>` : ""}` : ""}${dirHead}${kHead}<th></th></tr></thead>
         <tbody>${rows}</tbody></table></div>

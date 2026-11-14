@@ -140,7 +140,7 @@ export class CandidatesPanel {
     const missing = (d.scores_missing || []).length;
     el.innerHTML = `${bests}
       ${!has ? `<p class="note">${t("まだ集計していません。「名前を伏せて採点する」で全部の返事に点を付けると、候補ごとに集計します。")}</p>` : missing ? `<p class="pp-warn note">${t("点の無い返事が {n} 本あります(集計はある分だけ)。", { n: missing })}</p>` : ""}
-      <div class="evx-scroll"><table class="evx mono cd-sum"><thead><tr><th class="l">${t("候補")}</th><th title="${t("全体の倍率(正 = A 側で消す向き、負 = B 側で強める向き)")}">${t("倍率")}</th>
+      <div class="evx-scroll"><table class="evx mono cd-sum"><thead><tr><th class="l">${t("候補")}</th><th title="${t("全体の強さ(正 = A 側で消す向き、負 = B 側で強める向き)")}">${t("強さ")}</th>
         <th title="${t("採点した側(A = 振る舞いが出ている状態、B = ふつうの状態)")}">${t("側")}</th><th>${t("向き")}</th>
         <th title="${t("判定(validate.match)に合う返事の割合")}">${t("一致")}</th><th title="${t("4-gram の重複の少なさ(1 = 繰り返し無し)")}">d4</th>
         <th title="${t("採点しない側で、無介入と違う返事の割合(同じ種なので、変わらなければ一致する)")}">${t("反対側の変化")}</th>

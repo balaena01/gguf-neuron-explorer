@@ -783,3 +783,15 @@ details.more > p { margin: var(--sp-2) 0 var(--sp-3); }
 .stage details#kb-wrap > summary.kb-sum { display: none; }       /* 鍵の画面の「CHiPS の残りから作る」は作業の一覧で開く(見出しは上に出る) */
 .stage details#evx-ft-wrap > summary { display: none; }        /* 評価の画面の実地テストは作業の一覧で開く */
 #eval-view .build, #direction-view .build { min-height: calc(100% - var(--sp-6)); }
+
+/* 確かめる窓(ui.js の askConfirm、<dialog>) */
+dialog#ask { background: var(--panel); color: var(--text); border: 1px solid var(--line-strong); border-radius: var(--r-l); padding: var(--sp-6) var(--sp-7);
+  max-width: min(520px, 90vw); }
+dialog#ask::backdrop { background: color-mix(in srgb, var(--bg) 60%, transparent); overflow: hidden; overscroll-behavior: contain; }
+dialog#ask:modal { overscroll-behavior: contain; }
+dialog#ask p { margin: 0 0 var(--sp-6); white-space: pre-wrap; line-height: 1.6; }
+dialog#ask .ask-btns { display: flex; justify-content: flex-end; gap: var(--sp-4); }
+.panel.collapsed .pill { writing-mode: horizontal-tb; margin-top: var(--sp-3); align-self: center; }   /* 細くたたんだときも数は横書きで読めるように */
+@container (max-width: 720px) { #map-bar { gap: var(--sp-2) var(--sp-3); padding: var(--sp-2) var(--sp-4); } #map-bar :is(select, button) { font-size: var(--fs-m); }
+  #map-bar #layer-select { max-width: 120px; } #map-bar #color-select { max-width: 120px; } #map-bar #layout-select { max-width: 72px; } }
+input.layers { width: 10em; }

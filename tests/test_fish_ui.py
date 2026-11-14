@@ -87,6 +87,31 @@ def _recipe_tab(pg, tab="units"):
 
 _STEP_ROOT = {"fish": "#dv-fish", "keys": "#dv-key", "chips": "#dv-pipe", "eval": "#eval-view"}
 
+_ASK_JS = """([answer, once]) => {
+  window.__asked = window.__asked || [];
+  window.__askAns = window.__askAns || [];
+  window.__askAns.push({ answer, once });
+  window.gneAsk = (msg) => {
+    const h = window.__askAns[window.__askAns.length - 1];
+    window.__asked.push(msg);
+    if (h && h.once) window.__askAns.pop();
+    return !!h && h.answer === "accept";
+  };
+}"""
+
+
+def _dialogs(pg, answer="accept", once=False):
+    """確かめる窓に答える(accept = はい、dismiss = やめる。ページの window.gneAsk で、窓を出さずに答える)。once なら次の 1 回だけ。once でなければ、
+    読み直したページでも答える。出た文は _asked で読む。"""
+    if not once:
+        pg.add_init_script(f"addEventListener('DOMContentLoaded', () => ({_ASK_JS})(['{answer}', false]))")
+    pg.evaluate(_ASK_JS, [answer, once])
+
+
+def _asked(pg, clear=False):
+    """確かめる窓に出た文(_dialogs が答えたもの)。clear なら空にする。"""
+    return pg.evaluate("(c) => { if (c) window.__asked = []; return [...(window.__asked || [])]; }", clear)
+
 
 def _step(pg, screen, step):
     """作る画面の左の手順(作業の一覧)を開く(開いていれば何もしない)。step が shared なら、共通の設定が見える手順にする。"""
@@ -157,7 +182,7 @@ def _open(browser, url, lang):
     pg = browser.new_page(viewport={"width": 1600, "height": 1100}, locale="ja-JP")
     errors = []
     pg.on("pageerror", lambda e: errors.append(str(e)))
-    pg.on("dialog", lambda dl: dl.accept())
+    _dialogs(pg)
     pg.goto(url + f"/?lang={lang}")
     pg.wait_for_function("window.gne && window.gne.recipe && window.gne.arch", timeout=120000)
     return pg, errors
@@ -455,8 +480,10 @@ def test_fish_tab_end_to_end_in_browser(served, browser):
     _shot(pg, "fish_1_form.png")
     _step(pg, "fish", "all")
     pg.click("#fx-all")
-    pg.wait_for_function("document.querySelector('#fx-prog-all').textContent.length > 0", timeout=30000)        # 進み具合と「止める」
-    assert pg.evaluate("!!document.querySelector('#fx-prog-all button[data-fxstop]')")
+    pg.wait_for_function("document.querySelector('#fx-prog-all').textContent.length > 0", timeout=30000)        # 実行中の印(進み具合と「止める」は下の帯)
+    assert pg.evaluate("document.querySelector('#dv-fish [role=tab][data-step=all] [data-mark]').className.includes('run')")
+    assert not pg.evaluate("document.querySelector('#fx-prog-all .jb-bar, #fx-prog-all button')")
+    assert pg.evaluate("!!document.querySelector('#jobs-bar [data-cancel]')")
     pg.wait_for_function("document.querySelectorAll('#fx-unit-tab tbody tr').length === 6", timeout=1500000)
     assert "できました" in pg.evaluate("document.querySelector('#fx-status-all').textContent")
     assert pg.evaluate("document.querySelectorAll('#fx-dir-tab tbody tr').length") == 6
@@ -511,9 +538,11 @@ def test_fish_tab_end_to_end_in_browser(served, browser):
     # ニューロンを選び直す: 既定の 1 個を外すと数が合わずユニットが消え、別の 1 個を足すと組み直される
     first = pg.evaluate("+document.querySelector('.fx-neu-tab[data-l=\"8\"] input:checked').dataset.fxn")
     other = pg.evaluate("+document.querySelector('.fx-neu-tab[data-l=\"8\"] input:not(:checked)').dataset.fxn")
+    _step(pg, "fish", "neu")
     pg.uncheck(f".fx-neu-tab[data-l=\"8\"] input[data-fxn=\"{first}\"]")
     pg.wait_for_function("document.querySelector('#fx-add').disabled", timeout=5000)
     assert "選んだ数 5 / 必要な数 6" in pg.evaluate("document.querySelector('[data-fxcount=\"8\"]').textContent")
+    _step(pg, "fish", "neu")
     pg.check(f".fx-neu-tab[data-l=\"8\"] input[data-fxn=\"{other}\"]")
     pg.wait_for_function("document.querySelectorAll('#fx-unit-tab tbody tr').length === 6", timeout=10000)
     units2 = pg.evaluate(f"{f}.st.units")
@@ -524,6 +553,7 @@ def test_fish_tab_end_to_end_in_browser(served, browser):
     pg.click("#fx-neu-go")
     pg.wait_for_function("document.querySelector('#fx-status-neu').textContent.includes('できました')", timeout=600000)
     assert other in pg.evaluate(f"{f}.st.picked[8]") and first not in pg.evaluate(f"{f}.st.picked[8]")
+    _step(pg, "fish", "neu")
     _step(pg, "fish", "neu")
     pg.click("button[data-fxdef=\"8\"]")
     pg.wait_for_function(f"!{f}.st.touched.has(8) && !document.querySelector('button[data-fxdef]')", timeout=5000)
@@ -590,7 +620,7 @@ def test_fish_steps_in_browser(served, browser, piped):
     spec["fish"]["alpha"] = 0.9                                             # 1 つだけ書くと、全部の区切りに同じ値
     _put_spec(pg, spec)
     assert pg.evaluate("[...document.querySelectorAll('#fx-alphas input')].map((x) => x.value)") == ["0.9", "0.9"]
-    assert pg.evaluate("[...document.querySelectorAll('#fx-try-alphas input')].map((x) => x.value)") == ["0.9", "0.9"]
+    assert not pg.evaluate("document.querySelector('#fx-try-alphas')")             # 試すときも共通の設定の強さを使う(強さの欄は 1 組)
     assert pg.evaluate("document.querySelector('#fx-form').value") == "one" and pg.evaluate("document.querySelector('#fx-seg').value") == "0,1-"
     pg.fill("#fx-layers", "8")
     _step(pg, "fish", "neu")
@@ -599,20 +629,20 @@ def test_fish_steps_in_browser(served, browser, piped):
     assert pg.evaluate("document.querySelector('#fx-add').disabled")
     _step(pg, "fish", "dir")
     pg.uncheck("#fx-compare")
-    # 「速い読み方」のチェックは 2 か所(まとめて作る・2. 方向を作る)にあり、片方を変えるともう片方もそろう。既定は切。表の fish.stack_fast で入る
+    # 「速い読み方」のチェックは共通の設定に 1 つ。既定は切。表の fish.stack_fast で入る
     fast = "[...document.querySelectorAll('input.fx-fast')].map((x) => x.checked)"
-    assert pg.evaluate(fast) == [False, False]
+    assert pg.evaluate(fast) == [False]
     assert "探索向け" in pg.evaluate("document.querySelector('#fx-fast').parentElement.textContent")
-    tip = pg.evaluate("document.querySelector('#fx-fast-all').parentElement.title")
+    tip = pg.evaluate("document.querySelector('#fx-fast').parentElement.title")
     assert "cos 0.999 以上" in tip and "配るものを作るときは切のまま" in tip and "大きいモデル" in tip
     _put_spec(pg, {**spec, "fish": {**spec["fish"], "stack_fast": True}})
-    assert pg.evaluate(fast) == [True, True]
+    assert pg.evaluate(fast) == [True]
     _put_spec(pg, spec)                                                     # 書いていない設定は既定(切)に戻る
-    assert pg.evaluate(fast) == [False, False]
-    pg.check("#fx-fast-all")
-    assert pg.evaluate(fast) == [True, True]
+    assert pg.evaluate(fast) == [False]
+    pg.check("#fx-fast")
+    assert pg.evaluate(fast) == [True]
     pg.uncheck("#fx-fast")
-    assert pg.evaluate(fast) == [False, False]
+    assert pg.evaluate(fast) == [False]
     pg.check("#fx-fast")
     _step(pg, "fish", "dir")
     pg.click("#fx-dir-go")
@@ -644,7 +674,7 @@ def test_fish_steps_in_browser(served, browser, piped):
     row = pg.evaluate("[...document.querySelectorAll('#fx-try-runs tbody tr')[0].children].map((x) => x.textContent.trim())")
     assert row[1] == "8" and row[2] == "0: 0.9 / 1-: 0.9" and row[3] == "greedy" and row[4] == "2"
     _step(pg, "fish", "try")
-    pg.fill("#fx-try-alpha-1", "0.5")
+    pg.fill("#fx-alpha-1", "0.5")                                            # 試すときの強さ = 共通の設定の強さ
     _step(pg, "fish", "try")
     pg.fill("#fx-try-temp", "0.8")
     _step(pg, "fish", "try")
@@ -654,11 +684,12 @@ def test_fish_steps_in_browser(served, browser, piped):
     assert row[2] == "0: 0.9 / 1-: 0.5" and row[3].startswith("0.8")
     assert pg.evaluate(f"{f}.st.tryShown") == 1
     _step(pg, "fish", "try")
+    _step(pg, "fish", "try")
     pg.click("#fx-try-runs button[data-fxtry=\"0\"]")                      # 前の回の返事を見る
     pg.wait_for_function(f"{f}.st.tryShown === 0 && document.querySelector('#fx-try-runs tbody tr.fx-sel td').textContent === '1'", timeout=5000)
     assert pg.evaluate(f"{f}.st.tries[1].alphas") == [0.9, 0.5] and pg.evaluate(f"{f}.st.tries[1].temperature") == 0.8
     _step(pg, "fish", "try")
-    pg.click("#fx-try-use")                                                 # 試した強さを上の欄に入れる
+    pg.click("#fx-try-use")                                                 # 試した層を共通の設定に入れる(強さはもともと共通)
     assert pg.evaluate("[...document.querySelectorAll('#fx-alphas input')].map((x) => x.value)") == ["0.9", "0.5"]
     pg.fill("#fx-alpha-1", "0.9")
     _shot(pg, "fish_4a_try.png")
@@ -754,7 +785,7 @@ def test_fish_tab_in_english(served, browser, piped):
     assert texts["bad"].startswith("The regularization strength is a number above 0") and texts["before"].startswith("Least-squares keys are only for reply-position segments")
     assert "Use an existing direction" in pg.evaluate("document.querySelector('#fx-usedir').parentElement.textContent")
     # 速い読み方: チェックの文言、できた方向の読み方の表示、見積もりに添える「初回は長めに出ます」
-    assert [x.split("(")[0].strip() for x in pg.evaluate("[...document.querySelectorAll('input.fx-fast')].map((x) => x.parentElement.textContent)")] == ["Fast reading"] * 2
+    assert [x.split("(")[0].strip() for x in pg.evaluate("[...document.querySelectorAll('input.fx-fast')].map((x) => x.parentElement.textContent)")] == ["Fast reading"]
     tip = pg.evaluate("document.querySelector('#fx-fast').parentElement.title")
     assert "cosine of 0.999 or more" in tip and "Keep it off when you build something to distribute" in tip and "large models" in tip
     assert pg.evaluate("document.querySelector('#fx-dir-read').textContent") == "Direction built with the default reading"
@@ -770,6 +801,7 @@ def test_fish_tab_in_english(served, browser, piped):
     assert "about 900 s" in pg.evaluate("window._fxEst1") and "the first estimate on a model runs long" in pg.evaluate("window._fxEst1")
     assert "about 80 s" in pg.evaluate("window._fxEst2") and "runs long" not in pg.evaluate("window._fxEst2")
     box = pg.evaluate("document.querySelector('.fx-neu-tab input:checked').dataset.fxn")
+    _step(pg, "fish", "neu")
     _step(pg, "fish", "neu")
     pg.uncheck(f".fx-neu-tab input[data-fxn=\"{box}\"]")                   # 数が合わない文・「既定の候補に戻す」
     pg.wait_for_function("document.querySelector('#fx-add').disabled", timeout=5000)
@@ -790,7 +822,7 @@ def test_fish_tab_in_english(served, browser, piped):
                       "replies": [{"prompt": "q", "text": "a", "loop": False, "finish": "eog"}]}, "match": "x", "own_prompts": False}
     pg.evaluate(f"(r) => {{ const p = {f}; p.st.behave = r; p.renderBehave(); }}", beh)
     assert "Target-scene questions" in pg.evaluate("document.querySelector('#fx-behave').textContent")
-    assert "Try before writing into the weights" in pg.evaluate("document.querySelector('#fx-try-sec h4').textContent")
+    assert "Try before writing into the weights" in pg.evaluate("document.querySelector('#dv-fish [role=tab][data-step=try]').textContent")   # 手順の名前(左の一覧)
     assert "13 layers: 78 neurons" in pg.evaluate("(() => { const l = document.querySelector('#fx-layers'); const was = l.value; l.value = '11-23'; l.dispatchEvent(new Event('input')); const s = document.querySelector('#fx-need').textContent; l.value = was; l.dispatchEvent(new Event('input')); return s; })()")
     one = {"counts": {"n": 1, "match": 0, "loop": 1, "empty": 0, "at_limit": 0, "tokens": 5.0}, "replies": [{"prompt": "q", "text": "a", "loop": True, "finish": "eog", "n_tokens": 5}]}
     tr = {"scene": one, "baseline": one, "others": one, "direction": "fish_job", "layers": [8, 12], "segments": ["0", "1-3", "4-"], "alphas": [1, 1, 0.8], "alpha": [1, 1, 0.8],

@@ -2,7 +2,7 @@
 // CHANGE-05 G: MoE の層のニューロン(通し番号 = 専門家 × 幅 + n)は L12 E37 N511 の住所で出し、レシピには L:Ee:Nn で足す
 // (add = 書き込み方向の押し、×0 / ×2 = 選ばれたときだけ効く gain)。connections(Web)は MoE の層では使えない。
 import { getJSON, postJSON } from "./api.js";
-import { t } from "./i18n.js";
+import { t, tl } from "./i18n.js";
 import { plainEnter, noteHTML } from "./ui.js";
 
 export const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -193,8 +193,8 @@ export class NeuronPanel {
         <p class="muted note n-moe-note">${document.body.dataset.cvec === "off" ? t("MoE の専門家のニューロン。×k は、この専門家が選ばれたときだけ効く gain です") : t("MoE の専門家のニューロン。+ / − は方向押し(専門家が選ばれたかに関係なく、全トークンでこのニューロンの書き込み方向を足す)。×0 / ×2 の gain は専門家が選ばれたときだけ効く本当のニューロン押し。")}</p>` : ""}
       </div>
       <div class="tabs">
-        <button data-tab="examples">Examples</button><button data-tab="chat"${rnd ? ` disabled title="${t("ランダム方向の対照ではチャットできません")}"` : ""}>Chat</button>
-        <button data-tab="details">Details</button><button data-tab="web"${noWeb ? ` disabled title="${webWhy}"` : ""}>Web</button>
+        <button data-tab="examples">${tl("例", "Examples")}</button><button data-tab="chat"${rnd ? ` disabled title="${t("ランダム方向の対照ではチャットできません")}"` : ""}>${tl("チャット", "Chat")}</button>
+        <button data-tab="details">${tl("くわしく", "Details")}</button><button data-tab="web"${noWeb ? ` disabled title="${webWhy}"` : ""}>${tl("配線", "Web")}</button>
       </div>
       <div class="n-tab" id="n-tab"></div>`;
     for (const b of this.root.querySelectorAll(".tabs button")) {
@@ -336,7 +336,7 @@ export class NeuronPanel {
     if (s) {
       out.push(`<h4>${t("語(sweep の z の順。数字 = 出現 rollout 数、マウスを当てると z とプロンプト)")}</h4><div class="chips">${s.words.map(([w, c, z, ps]) =>
         `<span class="chip" title="${c} rollout · z ${fmt(z, 2)} · ${esc(ps.join(", "))}">${esc(w)}<i>${c}</i></span>`).join("")}</div>`);
-      out.push(`<h4>${t("dose ごと")}</h4><table class="kv mono"><tr><th>dose</th><th>rel_push</th><th>distinct-4</th><th title="${t("max_tokens で打ち切られた割合")}">${t("打ち切り")}</th><th>logprob</th></tr>${
+      out.push(`<h4>${t("強さごと")}</h4><table class="kv mono"><tr><th>${t("強さ")}</th><th>rel_push</th><th>distinct-4</th><th title="${t("max_tokens で打ち切られた割合")}">${t("打ち切り")}</th><th>logprob</th></tr>${
         s.dose_table.map((r) => `<tr><td>${esc(r.dose)}</td><td>${String(r.dose).startsWith("-") ? "−" : ""}${fmt(r.rel_push)}</td><td>${fmt(r.distinct4, 3)}</td><td>${pct(r.capped)}</td><td>${fmt(r.logprob, 3)}</td></tr>`).join("")}</table>`);
     }
     const sl = d.steer_lens;

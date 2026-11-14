@@ -319,6 +319,31 @@ def _free_port() -> int:
 
 _STEP_ROOT = {"fish": "#dv-fish", "keys": "#dv-key", "chips": "#dv-pipe", "eval": "#eval-view"}
 
+_ASK_JS = """([answer, once]) => {
+  window.__asked = window.__asked || [];
+  window.__askAns = window.__askAns || [];
+  window.__askAns.push({ answer, once });
+  window.gneAsk = (msg) => {
+    const h = window.__askAns[window.__askAns.length - 1];
+    window.__asked.push(msg);
+    if (h && h.once) window.__askAns.pop();
+    return !!h && h.answer === "accept";
+  };
+}"""
+
+
+def _dialogs(pg, answer="accept", once=False):
+    """確かめる窓に答える(accept = はい、dismiss = やめる。ページの window.gneAsk で、窓を出さずに答える)。once なら次の 1 回だけ。once でなければ、
+    読み直したページでも答える。出た文は _asked で読む。"""
+    if not once:
+        pg.add_init_script(f"addEventListener('DOMContentLoaded', () => ({_ASK_JS})(['{answer}', false]))")
+    pg.evaluate(_ASK_JS, [answer, once])
+
+
+def _asked(pg, clear=False):
+    """確かめる窓に出た文(_dialogs が答えたもの)。clear なら空にする。"""
+    return pg.evaluate("(c) => { if (c) window.__asked = []; return [...(window.__asked || [])]; }", clear)
+
 
 def _step(pg, screen, step):
     """作る画面の左の手順(作業の一覧)を開く(開いていれば何もしない)。step が shared なら、共通の設定が見える手順にする。"""
@@ -376,7 +401,7 @@ def _key_tab(browser, url, lang, routes=()):
     pg = browser.new_page(viewport={"width": 1600, "height": 1100}, locale="ja-JP")
     errors = []
     pg.on("pageerror", lambda e: errors.append(str(e)))
-    pg.on("dialog", lambda dl: dl.accept())
+    _dialogs(pg)
     for pat, fn in routes:
         pg.route(pat, fn)
     pg.goto(url + f"/?lang={lang}")
@@ -386,8 +411,8 @@ def _key_tab(browser, url, lang, routes=()):
     pg.click("#views button[data-view=keys]")
     pg.wait_for_function("window.gne.directionView.key.loaded && document.querySelector(\"#kb-dir option[value='polite_left']\")",
                          timeout=60000)
-    _step(pg, "keys", "chips")
-    pg.click("#kb-wrap > summary")
+    _step(pg, "keys", "chips")                                                       # 作業の一覧で開く(見出しの折りたたみは使わない)
+    assert pg.evaluate("document.querySelector('#kb-wrap').open")
     return pg, errors
 
 
@@ -398,8 +423,7 @@ def test_chips_flow_in_browser(ui_server, browser, env):
     keyed.direction・keyed.iv が欄に入る)→「方向から key-check まで」(方向は使い回し、介入はレシピ)。書きかけの入力欄は
     置き換える前に確かめる。"""
     pg, errors = _key_tab(browser, ui_server, "ja")
-    dialogs = []
-    pg.on("dialog", lambda dl: dialogs.append(dl.message))
+    _asked(pg, clear=True)
     _step(pg, "keys", "chips")
     pg.select_option("#kb-dir", "polite_left")
     pg.wait_for_function("document.querySelector('#kb-src').textContent.includes('A 側 8 問')", timeout=10000)
@@ -435,7 +459,7 @@ def test_chips_flow_in_browser(ui_server, browser, env):
     res = pg.evaluate("document.querySelector('#kb-res').textContent")
     assert "残った質問" in res and "dont_touch の ordinary 6 問" in res
     n_rows = pg.evaluate("document.querySelectorAll('#kb-res table.kb-rows tbody tr').length")
-    assert n_rows >= 1 and len(dialogs) == 1                                # 書きかけを置き換える前に 1 回確かめた
+    assert n_rows >= 1 and len(_asked(pg)) == 1                                # 書きかけを置き換える前に 1 回確かめた
     _step(pg, "keys", "chips")
     pg.click("#kb-res table.kb-rows tbody tr details summary")
     assert pg.evaluate("document.querySelector('#kb-res table.kb-rows tbody tr details').open")
@@ -454,7 +478,7 @@ def test_chips_flow_in_browser(ui_server, browser, env):
     pg.fill("#kx-mt", "16")
     _step(pg, "keys", "chips")
     pg.click("#kb-res [data-kbpipe]")
-    _step(pg, "keys", "check")
+    assert pg.evaluate("document.querySelector('#dv-key [role=tab][aria-selected=true]').dataset.step") == "make"   # 一括の結果が出る「鍵を作る」に移る
     pg.wait_for_selector("#kc-res table.kx-check tbody tr", timeout=600000)
     pipe = pg.evaluate("document.querySelector('#kx-pipe').textContent")
     assert "web_left_keyed" in pipe

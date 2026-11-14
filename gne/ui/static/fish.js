@@ -28,7 +28,7 @@ import { LANG, t } from "./i18n.js";
 import { checkKeySpec, parseLayers } from "./keys.js";
 import { esc } from "./panels.js";
 import { Steps } from "./steps.js";
-import { noteHTML } from "./ui.js";
+import { noteHTML, askConfirm, layersInput } from "./ui.js";
 
 const fmt = (x, d = 2) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : (+x).toFixed(d));
 const NAME_RE = /^[\w.-]+$/;
@@ -104,8 +104,7 @@ export class FishPanel {
         <div class="pp-in"><span class="muted">${t("対照集合")}</span>
           <span class="seg" id="fx-src"><button data-src="file" title="${t("configs/contrast/ か <root>/contrasts/ の YAML を選ぶ")}">${t("ファイルを選ぶ")}</button><button data-src="json" title="${t("ひな形(configs/fish/)から始めて、入力欄の JSON を手で直す")}">${t("JSON を書く(ひな形)")}</button></span>
           <label class="muted" title="${t("FiSH 用のひな形(configs/fish/)。選ぶと入力欄に入る")}">${t("ひな形")}
-            <select id="fx-tpl-sel"><option value="">${t("(ひな形を選ぶ)")}</option></select></label>
-          <button class="small" id="fx-tpl" title="${t("選んだひな形を入力欄に入れる")}">${t("入れる")}</button></div>
+            <select id="fx-tpl-sel"><option value="">${t("(ひな形を選ぶ)")}</option></select></label></div>
         <div id="fx-src-file">
           <div class="pp-in">
             <select id="fx-contrast" aria-label="${t("対照集合")}"></select>
@@ -124,7 +123,7 @@ export class FishPanel {
         ${noteHTML(t("FiSH(Formula-instantiated Scene-gated Hidden units): すでにある MLP のニューロンを、学習なしで、式から計算した重みで書き換えて、決まった場面の返事でだけ方向を書くようにする。ゲートの行に鍵、入力の行に鍵、出力の列に方向を入れる。ふだんの働きが小さいニューロンを選んで書き換える(元の働きは無くなる)。実行時は LoRA で当て、レシピのタブでチャット・保存・LoRA の書き出しができる。層と強さは使う人が決める。"))}
         <div class="pp-set">
           <label class="muted" title="${t("方向と鍵の名前の元(方向 <名前>、鍵 <名前>_p0 など)。空なら対照集合の名前")}">${t("名前")} <input id="fx-name" size="16" spellcheck="false"></label>
-          <label class="muted" title="${t("書き換える層(カンマ区切りか、続いた層は 11-23 のように範囲で)。層の番号はモデルで違うので、使う人が決める。Qwen3.5-4B の 1 例では、離れた 3 層より、続いた 13 層(11-23)のほうが良かった。層を増やすと、要るニューロンと作成時間が増える")}">${t("層")} <input id="fx-layers" size="12" placeholder="11-23" spellcheck="false"></label>
+          <label class="muted" title="${t("書き換える層(カンマ区切りか、続いた層は 11-23 のように範囲で)。層の番号はモデルで違うので、使う人が決める。Qwen3.5-4B の 1 例では、離れた 3 層より、続いた 13 層(11-23)のほうが良かった。層を増やすと、要るニューロンと作成時間が増える")}">${t("層")} ${layersInput("fx-layers", { placeholder: "11-23" })}</label>
           <label class="muted" title="${t("書く位置。返事の位置の区切り(位置 0 = 返事を書き始める直前、1-3 = 返事の最初の 3 トークン、4- = それ以降。区切りごとに方向・鍵・ニューロンを分ける)か、before:<正規表現>(一致する文字の直前の位置だけ。例 before:(です|ます)。)")}">${t("位置の区切り")} <input id="fx-seg" size="14" value="0,1-3,4-" spellcheck="false"></label>
           <label class="muted" title="${t("鍵 1 つ = 鍵が反応する位置で書く。鍵 2 つ = 場面の鍵 かつ 位置の鍵。上限つき = ニューロン 2 個を組にして、足す量が 1 倍あたりで頭打ちになる(実験でいちばん良かった形)")}">${t("形")}
             <select id="fx-form"><option value="cap">${t("上限つきの 2 個組")}</option><option value="two">${t("鍵 2 つ(場面 かつ 位置)")}</option><option value="one">${t("鍵 1 つ")}</option></select></label>
@@ -134,7 +133,7 @@ export class FishPanel {
             <select id="fx-keyfit"><option value="mean">${t("いまの作り方(既定)")}</option><option value="ridge">${t("最小二乗(ますごとの重み)")}</option></select></label>
           <label class="muted" title="${t("最小二乗の鍵の正則化の強さ(行列の対角の平均の何倍か。例 1)。空なら、鍵を作る質問だけを使った質問単位の 5 分割で、0.01・0.1・1・10・100 から決める(選ばれた値は鍵の表の上に出る)")}">${t("正則化の強さ")} <input id="fx-keyc" size="7" placeholder="${t("5 分割で決める")}" spellcheck="false" disabled></label>
           <label class="muted" title="${t("先に当てておく介入: 保存したレシピの名前か、ユニットを空白区切りで。CHiPS のレシピを当てた状態で作るときに入れる。空なら無介入")}">${t("先に当てておくレシピ(iv)")} <input id="fx-iv" size="18" spellcheck="false"></label>
-          <label class="muted" title="${t("鍵づくりと確かめで返事を生成する長さ")}">max_tokens <input class="w5" id="fx-mt" type="number" min="1" max="2048" value="96"></label>
+          <label class="muted" title="${t("鍵づくりと確かめで返事を生成する長さ")}">${t("返事の長さ")} <input class="w5" id="fx-mt" type="number" min="1" max="2048" value="96"></label>
           <label class="muted" title="${t("速い読み方(区切りごとにまとめて読む)。大きいモデルで方向づくりがずっと速くなるが、方向がわずかに変わる(今までの方向との cos 0.999 以上)。層や強さを比べる探索向け。配るものを作るときは切のまま。この読み方の方向での口調・正答は測っていない。効くのは方向を作る段だけで、「すでにある方向を使う」に名前を入れたときは効かない")}"><input type="checkbox" class="fx-fast" id="fx-fast"> ${t("速い読み方(区切りごとにまとめて読む。探索向け。方向がわずかに変わる)")}</label>
         </div>
       </div>
@@ -162,7 +161,7 @@ export class FishPanel {
       <section class="kx-sec" id="fx-try-sec" data-step="try">
         ${noteHTML(t("2. で作った方向を、ニューロンにも鍵にも入れずに、層の出力へ直接足して返事を作る。足すのは狙う場面の質問の返事だけ(場面は質問の群で決める。重みに入れたときの鍵の代わり)。層と区切りごとの強さを変えて何回か回し、返事と数を比べてから 3. 以降に進む"), "muted note")}
         <div class="pp-set">
-          <label class="muted" title="${t("足す層(カンマ区切りか 11-23)。空なら上の欄の層。足せるのは層 1 から、最終層の 1 つ手前まで")}">${t("足す層")} <input id="fx-try-layers" size="12" spellcheck="false"></label>
+          <label class="muted" title="${t("足す層(カンマ区切りか 11-23)。空なら上の欄の層。足せるのは層 1 から、最終層の 1 つ手前まで")}">${t("足す層")} ${layersInput("fx-try-layers", { placeholder: t("空なら共通の設定の層") })}</label>
           <label class="muted" title="${t("狙う場面・書き込みたくない場面それぞれで、返事を作る質問の数(対照集合の先頭から)")}">${t("質問の数")} <input class="w45" id="fx-try-n" type="number" min="1" max="200" value="12"></label>
           <label class="muted" title="${t("返事を生成する長さ")}">${t("返事の長さ")} <input class="w5" id="fx-try-mt" type="number" min="1" max="2048" value="120"></label>
           <label class="muted" title="${t("0 なら毎回同じ返事(greedy)。0 より大きいとサンプリング")}">${t("温度")} <input class="w45" id="fx-try-temp" type="number" min="0" max="2" step="0.1" value="0"></label>
@@ -232,7 +231,6 @@ export class FishPanel {
     try { ta.value = localStorage.getItem(DRAFT) || ""; } catch { /* 下書きが無くても使える */ }
     ta.addEventListener("input", () => this.checkJSON());
     const sel = this.$("#fx-tpl-sel");
-    this.$("#fx-tpl").addEventListener("click", () => this.insertTemplate(sel.value, false));
     sel.addEventListener("change", () => this.insertTemplate(sel.value, true));
     for (const id of ["#fx-layers", "#fx-seg", "#fx-form", "#fx-cap"]) this.$(id).addEventListener("input", () => this.settingsChanged());
     this.$("#fx-form").addEventListener("change", () => this.settingsChanged());
@@ -369,11 +367,11 @@ export class FishPanel {
       : ` · <span class="pp-warn">${t("dont_touch(書き込みたくない場面の質問)がありません。ほかの場面でも鍵が反応しやすくなります")}</span>`}`;
   }
 
-  insertTemplate(file, ask) {
+  async insertTemplate(file, ask) {
     const x = this.templates.find((y) => y.file === file);
     if (!x) return;
     const ta = this.$("#fx-text"), cur = ta.value.trim();
-    if (ask && cur && cur !== this.tplText && !window.confirm(t("入力欄の JSON をひな形で置き換えます。よいですか?"))) { this.$("#fx-tpl-sel").value = ""; return; }
+    if (ask && cur && cur !== this.tplText && !(await askConfirm(t("入力欄の JSON をひな形で置き換えます。よいですか?")))) { this.$("#fx-tpl-sel").value = ""; return; }
     ta.value = JSON.stringify(x.spec, null, 2);
     this.tplText = ta.value.trim();
     const about = this.$("#fx-tpl-about");
@@ -550,10 +548,7 @@ export class FishPanel {
     const show = (j) => {
       if (this.jobs[which] !== id) return;
       if (!["queued", "running"].includes(j.status)) { el.innerHTML = ""; return; }
-      const pct = j.total ? Math.round((j.done / j.total) * 100) : 0;
-      const stop = `<button class="small" data-fxstop="${esc(id)}" title="${t("このジョブを止める")}">${t("止める")}</button>`;
-      el.innerHTML = j.status === "queued" ? `<span class="muted">${t("待機中")}</span> ${stop}`
-        : `<span class="jb-bar"><span style="width:${pct}%"></span></span> ${pct}% <span class="muted">${esc(j.stage || "")}</span> ${stop}`;
+      el.innerHTML = `<span class="muted note">${t(j.status === "queued" ? "待機中(進み具合と「止める」は下の帯)" : "実行中(進み具合と「止める」は下の帯)")}</span>`;
     };
     show({ status: "queued" });
     let es;

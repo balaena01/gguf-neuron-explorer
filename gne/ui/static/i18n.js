@@ -50,8 +50,11 @@ export function setLang(lang) {
 
 // index.html の静的な文言: data-i18n(中身)、data-i18n-title、data-i18n-placeholder、data-i18n-aria-label
 export function translateDOM(root = document) {
-  for (const el of root.querySelectorAll("[data-i18n]")) el.textContent = t(el.dataset.i18n);
+  for (const el of root.querySelectorAll("[data-i18n]")) el.textContent = LANG === "en" && el.dataset.i18nEn ? el.dataset.i18nEn : t(el.dataset.i18n);   // data-i18n-en: 英語のときの言葉(辞書の訳が別の場面向けのとき)
   for (const el of root.querySelectorAll("[data-i18n-title]")) el.title = t(el.dataset.i18nTitle);
   for (const el of root.querySelectorAll("[data-i18n-placeholder]")) el.placeholder = t(el.dataset.i18nPlaceholder);
   for (const el of root.querySelectorAll("[data-i18n-aria-label]")) el.setAttribute("aria-label", t(el.dataset.i18nAriaLabel));
 }
+
+// 日本語の表示と英語の表示で別の言葉を使う短い札(辞書の訳が別の場面向けのとき。タブの名前など)
+export const tl = (ja, en) => (LANG === "en" ? en : ja);

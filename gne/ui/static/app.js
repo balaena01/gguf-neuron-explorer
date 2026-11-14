@@ -675,12 +675,12 @@ function closeSearch() {
 let rank, neuron, layersView, searchList, chat, firesPanel, recipePanel, jobsBar, embedView, evalView, agent, headPanel, writersView, expertPanel, directionView;
 
 // パネル(左の LIST、右の「くわしく見る」と「レシピ」)を開く。真ん中の画面が狭くなりすぎたときだけ、ほかのパネルを細くたたむ:
-// くわしく見る・LIST を開くときはレシピを(足せば開き直す)、レシピを開くときは LIST を。見ている「くわしく見る」はたたまない
-const MIN_VIEW = 300;
+// くわしく見るを開くときはレシピ → LIST の順(レシピは足せば開き直す)、LIST を開くときはレシピを、レシピを開くときは LIST を。見ている「くわしく見る」はたたまない
+const MIN_VIEW = 560;                                                    // これより狭いと地図の上の帯が折り返す
 function expand(id) {
   const p = $(`#${id}`);
   if (p.classList.contains("collapsed")) p.classList.remove("collapsed");
-  makeRoom({ list: ["recipe"], detail: ["recipe"], recipe: ["list"] }[id] || []);
+  makeRoom({ list: ["recipe"], detail: ["recipe", "list"], recipe: ["list"] }[id] || []);
   if (state.map) state.map.resize();
 }
 
@@ -723,8 +723,8 @@ function recipeTouched(added) {
 }
 
 // レシピを置き換える(どの入口でも同じ): いまのレシピが空でなければ確かめ、置き換えたらパネルを開く。やめたら false
-function replaceRecipe(name, apply) {
-  if (!askReplace(state.recipe, name)) return false;
+async function replaceRecipe(name, apply) {
+  if (!(await askReplace(state.recipe, name))) return false;
   apply();
   showRecipe("units");
   return true;
@@ -793,7 +793,7 @@ async function loadCandidate({ name, specs, direction, withRecipe }) {   // や�
     if (x) units = [...x.units, ...units];
     else note = t("重ねたレシピ {r} は保存したレシピに無いので、ヘッドの射影だけを読み込みました", { r: stem });
   }
-  if (!replaceRecipe(name, () => state.recipe.load(name, units, null, null))) return false;
+  if (!(await replaceRecipe(name, () => state.recipe.load(name, units, null, null)))) return false;
   return note;
 }
 
@@ -946,12 +946,12 @@ async function setView(v) {
           onRun: (kind, params) => jobsBar.start(kind, params),
           onOpenHead: (u) => openHead(u),
           onLoadProj: (name, specs, dir) => replaceRecipe(name, () => state.recipe.loadProj(name, specs, dir)),
-          onEval: (params) => jobsBar.start("eval", params).catch((e) => { state.note = `${t("エラー")}: ${e.message}`; updateStatus(); return null; }),
+          onEval: (params, label) => sendToEval(params, label),           // 評価へ送る(評価の画面で確かめてから始める)
           onOverlay: (field) => { setView("map"); applyOverlay(field); },
         },
         candidates: {                                                     // 強さの候補(heads_candidates)の候補を使う
           onLoadCandidate: (c) => loadCandidate(c),
-          onChatCandidate: async (c) => { const note = await loadCandidate(c); if (note === false) return false; chat.setSingle(true); startRecipeChat(); return note; },
+          onChatCandidate: async (c) => { const note = await loadCandidate(c); if (note === false) return false; await chat.setSingle(true); startRecipeChat(); return note; },
         },
         keyed: {                                                          // 鍵つきの書き込みの鍵: 作成と key-check のジョブ
           onRun: (kind, params) => jobsBar.start(kind, params),
@@ -994,7 +994,7 @@ async function setView(v) {
   if (v === "eval") {
     if (!state.model) { xv.innerHTML = `<p class="muted view-empty">${t("合成の構造には eval がありません")}</p>`; return; }
     if (!evalView) {
-      evalView = new EvalView(xv, { recipe: state.recipe, onRun: (p) => startJob("eval", p), onRunJob: (kind, params) => jobsBar.start(kind, params),          // CHANGE-06 G: 組・方式のレシピを読み込む
+      evalView = new EvalView(xv, { recipe: state.recipe, onRun: (p) => jobsBar.start("eval", p).catch((e) => { state.note = `${t("エラー")}: ${e.message}`; updateStatus(); return null; }), onRunJob: (kind, params) => jobsBar.start(kind, params),          // CHANGE-06 G: 組・方式のレシピを読み込む
                                     onLoadProj: (name, specs) => replaceRecipe(name, () => state.recipe.loadProj(name, specs)),
                                     onLoadRecipe: (rd) => {
                                       const us = (rd.units || []).map((u) => (u.mode === "proj" && !u.direction ? { ...u, direction: rd.default_direction } : u));
@@ -1032,6 +1032,12 @@ async function setView(v) {
     state.note = "";
     updateStatus();
   }
+}
+
+// ほかの画面の「評価へ送る」: 評価の画面に移り、送られたレシピと設定を欄に入れる(始めるのは評価の画面で)
+async function sendToEval(params, label) {
+  await setView("eval");
+  if (evalView) evalView.send({ ...params, label });
 }
 
 // "L14 N8949" / "14:8949" / MoE は "L10 E93 N252"、専門家は "L10 E93"(くわしく見る) / ヘッドは "L21 H7"・"21:H7"
