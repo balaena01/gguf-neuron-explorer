@@ -138,7 +138,7 @@ export class ExpertPanel {
           ${row("contrib_cos", sgn(c.contrib_cos, 3), t("専門家の出力の差と方向(または残差の差)の cos"), sc(c.contrib_cos))}
           ${row("contrib_norm", fmt(c.contrib_norm, 3), t("専門家の出力の差の大きさ"))}
         </table></div>`).join("") +
-      `<p class="muted note">${t("z = 中立どうしの対照に対する z、null = 対照の何割より大きいか(琥珀 = 0.95 以上)。")}</p>`;
+      `<p class="muted note">${t("z = 中立どうしの対照に対する z、対照超え = 対照の何割より大きいか(琥珀 = 0.95 以上)。")}</p>`;
   }
 
   // ニューロンの上位(活性統計があれば q999 × ‖W_down‖ = 書き込みの大きさ、無ければ ‖W_down‖ の順)
@@ -147,7 +147,7 @@ export class ExpertPanel {
     const rows = d.neurons.map((x) => `<tr class="pick" data-n="${x.neuron}" title="${t("くわしく見るで開く(L{L} E{e} N{n})", { L: d.layer, e: d.expert, n: x.neuron })}">
       <td>N${x.neuron}</td><td>${fmt(x.q999, 3)}</td><td>${fmt(x.down_norm, 3)}</td><td>${fmt(x.write, 3)}</td></tr>`).join("");
     return `<h4>${d.usage ? t("ニューロンの上位(q999 × ‖W_down‖ の順)") : t("ニューロンの上位(‖W_down‖ の順)")}</h4>
-      <div class="x-wrap"><table class="rank mono x-top"><thead><tr><th>N</th><th>q999</th><th>‖W_down‖</th><th title="${t("q999 × ‖W_down‖(選ばれたときに残差へ書ける大きさの目安)")}">write</th></tr></thead><tbody>${rows}</tbody></table></div>
+      <div class="x-wrap"><table class="rank mono x-top"><thead><tr><th title="${t("ニューロンの番号")}">${t("番号")}</th><th>q999</th><th>‖W_down‖</th><th title="${t("q999 × ‖W_down‖(選ばれたときに残差へ書ける大きさの目安)")}">${t("書く大きさ")}</th></tr></thead><tbody>${rows}</tbody></table></div>
       <p class="muted note">${t("行をクリックするとくわしく見る。専門家のニューロンの add は方向押し、×k の gain は選ばれたときだけ効く。")}</p>`;
   }
 }

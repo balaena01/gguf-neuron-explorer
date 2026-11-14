@@ -64,7 +64,7 @@ export class AgentLink {
 
   renderButton() {
     const s = this.state, n = s.highlights.length + s.notes.length;
-    this.btn.textContent = `agent${s.highlights.length ? ` ◌${s.highlights.length}` : ""}${s.notes.length ? ` ✎${s.notes.length}` : ""}`;
+    this.btn.textContent = `${t("エージェント")}${s.highlights.length ? ` ◌${s.highlights.length}` : ""}${s.notes.length ? ` ✎${s.notes.length}` : ""}`;
     this.btn.classList.toggle("on", n > 0);
     this.btn.classList.toggle("off", !this.connected);
     this.btn.title = this.connected

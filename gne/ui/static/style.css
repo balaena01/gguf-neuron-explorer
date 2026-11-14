@@ -261,7 +261,7 @@ input.w4 { width: 4em; } input.w45 { width: 4.5em; } input.w5 { width: 5em; }   
 code { font-family: var(--mono); background: var(--line-faint); padding: 0 var(--sp-2); border-radius: var(--r-s); }
 
 /* header(地図の配置・線・cos の閾値・検索) */
-#layout-select { max-width: 90px; }
+#layout-select { max-width: 90px; } :root:lang(en) #layout-select { max-width: 130px; }   /* 英語の並べ方の名前は長い */
 #web-toggle.on { background: var(--accent-bg); border-color: var(--accent); color: var(--accent); }
 #overlay svg.lk { position: absolute; left: 0; top: 0; pointer-events: none; }
 #overlay span.lk-l { font-size: var(--fs-s); background: var(--scrim); border-radius: var(--r-s); padding: 0 var(--sp-2); transform: translate(0, -50%); }
@@ -286,10 +286,12 @@ code { font-family: var(--mono); background: var(--line-faint); padding: 0 var(-
 .list-head { color: var(--muted); margin-bottom: var(--sp-3); display: flex; justify-content: space-between; align-items: center; gap: var(--sp-4); }
 .list-tools { display: flex; gap: var(--sp-4); align-items: center; margin-bottom: var(--sp-3); }
 .list-tools input[type=text], #rank-filter { flex: 1 1 auto; min-width: 0; }
+.list-tools label { white-space: nowrap; flex: none; }
 .rank-wrap { overflow: auto; min-height: 0; flex: 1 1 auto; }
 table.rank { width: 100%; border-collapse: collapse; font-size: var(--fs-m); table-layout: fixed; }
 table.rank th:nth-child(1) { width: 30px; } table.rank th:nth-child(2) { width: 44px; }
 table.rank th:nth-child(3) { width: 42px; } table.rank th:nth-child(4) { width: 36px; }
+#rank table.rank th { white-space: nowrap; } #rank table.rank th:nth-child(4) { width: 76px; }   /* 対照超え / beats ctrl を 1 行で */
 table.rank th[data-sort]::after { content: attr(data-sort); font-size: var(--fs-2xs); margin-left: var(--sp-1); color: var(--disabled); }
 table.rank th.on[data-sort]::after { color: var(--accent); }
 #search-list table.rank td:nth-child(1) { width: 34px; } #search-list table.rank td:nth-child(2) { width: 56px; }
@@ -793,5 +795,7 @@ dialog#ask p { margin: 0 0 var(--sp-6); white-space: pre-wrap; line-height: 1.6;
 dialog#ask .ask-btns { display: flex; justify-content: flex-end; gap: var(--sp-4); }
 .panel.collapsed .pill { writing-mode: horizontal-tb; margin-top: var(--sp-3); align-self: center; }   /* 細くたたんだときも数は横書きで読めるように */
 @container (max-width: 720px) { #map-bar { gap: var(--sp-2) var(--sp-3); padding: var(--sp-2) var(--sp-4); } #map-bar :is(select, button) { font-size: var(--fs-m); }
-  #map-bar #layer-select { max-width: 120px; } #map-bar #color-select { max-width: 120px; } #map-bar #layout-select { max-width: 72px; } }
+  #map-bar #layer-select { max-width: 120px; } #map-bar #color-select { max-width: 120px; } #map-bar #layout-select { max-width: 72px; } :root:lang(en) #map-bar #layout-select { max-width: 104px; } }
 input.layers { width: 10em; }
+.fx-part { border-left: 2px solid var(--line-mid); padding-left: var(--sp-4); margin: 0 0 var(--sp-4); }
+.fx-part-h { flex-basis: 100%; }

@@ -46,7 +46,7 @@ export class LayersView {
       { key: "rho", label: t("残差ノルム ρ_L"), sub: [t("帯 = p10〜p90"), t("線 = 中央値")], h: 86 },
       { key: "sweep", label: t("対照群超え"), sub: ["null_pct ≥ 0.95", t("の割合(数/母数)")], h: 92 },
       { key: "kl", label: "steer KL", sub: [t("● 中央値 ○ p90"), t("黄 + / 赤紫 −")], h: 86 },
-      { key: "repeat", label: t("反復(+0.8)"), sub: [t("distinct-4 の中央値"), t("琥珀 ニューロン / 灰 random")], h: 80 },
+      { key: "repeat", label: t("反復(+0.8)"), sub: [t("distinct-4 の中央値"), t("琥珀 ニューロン / 灰 ランダムな方向の対照")], h: 80 },
       { key: "dir", label: t("逆引き"), sub: [t("マップと同じ閾値を"), t("超えるニューロンの数")], h: 86 },
       { key: "cov", label: t("データの有無"), h: 92 },
     ];

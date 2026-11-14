@@ -958,7 +958,7 @@ export class LayerMap {
       const id = `L${e.layer} N${e.neuron}${dose}`;
       // 近い順に候補を試す: 右・左・上下の中ほど、上下へずらしたもの。札が置けて、線がほかを横切らないもの
       const search = (text, font, maxD, checkCross) => {
-        const w = measure("agent", mono) + measure(text, font) + 22, cands = [], step = 19;
+        const w = measure(t("エージェント"), mono) + measure(text, font) + 22, cands = [], step = 19;
         const K = Math.ceil(maxD / step) * 2 + 2;
         for (let k = 0; k < K; k++) {
           const dy = (k % 2 ? 1 : -1) * Math.ceil(k / 2) * step;
@@ -983,14 +983,14 @@ export class LayerMap {
       if (!best) { text = full; best = search(full, e.note ? sans : mono, 320, false); }
       if (!best) { text = compact; best = search(compact, mono, 2000, false); }
       if (!best) {
-        const w = measure("agent", mono) + measure(text, mono) + 22, bx = Math.min(Math.max(4, px + 14), r.width - w - 4);
+        const w = measure(t("エージェント"), mono) + measure(text, mono) + 22, bx = Math.min(Math.max(4, px + 14), r.width - w - 4);
         best = { ax: bx, y: py, bx, left: false, w };
       }
       boxes.push({ x: best.bx, y: best.y - 9, w: best.w, h: 18 });
       const line = Math.abs(best.y - py) > 4 || Math.abs(best.ax - (px + 14)) > 1;
       if (line) lines.push(`<line x1="${px.toFixed(1)}" y1="${py.toFixed(1)}" x2="${best.ax.toFixed(1)}" y2="${best.y.toFixed(1)}"/>`);
       const title = e.note ? `${t("エージェントの注釈")} L${e.layer} N${e.neuron}: ${e.note}` : `${t("エージェントの強調")}${A.label ? ` (${A.label})` : ""}: L${e.layer} N${e.neuron}`;
-      const item = { x: best.left ? best.ax : best.bx, y: best.y, html: `<i class="who">agent</i>${escHTML(text)}`, text: " ",
+      const item = { x: best.left ? best.ax : best.bx, y: best.y, html: `<i class="who">${escHTML(t("エージェント"))}</i>${escHTML(text)}`, text: " ",
                      cls: `ag-lab${e.note && text === full ? " has-note" : ""}${best.left ? " l" : ""}`, open: key, title };
       items.push(item);
       keep.set(key, { item, ix: item.x - px, y: best.y - py, ax: best.ax - px, line });

@@ -22,9 +22,9 @@
     <div class="grp"><span class="grp-l" data-i18n="確かめる" data-i18n-en="Check">確かめる</span><span class="nav">
       <button type="button" data-view="eval" data-i18n-en="eval" data-i18n="評価">評価</button><button type="button" data-view="cand" data-i18n-en="candidates" data-i18n="強さの候補">強さの候補</button></span></div>
   </nav>
-  <label><span class="lbl">jump</span> <input id="jump" placeholder="L14 N8949" size="11" spellcheck="false" data-i18n-title="ニューロンへ飛ぶ(L14 N8949 の形で Enter)" title="ニューロンへ飛ぶ(L14 N8949 の形で Enter)"></label>
-  <span id="search" class="seg"><select id="search-mode" data-i18n-title="検索の対象" title="検索の対象"><option value="lens">lens</option><option value="words">words</option><option value="name">name</option></select><input id="search-q" data-i18n-placeholder="検索(alien など)" placeholder="検索(alien など)" size="14" spellcheck="false"></span>
-  <button id="agent-btn" class="hidden">agent</button>
+  <label><span class="lbl" data-i18n="移動" data-i18n-en="Go to">移動</span> <input id="jump" placeholder="L14 N8949" size="11" spellcheck="false" data-i18n-title="ニューロンへ飛ぶ(L14 N8949 の形で Enter)" title="ニューロンへ飛ぶ(L14 N8949 の形で Enter)"></label>
+  <span id="search" class="seg"><select id="search-mode" data-i18n-title="検索の対象" title="検索の対象"><option value="lens" data-i18n="lens の語" data-i18n-en="lens words">lens の語</option><option value="words" data-i18n="sweep の語">sweep の語</option><option value="name" data-i18n="名前">名前</option></select><input id="search-q" data-i18n-placeholder="検索(alien など)" placeholder="検索(alien など)" size="14" spellcheck="false"></span>
+  <button id="agent-btn" class="hidden" data-i18n="エージェント">エージェント</button>
   <span id="lang" class="seg" title="表示の言語 / Language"><button data-lang="ja">JP</button><button data-lang="en">EN</button></span>
 </header>
 <main id="main">
@@ -40,11 +40,11 @@
   <section id="map-wrap">
     <!-- 地図だけで使う設定(層・並べ方・色・線)と、この層で計算 -->
     <div id="map-bar">
-      <label><span class="lbl" data-i18n="層">層</span> <select id="layer-select" data-i18n-title="表示する層" title="表示する層"></select></label>
-      <label><span class="lbl" data-i18n="並べ方">並べ方</span> <select id="layout-select" data-i18n-title="シート内の並べ方" title="シート内の並べ方"><option value="index">index</option><option value="writes">writes</option><option value="lens">lens</option></select></label>
+      <label><span class="lbl" data-i18n="層" data-i18n-en="layer">層</span> <select id="layer-select" data-i18n-title="表示する層" title="表示する層"></select></label>
+      <label><span class="lbl" data-i18n="並べ方">並べ方</span> <select id="layout-select" data-i18n-title="シート内の並べ方" title="シート内の並べ方"><option value="index" data-i18n="番号順">番号順</option><option value="writes" data-i18n="書く向き">書く向き</option><option value="lens" data-i18n="lens の語" data-i18n-en="lens words">lens の語</option></select></label>
       <label><span class="lbl" data-i18n="色">色</span> <select id="color-select" data-i18n-title="点の色(overlay)" title="点の色(overlay)"></select></label>
       <span id="cos-thr-wrap" class="hidden" data-i18n-title="|cos| の閾値" title="|cos| の閾値"><input type="range" id="cos-thr" min="0" max="1" step="0.001"><span id="cos-thr-val" class="mono"></span></span>
-      <button id="web-toggle" data-i18n-title="開いたニューロンの配線: 直接(上流・下流 14 本ずつ)→ web(多段)→ なし" title="開いたニューロンの配線: 直接(上流・下流 14 本ずつ)→ web(多段)→ なし" data-i18n="線: 直接">線: 直接</button>
+      <button id="web-toggle" data-i18n-title="開いたニューロンの配線: 直接(上流・下流 14 本ずつ)→ 多段 → なし" title="開いたニューロンの配線: 直接(上流・下流 14 本ずつ)→ 多段 → なし" data-i18n="線: 直接">線: 直接</button>
       <button id="map-compute" class="hidden" aria-haspopup="menu" data-i18n-title="いまの層(層の選択欄)で lens・sweep・配置・connections を計算する(層の番号の右クリックと同じ)" title="いまの層(層の選択欄)で lens・sweep・配置・connections を計算する(層の番号の右クリックと同じ)" data-i18n="この層で計算 ▾">この層で計算 ▾</button>
       <button id="reset-view" class="quiet" data-i18n-title="全体の視点に戻る" title="全体の視点に戻る" data-i18n="全体を見る">全体を見る</button>
     </div>
@@ -78,7 +78,7 @@
     <div class="panel-body" id="recipe-list"></div>
   </aside>
 </main>
-<footer id="jobs" class="mono"><span id="jobs-bar"><span class="muted" data-i18n="jobs: なし">jobs: なし</span></span><span id="status"><span id="status-main"></span></span><span id="perf"></span></footer>
+<footer id="jobs" class="mono"><span id="jobs-bar"><span class="muted" data-i18n="ジョブ: なし">ジョブ: なし</span></span><span id="status"><span id="status-main"></span></span><span id="perf"></span></footer>
 <script type="module" src="app.js"></script>
 </body>
 </html>

@@ -44,10 +44,10 @@ export class RankList {
       <div class="list-head mono" id="rank-head"></div>
       <div class="list-tools">
         <input id="rank-filter" placeholder="${t("語・番号で絞り込み")}" spellcheck="false">
-        <label class="muted"><input type="checkbox" id="rank-random"> random</label>
+        <label class="muted" title="${t("ランダムな方向の対照(sweep で比べるために押した方向)も表に出す")}"><input type="checkbox" id="rank-random"> ${t("対照も出す")}</label>
       </div>
       <div class="rank-wrap"><table class="rank mono"><thead><tr>
-        <th data-k="rank">#</th><th data-k="neuron">N</th><th data-k="mass">mass</th><th data-k="null_pct">null</th>
+        <th data-k="rank" title="${t("sweep の順位")}">#</th><th data-k="neuron" title="${t("ニューロンの番号")}">${t("番号")}</th><th data-k="mass" title="${t("押したときに増えた上位 5 語の z の和(sweep の mass)")}">mass</th><th data-k="null_pct" title="${t("mass がランダムな方向の対照の何割より大きいか(null_pct。1 = 全部の対照より上)")}">${t("対照超え")}</th>
         <th data-k="words">${t("語")}</th></tr></thead><tbody></tbody></table></div>
       <p class="muted note" id="rank-empty"></p>`;
     root.querySelector("#rank-filter").addEventListener("input", () => this.render());
@@ -178,7 +178,7 @@ export class NeuronPanel {
     const id = rnd ? `L${d.layer} random ${d.neuron}` : moe ? d.address || `L${d.layer} E${d.expert} N${d.expert_neuron}` : `L${d.layer} N${d.neuron}`;
     const noWeb = rnd || moe || !this.hasConnections();
     const webWhy = moe ? t("MoE の層は connections の対象外") : rnd ? t("ランダム方向の対照には connections がありません") : t("connections が要ります(層の右クリック →「connections」)");
-    const stats = s ? `${s.rank ? `#${s.rank}/${s.n_ranked} · ` : ""}mass ${fmt(s.mass, 1)} · null ${s.null_pct === null ? "—" : pct(s.null_pct)} · z ${fmt(s.z, 2)}`
+    const stats = s ? `${s.rank ? `#${s.rank}/${s.n_ranked} · ` : ""}mass ${fmt(s.mass, 1)} · ${t("対照超え")} ${s.null_pct === null ? "—" : pct(s.null_pct)} · z ${fmt(s.z, 2)}`
       : t("sweep なし");
     this.root.innerHTML = `
       <div class="n-head">
@@ -263,7 +263,7 @@ export class NeuronPanel {
         <span class="grp"><span class="muted">${t("1 段目の本数")}</span><input id="wb-first" type="number" min="1" max="24" value="${p.first}"></span>
         <span class="grp"><span class="muted">${t("2 段目以降の本数")}</span><input id="wb-k" type="number" min="1" max="24" value="${p.k}"></span>
         <span class="grp"><span class="muted">z ≥</span><input id="wb-zmin" type="number" step="0.5" value="${p.zmin}"></span><button class="small" id="wb-run">${t("更新")}</button></div>
-      ${noteHTML(t("開いたニューロンから下流・上流へたどった配線(header の「線」を web にすると地図に出る)。ここでの符号は経路で掛け合わせたもの(下流の 2 段目以降は途中のニューロンが、上流は相手が、+ 側で光ると仮定)。数字 = その語を lens に持つニューロンの数。並びは、層の中でその語を持つニューロンの割合から見た期待に対する比(lift)の順で、2 ニューロン以上の語が先。大文字・語頭の空白の違いはまとめる。± = toward と away の両方に出る語。"), "muted note")}
+      ${noteHTML(t("開いたニューロンから下流・上流へたどった配線(地図の上の「線」を多段にすると地図に出る)。ここでの符号は経路で掛け合わせたもの(下流の 2 段目以降は途中のニューロンが、上流は相手が、+ 側で光ると仮定)。数字 = その語を lens に持つニューロンの数。並びは、層の中でその語を持つニューロンの割合から見た期待に対する比(lift)の順で、2 ニューロン以上の語が先。大文字・語頭の空白の違いはまとめる。± = toward と away の両方に出る語。"), "muted note")}
       ${s ? `<p class="muted note mono">${t("{n} ニューロン · {e} 本", { n: s.n_neurons, e: s.n_edges })}</p>
       <h4>${t("toward(下流が書く語)")}</h4><div class="chips">${words(s.toward)}</div>
       <h4>${t("away(下流で抑えられる語)")}</h4><div class="chips">${words(s.away)}</div>
@@ -394,9 +394,9 @@ export class SearchList {
         <td class="${sign}">${esc(w)}${b.pos ? ` #${b.pos}` : ""}</td><td class="w">${b.where === "name" ? `<b>${esc(nm || "")}</b>` : tokHTML(b.token)}</td></tr>`;
     }).join("");
     this.root.innerHTML = `
-      <div class="list-head"><span>${t("「{q}」({m}){n} 件", { q: esc(r.q), m: esc(r.mode), n: r.n_hits })}${r.hits.length < r.n_hits ? t("・先頭 {n}", { n: r.hits.length }) : ""}</span>
+      <div class="list-head"><span>${t("「{q}」({m}){n} 件", { q: esc(r.q), m: esc({ lens: tl("lens の語", "lens words"), words: t("sweep の語"), name: t("名前") }[r.mode] || r.mode), n: r.n_hits })}${r.hits.length < r.n_hits ? t("・先頭 {n}", { n: r.hits.length }) : ""}</span>
         <button id="search-close" class="small quiet">${t("閉じる")}</button></div>
-      ${noteHTML(t("並び: steer+ → logit+ → steer− → logit−、それぞれ lens の中の順位(#)の順。words は sweep の語の z の順"), "muted note")}
+      ${noteHTML(t("並び: steer+ → logit+ → steer− → logit−、それぞれ lens の中の順位(#)の順。sweep の語で探したときは z の順"), "muted note")}
       <div class="rank-wrap"><table class="rank mono"><tbody>${rows}</tbody></table></div>`;
     this.root.querySelector("#search-close").addEventListener("click", () => this.onClose());
     this.root.querySelector("tbody").addEventListener("click", (ev) => {

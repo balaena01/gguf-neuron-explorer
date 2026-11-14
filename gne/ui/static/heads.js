@@ -136,7 +136,7 @@ export class HeadPanel {
     const d = this.d;
     if (!d) return;
     const best = d.contrasts[0];
-    const stats = best ? `#${best.rank}/${best.n_ranked} · z ${fmt(best.z, 2)} · null ${fmt(best.null_pct, 2)} · ${esc(best.name)}` : t("ヘッドの対照分析なし");
+    const stats = best ? `#${best.rank}/${best.n_ranked} · z ${fmt(best.z, 2)} · ${t("対照超え")} ${fmt(best.null_pct, 2)} · ${esc(best.name)}` : t("ヘッドの対照分析なし");
     this.root.innerHTML = `
       <div class="n-head">
         <div class="n-id mono">L${d.layer} H${d.head} <span class="muted h-kind">${kindLabel(d.kind)}</span></div>
@@ -402,13 +402,13 @@ export class HeadPanel {
       const top = sm ? sm.rows.slice(0, 12).map((x, i) => `<tr data-go="${x.layer}:${x.head}" class="pick${x.layer === d.layer && x.head === d.head ? " sel" : ""}"><td>${i + 1}</td><td>L${x.layer} H${x.head}</td><td>${x.kind === "attn" ? "attn" : "linear"}</td><td>${fmt(x.z, 2)}</td><td>${fmt(x.null_pct, 2)}</td></tr>`).join("") : "";
       const samples = sm && sm.samples ? sm.samples.filter((s) => s.triggers && s.triggers.length) : [];
       return `<div class="h-con">
-        <h4><b class="mono">${esc(c.name)}</b> <span class="mono">#${c.rank}/${c.n_ranked} · z ${fmt(c.z, 2)} · null ${fmt(c.null_pct, 2)}</span>
+        <h4><b class="mono">${esc(c.name)}</b> <span class="mono">#${c.rank}/${c.n_ranked} · z ${fmt(c.z, 2)} · ${t("対照超え")} ${fmt(c.null_pct, 2)}</span>
           <button class="small" data-ov="${esc(c.name)}" title="${t("地図の板の上辺のヘッドをこの対照分析の z で色付けする")}">${t("地図で見る")}</button></h4>
         <table class="kv h-met"><tr><th>${t("指標")}</th><th>${t("値")}</th><th title="${t("中立どうし(system を別の中立の文に替えただけ)で測った同じ指標の、全ヘッドの 95% 点")}">${t("基準値(中立どうしの差の p95)")}</th><th></th></tr>${mrows}</table>
-        <p class="muted note">${t("琥珀 = 基準値を超えた指標。z = 測れた指標ごとの対照に対する z の平均、null = 対照のヘッドの何割より大きいか。")}${c.direction ? ` ${t("方向 {d}", { d: esc(c.direction) })}` : ""}</p>
+        <p class="muted note">${t("琥珀 = 基準値を超えた指標。z = 測れた指標ごとの対照に対する z の平均、対照超え = 対照のヘッドの何割より大きいか。")}${c.direction ? ` ${t("方向 {d}", { d: esc(c.direction) })}` : ""}</p>
         ${samples.length ? `<h4>${t("トリガーのある会話(Pattern で、このヘッドの注目をペルソナあり/なしで見る)")}</h4>${samples.slice(0, 8).map((s, i) =>
           `<div class="h-sample"><button class="small" data-pat="${esc(c.name)}" data-i="${i}">${t("Pattern で見る")}</button> <span class="note">${esc(s.prompt)}</span> <span class="muted mono">${s.triggers.map((x) => esc(tokText(x, 16))).join(" · ")}</span></div>`).join("")}` : ""}
-        ${top ? `<h4>${t("この対照分析の上位")}</h4><table class="rank mono h-top"><tr><th>#</th><th>${t("ヘッド")}</th><th>kind</th><th>z</th><th>null</th></tr>${top}</table>` : sm === undefined ? `<p class="muted">${t("読み込み中…")}</p>` : ""}
+        ${top ? `<h4>${t("この対照分析の上位")}</h4><table class="rank mono h-top"><tr><th>#</th><th>${t("ヘッド")}</th><th>${t("種類")}</th><th>z</th><th>${t("対照超え")}</th></tr>${top}</table>` : sm === undefined ? `<p class="muted">${t("読み込み中…")}</p>` : ""}
       </div>`;
     }).join("");
     for (const b of el.querySelectorAll("[data-ov]")) b.addEventListener("click", () => this.onOverlay(`heads:${b.dataset.ov}`));
@@ -539,7 +539,7 @@ export class HeadPanel {
         th("ratio", "ratio", t("causal ÷ 直接の寄与(表示中の測る層)"))}${th("eta", `η L${esc(k)}`, t("効率 η(marginal、表示中の測る層)。* = いまの組のヘッド"))}<th title="${t("B 側の射影の値の変化")}">B Δ</th><th title="${t("B 側の直交成分のずれ")}">B ⊥</th></tr>${body}</table></div>
       <p class="muted note">${t("見出しをクリックで並べ替え、行をクリックでそのヘッドを開く。灰色 = 配分から外したヘッド。")}</p>
       ${lrows ? `<details><summary class="muted note">${t("層単位のスクリーニング({n} 層、層のヘッドを全部止めたとき)", { n: lr.length })}</summary>
-        <table class="kv mono cz-layers"><tr><th>${t("層")}</th><th>kind</th><th>${t("ヘッド")}</th><th>causal_max</th><th>L${esc(k)}</th><th>B Δ</th><th>B ⊥</th></tr>${lrows}</table></details>` : ""}
+        <table class="kv mono cz-layers"><tr><th>${t("層")}</th><th>${t("種類")}</th><th>${t("ヘッド")}</th><th>causal_max</th><th>L${esc(k)}</th><th>B Δ</th><th>B ⊥</th></tr>${lrows}</table></details>` : ""}
       ${this.allocHTML(sm)}`;
   }
 
@@ -669,7 +669,7 @@ export class HeadPanel {
         : t("色 = 返事の各トークンからの注目の平均(選んだヘッドの合計)。明るさ = √(値 / 文脈の最大)。")} ${t("トークンにマウスを当てるとヘッドごとの値。")}</p>
       ${layers}
       <h4>${contrib ? t("寄与の上位(文脈のトークン)") : t("注目の上位(文脈のトークン)")}</h4>
-      <table class="kv mono hp-trig"><tr><th>pos</th><th>${t("トークン")}</th><th>${t("役")}</th><th>${t("合計")}</th>${keys.map((k) => `<th>${esc(k)}</th>`).join("")}</tr>${rows}</table>
+      <table class="kv mono hp-trig"><tr><th>${tl("位置", "pos")}</th><th>${t("トークン")}</th><th>${t("役")}</th><th>${t("合計")}</th>${keys.map((k) => `<th>${esc(k)}</th>`).join("")}</tr>${rows}</table>
       <h4>${t("役ごとの合計")}</h4><table class="kv mono"><tr><th>${t("役")}</th><th>${t("注目")}</th><th>${t("寄与")}</th></tr>${role}</table>`;
     for (const b of out.querySelectorAll("[data-m]")) b.addEventListener("click", () => { L.mode = b.dataset.m; this._modeChosen = true; this.drawListen(); });
   }
@@ -678,8 +678,8 @@ export class HeadPanel {
   details() {
     const d = this.d, ll = d.logit_lens, out = [];
     out.push(`<h4>${t("大きさ")}</h4><table class="kv mono">
-      <tr><td>kind</td><td>${kindLabel(d.kind)}</td><td>n_head</td><td>${d.n_head}${d.n_head_kv ? ` / kv ${d.n_head_kv}` : ""}</td></tr>
-      <tr><td>head_dim</td><td>${d.head_dim}</td><td>${d.kind === "attn" ? "kv group" : ""}</td><td>${d.kv_group ?? ""}</td></tr>
+      <tr><td>${t("種類")}</td><td>${kindLabel(d.kind)}</td><td>n_head</td><td>${d.n_head}${d.n_head_kv ? ` / kv ${d.n_head_kv}` : ""}</td></tr>
+      <tr><td>head_dim</td><td>${d.head_dim}</td><td>${d.kind === "attn" ? t("kv の組") : ""}</td><td>${d.kv_group ?? ""}</td></tr>
       <tr><td>${t("書き込み")}</td><td colspan="3">${esc(d.writer)} [${d.block[0]}, ${d.block[1]})</td></tr></table>`);
     if (ll) {
       out.push(`<h4>${t("W_O の列ブロックの logit lens(主成分 1 本目の割合 {p})", { p: pct(ll.sv_share) })}</h4>`);

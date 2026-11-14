@@ -887,6 +887,128 @@ def test_build_screens_open_one_step_at_a_time(server, browser):
     pg.close()
 
 
+@pytest.mark.model
+def test_fish_build_all_sends_every_setting(server, browser):
+    """FiSH の共通の設定は 名前・層・位置の区切り・強さ だけで、ほかは使う手順のときだけ出る(細かい設定は折りたたみ)。
+    欄の置き場所が替わっても、「まとめて作る」は今までどおり全部の値をジョブに送る。"""
+    pg = browser.new_page(viewport={"width": 1500, "height": 860})
+    errors, posts = [], []
+    pg.on("pageerror", lambda e: errors.append(str(e)))
+
+    def on_jobs(route, req):
+        if req.method != "POST":
+            route.continue_()
+            return
+        posts.append(json.loads(req.post_data))
+        route.fulfill(status=200, content_type="application/json", body=json.dumps({
+            "id": "fake-fish", "kind": "fish_pipeline", "params": {}, "status": "queued", "done": 0, "total": 0, "stage": "", "eta_s": None,
+            "yields": 0, "seconds": None, "result": None, "error": None}))
+    pg.goto(server + "/")
+    pg.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
+    pg.route("**/api/jobs", on_jobs)
+    pg.click("#views button[data-view=fish]")
+    pg.wait_for_function("document.querySelectorAll('#fx-tpl-sel option').length > 1", timeout=30000)
+    shared = pg.evaluate("[...document.querySelectorAll('#fx-shared > .pp-set input, #fx-shared > .pp-set select')].map(e => e.id)")
+    assert shared[:3] == ["fx-name", "fx-layers", "fx-seg"] and all(x.startswith("fx-alpha") for x in shared[3:])
+    pg.click("#dv-fish [role=tab][data-step=src]")
+    pg.select_option("#fx-tpl-sel", index=1)
+    pg.wait_for_function("window.gne.directionView.fish.jspec.spec", timeout=10000)
+    assert pg.evaluate("document.querySelector('#fx-formset').offsetParent === null")               # 対照集合の手順では、形の欄は出ない
+    pg.fill("#fx-name", "fish_send")
+    pg.fill("#fx-layers", "8,9")
+    pg.fill("#fx-seg", "0,1-")
+    pg.dispatch_event("#fx-seg", "input")
+    pg.fill("#fx-alpha", "0.9")
+    pg.fill("#fx-alpha-1", "0.7")
+    pg.evaluate("document.querySelector('#fx-shared details.kx-adv').open = true")
+    pg.fill("#fx-iv", "chips_r")
+    pg.fill("#fx-mt", "64")
+    pg.click("#dv-fish [role=tab][data-step=neu]")
+    assert not pg.evaluate("document.querySelector('#fx-formset').offsetParent === null") and pg.evaluate("document.querySelector('#fx-keyset').offsetParent === null")
+    pg.select_option("#fx-form", "cap")
+    pg.fill("#fx-cap", "0.3-0.7")
+    pg.fill("#fx-top", "12")
+    pg.click("#dv-fish [role=tab][data-step=keys]")
+    pg.select_option("#fx-keyfit", "ridge")
+    pg.fill("#fx-keyc", "2")
+    pg.fill("#fx-pseudo", "3")
+    pg.click("#dv-fish [role=tab][data-step=dir]")
+    assert not pg.evaluate("document.querySelector('#fx-fastset').offsetParent === null")
+    pg.check("#fx-fast")
+    pg.select_option("#fx-method", "own")
+    pg.fill("#fx-rt", "80")
+    pg.click("#dv-fish [role=tab][data-step=all]")
+    pg.uncheck("#fx-rekey-on")
+    pg.click("#fx-all")
+    pg.wait_for_function("document.querySelector('#fx-status-all').textContent.length > 0", timeout=10000)
+    for _ in range(100):
+        if posts:
+            break
+        pg.wait_for_timeout(50)
+    assert posts and posts[0]["kind"] == "fish_pipeline", (posts, pg.evaluate("document.querySelector('#fx-status-all').textContent"))
+    q = posts[0]["params"]
+    assert "spec" in q and q["name"] == "fish_send" and q["layers"] == "8,9" and q["segments"] == "0,1-" and q["form"] == "cap"
+    assert q["alpha"] == [0.9, 0.7] and q["cap"] == "0.3-0.7" and q["key_fit"] == "ridge" and q["key_c"] == 2
+    assert q["iv"] == "chips_r" and q["max_tokens"] == 64 and q["stack_fast"] is True and q["same_reply"] is False
+    assert q["response_tokens"] == 80 and q["pseudo"] == 3 and q["top"] == 12 and q["rekey"] is False
+    assert set(q) == {"spec", "name", "layers", "segments", "form", "max_tokens", "iv", "key_fit", "key_c", "alpha", "same_reply", "stack",
+                      "stack_fast", "compare", "rekey", "pseudo", "response_tokens", "top", "cap"}, sorted(q)
+    assert not errors, errors
+    pg.close()
+
+
+@pytest.mark.model
+def test_plain_words_in_japanese_and_english(server, browser):
+    """日本語の画面に英語の一般語(jump・lens / words / name・random・agent・jobs・N・null・when・subset)を出さない。
+    option の値とジョブに送る値は今までどおり。英語の画面では自然な英語。鍵の共通の設定は、両方の手順が読む欄だけ。"""
+    pg = browser.new_page(viewport={"width": 1500, "height": 860})
+    errors = []
+    pg.on("pageerror", lambda e: errors.append(str(e)))
+    opts = lambda sel: pg.evaluate(f"[...document.querySelectorAll('{sel} option')].map(o => [o.value, o.textContent])")  # noqa: E731
+    heads = "[...document.querySelectorAll('#rank thead th')].map(t => t.textContent)"
+    pg.goto(server + "/")
+    pg.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
+    assert pg.evaluate("document.querySelector('#jump').closest('label').querySelector('.lbl').textContent") == "移動"
+    assert opts("#search-mode") == [["lens", "lens の語"], ["words", "sweep の語"], ["name", "名前"]]
+    assert opts("#layout-select") == [["index", "番号順"], ["writes", "書く向き"], ["lens", "lens の語"]]
+    assert pg.evaluate("document.querySelector('#jobs-bar').textContent").startswith("ジョブ: なし")
+    _open_list(pg, "rank")
+    assert pg.evaluate("document.querySelector('#rank-random').parentElement.textContent").strip() == "対照も出す"
+    assert pg.evaluate(heads) == ["#", "番号", "mass", "対照超え", "語"]
+    pg.fill("#search-q", "alien")
+    pg.select_option("#search-mode", "words")
+    pg.press("#search-q", "Enter")
+    pg.wait_for_function("document.querySelector('#search-list .list-head')", timeout=30000)
+    assert "(sweep の語)" in pg.evaluate("document.querySelector('#search-list .list-head').textContent")
+    pg.click("#search-close")
+    pg.fill("#jump", "L6 N100")
+    pg.press("#jump", "Enter")
+    pg.wait_for_function("document.querySelector('#neuron-body .n-id')", timeout=30000)
+    stats = pg.evaluate("document.querySelector('#neuron-body .n-stats').textContent")
+    assert "対照超え" in stats and " null " not in stats
+    pg.click("#neuron-body button[data-tab=chat]")
+    pg.wait_for_selector("#ch-when", timeout=10000)
+    assert pg.evaluate("[...document.querySelectorAll('#neuron-body [data-mode]')].map(b => b.textContent)") == ["押して話す", "反応を見る"]
+    assert [v for v, _ in opts("#ch-when")] == ["all", "gen", "assistant", "skip-replies", "after", "ramp"]
+    assert opts("#ch-when")[1][1] == "生成中だけ" and "足す位置" in pg.evaluate("document.querySelector('#ch-when').previousElementSibling.textContent")
+    pg.click("#views button[data-view=keys]")
+    pg.wait_for_function("document.querySelector('#kx-shared')", timeout=30000)
+    assert pg.evaluate("[...document.querySelectorAll('#kx-shared .pp-set input, #kx-shared .pp-set select')].map(e => e.id)") == ["kx-mt", "kx-iv"]
+    assert pg.evaluate("document.querySelector('#kx-subset').parentElement.textContent").strip().startswith("使う質問")
+    assert opts("#kx-subset")[0] == ["even", "偶数番目"]
+    pg.goto(server + "/?lang=en")
+    pg.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
+    assert pg.evaluate("document.querySelector('#jump').closest('label').querySelector('.lbl').textContent") == "Go to"
+    assert opts("#search-mode") == [["lens", "lens words"], ["words", "sweep words"], ["name", "name"]]
+    assert opts("#layout-select") == [["index", "by number"], ["writes", "write direction"], ["lens", "lens words"]]
+    _open_list(pg, "rank")
+    assert pg.evaluate(heads) == ["#", "No.", "mass", "beats ctrl", "words"]
+    assert pg.evaluate("document.querySelector('#rank-random').parentElement.textContent").strip() == "show controls"
+    assert pg.evaluate("[...window.gneI18n.missing]") == []
+    assert not errors, errors
+    pg.close()
+
+
 def test_chat_single_column_in_browser(server, browser):
     """チャットの 1 列: + の列(レシピあり)だけを生成し、3 列に戻すときは確かめてから会話を消す。選んだ列の数は覚える。"""
     pg = browser.new_page()
@@ -1279,7 +1401,7 @@ def test_u5_mcp_ui_tools_reach_the_browser(server, browser, tmp_path):
     assert "sweep 1 位" in note and "<script>" in note                                         # 文字として出る(タグにならない)
     assert pg.evaluate("document.querySelectorAll('#overlay script').length") == 0
     assert "エージェントの注釈" in pg.evaluate("document.querySelector('#neuron-body').innerText")
-    assert pg.evaluate("document.querySelector('#agent-btn').textContent") == "agent ◌2 ✎1"
+    assert pg.evaluate("document.querySelector('#agent-btn').textContent") == "エージェント ◌2 ✎1"
     pg.click("#agent-btn")
     assert "宇宙人の候補" in pg.evaluate("document.querySelector('#agent-pop').innerText")
     pg.click("#ag-clear")
@@ -1930,7 +2052,7 @@ def test_head_panel_in_browser(server, browser):
       ev.dose = 1; ev.render();
     })()""")
     heads_ = pg.evaluate("[...document.querySelectorAll('table.evx thead th')].map(th => th.textContent)")
-    assert ["あり", "なし", "反応性", "対照p95", "null"] == heads_[-6:-1]
+    assert ["あり", "なし", "反応性", "対照p95", "対照超え"] == heads_[-6:-1]
     cells = pg.evaluate("[...document.querySelectorAll('table.evx tbody tr[data-dose=\"1\"] td')].map(td => td.textContent)")
     assert cells[-6:-1] == ["60%", "10%", "+50%", "+10%", "1.00"]
     assert "L12 H3 ×0.00" in pg.evaluate("document.querySelector('#evx-body').textContent")

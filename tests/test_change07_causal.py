@@ -716,10 +716,9 @@ def _key_tab(browser, url, lang, routes=()):
         pg.route(pat, fn)
     pg.goto(url + f"/?lang={lang}")
     pg.wait_for_function("window.gne && window.gne.recipe && window.gne.arch", timeout=120000)
-    pg.click("#views button[data-view=direction]")
-    pg.wait_for_function("window.gne.directionView && window.gne.directionView.mode", timeout=60000)
-    pg.click("#dv-mode button[data-m=key]")
-    pg.wait_for_function("window.gne.directionView.key.loaded", timeout=60000)
+    pg.click("#views button[data-view=keys]")                                   # 上の帯の「鍵」
+    pg.wait_for_function("window.gne.directionView && window.gne.directionView.key && window.gne.directionView.key.loaded", timeout=60000)
+    pg.click("#dv-key [role=tab][data-step=causal]")                            # 左の作業の一覧の「効く層を探す」
     return pg, errors
 
 

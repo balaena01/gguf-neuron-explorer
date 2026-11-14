@@ -116,7 +116,7 @@ export class JobsBar {
 
   render() {
     const js = [...this.jobs.values()].reverse();
-    if (!js.length) { this.root.innerHTML = `<span class="muted">${tr("jobs: なし(地図の上の「この層で計算」か、層の番号の右クリックで計算を投げられます)")}</span>`; return; }
+    if (!js.length) { this.root.innerHTML = `<span class="muted">${tr("ジョブ: なし(地図の上の「この層で計算」か、層の番号の右クリックで計算を投げられます)")}</span>`; return; }
     const one = (j) => {
       const pct = j.total ? Math.round((j.done / j.total) * 100) : 0;
       const st = { queued: tr("待機中"), running: "", done: tr("完了"), error: tr("エラー"), cancelled: tr("中止済み") }[j.status];
@@ -152,9 +152,9 @@ export function computeMenu(ev, L, li, cov, { onStart, arch, model }) {
     ["lens_steer", { layer: L }, tr("steer lens(全 {n} ニューロン + 対照 64)", { n }), about(mins((0.145 * (n + 64)) / 60)), cov && cov.steer_lens],
     ["sweep_rank", { layer: L, design: "quick", neurons: "random:64", random_controls: 16 }, tr("sweep quick(ランダムに 64 個 + 対照 16)"), about(mins(5)), runs("quick")],
     ["sweep_rank", { layer: L, design: "main_rel", neurons: "random:384" }, tr("sweep main_rel(ランダムに 384 個 + 対照 64)"), about(mins((6.4 * 448) / 60)), runs("main_rel")],
-    ["layout", { kind: "writes", layers: [L] }, tr("配置 writes(この層、W_down → UMAP)"), about(mins((25 * k) / 60)), lay("writes").includes(L)],
-    ["layout", { kind: "writes", layers: "all" }, tr("配置 writes(全層)"), about(mins((25 * k * nL) / 60)), lay("writes").length === nL && lay("writes").length],
-    ["layout", { kind: "lens", layers: [L] }, tr("配置 lens(この層、lens の語 → UMAP)"), about(mins((10 * k) / 60)), lay("lens").includes(L)],
+    ["layout", { kind: "writes", layers: [L] }, tr("配置: 書く向き(この層、W_down → UMAP)"), about(mins((25 * k) / 60)), lay("writes").includes(L)],
+    ["layout", { kind: "writes", layers: "all" }, tr("配置: 書く向き(全層)"), about(mins((25 * k * nL) / 60)), lay("writes").length === nL && lay("writes").length],
+    ["layout", { kind: "lens", layers: [L] }, tr("配置: lens の語(この層、lens の語 → UMAP)"), about(mins((10 * k) / 60)), lay("lens").includes(L)],
     ["connections", {}, tr("connections(全 {p} 層ペア、重みだけ、CPU)", { p: pairs }), about(mins((4.5 * k * k * (d / 2560) * pairs) / 60)), !!model.connections],
   ];
   const m = document.createElement("div");

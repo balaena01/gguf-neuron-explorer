@@ -799,18 +799,16 @@ def _key_tab(browser, url, lang):
     pg.on("dialog", lambda dl: dl.accept())
     pg.goto(url + f"/?lang={lang}")
     pg.wait_for_function("window.gne && window.gne.recipe && window.gne.arch", timeout=120000)
-    pg.click("#views button[data-view=direction]")
-    pg.wait_for_function("window.gne.directionView && window.gne.directionView.mode", timeout=60000)
-    pg.click("#dv-mode button[data-m=key]")
-    pg.wait_for_function("window.gne.directionView.key.loaded && document.querySelector(\"#kx-tpl-sel option[value='root/left_keyed.json']\")",
-                         timeout=30000)
+    pg.click("#views button[data-view=keys]")                                   # 上の帯の「鍵」
+    pg.wait_for_function("window.gne.directionView && window.gne.directionView.key && window.gne.directionView.key.loaded"
+                         " && document.querySelector(\"#kx-tpl-sel option[value='root/left_keyed.json']\")", timeout=60000)
     return pg, errors
 
 
 @pytest.mark.model
 def test_root_template_in_browser(ui_server, browser):
     """鍵のタブの「ひな形」に <root>/keyed/ の JSON が「自分で作ったひな形」の組で出て、選ぶと入力欄に入る。説明の頭に置き場所、
-    keyed.iv が介入の欄に(細かい設定を開いて)、要約に keyed.direction の方向、方向の欄に「使い回す」。英語の画面でも文言がそろう。"""
+    keyed.iv が介入の欄(共通の設定)に、要約に keyed.direction の方向、方向の欄に「使い回す」。英語の画面でも文言がそろう。"""
     pg, errors = _key_tab(browser, ui_server, "ja")
     grp = pg.evaluate("document.querySelector(\"#kx-tpl-sel option[value='root/left_keyed.json']\").parentElement.label")
     assert grp == "自分で作ったひな形(<root>/keyed/)"
@@ -820,10 +818,10 @@ def test_root_template_in_browser(ui_server, browser):
     spec = json.loads(text)
     assert spec["name"] == "left_keyed" and spec["keyed"] == {"direction": "tsun", "alpha": -1, "iv": "chips"} and "about" not in spec
     assert len(spec["user_prompts"]) == 8 and spec["dont_touch"][0]["name"] == "ordinary"
-    about = pg.evaluate("document.querySelector('#kx-tpl-about').textContent")
+    about = pg.evaluate("document.querySelector('#kx-tpl-about p').textContent")         # 全文(長い説明は最初の文だけ見せてたたむ)
     assert about.startswith("自分で作ったひな形(<root>/keyed/left_keyed.json)") and "gne behave の結果 left" in about
     assert pg.evaluate("document.querySelector('#kx-tpl-about').title") == "<root>/keyed/left_keyed.json"
-    assert pg.input_value("#kx-iv") == "chips" and pg.evaluate("document.querySelector('.kx-adv').open")
+    assert pg.input_value("#kx-iv") == "chips" and pg.is_visible("#kx-iv")          # 介入の欄は共通の設定にある(たたまれていない)
     jc = pg.evaluate("document.querySelector('#kx-jcheck').textContent")
     assert "keyed.direction の tsun を使い回す" in jc and "質問 8 個" in jc and "ordinary" in jc
     assert pg.evaluate("document.querySelectorAll('#kx-jcheck .err').length") == 0
@@ -836,7 +834,7 @@ def test_root_template_in_browser(ui_server, browser):
     assert pg.evaluate("document.querySelector(\"#kx-tpl-sel option[value='root/left_keyed.json']\").parentElement.label") == \
         "your own templates (<root>/keyed/)"
     pg.select_option("#kx-tpl-sel", "root/left_keyed.json")
-    assert pg.evaluate("document.querySelector('#kx-tpl-about').textContent").startswith("Your own template (<root>/keyed/left_keyed.json)")
+    assert pg.evaluate("document.querySelector('#kx-tpl-about p').textContent").startswith("Your own template (<root>/keyed/left_keyed.json)")
     assert "reuse tsun from keyed.direction" in pg.evaluate("document.querySelector('#kx-jcheck').textContent")
     missing = [m for m in pg.evaluate("[...window.gneI18n.missing]") if "keyed" in m or "ひな形" in m]
     assert missing == [], missing

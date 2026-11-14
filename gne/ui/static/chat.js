@@ -2,11 +2,14 @@
 // reads you = 文章を流して、このニューロンの活性をトークンごとに色で見る(§5.5 の 1 ニューロン版)。
 // 会話の状態はブラウザが持ち、毎ターン列ごとの履歴をサーバに送る(サーバは状態を持たない)。
 import { postJSON, postSSE } from "./api.js";
-import { t as tr } from "./i18n.js";                 // t は会話のターンの変数名に使っているので tr
+import { t as tr, tl } from "./i18n.js";             // t は会話のターンの変数名に使っているので tr
 import { esc, tokHTML } from "./panels.js";
 import { samplingLabel } from "./recipe.js";
 import { Mic } from "./mic.js";
 import { askConfirm } from "./ui.js";
+
+// 足す位置(when)。値はジョブ・CLI と同じ、表示は画面の言葉
+const WHEN = [["all", "全位置"], ["gen", "生成中だけ"], ["assistant", "assistant の発話だけ"], ["skip-replies", "過去の返事以外"], ["after", "文字列が出てから"], ["ramp", "倍率を a から b へ"]];
 
 // "14:8949:+1" → "L14 N8949 +1"、ヘッドの gain "21:H7:x0" → "L21 H7 ×0"、方向 "30:dir:NAME:+0.3" → "L30 dir:NAME +0.3"。
 // MoE(CHANGE-05): "12:E37:N511:+0.8" → "L12 E37 N511 +0.8"、"12:E3:x0" → "L12 E3 ×0"、"12:E3:route:+2" → "L12 E3 route +2"、
@@ -161,7 +164,7 @@ export class ChatPanel {
     const seg = (name, items, cur) => `<span class="seg">${items.map(([v, t, dis]) =>
       `<button data-${name}="${v}"${v === cur ? ' class="on"' : ""}${dis ? " disabled" : ""}>${t}</button>`).join("")}</span>`;
     this.el.innerHTML = `
-      <div class="ch-tools">${seg("mode", [["writes", "writes"], ["reads", "reads you"]], this.mode)}
+      <div class="ch-tools">${seg("mode", [["writes", tl("押して話す", "steer & chat")], ["reads", tl("反応を見る", "read a text")]], this.mode)}
         ${this.mode === "writes" ? seg("target", [["neuron", tr("このニューロン")], ["recipe", tr("レシピ({n})", { n: nR }), !nR]], this.target) : ""}</div>
       ${this.mode === "writes" ? this.writesHTML() : this.readsHTML()}
       ${lens.length && this.target === "neuron" ? `<div class="ch-lens">${lens.join("<span class='muted'> | </span>")}</div>` : ""}`;
@@ -176,7 +179,7 @@ export class ChatPanel {
     const amount = this.target === "recipe"
       ? `${tr("強さ")} <button class="small" data-step="-0.25" title="${tr("小さく")}">▼</button><input id="ch-dose" type="number" step="0.25" value="${this.scale}"><button class="small" data-step="0.25" title="${tr("大きく")}">▲</button>`
       : `${tr("強さ")} <button class="small" data-step="-0.1" title="${tr("小さく")}">▼</button><input id="ch-dose" type="number" step="0.1" value="${this.dose}"><button class="small" data-step="0.1" title="${tr("大きく")}">▲</button>
-         <span class="seg"><button class="on" title="${tr("rel(残差ノルムの中央値に対する大きさ)で足す")}">add</button><button disabled title="${tr("活性を何倍にするやり方は、まだ使えません")}">×</button></span>${
+         <span class="seg"><button class="on" title="${tr("rel(残差ノルムの中央値に対する大きさ)で足す")}">${tr("足す")}</button><button disabled title="${tr("活性を何倍にするやり方は、まだ使えません")}">×</button></span>${
           this.detail && this.detail.expert !== undefined && this.detail.expert !== null
             ? `<span class="badge push" title="${tr("MoE の専門家のニューロンの add は書き込み方向の押し(専門家が選ばれたかに関係なく全トークンに足す)。選ばれたときだけ効く gain は NEURON の ×0 / ×2 からレシピで試す")}">${tr("方向押し")}</span>` : ""}`;
     const turns = this.turns.map((t, ti) => `
@@ -186,8 +189,8 @@ export class ChatPanel {
       [["3", tr("3 列")], ["1", tr("1 列")]].map(([v, l]) => `<button data-cols="${v}"${(this.single ? "1" : "3") === v ? ' class="on"' : ""}${this.busy ? " disabled" : ""}>${l}</button>`).join("")}</span>`;
     return `
       <div class="ch-tools">${colSeg}${amount}<span class="muted">${tr("返事の長さ")}</span><input id="ch-max" type="number" min="1" max="2048" value="${this.maxTokens}">
-        <span class="muted" title="${tr("足す位置: all = 全位置 / gen = 生成中だけ(プロンプトの理解を壊さない)/ assistant = assistant の発話だけ / skip-replies = 過去の返事以外(過去の返事は素のまま読む)/ after = 出力にその文字列が出てから / ramp = 倍率を a から b へ変える")}">when</span><select id="ch-when">${
-          ["all", "gen", "assistant", "skip-replies", "after", "ramp"].map((w) => `<option value="${w}"${this.when === w ? " selected" : ""}>${w}</option>`).join("")}</select>${
+        <span class="muted" title="${tr("足す位置: all = 全位置 / gen = 生成中だけ(プロンプトの理解を壊さない)/ assistant = assistant の発話だけ / skip-replies = 過去の返事以外(過去の返事は素のまま読む)/ after = 出力にその文字列が出てから / ramp = 倍率を a から b へ変える")}">${tr("足す位置")}</span><select id="ch-when">${
+          WHEN.map(([w, l]) => `<option value="${w}"${this.when === w ? " selected" : ""}>${tr(l)}</option>`).join("")}</select>${
           this.when === "after" || this.when === "ramp" ? `<input id="ch-when-x" size="8" value="${esc(this.whenArg)}" placeholder="${this.when === "after" ? tr("結論:") : "1.5-0.5"}">` : ""}</div>
       <div class="ch-tools">${this.samplingHTML()}</div>
       <div class="ch-tools"><span class="muted">system</span><input id="ch-system" class="ch-system" value="${esc(this.system)}" placeholder="${tr("空なら無し(音声で話すなら Respond in text.)")}">

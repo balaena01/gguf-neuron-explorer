@@ -639,10 +639,13 @@ def test_fish_steps_in_browser(served, browser, piped):
     assert pg.evaluate(fast) == [True]
     _put_spec(pg, spec)                                                     # 書いていない設定は既定(切)に戻る
     assert pg.evaluate(fast) == [False]
+    _step(pg, "fish", "dir")
     pg.check("#fx-fast")
     assert pg.evaluate(fast) == [True]
+    _step(pg, "fish", "dir")
     pg.uncheck("#fx-fast")
     assert pg.evaluate(fast) == [False]
+    _step(pg, "fish", "dir")
     pg.check("#fx-fast")
     _step(pg, "fish", "dir")
     pg.click("#fx-dir-go")
@@ -650,6 +653,7 @@ def test_fish_steps_in_browser(served, browser, piped):
     sent = [j for j in served["client"].get("/api/jobs").json() if j["kind"] == "fish_direction" and (j["params"].get("spec") or {}).get("name") == "fish_steps"]
     assert sent and sent[-1]["params"]["stack_fast"] is True                 # チェックがジョブの引数に入る(層が 1 つなので、読み直しは無い)
     assert sent[-1]["result"]["stack_fast"] is False and not pg.evaluate("!!document.querySelector('#fx-dir-read')")
+    _step(pg, "fish", "dir")
     pg.uncheck("#fx-fast")
     assert "まだ無いもの" in pg.evaluate("document.querySelector('#fx-units').textContent")
     # 重みに入れる前に試す: 方向を層 8 の出力に直接足して返事を作る。強さを変えてもう 1 回 → 回ごとの数が並ぶ

@@ -533,12 +533,12 @@ export class RecipePanel {
   // 方向の層(own / base)の選択と、射影の説明(proj があるとき)
   projNote() {
     const r = this.r;
-    const tip = r.keyed().length ? t("proj・keyed のユニットに当てる方向の層。own = そのユニットがある層の方向 r_L、base = 方向セットの基準層の r(gne direction score で記録した層)")
-      : t("proj のユニットに当てる方向の層。own = そのヘッドがある層の方向 r_L、base = 方向セットの基準層の r(gne direction score で記録した層)");
+    const tip = r.keyed().length ? t("proj・keyed のユニットに当てる方向の層。その層 = そのユニットがある層の方向 r_L(own)、基準層 = 方向セットの基準層の r(base。gne direction score で記録した層)")
+      : t("proj のユニットに当てる方向の層。その層 = そのヘッドがある層の方向 r_L(own)、基準層 = 方向セットの基準層の r(base。gne direction score で記録した層)");
     return `<div class="rc-ablate"><span class="muted" title="${tip}">${t("方向の層")}</span>
-        <select id="rc-dl"><option value="own"${r.directionLayer === "own" ? " selected" : ""}>own</option><option value="base"${r.directionLayer === "base" ? " selected" : ""}>base</option></select></div>
+        <select id="rc-dl"><option value="own"${r.directionLayer === "own" ? " selected" : ""}>${t("その層")}</option><option value="base"${r.directionLayer === "base" ? " selected" : ""}>${t("基準層")}</option></select></div>
       ${r.projs().length ? `${noteHTML(t("射影 s: ヘッドが残差に書くベクトルのうち方向 r̂ に沿った成分だけを (1 − s) 倍にする(1 で消す、2 で反転、直交成分はそのまま)。LoRA で当てるので cvec には入りません。3 列チャットの − 列は s が負(その方向へ強める)。"), "muted note")}` : ""}${
-        r.directionLayer === "base" ? `${noteHTML(t("方向の層 base は保存したレシピのファイルにだけ入ります(3 列チャットと「今のレシピで eval」はユニットの文字列を送るので own で当てます)。"), "muted note")}` : ""}`;
+        r.directionLayer === "base" ? `${noteHTML(t("方向の層「基準層」は保存したレシピのファイルにだけ入ります(3 列チャットと「今のレシピで eval」はユニットの文字列を送るので、その層の方向で当てます)。"), "muted note")}` : ""}`;
   }
 
   // 鍵つきの書き込みの行(CHANGE-07、L14 ffn keyed a+1.00 @方向 #鍵)。書き込み先・方向・鍵の選択(方向・鍵の「既定」は

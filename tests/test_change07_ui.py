@@ -366,7 +366,7 @@ def test_key_panel_and_recipe_in_browser(ui_server, browser):
     assert pg.evaluate("document.querySelector('#kx-dir').value") == NAME                 # 対照集合と同じ名前の方向を選んでおく
     assert "zk_web" in pg.evaluate("document.querySelector('#kx-keys').textContent")
     _shot(pg, "keyed_build.png")
-    # この鍵で key-check(対照集合・返事・反対側の subset を入れて回す)
+    # この鍵で key-check(対照集合・返事・反対側の質問を入れて回す)
     _step(pg, "keys", "make")
     pg.click("#kx-build [data-kcheck]")
     assert pg.evaluate("document.querySelector('#kc-subset').value") == "odd"
@@ -673,7 +673,7 @@ def test_key_panel_template_pipeline_and_verify_in_browser(ui_server, browser):
     rows = pg.evaluate("[...document.querySelectorAll('#kx-build table.kx-tab tbody tr')].map(tr => tr.cells[0].textContent)")
     assert rows == ["L8", "L14"]
     pipe = pg.evaluate("document.querySelector('#kx-pipe').textContent")
-    assert "noda_endings" in pipe and "作りました" in pipe and "subset odd" in pipe
+    assert "noda_endings" in pipe and "作りました" in pipe and "使う質問 奇数番目" in pipe
     assert pg.input_value("#kx-dir") == "noda_endings" and pg.input_value("#kx-alpha") == "1"
     assert pg.input_value("#kc-key") == "noda_endings" and pg.input_value("#kc-subset") == "odd"
     assert pg.input_value("#kc-contrast").endswith("/contrasts/noda_endings.yaml")

@@ -143,7 +143,7 @@ function expertTooltipHTML(h) {
       .filter(Boolean).map((u) => `${u.kind === "expert" ? `E${h.expert} ` : ""}${u.mode === "gain" ? `×${fmt(u.k, 2)}` : `${u.mode === "route" ? "route " : ""}${u.dose >= 0 ? "+" : "−"}${fmt(Math.abs(u.dose), 2)}`}`);
     if (xs.length) kv("recipe", xs.join(" · "));
   }
-  lines.push(`<span class="t-wait">${t("クリックでくわしく見る(専門家は jump に L{L} E{e})", { L, e: h.expert })}</span>`);
+  lines.push(`<span class="t-wait">${t("クリックでくわしく見る(専門家は「移動」の欄に L{L} E{e})", { L, e: h.expert })}</span>`);
   return lines.join("<br>");
 }
 
@@ -214,10 +214,8 @@ function updateStatus() {
   $("#status-main").textContent = `${m.name} · ${where}${off}${flash ? ` · ${flash}` : ""}${state.note ? ` · ${state.note}` : ""}`;
   $("#status-main").title = $("#status-main").textContent + (sp ? ` · ${t("GPU {g} 層 / CPU {c} 層、約 {v} tok/s", { g: sp.gpu_layers, c: sp.cpu_layers, v: Math.round(sp.decode_tok_s) })}` : "");
   $("#perf").textContent = state.view === "embed"
-    ? (embedView && embedView.data ? `${embedView.data.points.length.toLocaleString()} rollouts (embed)` : "— (embed)")
-    : state.view === "layers" ? "(layers)"                                // 層の数は左にある
-    : state.view === "eval" ? "(eval)"
-    : state.view === "direction" ? "(direction)"
+    ? (embedView && embedView.data ? t("rollout {n} 本", { n: embedView.data.points.length.toLocaleString() }) : "—")
+    : state.view !== "map" ? ""                                           // 地図でない画面は、上の帯で分かる
     : `${t("{n} 点", { n: (map?.nPoints ?? 0).toLocaleString() })} · ${map && map.fps !== null ? map.fps.toFixed(0) : "—"} fps`;
 }
 
@@ -254,11 +252,11 @@ function legend() {
     .concat(state.expertFocus ? [it(tile("#ffffff"), t("開いている専門家"))] : [])
     .concat(state.firesRouted ? [it(tile("#6fe3ff"), t("fires のトークンで選ばれた専門家"))] : [])
     .concat(ag && ag.highlights.length ? [it(`<span class="sw ring dash agent"></span>`, `${t("エージェントの強調")}${ag.label ? ` (${esc(ag.label)})` : ""}`)] : [])
-    .concat(ag && ag.notes.length ? [itl(`<span class="sw ring agent small"></span><span class="ag-note-sw">agent ✎</span>` +
+    .concat(ag && ag.notes.length ? [itl(`<span class="sw ring agent small"></span><span class="ag-note-sw">${t("エージェント")} ✎</span>` +
       t("エージェントの注釈(小さな輪。札は 28 字まで、マウスを当てると全文、クリックで開く)"))] : [])
-    .concat(ag && ag.highlights.length + ag.notes.length > 30 ? [itl(t("(札は 30 枚まで。残りは輪だけで、全部は header の agent の一覧)"))] : []);
+    .concat(ag && ag.highlights.length + ag.notes.length > 30 ? [itl(t("(札は 30 枚まで。残りは輪だけで、全部は上の帯の「エージェント」の一覧)"))] : []);
   const line = (c) => `<span class="sw line" style="background:${c}"></span>`;
-  const links = state.links ? `<div>${it(state.links.web ? t("web({h} 段、{n} 本): ", { h: state.webHops, n: state.links.n }) : t("配線(上流・下流 {n} 本): ", { n: state.links.n }))}${
+  const links = state.links ? `<div>${it(state.links.web ? t("多段の配線({h} 段、{n} 本): ", { h: state.webHops, n: state.links.n }) : t("配線(上流・下流 {n} 本): ", { n: state.links.n }))}${
     it(line("#f2d24b"), t("黄 = 読み手(線の先)を + に押す"))}${it(line("#ff70d0"), t("赤紫 = 読み手を − に押す"))}${
     itl(state.links.web ? t("色 = 各辺の符号(経路の積ではない)、明るさ = z(表示中の最大に対する相対)、暗い線 = web の端(この先はたどっていない)") +
       (state.map && state.map.front !== null ? t("。正面ビューの札は 1 段目だけ(全体ビューで全体を見る)") : "")
@@ -1119,7 +1117,7 @@ function wireHeader() {
     state.linkMode = { direct: "web", web: "off", off: "direct" }[state.linkMode];
     state.web = state.linkMode === "web";
     const b = $("#web-toggle");
-    b.textContent = t({ direct: "線: 直接", web: "線: web", off: "線: なし" }[state.linkMode]);
+    b.textContent = t({ direct: "線: 直接", web: "線: 多段", off: "線: なし" }[state.linkMode]);
     b.classList.toggle("on", state.linkMode === "web");
     showLinks();
   });
