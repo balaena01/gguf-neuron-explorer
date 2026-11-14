@@ -204,9 +204,14 @@ input.w4 { width: 4em; } input.w45 { width: 4.5em; } input.w5 { width: 5em; }   
 .panel-body { padding: var(--sp-4) var(--sp-6); overflow: auto; min-height: 0; }
 
 #map-wrap { position: relative; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
-#map-bar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-3) var(--sp-5); padding: var(--sp-2) var(--sp-6); border-bottom: 1px solid var(--line); background: var(--panel); }
+#map-bar { display: flex; flex-wrap: nowrap; align-items: center; gap: var(--sp-3) var(--sp-5); padding: var(--sp-2) var(--sp-6); border-bottom: 1px solid var(--line); background: var(--panel); }
 #map-bar label { display: flex; align-items: center; gap: var(--sp-3); color: var(--muted); }
 #map-bar #reset-view { margin-left: auto; }
+/* 1 段に収める: 折り返さず、層と色の選択欄だけが縮む(選んだ項目の頭は見える)。並べ方の欄は縮めない(項目名を切らない) */
+#map-bar > * { flex: none; }
+#map-bar label:has(#layer-select), #map-bar label:has(#color-select) { flex: 0 1 auto; min-width: 0; }
+#map-bar :is(#layer-select, #color-select) { min-width: 64px; flex: 0 1 auto; }
+#map-bar .mb-short { display: none; }
 #map-stage { position: relative; flex: 1 1 auto; min-height: 0; }
 #map-wrap { container-type: inline-size; }
 @container (max-width: 900px) { #map-bar .lbl { display: none; } #map-bar #layer-select { max-width: 170px; } #map-bar #color-select { max-width: 150px; } }   /* 狭い地図では欄の名前を省き(title に残る)、1 行に収める */
@@ -261,7 +266,6 @@ input.w4 { width: 4em; } input.w45 { width: 4.5em; } input.w5 { width: 5em; }   
 code { font-family: var(--mono); background: var(--line-faint); padding: 0 var(--sp-2); border-radius: var(--r-s); }
 
 /* header(地図の配置・線・cos の閾値・検索) */
-#layout-select { max-width: 90px; } :root:lang(en) #layout-select { max-width: 130px; }   /* 英語の並べ方の名前は長い */
 #web-toggle.on { background: var(--accent-bg); border-color: var(--accent); color: var(--accent); }
 #overlay svg.lk { position: absolute; left: 0; top: 0; pointer-events: none; }
 #overlay span.lk-l { font-size: var(--fs-s); background: var(--scrim); border-radius: var(--r-s); padding: 0 var(--sp-2); transform: translate(0, -50%); }
@@ -795,7 +799,9 @@ dialog#ask p { margin: 0 0 var(--sp-6); white-space: pre-wrap; line-height: 1.6;
 dialog#ask .ask-btns { display: flex; justify-content: flex-end; gap: var(--sp-4); }
 .panel.collapsed .pill { writing-mode: horizontal-tb; margin-top: var(--sp-3); align-self: center; }   /* 細くたたんだときも数は横書きで読めるように */
 @container (max-width: 720px) { #map-bar { gap: var(--sp-2) var(--sp-3); padding: var(--sp-2) var(--sp-4); } #map-bar :is(select, button) { font-size: var(--fs-m); }
-  #map-bar #layer-select { max-width: 120px; } #map-bar #color-select { max-width: 120px; } #map-bar #layout-select { max-width: 72px; } :root:lang(en) #map-bar #layout-select { max-width: 104px; } }
+  #map-bar #layer-select { max-width: 120px; } #map-bar #color-select { max-width: 120px; }
+  #map-bar .mb-long { display: none; } #map-bar .mb-short { display: inline; } }   /* 狭いときは「線: 」「この層で」を省く */
+@container (max-width: 560px) { #map-bar { column-gap: var(--sp-2); padding-inline: var(--sp-3); } }   /* いちばん狭いとき(1280 px でくわしく見るとレシピを開く)も 1 段に */
 input.layers { width: 10em; }
 .fx-part { border-left: 2px solid var(--line-mid); padding-left: var(--sp-4); margin: 0 0 var(--sp-4); }
 .fx-part-h { flex-basis: 100%; }

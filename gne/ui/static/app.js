@@ -219,6 +219,12 @@ function updateStatus() {
     : `${t("{n} 点", { n: (map?.nPoints ?? 0).toLocaleString() })} · ${map && map.fps !== null ? map.fps.toFixed(0) : "—"} fps`;
 }
 
+// 地図の上の「線: 直接」。「線: 」を span に分け、地図が狭いときは CSS で省く(文字列としては今までどおり「線: 直接」)
+function linkLabel() {
+  const full = t({ direct: "線: 直接", web: "線: 多段", off: "線: なし" }[state.linkMode]), i = full.indexOf(": ");
+  $("#web-toggle").innerHTML = i < 0 ? esc(full) : `<span class="mb-long">${esc(full.slice(0, i + 2))}</span>${esc(full.slice(i + 2))}`;
+}
+
 function legend() {
   const kinds = new Set(state.arch.layers.map((li) => li.mixer));
   const o = state.overlay;
@@ -1117,7 +1123,7 @@ function wireHeader() {
     state.linkMode = { direct: "web", web: "off", off: "direct" }[state.linkMode];
     state.web = state.linkMode === "web";
     const b = $("#web-toggle");
-    b.textContent = t({ direct: "線: 直接", web: "線: 多段", off: "線: なし" }[state.linkMode]);
+    linkLabel();
     b.classList.toggle("on", state.linkMode === "web");
     showLinks();
   });
@@ -1148,6 +1154,7 @@ async function checkStale() {
 
 async function main() {
   translateDOM();                                                        // index.html の文言を今の言語に
+  linkLabel();
   for (const b of document.querySelectorAll("#lang button")) {         // 右上の JP / EN
     b.classList.toggle("on", b.dataset.lang === LANG);
     b.addEventListener("click", () => { if (b.dataset.lang !== LANG) setLang(b.dataset.lang); });

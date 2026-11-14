@@ -716,8 +716,10 @@ def test_top_bar_opens_each_screen(server, browser):
     """上の帯の 3 群(探す・作る・確かめる)から、どの画面も直接開ける。いまの画面だけに印(aria-current)。方向・CHiPS・鍵・FiSH・
     強さの候補は direction ビューの中身を入れ替えて出す(中の切り替えは無い)。地図の上の帯(層・並べ方・色・線・この層で計算)は地図だけ。
     方向の画面は開いただけでは測らない。英語の画面でも文言は辞書にある。"""
-    want = {"map": "#map-bar", "layers": "#layers-view",                       # 地図の上の帯は地図のときだけ見える(地図の上に重ねるほかの画面と分ける) "writers": "#writers-view", "embed": "#embed-view", "eval": "#eval-view",
+    # 地図の上の帯は地図のときだけ見える(地図の上に重ねるほかの画面と分ける)
+    want = {"map": "#map-bar", "layers": "#layers-view", "writers": "#writers-view", "embed": "#embed-view", "eval": "#eval-view",
             "direction": "#dv-dir", "chips": "#dv-pipe", "keys": "#dv-key", "fish": "#dv-fish", "cand": "#dv-cand"}
+    assert len(want) == 10
     for lang in ("ja", "en"):
         pg = browser.new_page(viewport={"width": 1500, "height": 860})
         errors, posts = [], []
@@ -1000,13 +1002,61 @@ def test_plain_words_in_japanese_and_english(server, browser):
     pg.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
     assert pg.evaluate("document.querySelector('#jump').closest('label').querySelector('.lbl').textContent") == "Go to"
     assert opts("#search-mode") == [["lens", "lens words"], ["words", "sweep words"], ["name", "name"]]
-    assert opts("#layout-select") == [["index", "by number"], ["writes", "write direction"], ["lens", "lens words"]]
+    assert opts("#layout-select") == [["index", "number"], ["writes", "output"], ["lens", "lens words"]]
     _open_list(pg, "rank")
     assert pg.evaluate(heads) == ["#", "No.", "mass", "beats ctrl", "words"]
     assert pg.evaluate("document.querySelector('#rank-random').parentElement.textContent").strip() == "show controls"
     assert pg.evaluate("[...window.gneI18n.missing]") == []
     assert not errors, errors
     pg.close()
+
+
+@pytest.mark.model
+def test_map_bar_one_line_at_common_widths(server, browser):
+    """地図の上の帯は、日本語・英語、幅 1280・1500・1600・1700 で、パネル(一覧・くわしく見る・レシピ)を閉じても開いても 1 段で、
+    中身がはみ出さない。縮むのは層と色の選択欄だけで、並べ方の欄は項目名を切らない。"""
+    bar = """() => { const b = document.querySelector('#map-bar'), e = document.querySelector('#layout-select');
+      const w = e.getBoundingClientRect().width, keep = e.getAttribute('style') || '';
+      e.style.maxWidth = 'none'; e.style.flexShrink = '0'; e.style.width = 'auto';
+      const natural = e.getBoundingClientRect().width; e.setAttribute('style', keep);
+      return { h: b.getBoundingClientRect().height, over: b.scrollWidth - b.clientWidth, layoutCut: natural - w,
+               open: ['list', 'detail', 'recipe'].filter((p) => !document.querySelector('#' + p).classList.contains('collapsed')) }; }"""
+    bad = []
+    for lang in ("ja", "en"):
+        for width in (1280, 1500, 1600, 1700):
+            pg = browser.new_page(viewport={"width": width, "height": 860})
+            errors = []
+            pg.on("pageerror", lambda e: errors.append(str(e)))
+            pg.goto(server + f"/?lang={lang}")
+            pg.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
+            pg.evaluate("window.gne.recipe.clear()")
+
+            def panels(**want):
+                for k, on in want.items():
+                    if pg.evaluate(f"!document.querySelector('#{k}').classList.contains('collapsed')") != on:
+                        pg.click(f".toggle[data-target={k}]")
+                pg.wait_for_timeout(150)
+
+            def check(state):
+                m = pg.evaluate(bar)
+                if m["h"] >= 48 or m["over"] > 1 or m["layoutCut"] > 0.5:
+                    bad.append((lang, width, state, m))
+            panels(list=False, detail=False, recipe=False)
+            check("closed")
+            panels(list=True)
+            check("list")
+            panels(recipe=True)
+            check("list+recipe")
+            pg.fill("#jump", "L6 N100")                                            # くわしく見るを開き、レシピに足す(狭ければほかをたたむ)
+            pg.press("#jump", "Enter")
+            pg.wait_for_function("document.querySelector('#neuron-body .n-id')", timeout=30000)
+            pg.click("#neuron-body [data-rc='1']")
+            pg.wait_for_timeout(150)
+            check("detail+recipe")
+            pg.evaluate("window.gne.recipe.clear()")
+            assert not errors, errors
+            pg.close()
+    assert not bad, bad
 
 
 def test_chat_single_column_in_browser(server, browser):
