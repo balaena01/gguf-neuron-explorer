@@ -738,6 +738,18 @@ def units_key_fit(session, rows: list[dict]) -> dict:
     return {"fit": "mean" if not kinds else (kinds.pop() if len(kinds) == 1 else "mixed"), "keys": keys, "c": cs}
 
 
+def key_fit_line(kf: dict | None) -> str:
+    """units_key_fit の結果を 1 行に(gne nw check の画面)。記録が無ければ mean(いまの作り方)。"""
+    kf = kf or {}
+    fit = kf.get("fit") or "mean"
+    if fit == "ridge":
+        cs = sorted({format(float(v), "g") for v in (kf.get("c") or {}).values() if v is not None}, key=float)
+        return "鍵の作り方: ridge(最小二乗の鍵、ますごとの重み" + (f"。正則化の強さ c = {'・'.join(cs)}" if cs else "") + ")"
+    if fit == "mixed":
+        return "鍵の作り方: mean と ridge が混ざっています(" + "、".join(f"{k} {v}" for k, v in (kf.get("keys") or {}).items()) + ")"
+    return "鍵の作り方: mean(いまの作り方)"
+
+
 def leak_table(groups: dict, segs: list[str], leak: float) -> dict:
     """書き込みたくない場面の群ごとの漏れ。check の groups(群 → questions)から、群ごとに:
     n(質問の数)、any(どれかの区間で、合計の大きさが leak 以上の質問の数)、segments(区間ごとの leak = その数、n、total_mean =

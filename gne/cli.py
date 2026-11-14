@@ -3133,17 +3133,14 @@ def nw_check(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Op
     最後に、書き込みたくない場面の群ごとの漏れの表を出す: 群ごと・区間ごとに、狙った量の --leak(既定 0.2)以上を書いた質問の数と、
     書いた量の平均。位置 0(返事を書き始める直前)だけで見た数も出す。最初の行に、ユニットの鍵がどちらの作り方(mean / ridge)かを出す。"""
     import re as _re
-    from .nwrite import question_lines
+    from .nwrite import key_fit_line, question_lines
     s = holder["session"] = c.session()
     r = s.recipe(units=unit, path=recipe, default_direction=direction, default_key=key)
     save = name or (r.name if r.name and _re.fullmatch(r"[\w.\-]+", r.name) else "recipe")
     d = s.nw_check(r, contrast, subset=subset, max_tokens=max_tokens, replies=replies, n_pos=n_pos, iv=_iv_arg(iv), low=low, over=over,
                    leak=leak, top=top, save=save)
-    kf = d.get("key_fit") or {}
     lines = [f"対照集合 {d['contrast']}(subset {d['subset']}、返事 {d['replies']}、{d['seconds']:.0f} 秒)。値は足した量の平均(α·d を 1。かっこ内は最小〜最大)",
-             "鍵の作り方: " + {"mean": "mean(いまの作り方)", "ridge": "ridge(最小二乗の鍵、ますごとの重み"
-                               + (f"。正則化の強さ c = {'・'.join(sorted({format(v, 'g') for v in (kf.get('c') or {}).values() if v is not None}))}" if kf.get("c") else "") + ")",
-                               "mixed": "mean と ridge が混ざっています(" + "、".join(f"{k} {v}" for k, v in (kf.get("keys") or {}).items()) + ")"}.get(kf.get("fit"), "mean(いまの作り方)")]
+             key_fit_line(d.get("key_fit"))]
     for g, x in d["groups"].items():
         lines.append(f"[{g}] {x['n']} 問、ループ {x['loops']}")
         for u in x["units"]:
@@ -3248,8 +3245,12 @@ def nw_pipeline(c: Common, holder: dict,
     if cap is not None:                              # しきい値が読めなければ、見積もりの前に止める
         fish.caps_of(cap, len(fish._segments(segments)), form or fish.DEFAULTS["form"])
     from .keyed_ridge import check_c, check_key_fit
-    check_key_fit(key_fit)                           # 鍵の作り方が読めなければ、見積もりの前に止める
-    check_c(key_c)
+    kf = check_key_fit(key_fit)                      # 鍵の作り方・強さが読めなければ、見積もりの前に止める
+    if check_c(key_c) is not None and kf != "ridge":
+        raise GneError("BAD_ARGS", "--key-c(正則化の強さ)は、--key-fit ridge のときだけ使います")
+    if kf == "ridge" and fish.before_mode(fish._segments(segments)):
+        raise GneError("BAD_ARGS", "最小二乗の鍵(--key-fit ridge)は、返事の位置の区切り(0,1-3,4- など)の鍵だけです",
+                       "書く位置が before:<正規表現> のときは、いまの作り方(--key-fit mean)で作ります")
     _gate(s, "fish_pipeline", p, yes, None)
     d = _fish_pipeline(s, **p)
     out = d if full else {**d["summary"], "units": d["units"], "contrast_path": d["contrast_path"]}

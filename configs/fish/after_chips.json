@@ -3,11 +3,11 @@
     "order": 6,
     "ja": {
       "title": "CHiPS のレシピを当てた上に足す(例: お礼を言われたときだけツンデレ)",
-      "text": "CHiPS(ヘッドの射影)のレシピを先に当てた状態で、ニューロンを作る例です。fish の iv は空にしてあるので、画面の「先に当てておくレシピ(iv)」に、保存してある CHiPS のレシピの名前を入れてください(入力欄の JSON の fish.iv に書いてもかまいません)。方向・ニューロンの表・鍵・確かめ・返事は、すべてそのレシピを当てた状態で行います。できた FiSH のユニットは、レシピのタブで CHiPS のレシピと同じレシピに並べて使い、「LoRA・焼き込み」から 1 つの LoRA に書き出せます(焼き込みは不可)。対照集合の中身は「特定の場面の返事の口調を変える」と同じです。強さは区切りごとに 1 / 1 / 0.8、層は続いた層(Qwen3.5-4B では 11-23)を勧めます(「特定の場面の返事の口調を変える」の説明を見てください)。試した範囲: Qwen3.5-4B(Q8_0)で 1 回。試したときの形は、層 11,18,23・強さは一律 0.9 です。先に当てたのは、動作を見るために手元で作った小さな proj のレシピ(ヘッド 2 本)です。流れは最後まで通り、式どおりかも合格。足した量は狙う場面で 0.8〜1.0、変えたくない場面で 0.05 以下。作成に使っていない 12 問で、当てないときと同じ程度にツンデレらしい返事が出ました(その「当てないとき」の形は、あとで 100 問で測ると、ツンデレらしい返事 27〜29%・繰り返しに落ちた返事 6〜10% でした。12 問の確かめは甘く出ます。層 11-23・強さ 1 / 1 / 0.8 では 53% でしたが、CHiPS のレシピを当てた上では確かめていません)。実際の CHiPS のレシピと組み合わせたときの良し悪しは確かめていません。 返事は数問〜12 問を読んだだけなので、1〜2 問の差は誤差です。ほかのモデルでは確かめていません。 設定の stack_fast を true にする(欄の「速い読み方」にチェックを入れる)と、方向づくりで層ごとに返事を読み直す所を、区切りごとにまとめて読みます。大きいモデルで方向づくりがずっと速くなりますが、方向がわずかに変わります(今までの方向との cos 0.999 以上。この方向での口調・正答は測っていません)。層や強さを比べる探索向けで、配るものを作るときは false のままにしてください。"
+      "text": "CHiPS(ヘッドの射影)のレシピを先に当てた状態で、ニューロンを作る例です。fish の iv は空にしてあるので、画面の「先に当てておくレシピ(iv)」に、保存してある CHiPS のレシピの名前を入れてください(入力欄の JSON の fish.iv に書いてもかまいません)。方向・ニューロンの表・鍵・確かめ・返事は、すべてそのレシピを当てた状態で行います。できた FiSH のユニットは、レシピのタブで CHiPS のレシピと同じレシピに並べて使い、「LoRA・焼き込み」から 1 つの LoRA に書き出せます(焼き込みは不可)。対照集合の中身(変えたくない場面の群を含む)は「特定の場面の返事の口調を変える」と同じです。鍵の作り方(key_fit)も、そちらの説明を見てください。強さは区切りごとに 1 / 1 / 0.8、層は続いた層(Qwen3.5-4B では 11-23)を勧めます(「特定の場面の返事の口調を変える」の説明を見てください)。試した範囲: Qwen3.5-4B(Q8_0)で 1 回。試したときの形は、層 11,18,23・強さは一律 0.9 です。先に当てたのは、動作を見るために手元で作った小さな proj のレシピ(ヘッド 2 本)です。流れは最後まで通り、式どおりかも合格。足した量は狙う場面で 0.8〜1.0、変えたくない場面で 0.05 以下。作成に使っていない 12 問で、当てないときと同じ程度にツンデレらしい返事が出ました(その「当てないとき」の形は、あとで 100 問で測ると、ツンデレらしい返事 27〜29%・繰り返しに落ちた返事 6〜10% でした。12 問の確かめは甘く出ます。層 11-23・強さ 1 / 1 / 0.8 では 53% でしたが、CHiPS のレシピを当てた上では確かめていません)。実際の CHiPS のレシピと組み合わせたときの良し悪しは確かめていません。 返事は数問〜12 問を読んだだけなので、1〜2 問の差は誤差です。ほかのモデルでは確かめていません。 設定の stack_fast を true にする(欄の「速い読み方」にチェックを入れる)と、方向づくりで層ごとに返事を読み直す所を、区切りごとにまとめて読みます。大きいモデルで方向づくりがずっと速くなりますが、方向がわずかに変わります(今までの方向との cos 0.999 以上。この方向での口調・正答は測っていません)。層や強さを比べる探索向けで、配るものを作るときは false のままにしてください。"
     },
     "en": {
       "title": "On top of a CHiPS recipe (example: tsundere only when thanked)",
-      "text": "An example that builds the neurons with a CHiPS (head projection) recipe applied first. fish.iv is left empty: enter the name of your saved CHiPS recipe in \"Recipe applied first (iv)\" (or write it in fish.iv in the JSON). The direction, the neuron table, the keys, the checks and the replies are all done with that recipe applied. Put the resulting FiSH units in the same recipe as the CHiPS units in the recipe tab; \"LoRA / bake\" exports them as one LoRA (baking is not available). The contrast set is the same as \"Change the tone of replies in one scene\". Strength 1 / 1 / 0.8 per segment and consecutive layers (11-23 on Qwen3.5-4B) are recommended (see the description of \"Change the tone of replies in one scene\"). Tried on: Qwen3.5-4B (Q8_0), one run, with layers 11,18,23 and strength 0.9 everywhere. The recipe applied first was a small proj recipe (2 heads) made locally just to exercise the flow. The whole flow ran and the formula check passed. The amounts written were 0.8–1.0 in the target scene and at most 0.05 in the scenes to leave alone. On 12 questions not used for building, tsundere-like replies appeared about as often as without the recipe (that setup without the recipe, measured later on 100 questions, gave 27–29% tsundere-like replies and 6–10% replies that fall into repetition; a 12-question check comes out too favorable. Layers 11-23 with strength 1 / 1 / 0.8 gave 53%, but that was not checked on top of a CHiPS recipe). How it works together with a real CHiPS recipe was not checked. Only a handful to 12 replies were read, so a difference of one or two means nothing. Not checked on other models. Setting stack_fast to true (ticking \"Fast reading\" in the form) makes the direction step read each reply again in one read per segment instead of in small groups. Building the direction gets much faster on large models, but the direction changes slightly (cosine of 0.999 or more with the default direction; tone and correct answers with such a direction have not been measured). It is meant for exploring layers and strengths; keep it false when you build something to distribute."
+      "text": "An example that builds the neurons with a CHiPS (head projection) recipe applied first. fish.iv is left empty: enter the name of your saved CHiPS recipe in \"Recipe applied first (iv)\" (or write it in fish.iv in the JSON). The direction, the neuron table, the keys, the checks and the replies are all done with that recipe applied. Put the resulting FiSH units in the same recipe as the CHiPS units in the recipe tab; \"LoRA / bake\" exports them as one LoRA (baking is not available). The contrast set (including the groups of scenes to leave alone) is the same as \"Change the tone of replies in one scene\"; see its description for the key method (key_fit) as well. Strength 1 / 1 / 0.8 per segment and consecutive layers (11-23 on Qwen3.5-4B) are recommended (see the description of \"Change the tone of replies in one scene\"). Tried on: Qwen3.5-4B (Q8_0), one run, with layers 11,18,23 and strength 0.9 everywhere. The recipe applied first was a small proj recipe (2 heads) made locally just to exercise the flow. The whole flow ran and the formula check passed. The amounts written were 0.8–1.0 in the target scene and at most 0.05 in the scenes to leave alone. On 12 questions not used for building, tsundere-like replies appeared about as often as without the recipe (that setup without the recipe, measured later on 100 questions, gave 27–29% tsundere-like replies and 6–10% replies that fall into repetition; a 12-question check comes out too favorable. Layers 11-23 with strength 1 / 1 / 0.8 gave 53%, but that was not checked on top of a CHiPS recipe). How it works together with a real CHiPS recipe was not checked. Only a handful to 12 replies were read, so a difference of one or two means nothing. Not checked on other models. Setting stack_fast to true (ticking \"Fast reading\" in the form) makes the direction step read each reply again in one read per segment instead of in small groups. Building the direction gets much faster on large models, but the direction changes slightly (cosine of 0.999 or more with the default direction; tone and correct answers with such a direction have not been measured). It is meant for exploring layers and strengths; keep it false when you build something to distribute."
     }
   },
   "name": "fish_after_chips",
@@ -15,19 +15,19 @@
   "user_prompts": [
     "今日なんか可愛いね。",
     "昨日は手伝ってくれてありがとう。",
-    "お弁当作ってきたよ、一緒に食べよう。",
+    "朝ごはんを作ってくれてありがとう。",
     "髪切った？似合ってるね。",
     "誕生日おめでとう！",
     "いつも助けてくれて感謝してるよ。",
-    "プレゼントを用意したんだ、受け取って。",
-    "一緒に写真撮ろうよ。",
+    "くれたマフラー、毎日使ってるよ。ありがとう。",
+    "君の撮った写真、すごくきれいだね。",
     "君の料理、すごくおいしかったよ。",
     "この前のアドバイス、本当に役に立ったよ。",
     "君と話してると楽しいな。",
     "今日の服、素敵だね。",
-    "手紙を書いてきたんだ、読んでくれる？",
+    "手紙、すごく嬉しかったよ。ありがとう。",
     "君のおかげで試験に合格できたよ。",
-    "週末、一緒に映画に行かない？",
+    "君の字、きれいで読みやすいね。",
     "いつもありがとう、頼りにしてるよ。",
     "荷物を運ぶのを手伝ってくれてありがとう。",
     "君の歌、とても上手だったよ。",
@@ -43,7 +43,7 @@
     "君のピアノ、感動したよ。",
     "相談に乗ってくれてありがとう、気持ちが楽になった。",
     "君のプレゼン、とても分かりやすかったよ。",
-    "おみやげを買ってきたよ、どうぞ。",
+    "おみやげ、ありがとう。家族も喜んでたよ。",
     "引っ越しを手伝ってくれて本当にありがとう。"
   ],
   "dont_touch": [
@@ -68,6 +68,51 @@
         "好きな季節は？",
         "疲れたときはどうすればいい？"
       ]
+    },
+    {
+      "name": "report",
+      "prompts": [
+        "今朝は早起きして散歩してきたよ。",
+        "昨日から新しい本を読み始めたんだ。",
+        "週末に部屋の片付けをしたよ。",
+        "今日は一日中雨だったね。"
+      ]
+    },
+    {
+      "name": "invite",
+      "prompts": [
+        "今度、駅前の新しいカフェに行ってみない？",
+        "週末、一緒に映画に行かない？",
+        "明日のお昼、一緒にご飯食べようよ。",
+        "あとで散歩に行こうよ。"
+      ]
+    },
+    {
+      "name": "greet",
+      "prompts": [
+        "おはよう。",
+        "ただいま。",
+        "こんばんは、久しぶりだね。",
+        "お疲れさま、今日も一日終わったね。"
+      ]
+    },
+    {
+      "name": "request",
+      "prompts": [
+        "そこのペン、取ってくれる？",
+        "あとで駅まで送ってほしいな。",
+        "この荷物、ちょっと持っててくれる？",
+        "明日の朝、七時に起こして。"
+      ]
+    },
+    {
+      "name": "partial",
+      "prompts": [
+        "はあ、もう金曜日か。",
+        "えっと、何を言おうとしてたんだっけ……",
+        "うーん、どうしようかな。",
+        "雨、降りそうだな。"
+      ]
     }
   ],
   "validate": {
@@ -86,6 +131,7 @@
     "stack": true,
     "stack_fast": false,
     "pseudo": 4,
+    "key_fit": "mean",
     "max_tokens": 96,
     "iv": ""
   }

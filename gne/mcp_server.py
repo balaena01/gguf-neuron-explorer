@@ -114,7 +114,7 @@ direction で作った方向は "L:dir:NAME:dose"、attention ヘッドの gain 
    ツンデレで、鍵が見ていない質問でない発言 105 問のうち 81 問に書き、14 問の口調が変わった)。fish_pipeline・direction_key の
    key_fit="ridge" は、位置の鍵を最小二乗の鍵にする(位置 1 つずつを行にして、書き込みたい位置で 1・書き込みたくない位置で 0 を
    返す鍵を閉じた式で解く。書き込みたくない位置の重みは「場面の群 × 位置の区分」のますごとに同じ)。同じ 105 問で、書いた質問
-   81 → 1、口調が変わった返事 14 → 0、狙う場面の口調は減らなかった(57 → 70。繰り返しに落ちた返事は 2 → 6 に増えた)。既定は
+   81 → 1、口調が変わった返事 14 → 0、狙う場面の口調は減らなかった(57 → 70。繰り返しに落ちた返事は機械的に数えて 1 → 4 に増えた)。既定は
    いまの作り方(mean)のまま。新しい作り方は 1 つのモデル・1 つの性格で確かめた段階(docs/fish.md §3)。nw_check の leaks(変えたく
    ない場面の群ごと・区間ごとの、書いてしまった質問の数と書いた量の平均。位置 0 だけの数も)で、群ごとに漏れを見る。
 """
@@ -639,6 +639,9 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
         try:
             if not _layers(layers):
                 raise GneError("BAD_ARGS", "layers に鍵を作る層を指定してください(例 [8, 14, 20])")
+            from .keyed_ridge import check_c, check_key_fit
+            check_key_fit(key_fit)                     # 作り方・強さが読めなければ、ジョブを投げる前に止める
+            check_c(key_c)
             p = {"contrast": str(_contrast_path(session, contrast, None, None, None, None)), "layers": layers, "name": name,
                  "positions": positions, "positions_b": positions_b, "skip": skip, "max_tokens": max_tokens,
                  "q_mode": q_mode, "q_energy": q_energy, "q_max_rank": q_max_rank, "q_max_samples": q_max_samples,
@@ -771,12 +774,15 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
         ridge(段ごとの c、候補の端だったか edge、行とますの数)に残る。鍵の計算は CPU で、Qwen3.5-4B の 13 層・576 問で 1 段あたり
         数分かかる(見積もりに入る)。書く位置が before:<正規表現> の鍵には使えない。Qwen3.5-4B のツンデレの 1 例で、鍵が見ていない
         質問でない発言 105 問に書いた質問が 81 → 1、口調が変わった返事が 14 → 0 になり、狙う場面の口調は減らなかった(繰り返しに
-        落ちた返事は 100 問中 2 → 6 に増えた)。1 つのモデル・1 つの性格で確かめた段階(docs/fish.md §3)。
+        落ちた返事は機械的に数えて 100 問中 1 → 4 に増えた)。1 つのモデル・1 つの性格で確かめた段階(docs/fish.md §3)。
         要約の leaks は、書き込みたくない場面の群ごとの漏れの表(nw_check の leaks と同じ)。"""
         from .jobs import _layers
         try:
             if not _layers(layers):
                 raise GneError("BAD_ARGS", "layers に書く層を指定してください(例 [11, 18, 23] か \"11-23\")")
+            from .keyed_ridge import check_c, check_key_fit
+            check_key_fit(key_fit)                     # 作り方・強さが読めなければ、ジョブを投げる前に止める
+            check_c(key_c)
             p = {**_fish_contrast(contrast), "layers": layers, "alpha": alpha, "segments": segments, "form": form, "name": name,
                  "same_reply": same_reply, "stack": stack, "rekey": rekey, "pseudo": pseudo, "max_tokens": max_tokens,
                  "response_tokens": response_tokens, "iv": iv, "neurons": neurons, "top": top, "save": save,

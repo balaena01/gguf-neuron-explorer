@@ -171,14 +171,16 @@ FiSH = Formula-instantiated Scene-gated Hidden units。すでにあるニュー�
 gne direction --contrast C --positions response --same-reply [--segments 0,1-3,4-] [--stack-layers 11-23]      # 方向(同じ返事を両方の条件で読ませた差。区切り i は NAME.seg<i>)
 gne nw try --direction NAME --contrast C [--layers 11-23] [--alpha 1,1,0.8] [--prompts F] [-n 12] [--temperature 0.7]   # 重みに入れる前に試す(方向を層の出力に直接足した返事と数)
 gne nw neurons --layers 11-23 [--top 20] [--sort sum|max|mean] [--iv R]                 # ふだんの働きの小さい順の表(上書きするニューロンを選ぶ)
-gne direction key --contrast C --target mlpin --layers L --positions pos:1-3 --name K   # 位置の鍵(この場面の返事の位置 1〜3。pos:0、pos:4- も)
+gne direction key --contrast C --target mlpin --layers L --positions pos:1-3 --name K [--key-fit ridge [--key-c 1]]   # 位置の鍵(この場面の返事の位置 1〜3。pos:0、pos:4- も)。--key-fit ridge で最小二乗の鍵
 gne nw key --contrast C --layers L --role scene|one [--iv R]                             # 場面の鍵 / ほぼ 1 を返す鍵
+gne nw key --contrast C --layers L --role position --positions pos:1-3 [--key-fit ridge]  # 位置の鍵(gne direction key --target mlpin と同じ)
 gne nw verify --recipe R | --unit 11:N2045:nw:a1@NAME.seg1#SCENE&POS [--iv R]            # LoRA が式どおりか(数秒)
-gne nw check --recipe R --contrast C [--subset odd] [--replies own|base] [--iv R] [--low 0.4] [--over 1.2] [--top 5] [--name N]   # 位置ごとの鍵の反応と足した量(狙う場面・dont_touch)。続けて、質問ごとの値の要約
+gne nw check --recipe R --contrast C [--subset odd] [--replies own|base] [--iv R] [--low 0.4] [--over 1.2] [--leak 0.2] [--top 5] [--name N]   # 位置ごとの鍵の反応と足した量(狙う場面・dont_touch)。続けて、質問ごとの値の要約と、変えたくない場面の群ごとの漏れの表
 gne nw export --recipe R -o FILE.lora.gguf [--strip-meta] [--name N]                     # LoRA(nw だけ)。--bake はエラー。--strip-meta は gne の記録と元のモデルの名前・識別子を書かない(名前の欄は adapter か --name)
 gne nw pipeline --contrast C --layers 11-23 --alpha 1,1,0.8 --save R.yaml                # 方向 → ニューロン → 鍵 → ユニット → 鍵の作り直し → verify → check を 1 回で。短い要約が出る。--save でレシピを書く
 gne nw pipeline --contrast C2 --layers 11-23 --alpha 1,1,0.8 --direction NAME --name N2 [--cap 0.4-0.8,0.3-0.7,0.3-0.7]   # すでにある方向を使い回す(作り直さない)。しきい値を区切りごとに
 gne nw pipeline --contrast C --layers 11-23 --alpha 1,1,0.8 --stack-fast --name TRY                          # 探索用: 方向の段だけ速い読み方(方向がわずかに変わる。配るものは付けずに作り直す)
+gne nw pipeline --contrast C --layers 11-23 --alpha 1,1,0.8 --key-fit ridge [--key-c 1] --save R.yaml         # 位置の鍵を最小二乗の鍵(ますごとの重み)に。2 段とも。既定はいまの作り方
 gne headproj export --recipe R                                                           # proj・keyed・gain と nw を 1 つの LoRA に(--bake は nw があるとエラー)
 ```
 
@@ -193,10 +195,12 @@ gne headproj export --recipe R                                                  
 - **check は平均の表だけで判断しない。** 平均だけでは、一部の質問でまったく書けていないことが隠れる。平均の表の後に出る質問ごとの値で、区間ごとの「ほとんど書けていない質問の数」(書いた量が 0.4 未満)と「狙った量を超えて書いた質問の数」(合計が 1.2 超)、書けていない質問の上位(質問と、返事の出だし)を見る。書けていない質問が、返事の書き出し方(かぎかっこで始まる、など)でまとまっていたら、鍵がその書き出し方を拾えていない → 鍵を作る質問を増やして作り直す。質問ごとの行は `--json`(`groups.<群>.questions`・`by_question`、`question_summary.worst`)と `<root>/behave/<model_id>/<名前>_check.json`。
 - **鍵を作る質問の数**: 最初から多め(狙う場面の質問は 100 問以上。ひな形の 32 問は流れを見るための数)に用意すると、返事の書き出し方の一部を鍵が拾えない取りこぼしが起きにくい。**質問を増やして効くのは、check の質問ごとの値に「ほとんど書けていない質問」があるときだけ**(27B のツンデレ: 40 → 120 問で、鍵が見ていない 100 問の狙った口調 52% → 77%、繰り返しに落ちた・読めない返事は 4 → 10)。すでに書けていれば増えない(4B のツンデレ 51 → 56・48 → 56 で有意でない、27B の 2 つ目の性格 35% → 33%)。狙う場面の質問だけ増やすと、変えたくない場面に少し書くことがあった(位置 1〜3 の平均 0.04 → 0.26)ので、変えたくない場面の質問も一緒に増やす(両方増やした場合は測っていない)。`docs/fish.md` §3。
 - **`--direction NAME`**(`fish.pipeline(direction=…)`、ジョブ・MCP の `direction`): すでにある方向を作り直さない。区切り・層・重ねる層が合わなければ BAD_DIRECTION(重ねる前提で作っていない方向を複数の層に書くなら `--no-stack`)。**`--cap`**(`cap`): 上限つきの形のしきい値を区切りごとに(`0.3-0.7` = 全部同じ、`0.4-0.8,0.3-0.7,0.3-0.7` = 区切りごと。既定 0.4-0.8)。
+- **変えたくない場面の群ごとの漏れ**: check の最後に、dont_touch の群ごと・区間ごとに、狙った量の 0.2 以上(`--leak`)を書いた質問の数と書いた量の平均、位置 0 だけで見た数が出る(`--json` では `leaks`。pipeline の要約・UI にも)。狙う場面と同じ形の発言の群だけに漏れていないか、漏れが位置 0 に移っただけでないかを見る。最初の行に、ユニットの鍵の作り方(`key_fit`)。
+- **最小二乗の鍵(`--key-fit ridge`、`key_fit="ridge"`)**: 位置 1 つずつを行にして「書き込みたい位置で 1、書き込みたくない位置で 0」を返す鍵を正則化つきの閉じた式で解く。書き込みたくない位置の重みは「場面の群(dont_touch の名前つきの群と、狙う場面のほかの区切り)× 位置の区切り」のますごとに同じ。正則化の強さは、鍵を作る質問だけの質問単位の 5 分割で 0.01〜100 から決める(`--key-c` で直接。選ばれた値と、候補の端かが結果に出る)。2 段とも同じ作り方、比較用の鍵も同じ式。FiSH の位置の鍵だけ(keyed write の鍵・場面の鍵・ほぼ 1 を返す鍵・`before:` の鍵は今までどおり)。鍵の計算は CPU(4B の 13 層・576 問で 1 段約 3 分。見積もりに入る)。Qwen3.5-4B のツンデレの 1 例で、変えたくない場面に質問でない発言の群を足して作ると、鍵が見ていない質問でない発言 105 問のツンデレ口調 14 → 0・書いた質問 81 → 1、狙う場面は減らず(greedy 57 → 70)、繰り返しは 1 → 4。**既定は変えていない。1 つのモデル・1 つの性格で確かめた段階**。`docs/fish.md` §3。
 - 鍵づくり(`fish.keys_step`・pipeline)は、返事を質問の群ごとに 1 回だけ作り、区切りごとの位置の鍵を 1 回の読み取りから作る(1 本ずつ作った鍵と同じ)。Python は `Session.direction_keys(contrast, [(名前, "pos:0"), (名前, "pos:1-3"), …], target="mlpin", …)`。
-- MCP: `direction(same_reply, segments, stack_layers, stack_fast)`、`direction_key(target="mlpin", positions="pos:1-3" | role="scene"|"one", iv)`、`nw_neurons`・`nw_check`(質問ごとの値つき。low・over・top・save)・`nw_try(direction, contrast, layers, alpha)`(ジョブ)、`nw_verify`、`nw_export`、`fish_pipeline(contrast, layers, alpha, direction, cap, stack_fast)`(まとめて作るジョブ)、`direction_key_pipeline(same_reply)`。
+- MCP: `direction(same_reply, segments, stack_layers, stack_fast)`、`direction_key(target="mlpin", positions="pos:1-3" | role="scene"|"one", iv, key_fit, key_c)`、`nw_neurons`・`nw_check`(質問ごとの値と群ごとの漏れの表つき。low・over・leak・top・save)・`nw_try(direction, contrast, layers, alpha)`(ジョブ)、`nw_verify`、`nw_export`、`fish_pipeline(contrast, layers, alpha, direction, cap, stack_fast, key_fit, key_c)`(まとめて作るジョブ)、`direction_key_pipeline(same_reply)`。
 
-Web UI(direction ビューの「FiSH」タブ)と同じ段は、ジョブとしても使える(MCP の `job_start`): `fish_pipeline`(spec か contrast、layers 必須、segments・form・alpha(数 1 つか区切りごとの並び)・cap(しきい値。1 つか区切りごと)・direction(すでにある方向)・same_reply・stack・stack_fast(速い読み方。探索向け)・rekey・neurons・iv)、`fish_direction`(stack_fast も)、`fish_try`(direction・layers・alpha・prompts・n・temperature)、`nw_neurons`、`fish_keys`(with_units でユニットを当てた状態)、`fish_verify`(units)、`fish_check`(units。質問ごとの値つき)、`fish_behave`(units、prompts・n・match)。ひな形は `configs/fish/`。
+Web UI(direction ビューの「FiSH」タブ)と同じ段は、ジョブとしても使える(MCP の `job_start`): `fish_pipeline`(spec か contrast、layers 必須、segments・form・alpha(数 1 つか区切りごとの並び)・cap(しきい値。1 つか区切りごと)・direction(すでにある方向)・same_reply・stack・stack_fast(速い読み方。探索向け)・rekey・neurons・iv・key_fit・key_c)、`fish_direction`(stack_fast も)、`fish_try`(direction・layers・alpha・prompts・n・temperature)、`nw_neurons`、`fish_keys`(with_units でユニットを当てた状態。key_fit・key_c)、`fish_verify`(units)、`fish_check`(units。質問ごとの値と群ごとの漏れの表つき)、`fish_behave`(units、prompts・n・match)。ひな形は `configs/fish/`。
 
 ### 鍵つきの書き込み(keyed write、CHANGE-07、`docs/keyed-write.md`)
 

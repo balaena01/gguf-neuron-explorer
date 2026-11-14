@@ -17,6 +17,10 @@
 // 超えた質問の数と、書けていない質問の一覧)を出す。平均だけでは、一部の質問でまったく書けていないことが隠れるため。
 // 「重みに入れる前に試す」(fish_try のジョブ): 2. で作った方向を、ニューロンにも鍵にも入れずに、狙う場面の質問の返事の位置どおりに
 // 層の出力へ直接足して返事を作る。層・区切りごとの強さを変えて、返事と数(繰り返し・空・正規表現の一致)を並べて比べる。
+// 「鍵の作り方」(表の fish.key_fit・key_c): 位置の鍵を、いまの作り方(既定)か、最小二乗の鍵(ますごとの重み。docs/fish.md §3)で作る。
+// 「まとめて作る」「鍵をまとめて作る」「当てた状態で鍵を作り直す」に効く。どちらで作ったかは、鍵の表・まとめて作った結果・足した量の上に出る。
+// 6. の「足した量」には、変えたくない場面の群ごとの漏れの表(群 × 区間ごとに、狙った量の 0.2 以上を書いた質問の数と書いた量の平均、
+// 位置 0 だけの数)も出す。
 // 遅れて届いた結果で、後から選んだもの・後から投げたジョブの結果を上書きしない(欄ごとに最後に投げたジョブだけを受け取る。
 // 一覧の読み込みとユニットの組み立ては通し番号で見分ける。手で選び直したニューロンは、表を取り直しても残す)。
 import { getJSON, postJSON } from "./api.js";
@@ -29,7 +33,8 @@ const NAME_RE = /^[\w.-]+$/;
 const DRAFT = "gne.fish.draft";                                   // 入力欄の下書き(このブラウザだけ)
 const SRC = "gne.fish.src";
 const PER = { one: 1, two: 1, cap: 2 };                           // 区切り 1 つに要るニューロンの数(gne/fish.py の PER_SEGMENT)
-const FISH_KEYS = ["layers", "segments", "form", "alpha", "cap", "same_reply", "stack", "stack_fast", "pseudo", "max_tokens", "response_tokens", "iv", "rekey"];
+const FISH_KEYS = ["layers", "segments", "form", "alpha", "cap", "same_reply", "stack", "stack_fast", "pseudo", "max_tokens", "response_tokens", "iv", "rekey",
+                   "key_fit", "key_c"];
 const CAP_RE = /^\d+(\.\d+)?-\d+(\.\d+)?$/;                       // 上限つきの形のしきい値 a-b
 export const AMOUNT_HIGH = 0.2;                                   // 書き込みたくない場面・区切りの外で、足した量の平均がこれ以上なら赤
 export const AMOUNT_LOW = 0.5;                                    // 狙う場面の区切りの中で、足した量の平均がこれ未満なら黄
@@ -120,6 +125,9 @@ export class FishPanel {
             <select id="fx-form"><option value="cap">${t("上限つきの 2 個組")}</option><option value="two">${t("鍵 2 つ(場面 かつ 位置)")}</option><option value="one">${t("鍵 1 つ")}</option></select></label>
           <span class="muted" title="${t("強さ α(区切りごと)。1 で、その区切りの方向をそのままの長さで書く。使う人が決める(Qwen3.5-4B の 1 例では、位置 0 と 1-3 に 1、4 以降に 0.8 がよかった)")}">${t("強さ(区切りごと)")} <span id="fx-alphas"></span></span>
           <label class="muted" title="${t("上限つきの形のしきい値 a-b。鍵の反応が a より小さいとほぼ書かず、b より大きいと狙った量で頭打ちになる。空なら既定の 0.4-0.8。1 つ書けば全部の区切りに同じ値、区切りごとに変えるなら区切りの順にカンマ区切りで(例 0.4-0.8,0.3-0.7,0.3-0.7)")}">${t("しきい値(上限つきの形)")} <input id="fx-cap" size="16" placeholder="0.4-0.8" spellcheck="false"></label>
+          <label class="muted" title="${t("位置の鍵の作り方。いまの作り方(既定)= 書き込みたい位置の状態の平均から、書き込みたくない位置にも現れる成分を取り除く。最小二乗 = 書き込みたい位置で 1、書き込みたくない位置で 0 を返す鍵を、正則化つきの式で解く。書き込みたくない位置の重みは「場面の群(変えたくない場面の群と、狙う場面のほかの区切り)× 位置の区切り」のますごとに同じにするので、数の少ない群(質問でない発言の群など)も見分ける。Qwen3.5-4B のツンデレの 1 例で確かめた段階。当てた状態で鍵を作り直す段にも同じ作り方を使う。鍵の計算は CPU で、4B の 13 層で数分かかる。書く位置が before:<正規表現> のときは使えない")}">${t("鍵の作り方")}
+            <select id="fx-keyfit"><option value="mean">${t("いまの作り方(既定)")}</option><option value="ridge">${t("最小二乗(ますごとの重み)")}</option></select></label>
+          <label class="muted" title="${t("最小二乗の鍵の正則化の強さ(行列の対角の平均の何倍か。例 1)。空なら、鍵を作る質問だけを使った質問単位の 5 分割で、0.01・0.1・1・10・100 から決める(選ばれた値は鍵の表の上に出る)")}">${t("正則化の強さ")} <input id="fx-keyc" size="7" placeholder="${t("5 分割で決める")}" spellcheck="false" disabled></label>
           <label class="muted" title="${t("先に当てておく介入: 保存したレシピの名前か、ユニットを空白区切りで。CHiPS のレシピを当てた状態で作るときに入れる。空なら無介入")}">${t("先に当てておくレシピ(iv)")} <input id="fx-iv" size="18" spellcheck="false"></label>
           <label class="muted" title="${t("鍵づくりと確かめで返事を生成する長さ")}">max_tokens <input id="fx-mt" type="number" min="1" max="2048" value="96" style="width:5em"></label>
         </div>
@@ -223,6 +231,7 @@ export class FishPanel {
     sel.addEventListener("change", () => this.insertTemplate(sel.value, true));
     for (const id of ["#fx-layers", "#fx-seg", "#fx-form", "#fx-cap"]) this.$(id).addEventListener("input", () => this.settingsChanged());
     this.$("#fx-form").addEventListener("change", () => this.settingsChanged());
+    this.$("#fx-keyfit").addEventListener("change", () => this.settingsChanged());
     root.addEventListener("input", (ev) => { if (ev.target.closest("input[data-fxa]")) this.compose(); });
     // 「速い読み方」のチェックは 2 か所(まとめて作る・2. 方向を作る)にあり、同じ 1 つの設定を表す
     for (const b of root.querySelectorAll("input.fx-fast")) b.addEventListener("change", () => this.setFast(b.checked));
@@ -386,6 +395,8 @@ export class FishPanel {
       this.$("#fx-stack").checked = fish.stack !== false;
       this.setFast(fish.stack_fast === true);
       this.$("#fx-rekey-on").checked = fish.rekey !== false;
+      this.$("#fx-keyfit").value = fish.key_fit === "ridge" ? "ridge" : "mean";
+      this.$("#fx-keyc").value = fish.key_c === undefined || fish.key_c === null ? "" : String(fish.key_c);
       if (fish.iv === undefined || fish.iv === null) this.$("#fx-iv").value = "";
       if (fish.layers !== undefined && fish.layers !== null && !this.$("#fx-layers").value.trim()) put("#fx-layers", Array.isArray(fish.layers) ? fish.layers.join(",") : fish.layers);
       this.settingsChanged();
@@ -440,6 +451,22 @@ export class FishPanel {
     return xs === null ? null : !xs.length ? undefined : xs.length === 1 ? xs[0] : xs;
   }
 
+  // ジョブに渡す鍵の作り方: いまの作り方(既定)なら {}。最小二乗なら { key_fit: "ridge" }(正則化の強さを入れたら key_c も)。
+  // 読めなければ欄の横に理由を出して null
+  keyFit(which) {
+    if (this.$("#fx-keyfit").value !== "ridge") return {};
+    const segs = parseSegments(this.$("#fx-seg").value);
+    if (segs && segs.length && segs[0].before) {
+      this.status(which, t("最小二乗の鍵は、返事の位置の区切り(0,1-3,4- など)の鍵だけです。書く位置が before:<正規表現> のときは、いまの作り方で作ります"), true);
+      return null;
+    }
+    const raw = this.$("#fx-keyc").value.trim();
+    if (!raw) return { key_fit: "ridge" };
+    const c = Number(raw);
+    if (!Number.isFinite(c) || c <= 0) { this.status(which, t("正則化の強さは 0 より大きい数です(例 1)。空なら 5 分割で決めます"), true); return null; }
+    return { key_fit: "ridge", key_c: c };
+  }
+
   // ジョブに渡す強さ: 全部の区切りが同じ値なら数 1 つ、違えば区切りごとの並び。読めなければ null
   alpha() {
     const xs = this.alphas();
@@ -463,6 +490,7 @@ export class FishPanel {
   // 層・区切り・形を変えた: 必要な個数と候補を出し直し、ユニットを組み直す
   settingsChanged() {
     this.$("#fx-cap").disabled = this.$("#fx-form").value !== "cap";
+    this.$("#fx-keyc").disabled = this.$("#fx-keyfit").value !== "ridge";
     this.renderAlphas("fx-alphas");
     this.renderAlphas("fx-try-alphas");
     this.showNeed();
@@ -578,8 +606,10 @@ export class FishPanel {
     if (a === null) { this.status("all", t("強さを、区切りごとに全部入れてください(例 1 / 1 / 0.8)"), true); return; }
     const cap = this.cap();
     if (cap === null) { this.status("all", t("しきい値は 0.4-0.8 のように書きます(下 < 上)。区切りごとに変えるなら、区切りの数だけカンマ区切りで"), true); return; }
+    const kf = this.keyFit("all");
+    if (kf === null) return;
     const rt = +this.$("#fx-rt").value, ps = +this.$("#fx-pseudo").value, top = +this.$("#fx-top").value;
-    const p = { ...s, ...c.p, alpha: a, same_reply: this.$("#fx-method").value === "same", stack: this.$("#fx-stack").checked,
+    const p = { ...s, ...c.p, ...kf, alpha: a, same_reply: this.$("#fx-method").value === "same", stack: this.$("#fx-stack").checked,
                 stack_fast: this.fast(), compare: this.$("#fx-compare").checked, rekey: this.$("#fx-rekey-on").checked,
                 pseudo: Number.isInteger(ps) && ps >= 0 ? ps : 4, response_tokens: Number.isInteger(rt) && rt > 0 ? rt : 96,
                 top: Number.isInteger(top) && top > 0 ? top : 20 };
@@ -618,8 +648,10 @@ export class FishPanel {
     const s = this.source(which), c = this.common(which);
     if (!s || !c) return;
     const ps = +this.$("#fx-pseudo").value;
+    const kf = this.keyFit(rekey ? "units" : which);
+    if (kf === null) return;
     const base = c.name || this.st.name || (this.src === "json" && this.jspec.spec ? String(this.jspec.spec.name) : null);
-    const p = { ...s, ...c.p, pseudo: Number.isInteger(ps) && ps >= 0 ? ps : 4 };
+    const p = { ...s, ...c.p, ...kf, pseudo: Number.isInteger(ps) && ps >= 0 ? ps : 4 };
     if (rekey) {
       if (!this.st.units.length) { this.status("units", t("先にユニットを組んでください(方向・ニューロン・鍵)"), true); return; }
       p.with_units = [...this.st.units];
@@ -799,7 +831,9 @@ export class FishPanel {
     if (!r) { el.innerHTML = ""; return; }
     const ss = r.stage_seconds || {};
     const lab = { direction: t("方向"), neurons: t("ニューロンの表"), keys: t("鍵"), rekey: t("鍵の作り直し"), verify: t("式どおりか"), check: t("足した量") };
+    const rd = r.ridge || {};
     el.innerHTML = `<p class="note">${Object.keys(lab).filter((k) => ss[k] !== undefined).map((k) => `${lab[k]} ${fmt(ss[k], 1)} ${t("秒")}`).join(" → ")}</p>
+      <p class="note" id="fx-pipe-fit">${this.fitHTML(r.key_fit, [[t("1 段目の鍵"), rd.build], [t("当てた状態で作り直した鍵"), rd.rekey]])}</p>
       <p class="muted note">${r.neurons_default ? t("ニューロンは既定の候補(表の上から)を使いました。3. の表のチェックで選び直せます(選び直したら、鍵の作り直しと確かめをやり直します)") : t("ニューロンは、手で選んだものを使いました")}: ${
       Object.entries(r.neurons || {}).map(([L, js]) => `L${L} ${js.map((j) => `N${j}`).join(" ")}`).join(" / ")}</p>
       ${(r.notes || []).length ? `<p class="muted note">${r.notes.map(esc).join("<br>")}</p>` : ""}
@@ -841,10 +875,11 @@ export class FishPanel {
     if (!r) { el.innerHTML = ""; return; }
     const kind = { position: t("位置の鍵"), scene: t("場面の鍵"), one: t("ほぼ 1 を返す鍵") };
     const rows = (r.rows || []).map((x) => `<tr><td class="l">${esc(x.key)}</td><td class="l">${kind[x.kind] || esc(x.kind)}</td><td>${x.positions === null || x.positions === undefined ? "—" : esc(x.positions)}</td><td>L${x.layer}</td>
-      <td title="${t("|k| / |μ|: 書き込みたい位置の平均のうち、書き込みたくない位置の部分空間に直交する割合")}">${fmt(x.kn, 3)}</td>
+      <td title="${t("いまの作り方では |k| / |μ|(書き込みたい位置の平均のうち、書き込みたくない位置の部分空間に直交する割合)。最小二乗の鍵では 1 / (|κ| |μ|)(鍵と、書き込みたい位置の平均との cos)")}">${fmt(x.kn, 3)}</td>
       <td title="${t("鍵の反応の平均の差(書き込みたい位置 − 書き込みたくない位置)。作成に使った例での値")}">${fmt(x.selectivity, 2)}</td>
       <td title="${t("比較用の鍵(ラベルをでたらめに入れ替えた鍵)での同じ値の 95% 点")}">${fmt(x.pseudo_p95, 2)}</td><td>${mark(x.beats)}</td></tr>`).join("");
     el.innerHTML = `<p class="note">${t("鍵の名前の頭")} <b class="mono">${esc(r.base)}</b>${r.with_units ? ` <span class="muted">(${t("レシピを当てた状態で作り直した鍵")})</span>` : ""} · subset ${esc(r.subset || "—")} · ${t("比較用の鍵 {n} 本", { n: r.pseudo ?? "—" })} · ${fmt(r.seconds, 1)} ${t("秒")}</p>
+      <p class="note" id="fx-keys-fit">${this.fitHTML(r.key_fit, [["", r.ridge]])}</p>
       <div class="evx-scroll"><table class="evx mono fx-tab" id="fx-keys-tab"><thead><tr><th class="l">${t("鍵")}</th><th class="l">${t("種類")}</th><th>${t("区切り")}</th><th>${t("層")}</th><th>kn</th><th>${t("鍵の反応の差")}</th><th>${t("比較用の鍵の 95% 点")}</th>
         <th title="${t("鍵の反応の差が、比較用の鍵の 95% 点を超えているか")}">${t("比較用の鍵を超えるか")}</th></tr></thead><tbody>${rows}</tbody></table></div>
       ${(r.notes || []).length ? `<p class="muted note">${r.notes.map(esc).join("<br>")}</p>` : ""}`;
@@ -937,9 +972,38 @@ export class FishPanel {
       <p class="muted note">${t("書けていない質問が、返事の書き出し方(かぎかっこで始まる、など)でまとまっていたら、鍵を作る質問を増やします(狙う場面の質問は 100 問以上を勧めます)")}</p>` : ""}`;
   }
 
+  // 鍵の作り方の 1 行。stages = [[見出し, 最小二乗の鍵の記録 {c, cv, folds, edge, …}], …](記録が無い段は出さない)
+  fitHTML(kf, stages) {
+    if (kf !== "ridge") return `<span class="muted">${t("鍵の作り方: いまの作り方(書き込みたい位置の状態の平均から、書き込みたくない位置にも現れる成分を取り除く)")}</span>`;
+    const parts = (stages || []).filter(([, x]) => x).map(([lab, x]) => `${lab ? `${esc(lab)} ` : ""}c = ${esc(String(x.c))}(${
+      x.cv ? t("質問単位の {f} 分割で決めた", { f: x.folds }) : t("渡した値")})${x.edge ? ` <span class="pp-warn">${t("候補の端(もっと端の値が合うかもしれません)")}</span>` : ""}`);
+    return `${t("鍵の作り方: 最小二乗(ますごとの重み)")}${parts.length ? ` · ${t("正則化の強さ")} ${parts.join(" · ")}` : ""}`;
+  }
+
+  // 変えたくない場面の群ごとの漏れ(gne nw check の leaks): 群 × 区間ごとに、狙った量の 0.2 以上を書いた質問の数と書いた量の平均、
+  // どれかの区間で書いた質問の数、位置 0 だけで見た数
+  leaksHTML(r) {
+    const lk = r.leaks;
+    if (!lk || !(lk.groups || []).length) return "";
+    const segs = lk.segments || [];
+    const cell = (c) => (!c || !c.n ? "<td>—</td>"
+      : `<td class="${c.leak ? "fx-bad" : ""}">${c.leak} / ${c.n} <span class="muted">(${fmt(c.total_mean, 2)})</span></td>`);
+    const rows = [...lk.groups, ...(lk.all && lk.groups.length > 1 ? [{ ...lk.all, group: null }] : [])].map((g) => `<tr><td class="l">${g.group === null ? t("(全部)") : esc(g.group)}</td>
+      <td class="${g.any ? "fx-bad" : ""}">${g.any} / ${g.n}</td>${segs.map((sg) => cell((g.segments || {})[sg])).join("")}${cell(g.pos0)}</tr>`).join("");
+    return `<h4 class="note">${t("変えたくない場面の群ごとの漏れ")} <span class="muted note">${t("狙った量の {v} 以上を書いた質問の数 / 質問の数。かっこ内は書いた量の平均", { v: lk.leak })}</span></h4>
+      <div class="evx-scroll"><table class="evx mono fx-tab" id="fx-leak-tab"><thead><tr><th class="l">${t("群")}</th><th>${t("どれかの区間")}</th>${
+        segs.map((sg) => `<th>${sg === "match" ? t("一致の直前") : t("区間 {s}", { s: esc(sg) })}</th>`).join("")}<th title="${t("返事を書き始める直前の 1 位置だけで見た数")}">${t("位置 0 だけ")}</th></tr></thead><tbody>${rows}</tbody></table></div>
+      <p class="muted note">${t("群ごとに見ます。狙う場面と同じ形の発言(質問でない発言など)の群だけに漏れていないか、漏れがある区間から位置 0 に移っただけでないかを確かめます")}</p>`;
+  }
+
   renderCheck() {
     const r = this.st.check, el = this.$("#fx-check");
     if (!r) { el.innerHTML = ""; return; }
+    const kf = r.key_fit || {};
+    const cs = [...new Set(Object.values(kf.c || {}).filter((x) => x !== null && x !== undefined).map(String))];
+    const fit = kf.fit === "ridge" ? `${t("ユニットの鍵の作り方: 最小二乗(ますごとの重み)")}${cs.length ? ` · c = ${esc(cs.join("・"))}` : ""}`
+      : kf.fit === "mixed" ? `<span class="pp-warn">${t("ユニットの鍵の作り方: いまの作り方と最小二乗が混ざっています")}</span>`
+      : `<span class="muted">${t("ユニットの鍵の作り方: いまの作り方")}</span>`;
     const segs = parseSegments(((this.st.dir && this.st.dir.segments) || []).join(",") || this.$("#fx-seg").value) || [];
     const segOf = (unit) => { const m = String(unit).match(/\.seg(\d+)/); return m ? segs[+m[1]] || null : segs.length === 1 && segs[0].before ? segs[0] : null; };
     const colName = (k) => (k === "match" ? t("一致の直前") : k === "other" ? t("それ以外") : k);
@@ -959,7 +1023,7 @@ export class FishPanel {
       return `<h4 class="note">${esc(title)} <span class="muted note">${d.n} ${t("問")} · ${t("繰り返しになった返事 {n}", { n: d.loops })}</span></h4>
         <div class="evx-scroll"><table class="evx mono fx-tab fx-check-tab" data-g="${esc(g)}"><thead><tr><th>${t("層")}</th><th>${t("区切り")}</th>${cols.map((k) => `<th>${esc(colName(k))}</th>`).join("")}<th class="l">${t("ユニット")}</th></tr></thead><tbody>${trs}</tbody></table></div>`;
     }).join("");
-    el.innerHTML = `${this.questionsHTML(r)}<h4 class="note">${t("実際に足した量(返事の位置ごとの平均。α·方向 を 1 として)")}</h4>
+    el.innerHTML = `<p class="note" id="fx-check-fit">${fit}</p>${this.questionsHTML(r)}${this.leaksHTML(r)}<h4 class="note">${t("実際に足した量(返事の位置ごとの平均。α·方向 を 1 として)")}</h4>
       <p class="note"><span class="fx-in fx-chip">${t("狙う場面の、その区切りの位置")}</span> <span class="fx-low fx-chip">${t("足りない({v} 未満)", { v: AMOUNT_LOW })}</span> <span class="fx-bad fx-chip">${t("書き込みたくない位置で大きい({v} 以上)", { v: AMOUNT_HIGH })}</span>
         <span class="muted" id="fx-check-sum">${t("足りない {a} か所 · 書き込みたくない位置で大きい {b} か所", { a: nLow, b: nBad })}</span></p>
       ${tables}

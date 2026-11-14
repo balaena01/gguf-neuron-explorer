@@ -2736,12 +2736,16 @@ round_01.scores.txt に「番号 P C」を 1 行ずつ書く(例: 17 3 4)。全�
     # --- 鍵つきの書き込み(CHANGE-07)--------------------------------------------------------------------
 
     def direction_key(self, contrast: str | Path, **kw) -> dict:
-        """対照集合から keyed の鍵を作る(gne direction key)。中身は gne/keyed_build.py の build_keys。"""
+        """対照集合から keyed の鍵を作る(gne direction key)。中身は gne/keyed_build.py の build_keys。
+        key_fit="ridge"(と key_c)で、FiSH の位置の鍵(target mlpin・positions pos:<範囲>)を最小二乗の鍵にする(gne/keyed_ridge.py)。"""
         role = kw.pop("role", None)
         if role in ("scene", "one"):                     # 計算で作るニューロン用の、場面の鍵・ほぼ 1 を返す鍵(target mlpin)
             from .nwrite import build_role_key
             if str(kw.pop("target", "mlpin") or "mlpin") != "mlpin":
                 raise GneError("BAD_ARGS", "role scene / one の鍵は target mlpin だけです")
+            if kw.pop("key_fit", None) not in (None, "mean") or kw.pop("key_c", None) is not None:
+                raise GneError("BAD_ARGS", "最小二乗の鍵(key_fit ridge・key_c)は位置の鍵だけです",
+                               "場面の鍵(scene)とほぼ 1 を返す鍵(one)の作り方は 1 つです")
             keep = ("layers", "name", "subset", "max_tokens", "pseudo", "iv", "seed", "q_energy", "progress", "gen_cache")
             extra = sorted(k for k, v in kw.items() if k not in keep and v not in (None, False))
             if extra:

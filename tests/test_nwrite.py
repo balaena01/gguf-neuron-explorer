@@ -1081,6 +1081,22 @@ def test_mcp_tools(tmp_path):
                 d = (sc.get("result", sc) if isinstance(sc, dict) else None) or json.loads(r.content[0].text)
                 assert d["error"]["code"] == "BAD_ARGS" and "stack_fast" in d["error"]["message"]
                 assert "role" in tools["direction_key"].input_schema["properties"]
+                # 鍵の作り方(最小二乗の鍵)と、群ごとの漏れの表の目安
+                assert {"key_fit", "key_c"} <= set(tools["direction_key"].input_schema["properties"]) and "ridge" in tools["direction_key"].description
+                assert {"key_fit", "key_c"} <= set(tools["fish_pipeline"].input_schema["properties"]) and "leaks" in tools["fish_pipeline"].description
+                assert "leak" in tools["nw_check"].input_schema["properties"] and "leaks" in tools["nw_check"].description
+                assert "key_fit" in (init.instructions or "")
+                for args in ({"contrast": "tsundere_thanks", "layers": [8], "role": "scene", "key_fit": "ridge"},
+                             {"contrast": "tsundere_thanks", "layers": [8], "target": "mlpin", "positions": "pos:0", "key_fit": "lasso"},
+                             {"contrast": "tsundere_thanks", "layers": [8], "target": "mlpin", "positions": "pos:0", "key_c": -1}):
+                    r = await c.call_tool("direction_key", args)                                 # ジョブを投げる前に止まる
+                    sc = getattr(r, "structured_content", None)
+                    d = (sc.get("result", sc) if isinstance(sc, dict) else None) or json.loads(r.content[0].text)
+                    assert d["error"]["code"] == "BAD_ARGS", args
+                r = await c.call_tool("fish_pipeline", {"contrast": "tone_in_scene", "layers": [8], "key_fit": "lasso"})
+                sc = getattr(r, "structured_content", None)
+                d = (sc.get("result", sc) if isinstance(sc, dict) else None) or json.loads(r.content[0].text)
+                assert d["error"]["code"] == "BAD_ARGS"
                 assert "same_reply" in tools["direction_key_pipeline"].input_schema["properties"]
                 r = await c.call_tool("nw_verify", {"units": ["8:N5:nw:a1@nope#nokey"]})
                 sc = getattr(r, "structured_content", None)

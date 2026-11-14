@@ -8,6 +8,7 @@
 LoRA の書き出し)。ニューロンをチェックで選び直すとユニットが組み直され、手で選んだ層は表を取り直しても残る。後から投げた
 ジョブがある欄には、先のジョブの結果を入れない。英語の画面で未翻訳が無い。
 強さは区切りごと(ひな形は 1 / 1 / 0.8。欄も区切りごと)。「重みに入れる前に試す」(ジョブ fish_try): 方向を層の出力に直接足した返事と数。
+「鍵の作り方」(いまの作り方 / 最小二乗)の欄とジョブの引数、鍵の表・まとめて作った結果・足した量の上の作り方の表示、変えたくない場面の群ごとの漏れの表。
 """
 
 import json
@@ -36,6 +37,7 @@ def small_spec(name: str) -> dict:
     d.pop("about")
     d["name"] = name
     d["user_prompts"] = d["user_prompts"][:8]
+    d["dont_touch"] = d["dont_touch"][:2]                                 # 質問の 2 群だけ(ひな形には質問でない発言の群もある)
     d["dont_touch"][0]["prompts"] = d["dont_touch"][0]["prompts"][:2]
     d["dont_touch"][1]["prompts"] = d["dont_touch"][1]["prompts"][:3]
     d["fish"] = {**d["fish"], "max_tokens": 16, "response_tokens": 16, "pseudo": 2}
@@ -155,7 +157,9 @@ def _put_spec(pg, spec):
 def test_template_file():
     d = json.loads(TEMPLATE.read_text(encoding="utf-8"))
     assert d["about"]["ja"]["title"] and d["about"]["en"]["title"] and d["about"]["ja"]["text"] and d["about"]["en"]["text"]
-    assert len(d["user_prompts"]) >= 24 and d["system_a"] and {g["name"] for g in d["dont_touch"]} == {"tasks", "ordinary"}
+    assert len(d["user_prompts"]) >= 24 and d["system_a"]
+    assert [g["name"] for g in d["dont_touch"]] == ["tasks", "ordinary", "report", "invite", "greet", "request", "partial"]   # 質問でない発言も群ごとに
+    assert d["fish"]["key_fit"] == "mean" and "key_fit" in d["about"]["ja"]["text"] and "key_fit" in d["about"]["en"]["text"]   # 既定の作り方
     assert d["fish"]["form"] == "cap" and d["fish"]["segments"] == "0,1-3,4-" and d["fish"]["alpha"] == [1, 1, 0.8]
     assert "layers" not in d["fish"]                                       # 層は使う人が入れる
     assert d["fish"]["stack_fast"] is False                                # 速い読み方は、書けるが既定は切
@@ -404,6 +408,8 @@ def test_fish_tab_end_to_end_in_browser(served, browser):
     assert pg.evaluate("[...document.querySelectorAll('#fx-alphas .fx-al span')].map((x) => x.textContent)") == ["0", "1-3", "4-"]
     assert pg.evaluate("document.querySelector('#fx-layers').value") == ""
     assert "狙う場面の質問 32 問" in pg.evaluate("document.querySelector('#fx-jcheck').textContent")
+    assert "report(4)" in pg.evaluate("document.querySelector('#fx-jcheck').textContent")                   # 変えたくない場面の群
+    assert pg.evaluate("document.querySelector('#fx-keyfit').value") == "mean" and pg.evaluate("document.querySelector('#fx-keyc').disabled")
     assert "層 1 つに 6 個" in pg.evaluate("document.querySelector('#fx-need').textContent")
     pg.fill("#fx-layers", "11-23")                                          # 層は範囲で入れられ、要るニューロンの数と、時間がかかることが出る
     need = pg.evaluate("document.querySelector('#fx-need').textContent")
@@ -440,6 +446,20 @@ def test_fish_tab_end_to_end_in_browser(served, browser):
     assert pg.evaluate("document.querySelectorAll('#fx-q-tab tbody tr').length") == 9
     assert "ほとんど書けていない質問" in pg.evaluate("document.querySelector('#fx-q-sum').textContent")
     assert "平均だけでは" in pg.evaluate("document.querySelector('#fx-check').textContent")
+    # 変えたくない場面の群ごとの漏れの表(2 群 + 合わせた行)と、鍵の作り方の表示(既定 = いまの作り方)
+    assert pg.evaluate("document.querySelectorAll('#fx-leak-tab tbody tr').length") == 3
+    assert pg.evaluate("[...document.querySelectorAll('#fx-leak-tab thead th')].map((x) => x.textContent)") == ["群", "どれかの区間", "区間 0", "区間 1-3", "区間 4-", "位置 0 だけ"]
+    for sel in ("#fx-pipe-fit", "#fx-keys-fit"):
+        assert pg.evaluate(f"document.querySelector('{sel}').textContent").startswith("鍵の作り方: いまの作り方"), sel
+    assert pg.evaluate("document.querySelector('#fx-check-fit').textContent") == "ユニットの鍵の作り方: いまの作り方"
+    # 鍵の作り方の欄 → ジョブの引数(いまの作り方なら渡さない。最小二乗なら key_fit、強さを入れたら key_c)。読めなければ止める
+    kf = pg.evaluate(f"""(() => {{ const p = {f}, sel = document.querySelector('#fx-keyfit'), c = document.querySelector('#fx-keyc'), seg = document.querySelector('#fx-seg');
+        const out = [p.keyFit('all')]; sel.value = 'ridge'; sel.dispatchEvent(new Event('change')); out.push(c.disabled, p.keyFit('all'));
+        c.value = '0.1'; out.push(p.keyFit('all')); c.value = '0'; out.push(p.keyFit('all'), document.querySelector('#fx-status-all').textContent);
+        c.value = ''; const was = seg.value; seg.value = 'before:(です|ます)。'; out.push(p.keyFit('all')); seg.value = was;
+        sel.value = 'mean'; sel.dispatchEvent(new Event('change')); out.push(c.disabled, p.keyFit('all')); return out; }})()""")
+    assert kf[0] == {} and kf[1] is False and kf[2] == {"key_fit": "ridge"} and kf[3] == {"key_fit": "ridge", "key_c": 0.1}
+    assert kf[4] is None and "正則化の強さは 0 より大きい数" in kf[5] and kf[6] is None and kf[7] is True and kf[8] == {}
     assert pg.evaluate("document.querySelector('#fx-cap').value") == "" and not pg.evaluate("document.querySelector('#fx-cap').disabled")
     assert pg.evaluate("import('/fish.js').then((m) => [m.parseCaps('', 3), m.parseCaps('0.3-0.7', 3), m.parseCaps('0.4-0.8,0.3-0.7,0.3-0.7', 3), m.parseCaps('0.4-0.8,0.3-0.7', 3), m.parseCaps('0.8-0.4', 3)])") \
         == [[], ["0.3-0.7"], ["0.4-0.8", "0.3-0.7", "0.3-0.7"], None, None]
@@ -654,6 +674,25 @@ def test_fish_tab_in_english(served, browser, piped):
     assert "Build everything" in pg.evaluate("document.querySelector('#fx-all').textContent")
     assert "Target scene" in pg.evaluate("document.querySelector('#fx-check').textContent")
     assert "Values per question" in pg.evaluate("document.querySelector('#fx-check').textContent")
+    assert "Leaks per group of scenes to leave alone" in pg.evaluate("document.querySelector('#fx-check').textContent")
+    assert pg.evaluate("document.querySelector('#fx-pipe-fit').textContent").startswith("Key method: current method")
+    assert pg.evaluate("document.querySelector('#fx-keyfit').parentElement.textContent").strip().startswith("Key method")
+    assert "Least squares (weights per cell)" in pg.evaluate("document.querySelector('#fx-keyfit').textContent")
+    texts = pg.evaluate(f"""(() => {{ const p = {f}; const k = p.st.keys, pp = p.st.pipe, ck = p.st.check, out = {{}};
+        p.st.keys = {{ ...k, key_fit: 'ridge', ridge: {{ c: 100, cv: true, folds: 5, edge: true }} }}; p.renderKeys(); out.keys = document.querySelector('#fx-keys-fit').textContent;
+        p.st.pipe = {{ ...pp, key_fit: 'ridge', ridge: {{ build: {{ c: 1, cv: true, folds: 5, edge: false }}, rekey: {{ c: 2, cv: false }} }} }}; p.renderPipe();
+        out.pipe = document.querySelector('#fx-pipe-fit').textContent;
+        p.st.check = {{ ...ck, key_fit: {{ fit: 'ridge', c: {{ a: 1, b: 1 }} }} }}; p.renderCheck(); out.ck1 = document.querySelector('#fx-check-fit').textContent;
+        p.st.check = {{ ...ck, key_fit: {{ fit: 'mixed', keys: {{}} }} }}; p.renderCheck(); out.ck2 = document.querySelector('#fx-check-fit').textContent;
+        p.st.keys = k; p.st.pipe = pp; p.st.check = ck; p.renderKeys(); p.renderPipe(); p.renderCheck();
+        const sel = document.querySelector('#fx-keyfit'), c = document.querySelector('#fx-keyc'), seg = document.querySelector('#fx-seg');
+        sel.value = 'ridge'; c.value = 'x'; p.keyFit('all'); out.bad = document.querySelector('#fx-status-all').textContent;
+        c.value = ''; const was = seg.value; seg.value = 'before:x'; p.keyFit('all'); out.before = document.querySelector('#fx-status-all').textContent;
+        seg.value = was; sel.value = 'mean'; return out; }})()""")
+    assert texts["keys"].startswith("Key method: least squares (weights per cell) · Regularization c = 100(chosen by 5-fold splits over questions)")
+    assert "at the edge of the candidates" in texts["keys"] and "first keys c = 1" in texts["pipe"] and "keys rebuilt with the recipe applied c = 2(value given)" in texts["pipe"]
+    assert texts["ck1"] == "Key method of the units: least squares (weights per cell) · c = 1" and "are mixed" in texts["ck2"]
+    assert texts["bad"].startswith("The regularization strength is a number above 0") and texts["before"].startswith("Least-squares keys are only for reply-position segments")
     assert "Use an existing direction" in pg.evaluate("document.querySelector('#fx-usedir').parentElement.textContent")
     # 速い読み方: チェックの文言、できた方向の読み方の表示、見積もりに添える「初回は長めに出ます」
     assert [x.split("(")[0].strip() for x in pg.evaluate("[...document.querySelectorAll('input.fx-fast')].map((x) => x.parentElement.textContent)")] == ["Fast reading"] * 2

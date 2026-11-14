@@ -1479,7 +1479,7 @@ def _keys_from_groups(session, spec: KeySpec, G: dict, run: dict, *, name, Ls, k
                                     where=f"L{L}(専門家 {expert} が選ばれた位置だけ): "))
         if same_n:
             perms_l = perms
-        elif nb and pseudo:                                     # 層ごとの例の数で並べ替え(層 L ごとに決まった乱数)
+        elif nb and pseudo and ridge is None:                   # 層ごとの例の数で並べ替え(層 L ごとに決まった乱数)。最小二乗の鍵の比較用の鍵は解いたもの
             rng_l = np.random.default_rng([seed, L])
             perms_l = [balanced_split(rng_l, na, nb) for _ in range(pseudo)]
         else:
