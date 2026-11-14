@@ -13,7 +13,7 @@
 import { getJSON, postJSON } from "./api.js";
 import { t } from "./i18n.js";
 import { esc, toksHTML } from "./panels.js";
-import { plainEnter } from "./ui.js";
+import { plainEnter, noteHTML } from "./ui.js";
 
 const fmt = (x, d = 2) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : (+x).toFixed(d));
 const sgn = (x, d = 3) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : `${x >= 0 ? "+" : "−"}${Math.abs(x).toFixed(d)}`);
@@ -201,7 +201,7 @@ export class HeadPanel {
   pattern(el) {
     const p = this.pat, d = this.d;
     if (d.kind !== "attn") {
-      el.innerHTML = `<p class="muted note">${t("線形注意(Gated DeltaNet など)の層には softmax の注目のパターンがありません。Details の W_O ブロックの lens と、Contrast の出力の差(out_shift・dir_cos)で見てください。")}</p>`;
+      el.innerHTML = `${noteHTML(t("線形注意(Gated DeltaNet など)の層には softmax の注目のパターンがありません。Details の W_O ブロックの lens と、Contrast の出力の差(out_shift・dir_cos)で見てください。"), "muted note")}`;
       return;
     }
     const canCmp = p.chat && !!p.system.trim();
@@ -317,7 +317,7 @@ export class HeadPanel {
       return `<tr><td class="w">${esc(tokText(a.text, 24))}</td>${cell(a.last, b && b.last)}${cell(a.after, b && b.after)}</tr>`;
     }).join("");
     return `<h4>${t("トリガー区間への注目(共通部分の中の割合)")}</h4><table class="kv mono hp-trig">${head}${rows}</table>
-      <p class="muted note">${t("割合 = その行の注目のうち、トリガーのトークンへのもの(比べるときは system の部分を除いた共通部分の中で。gne heads contrast の trigger_mass と同じ分母)。最後の行 = 返事の最初のトークンを決める位置。")}</p>`;
+      ${noteHTML(t("割合 = その行の注目のうち、トリガーのトークンへのもの(比べるときは system の部分を除いた共通部分の中で。gne heads contrast の trigger_mass と同じ分母)。最後の行 = 返事の最初のトークンを決める位置。"), "muted note")}`;
   }
 
   drawHeat(cv) {
@@ -502,7 +502,7 @@ export class HeadPanel {
           <tr><td>${t("下がり方")}</td><td class="mono" colspan="3">${drops(r)}</td></tr>${b}</table></div>`);
       }
     }
-    out.push(`<p class="muted note">${t("下がり方 = 介入の前 − 後の A 側の射影の値(正 = このヘッドが A 側の向きに押していた)。ratio > 1 は間接の経路、< 1 は補い合い。η = いまの組から s を Δs 上げたときの、効きにくい例での下がり方 ÷ Δs。")}</p>`);
+    out.push(`${noteHTML(t("下がり方 = 介入の前 − 後の A 側の射影の値(正 = このヘッドが A 側の向きに押していた)。ratio > 1 は間接の経路、< 1 は補い合い。η = いまの組から s を Δs 上げたときの、効きにくい例での下がり方 ÷ Δs。"), "muted note")}`);
     return out.join("");
   }
 
@@ -573,7 +573,7 @@ export class HeadPanel {
     if (!L.system && this.pat.system) L.system = this.pat.system;
     const dirs = this.directions();
     el.innerHTML = `
-      <p class="muted note">${t("返事のトークンが、選んだヘッドで文脈のどのトークンに注目しているか。方向を選ぶと、文脈の各トークンがヘッドの出力を通してその方向にどれだけ寄与したか(注目 × ゲート × OV)も出す。")}</p>
+      ${noteHTML(t("返事のトークンが、選んだヘッドで文脈のどのトークンに注目しているか。方向を選ぶと、文脈の各トークンがヘッドの出力を通してその方向にどれだけ寄与したか(注目 × ゲート × OV)も出す。"), "muted note")}
       <textarea id="ls-system" class="hp-sys" rows="3" placeholder="${t("system(空なら system なし)")}">${esc(L.system)}</textarea>
       <div class="ch-input"><textarea id="ls-user" rows="2" placeholder="${t("ユーザーの発話")}">${esc(L.user)}</textarea>
         <button class="main" id="ls-run"${this.busy ? " disabled" : ""}>${t("流す")}</button></div>
@@ -687,10 +687,10 @@ export class HeadPanel {
         out.push(`<div class="muted note mono">PC${i + 1} · σ ${fmt(c.sv, 3)}</div>
           <div class="lens"><span class="sg plus">+</span>${toksHTML(c.up_tokens)}</div><div class="lens"><span class="sg minus">−</span>${toksHTML(c.down_tokens)}</div>`);
       });
-      out.push(`<p class="muted note">${t("このヘッドが残差に書ける向き(W_O の列ブロック)を特異値分解し、主成分を出力層に通したときに上がる語(+)と下がる語(−)。主成分の符号は任意なので、+ と − は入れ替わりうる。")}</p>`);
+      out.push(`${noteHTML(t("このヘッドが残差に書ける向き(W_O の列ブロック)を特異値分解し、主成分を出力層に通したときに上がる語(+)と下がる語(−)。主成分の符号は任意なので、+ と − は入れ替わりうる。"), "muted note")}`);
     } else out.push(`<h4>W_O logit lens</h4><p class="muted">${t("計算中…")}</p>`);
     out.push(d.gain_k && d.gain_k.length ? `<p class="muted note mono">${t("当てたことのある gain")}: ${d.gain_k.map((k) => `×${fmt(k, 2)}`).join(" ")}</p>`
-      : `<p class="muted note">${t("このヘッドの gain はまだ当てていません(上の「×0 レシピ」「×2 レシピ」から 3 列チャットや eval で試せます)")}</p>`);
+      : `${noteHTML(t("このヘッドの gain はまだ当てていません(上の「×0 レシピ」「×2 レシピ」から 3 列チャットや eval で試せます)"), "muted note")}`);
     return out.join("");
   }
 }

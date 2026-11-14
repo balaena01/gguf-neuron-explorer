@@ -317,6 +317,23 @@ def _free_port() -> int:
         so.bind(("127.0.0.1", 0))
         return so.getsockname()[1]
 
+_STEP_ROOT = {"fish": "#dv-fish", "keys": "#dv-key", "chips": "#dv-pipe", "eval": "#eval-view"}
+
+
+def _step(pg, screen, step):
+    """作る画面の左の手順(作業の一覧)を開く(開いていれば何もしない)。step が shared なら、共通の設定が見える手順にする。"""
+    pg.evaluate("""([root, step]) => {
+      const nav = document.querySelector(`${root} .steps`);
+      if (!nav) return;
+      if (step === "shared") {
+        const sh = document.querySelector(`${root} .stage-shared`);
+        if (!sh || !sh.hidden) return;
+        step = nav.querySelector("[role=tab]").dataset.step;
+      }
+      const b = nav.querySelector(`[role=tab][data-step="${step}"]`);
+      if (b && b.getAttribute("aria-selected") !== "true") b.click();
+    }""", [_STEP_ROOT[screen], step])
+
 
 @pytest.fixture(scope="module")
 def ui_server(env):
@@ -369,6 +386,7 @@ def _key_tab(browser, url, lang, routes=()):
     pg.click("#views button[data-view=keys]")
     pg.wait_for_function("window.gne.directionView.key.loaded && document.querySelector(\"#kb-dir option[value='polite_left']\")",
                          timeout=60000)
+    _step(pg, "keys", "chips")
     pg.click("#kb-wrap > summary")
     return pg, errors
 
@@ -382,31 +400,43 @@ def test_chips_flow_in_browser(ui_server, browser, env):
     pg, errors = _key_tab(browser, ui_server, "ja")
     dialogs = []
     pg.on("dialog", lambda dl: dialogs.append(dl.message))
+    _step(pg, "keys", "chips")
     pg.select_option("#kb-dir", "polite_left")
     pg.wait_for_function("document.querySelector('#kb-src').textContent.includes('A 側 8 問')", timeout=10000)
     assert "validate.match" in pg.evaluate("document.querySelector('#kb-src').textContent")
     assert pg.evaluate("document.querySelector('#kb-pos').placeholder") == "before:です|ます"
     assert pg.evaluate("document.querySelector(\"#kb-recipe option[value='chips']\").textContent").endswith("· CHiPS")
+    _step(pg, "keys", "chips")
     pg.select_option("#kb-recipe", "chips")
+    _step(pg, "keys", "chips")
     pg.click("#kb-wrap .kb-adv > summary")
+    _step(pg, "keys", "chips")
     pg.fill("#kb-mt", "48")
+    _step(pg, "keys", "chips")
     pg.fill("#kb-bname", "web_left")
+    _step(pg, "keys", "shared")
     pg.click("#kx-src button[data-src=json]")
+    _step(pg, "keys", "shared")
     pg.fill("#kx-text", '{"name": "draft"}')                                   # 書きかけの入力欄(置き換える前に確かめる)
+    _step(pg, "keys", "chips")
     pg.click("#kb-run")
     pg.wait_for_function("document.querySelector('#kb-behave').value === 'web_left'", timeout=600000)
     assert "8 問" in pg.evaluate("document.querySelector('#kb-binfo').textContent")
     assert "できました" in pg.evaluate("document.querySelector('#kb-status').textContent")
     assert pg.evaluate("import('/jobs.js').then((m) => m.KIND.behave)") == "振る舞いを数える(behave)"
     # 判定と positions: 0.6B の返事で流れを確かめるため、文の終わり(どの返事にも出る)を「残った」振る舞いと書き込みたい位置にする
+    _step(pg, "keys", "chips")
     pg.fill("#kb-match", "。|！")
+    _step(pg, "keys", "chips")
     pg.fill("#kb-pos", "before:(。|！)")
+    _step(pg, "keys", "chips")
     pg.click("#kb-make")
     pg.wait_for_function("document.querySelector('#kb-mstatus').textContent.includes('keyed/')", timeout=30000)
     res = pg.evaluate("document.querySelector('#kb-res').textContent")
     assert "残った質問" in res and "dont_touch の ordinary 6 問" in res
     n_rows = pg.evaluate("document.querySelectorAll('#kb-res table.kb-rows tbody tr').length")
     assert n_rows >= 1 and len(dialogs) == 1                                # 書きかけを置き換える前に 1 回確かめた
+    _step(pg, "keys", "chips")
     pg.click("#kb-res table.kb-rows tbody tr details summary")
     assert pg.evaluate("document.querySelector('#kb-res table.kb-rows tbody tr details').open")
     spec = json.loads(pg.input_value("#kx-text"))
@@ -416,10 +446,15 @@ def test_chips_flow_in_browser(ui_server, browser, env):
     assert pg.input_value("#kx-iv") == "chips" and "keyed.direction の polite_left を使い回す" in pg.evaluate("document.querySelector('#kx-jcheck').textContent")
     assert pg.input_value("#kx-tpl-sel") == "root/web_left_keyed.json"
     # 方向から key-check まで(層は鍵を作る欄で)
+    _step(pg, "keys", "shared")
     pg.fill("#kx-layers", "8")
+    _step(pg, "keys", "shared")
     pg.fill("#kx-pseudo", "4")
+    _step(pg, "keys", "shared")
     pg.fill("#kx-mt", "16")
+    _step(pg, "keys", "chips")
     pg.click("#kb-res [data-kbpipe]")
+    _step(pg, "keys", "check")
     pg.wait_for_selector("#kc-res table.kx-check tbody tr", timeout=600000)
     pipe = pg.evaluate("document.querySelector('#kx-pipe').textContent")
     assert "web_left_keyed" in pipe
@@ -453,8 +488,10 @@ def test_chips_late_loads_do_not_overwrite(ui_server, browser, env):
         else:
             route.continue_()
     pg, errors = _key_tab(browser, ui_server, "ja", routes=[("**/api/behave", on_list), ("**/api/keyed-from-behave", on_make)])
+    _step(pg, "keys", "chips")
     pg.select_option("#kb-recipe", "chips")
     # 1. 一覧の読み直し(ジョブの後の自動の選択に見立てて late_a を選ばせる)を止めておき、その間に late_b を選ぶ
+    _step(pg, "keys", "chips")
     pg.select_option("#kb-behave", "late_a")
     mode["hold_list"] = True
     pg.evaluate("() => { window.gne.directionView.key.chips.loadList('late_a'); }")    # 待たない(読み込みは止めてある)
@@ -463,6 +500,7 @@ def test_chips_late_loads_do_not_overwrite(ui_server, browser, env):
             break
         pg.wait_for_timeout(25)
     assert held["list"]
+    _step(pg, "keys", "chips")
     pg.select_option("#kb-behave", "late_b")
     mode["hold_list"] = False
     with pg.expect_response("**/api/behave"):
@@ -470,14 +508,18 @@ def test_chips_late_loads_do_not_overwrite(ui_server, browser, env):
     pg.wait_for_timeout(300)
     assert pg.input_value("#kb-behave") == "late_b"
     # 2. 「JSON を作る」: late_a の結果を止めておき、late_b で押し直す。後から届いた late_a の結果は捨てる
+    _step(pg, "keys", "chips")
     pg.select_option("#kb-behave", "late_a")
+    _step(pg, "keys", "chips")
     pg.click("#kb-make")
     for _ in range(400):
         if held["make"]:
             break
         pg.wait_for_timeout(25)
     assert held["make"]
+    _step(pg, "keys", "chips")
     pg.select_option("#kb-behave", "late_b")
+    _step(pg, "keys", "chips")
     pg.click("#kb-make")
     pg.wait_for_function("window.gne.directionView.key.chips.made && window.gne.directionView.key.chips.made.behave === 'late_b'", timeout=30000)
     with pg.expect_response("**/api/keyed-from-behave"):
@@ -494,8 +536,10 @@ def test_chips_panel_in_english(ui_server, browser):
     """英語の画面: 「CHiPS で残った場面から作る」の文言に日本語が残らない。"""
     pg, errors = _key_tab(browser, ui_server, "en")
     assert pg.evaluate("document.querySelector('#kb-wrap > summary').textContent").startswith("Build from what a CHiPS recipe leaves behind")
+    _step(pg, "keys", "chips")
     pg.select_option("#kb-dir", "polite_left")
     pg.wait_for_function("document.querySelector('#kb-src').textContent.includes('A side 8 questions')", timeout=10000)
+    _step(pg, "keys", "chips")
     pg.click("#kb-wrap .kb-adv > summary")
     missing = pg.evaluate("[...window.gneI18n.missing]")
     assert missing == [], missing

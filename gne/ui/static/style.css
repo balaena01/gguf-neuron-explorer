@@ -759,3 +759,27 @@ table.fx-behave-tab td.fx-q, table.fx-try-tab td.fx-q { max-width: 260px; white-
 table.fx-behave-tab td.fx-a, table.fx-try-tab td.fx-a { max-width: 760px; white-space: pre-wrap; vertical-align: top; color: var(--text-hi); }
 .fx-al { margin-right: var(--sp-2); white-space: nowrap; }
 .fx-al .mono { color: var(--side-b); }
+
+/* 作る画面(CHiPS・鍵・FiSH・評価)の共通の形(steps.js): 左に手順、右に 選んだ手順の 入力 → 実行 → 結果 */
+.build { display: grid; grid-template-columns: 220px minmax(0, 1fr); align-items: start; min-height: 100%; }
+.steps { position: sticky; top: 0; display: flex; flex-direction: column; gap: var(--sp-2); padding: var(--sp-6) var(--sp-4) var(--sp-6) 0;
+  border-right: 1px solid var(--line); max-height: 100vh; overflow: auto; }
+.steps [role=tab] { display: flex; justify-content: space-between; align-items: center; gap: var(--sp-4); text-align: left; background: transparent;
+  border: 1px solid transparent; border-radius: var(--r-m); padding: var(--sp-2) var(--sp-4); color: var(--text-2); }
+.steps [role=tab]:hover:not(:disabled) { color: var(--text-hi); border-color: var(--line); }
+.steps [role=tab][aria-selected="true"] { background: var(--raised); border-color: var(--line-strong); color: var(--text-hi); }
+.steps [role=tab].sep { margin-top: var(--sp-6); }
+.steps .st-l { min-width: 0; }
+.pill.ok { color: var(--ok); } .pill.run { color: var(--accent); } .pill.wait { color: var(--muted); } .pill.warn { color: var(--ng); }
+.stage { min-width: 0; padding: var(--sp-6) 0 var(--sp-8) var(--sp-7); }
+.stage [hidden] { display: none !important; }
+.stage-shared { border: 1px solid var(--line); border-radius: var(--r-m); background: var(--panel); padding: var(--sp-3) var(--sp-6); margin-bottom: var(--sp-6); }
+.stage-shared > .stage-shared-h { margin: 0 0 var(--sp-2); font-size: var(--fs-s); color: var(--muted); letter-spacing: 0.06em; }
+.stage-h { margin: 0 0 var(--sp-4); font-size: var(--fs-l); font-weight: 600; color: var(--text-hi); }
+.stage .kx-sec:not([hidden]), .stage .pp-stage:not([hidden]) { border-top: 0; margin-top: 0; }
+details.more > summary { cursor: pointer; }
+details.more[open] > summary { color: var(--text-4); }
+details.more > p { margin: var(--sp-2) 0 var(--sp-3); }
+.stage details#kb-wrap > summary.kb-sum { display: none; }       /* 鍵の画面の「CHiPS の残りから作る」は作業の一覧で開く(見出しは上に出る) */
+.stage details#evx-ft-wrap > summary { display: none; }        /* 評価の画面の実地テストは作業の一覧で開く */
+#eval-view .build, #direction-view .build { min-height: calc(100% - var(--sp-6)); }

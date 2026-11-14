@@ -57,7 +57,7 @@ export class DirectionView {
     this.$ = (s) => root.querySelector(s);
     this.pipe = new PipelinePanel(this.$("#dv-pipe"), { ...(pipeline || {}), onShowDirection: (name) => this.showDirection(name),
                                                         onOpenCandidates: (name) => this.openCandidates(name) });
-    this.cand = new CandidatesPanel(this.$("#dv-cand"), candidates || {});
+    this.cand = new CandidatesPanel(this.$("#dv-cand"), { ...(candidates || {}), onMake: () => { this.setMode("pipe"); this.pipe.steps.select("cand"); } });
     this.key = new KeyPanel(this.$("#dv-key"), keyed || {});
     this.fish = new FishPanel(this.$("#dv-fish"), fish || {});         // FiSH(fish.js): 計算で作るニューロンを最初から最後まで
     this.cv = this.$("#dv-line");

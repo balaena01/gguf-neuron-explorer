@@ -10,6 +10,8 @@ import { getJSON } from "./api.js";
 import { t } from "./i18n.js";
 import { FieldtestPanel } from "./fieldtest.js";
 import { esc } from "./panels.js";
+import { Steps } from "./steps.js";
+import { noteHTML } from "./ui.js";
 
 const C = { text: "#aeb9c8", muted: "#6b7686", grid: "#1a212b", amber: "#e8b04a", minus: "#c94fa7", ppl: "#7c8796", judge: "#9fb3cf", ok: "#6fcf8f",
             react: "#5fd0c0" };
@@ -84,7 +86,7 @@ export class EvalView {
             <label class="muted" title="${t("add・gain・proj の強さを探して、書き込みたい位置の変化を keyed にそろえる(外すと同じ α の add とだけ比べて早く終わる)")}"><input type="checkbox" id="evx-kmatch" checked> ${t("大きさ合わせ")}</label>
           </span>
           <button class="main" id="evx-go">${t("今のレシピで eval")}</button></span></div>
-      <p class="muted note evx-help">${t("倍率はレシピ全体に掛ける係数(0 = 無介入)。能力 = exact と format の正答率、ppl は参照テキスト、混入は日本語の回答に出た簡体字・ハングルなどの割合。4B で数分。")}</p>
+      <div class="evx-help">${noteHTML(t("倍率はレシピ全体に掛ける係数(0 = 無介入)。能力 = exact と format の正答率、ppl は参照テキスト、混入は日本語の回答に出た簡体字・ハングルなどの割合。4B で数分。"))}</div>
       <div id="evx-body"></div>
       <details class="evx-ft" id="evx-ft-wrap"><summary>${t("実地テスト(本番と同じ動かし方で、ファイルどうしを比べる)")}</summary><div id="evx-ft"></div></details>`;
     this.$ = (s) => root.querySelector(s);
@@ -93,6 +95,13 @@ export class EvalView {
     this.$("#evx-pick").addEventListener("change", (ev) => this.load(ev.target.value));
     this.$("#evx-go").addEventListener("click", () => this.run());
     new ResizeObserver(() => this.draw()).observe(root);
+    // 左に作業の一覧(能力と ppl・実地テスト)、右に 入力 → 実行 → 結果
+    this.steps = new Steps(root, {
+      store: "gne.eval.step", label: t("評価の作業"),
+      steps: [{ key: "main", label: t("能力と ppl"), els: () => [this.$(".evx-tools"), this.$(".evx-help"), this.$("#evx-body")] },
+              { key: "ft", label: t("実地テスト"), els: () => [this.$("#evx-ft-wrap")] }],
+      onSelect: (k) => { if (k === "ft" && !this.$("#evx-ft-wrap").open) this.$("#evx-ft-wrap").open = true; },
+    });
   }
 
   async refresh(select) {
@@ -186,7 +195,7 @@ export class EvalView {
     const d = this.data;
     this.cv = null;
     this.nh = null;
-    if (!d) { body.innerHTML = `<p class="muted note">${t("eval がまだありません。上の「今のレシピで eval」で作ります(gne eval / MCP の eval でも)。")}</p>`; return; }
+    if (!d) { body.innerHTML = `${noteHTML(t("eval がまだありません。上の「今のレシピで eval」で作ります(gne eval / MCP の eval でも)。"), "muted note")}`; return; }
     const kind = kindOf(d);
     if (kind === "compare-methods") { this.renderMethods(body, d); return; }
     if (kind === "nheads") { this.renderNheads(body, d); return; }
@@ -294,7 +303,7 @@ export class EvalView {
         t("書き込みたくない位置")} <span class="muted">${esc(k.positions_b || "")}</span> ${t("{e} 例 {p} 位置", { e: cb.examples ?? 0, p: cb.positions ?? 0 })}${
         dts.map((g) => ` / ${esc(g.slice(3))} ${t("{e} 例 {p} 位置", { e: c[g].examples, p: c[g].positions })}`).join("")}${
         k.cost ? `<span class="muted"> · prefill ${k.cost.prefills} · ${fmt(k.cost.seconds, 0)} s</span>` : ""}</p>
-      <p class="muted note">${t("同じ方向を方式ごとに当て、目的の層の残差の変化を位置の群ごとに比べる。書き込みたい位置の r̂ = そこでの r̂ 方向の変化、書き込みたくない位置の ‖Δ‖・dont_touch の ‖Δ‖ = そこでの変化の大きさ、eval の選択性 = 書く向きにそろえた、書き込みたい位置 − 書き込みたくない位置の r̂ 方向の変化、b_over_a = 書き込みたい位置を 1 押すあたりの書き込みたくない位置の乱れ(小さいほど選択的)。β = 書き込みたい位置の変化を keyed にそろえた強さ(○ = ±10% でそろった)。")}</p>
+      ${noteHTML(t("同じ方向を方式ごとに当て、目的の層の残差の変化を位置の群ごとに比べる。書き込みたい位置の r̂ = そこでの r̂ 方向の変化、書き込みたくない位置の ‖Δ‖・dont_touch の ‖Δ‖ = そこでの変化の大きさ、eval の選択性 = 書く向きにそろえた、書き込みたい位置 − 書き込みたくない位置の r̂ 方向の変化、b_over_a = 書き込みたい位置を 1 押すあたりの書き込みたくない位置の乱れ(小さいほど選択的)。β = 書き込みたい位置の変化を keyed にそろえた強さ(○ = ±10% でそろった)。"), "muted note")}
       <div class="evx-scroll"><table class="evx mono evx-kx-tab"><thead><tr><th class="l">${t("方式")}</th><th class="l">${t("説明")}</th><th>β</th><th title="${t("書き込みたい位置の変化を keyed に ±10% でそろえられたか")}">${t("そろった")}</th>
         <th title="${t("書き込みたい位置での r̂ 方向の変化(par)")}">${t("書き込みたい位置の r̂")}</th><th title="${t("書き込みたくない位置での r̂ 方向の変化(par)")}">${t("書き込みたくない位置の r̂")}</th><th title="${t("書き込みたくない位置の残差の変化の大きさ")}">${t("書き込みたくない位置の ‖Δ‖")}</th>
         <th title="${t("dont_touch の群の残差の変化の大きさ(群の平均)")}">${t("dont_touch の ‖Δ‖")}</th><th title="${t("書く向きにそろえた、書き込みたい位置 − 書き込みたくない位置の r̂ 方向の変化。key-check の選択性(鍵の反応の強さの差)とは別の量")}">${t("eval の選択性")}</th><th title="${t("書き込みたくない位置の ‖Δ‖ ÷ |書き込みたい位置の r̂ 方向の変化|")}">b_over_a</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
@@ -346,7 +355,7 @@ export class EvalView {
       <p class="note mono">${t("方式の比較")} · ${t("方向 {d}", { d: esc(d.direction || "—") })} · ${t("射影の値を測る層 L{L}", { L: d.score_layer ?? "—" })} · ${
         t("目標の A 側の射影の値 {v}({src})", { v: fmt(d.target, 2), src: d.target_from === "match_effect" ? "--match-effect" : t("このレシピの水準") })} · ${
         t("無介入 A {a} / B {b}", { a: fmt(d.base_score_a, 2), b: fmt(d.base_score_b, 2) })}${d.base_rate !== undefined && d.base_rate !== null ? ` · ${t("判定の一致率(無介入 {p})", { p: pct(d.base_rate, 0) })}` : ""}<span class="muted"> · ${fmt(d.seconds, 0)} s</span></p>
-      <p class="muted note">${t("同じ方向を、方式ごとに強さ α を合わせて A 側の射影の値を目標までそろえ、副作用を比べる。B ⊥ = 関係のない入力(B 側)の残差の、方向に直交する成分のずれ(小さいほど他を壊さない)。緑の行 = B ⊥ が最も小さい方式。")}</p>
+      ${noteHTML(t("同じ方向を、方式ごとに強さ α を合わせて A 側の射影の値を目標までそろえ、副作用を比べる。B ⊥ = 関係のない入力(B 側)の残差の、方向に直交する成分のずれ(小さいほど他を壊さない)。緑の行 = B ⊥ が最も小さい方式。"), "muted note")}
       <div class="evx-scroll"><table class="evx mono evx-methods"><thead><tr><th class="l">${t("方式")}</th><th class="l">${t("説明")}</th><th title="${t("目標にそろえた強さ")}">α</th><th title="${t("A 側の射影の値(測る層)")}">A</th>
         <th title="${t("B 側の残差の直交成分のずれ")}">B ⊥</th><th>${t("低下pt")}</th><th>${t("悪化")}</th><th title="${t("混入の増加")}">${t("混入")}</th>${
         hasRate ? `<th>${t("一致率")}</th><th>${t("一致減")}</th>` : ""}<th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
@@ -368,7 +377,7 @@ export class EvalView {
         d.score_layer !== undefined ? ` · ${t("L{L} の射影の値を {v} まで", { L: d.score_layer, v: fmt(d.target, 2) })}` : ""}${rec ? ` · ${t("推奨 {n} ヘッド", { n: rec.n_heads })}` : ""}${
         d.random_controls ? ` · ${t("対照 {n} 本", { n: d.random_controls })}` : ""}<span class="muted"> · ${fmt(d.seconds, 0)} s</span></p>
       ${notes.length ? `<ul class="evx-notes">${notes.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : ""}
-      <p class="muted note">${t("x = ヘッドの数(gne heads allocate の組)。少ないヘッドほど 1 ヘッドの s が大きくなる。残り = 目標に届かず残った効きにくい例の数。白の破線 = 推奨の組。")}</p>
+      ${noteHTML(t("x = ヘッドの数(gne heads allocate の組)。少ないヘッドほど 1 ヘッドの s が大きくなる。残り = 目標に届かず残った効きにくい例の数。白の破線 = 推奨の組。"), "muted note")}
       <canvas id="evx-nh"></canvas>
       <div class="evx-scroll"><table class="evx mono"><thead><tr><th>${t("ヘッド数")}</th><th>s max</th><th title="${t("目標に届かず残った例の数")}">${t("残り")}</th><th>${t("低下pt")}</th><th>${t("悪化")}</th><th>${t("混入")}</th>
         <th title="${t("A 側の射影の値の下がり方")}">${t("A 下がり")}</th><th title="${t("B 側の残差の直交成分のずれ")}">B ⊥</th><th>${t("一致率")}</th><th></th><th class="l">${t("ユニット")}</th><th></th></tr></thead><tbody>${tr}</tbody></table></div>`;

@@ -27,6 +27,8 @@ import { getJSON, postJSON } from "./api.js";
 import { LANG, t } from "./i18n.js";
 import { checkKeySpec, parseLayers } from "./keys.js";
 import { esc } from "./panels.js";
+import { Steps } from "./steps.js";
+import { noteHTML } from "./ui.js";
 
 const fmt = (x, d = 2) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : (+x).toFixed(d));
 const NAME_RE = /^[\w.-]+$/;
@@ -98,8 +100,7 @@ export class FishPanel {
     this.st = { name: null, path: null, dir: null, usage: null, keys: null, verify: null, check: null, picked: {}, touched: new Set(),
                 keyBase: null, units: [], rows: [], pipe: null, behave: null, tries: [], tryShown: -1 };
     root.innerHTML = `
-      <p class="muted note pp-help">${t("FiSH(Formula-instantiated Scene-gated Hidden units): すでにある MLP のニューロンを、学習なしで、式から計算した重みで書き換えて、決まった場面の返事でだけ方向を書くようにする。ゲートの行に鍵、入力の行に鍵、出力の列に方向を入れる。ふだんの働きが小さいニューロンを選んで書き換える(元の働きは無くなる)。実行時は LoRA で当て、レシピのタブでチャット・保存・LoRA の書き出しができる。層と強さは使う人が決める。")}</p>
-      <section class="kx-sec"><h4>${t("1. 対照集合")}</h4>
+      <section class="kx-sec" data-step="src">
         <div class="pp-in"><span class="muted">${t("対照集合")}</span>
           <span class="seg" id="fx-src"><button data-src="file" title="${t("configs/contrast/ か <root>/contrasts/ の YAML を選ぶ")}">${t("ファイルを選ぶ")}</button><button data-src="json" title="${t("ひな形(configs/fish/)から始めて、入力欄の JSON を手で直す")}">${t("JSON を書く(ひな形)")}</button></span>
           <label class="muted" title="${t("FiSH 用のひな形(configs/fish/)。選ぶと入力欄に入る")}">${t("ひな形")}
@@ -117,6 +118,10 @@ export class FishPanel {
           <textarea id="fx-text" class="mono" rows="9" spellcheck="false" placeholder='{"name": "…", "system_a": "…", "user_prompts": ["…", "…", "…", "…"], "dont_touch": [{"name": "ordinary", "prompts": ["…"]}], "fish": {"segments": "0,1-3,4-", "form": "cap", "alpha": 0.9}}'></textarea>
           <div id="fx-jcheck" class="note"></div>
         </div>
+      </section>
+      <div id="fx-shared">
+        <p class="stage-shared-h">${t("共通の設定(全部の手順が使う)")}</p>
+        ${noteHTML(t("FiSH(Formula-instantiated Scene-gated Hidden units): すでにある MLP のニューロンを、学習なしで、式から計算した重みで書き換えて、決まった場面の返事でだけ方向を書くようにする。ゲートの行に鍵、入力の行に鍵、出力の列に方向を入れる。ふだんの働きが小さいニューロンを選んで書き換える(元の働きは無くなる)。実行時は LoRA で当て、レシピのタブでチャット・保存・LoRA の書き出しができる。層と強さは使う人が決める。"))}
         <div class="pp-set">
           <label class="muted" title="${t("方向と鍵の名前の元(方向 <名前>、鍵 <名前>_p0 など)。空なら対照集合の名前")}">${t("名前")} <input id="fx-name" size="16" spellcheck="false"></label>
           <label class="muted" title="${t("書き換える層(カンマ区切りか、続いた層は 11-23 のように範囲で)。層の番号はモデルで違うので、使う人が決める。Qwen3.5-4B の 1 例では、離れた 3 層より、続いた 13 層(11-23)のほうが良かった。層を増やすと、要るニューロンと作成時間が増える")}">${t("層")} <input id="fx-layers" size="12" placeholder="11-23" spellcheck="false"></label>
@@ -130,22 +135,23 @@ export class FishPanel {
           <label class="muted" title="${t("最小二乗の鍵の正則化の強さ(行列の対角の平均の何倍か。例 1)。空なら、鍵を作る質問だけを使った質問単位の 5 分割で、0.01・0.1・1・10・100 から決める(選ばれた値は鍵の表の上に出る)")}">${t("正則化の強さ")} <input id="fx-keyc" size="7" placeholder="${t("5 分割で決める")}" spellcheck="false" disabled></label>
           <label class="muted" title="${t("先に当てておく介入: 保存したレシピの名前か、ユニットを空白区切りで。CHiPS のレシピを当てた状態で作るときに入れる。空なら無介入")}">${t("先に当てておくレシピ(iv)")} <input id="fx-iv" size="18" spellcheck="false"></label>
           <label class="muted" title="${t("鍵づくりと確かめで返事を生成する長さ")}">max_tokens <input class="w5" id="fx-mt" type="number" min="1" max="2048" value="96"></label>
+          <label class="muted" title="${t("速い読み方(区切りごとにまとめて読む)。大きいモデルで方向づくりがずっと速くなるが、方向がわずかに変わる(今までの方向との cos 0.999 以上)。層や強さを比べる探索向け。配るものを作るときは切のまま。この読み方の方向での口調・正答は測っていない。効くのは方向を作る段だけで、「すでにある方向を使う」に名前を入れたときは効かない")}"><input type="checkbox" class="fx-fast" id="fx-fast"> ${t("速い読み方(区切りごとにまとめて読む。探索向け。方向がわずかに変わる)")}</label>
         </div>
+      </div>
+      <section class="kx-sec" data-step="all">
         <div class="pp-go">
           <button class="main" id="fx-all" title="${t("方向 → ニューロンの表 → 鍵 → レシピ → 当てた状態で鍵を作り直す → 確かめ、を 1 回のジョブで回す。ニューロンは既定の候補(表の上から)を使い、あとで選び直せる")}">${t("まとめて作る")}</button>
           <label class="muted" title="${t("レシピを当てた状態で鍵を作り直す段を入れる(例ではこのほうがよかった)")}"><input type="checkbox" id="fx-rekey-on" checked> ${t("当てた状態で鍵を作り直す")}</label>
           <label class="muted" title="${t("前に作った方向の名前を入れると、「まとめて作る」は方向を作り直さずにそれを使う(層が多いと、方向づくりがいちばん時間がかかる)。区切り・層・重ねる層が合わなければエラーになる。空なら作る")}">${t("すでにある方向を使う")} <input id="fx-usedir" size="14" spellcheck="false"></label>
-          <label class="muted" title="${t("速い読み方(区切りごとにまとめて読む)。大きいモデルで方向づくりがずっと速くなるが、方向がわずかに変わる(今までの方向との cos 0.999 以上)。層や強さを比べる探索向け。配るものを作るときは切のまま。この読み方の方向での口調・正答は測っていない。効くのは方向を作る段だけで、「すでにある方向を使う」に名前を入れたときは効かない")}"><input type="checkbox" class="fx-fast" id="fx-fast-all"> ${t("速い読み方(区切りごとにまとめて読む。探索向け。方向がわずかに変わる)")}</label>
           <span class="muted note" id="fx-status-all"></span></div>
         <div id="fx-prog-all" class="note mono"></div>
         <div id="fx-pipe"></div>
       </section>
-      <section class="kx-sec"><h4>${t("2. 方向を作る")}</h4>
+      <section class="kx-sec" data-step="dir">
         <div class="pp-set">
           <label class="muted" title="${t("今まで = それぞれの条件で作った返事を読む。同じ返事 = 指示を付けて作った返事を、指示あり・なしの両方で読む(読んでいる言葉の違いが方向に入らない)")}">${t("作り方")}
             <select id="fx-method"><option value="same">${t("同じ返事を両方の条件で読む")}</option><option value="own">${t("今までの作り方")}</option></select></label>
           <label class="muted" title="${t("下の層に書いた後に残る差を、上の層の方向にする(上の欄の層に重ねて書く前提)")}"><input type="checkbox" id="fx-stack" checked> ${t("下の層に書いた後の残りを使う")}</label>
-          <label class="muted" title="${t("速い読み方(区切りごとにまとめて読む)。大きいモデルで方向づくりがずっと速くなるが、方向がわずかに変わる(今までの方向との cos 0.999 以上)。層や強さを比べる探索向け。配るものを作るときは切のまま。この読み方の方向での口調・正答は測っていない。効くのは方向を作る段だけで、「すでにある方向を使う」に名前を入れたときは効かない")}"><input type="checkbox" class="fx-fast" id="fx-fast"> ${t("速い読み方(区切りごとにまとめて読む。探索向け。方向がわずかに変わる)")}</label>
           <label class="muted" title="${t("今までの作り方の方向も作って、向きの近さ(cos)を表に出す")}"><input type="checkbox" id="fx-compare" checked> ${t("今までの作り方と比べる")}</label>
           <label class="muted" title="${t("方向を作るとき、返事を生成する長さ")}">${t("方向の返事の長さ")} <input class="w5" id="fx-rt" type="number" min="1" max="2048" value="96"></label>
         </div>
@@ -153,11 +159,10 @@ export class FishPanel {
         <div id="fx-prog-dir" class="note mono"></div>
         <div id="fx-dir"></div>
       </section>
-      <section class="kx-sec" id="fx-try-sec"><h4>${t("重みに入れる前に試す")}</h4>
-        <p class="muted note">${t("2. で作った方向を、ニューロンにも鍵にも入れずに、層の出力へ直接足して返事を作る。足すのは狙う場面の質問の返事だけ(場面は質問の群で決める。重みに入れたときの鍵の代わり)。層と区切りごとの強さを変えて何回か回し、返事と数を比べてから 3. 以降に進む")}</p>
+      <section class="kx-sec" id="fx-try-sec" data-step="try">
+        ${noteHTML(t("2. で作った方向を、ニューロンにも鍵にも入れずに、層の出力へ直接足して返事を作る。足すのは狙う場面の質問の返事だけ(場面は質問の群で決める。重みに入れたときの鍵の代わり)。層と区切りごとの強さを変えて何回か回し、返事と数を比べてから 3. 以降に進む"), "muted note")}
         <div class="pp-set">
           <label class="muted" title="${t("足す層(カンマ区切りか 11-23)。空なら上の欄の層。足せるのは層 1 から、最終層の 1 つ手前まで")}">${t("足す層")} <input id="fx-try-layers" size="12" spellcheck="false"></label>
-          <span class="muted" title="${t("区切りごとの強さ。1 で、その区切りの方向をそのままの長さで足す")}">${t("強さ(区切りごと)")} <span id="fx-try-alphas"></span></span>
           <label class="muted" title="${t("狙う場面・書き込みたくない場面それぞれで、返事を作る質問の数(対照集合の先頭から)")}">${t("質問の数")} <input class="w45" id="fx-try-n" type="number" min="1" max="200" value="12"></label>
           <label class="muted" title="${t("返事を生成する長さ")}">${t("返事の長さ")} <input class="w5" id="fx-try-mt" type="number" min="1" max="2048" value="120"></label>
           <label class="muted" title="${t("0 なら毎回同じ返事(greedy)。0 より大きいとサンプリング")}">${t("温度")} <input class="w45" id="fx-try-temp" type="number" min="0" max="2" step="0.1" value="0"></label>
@@ -167,12 +172,12 @@ export class FishPanel {
         <details class="kx-adv"><summary class="muted note">${t("狙う場面の質問を自分で入れる")}</summary>
           <textarea id="fx-try-q" class="mono" rows="4" spellcheck="false" placeholder="${t("1 行に 1 問。空なら対照集合の質問の先頭から(方向づくりに使った質問なので、甘い)")}"></textarea></details>
         <div class="pp-go"><button id="fx-try-go" title="${t("方向を層の出力に直接足して、狙う場面の質問に答えさせる。同じ質問に何も足さない返事と、書き込みたくない場面の質問への返事(何も足さない)も作る")}">${t("直接足して返事を作る")}</button>
-          <button class="small" id="fx-try-use" title="${t("この欄の層と強さを、上の欄(まとめて作る・レシピを組む)に入れる")}">${t("この層と強さを上の欄に入れる")}</button>
+          <button class="small" id="fx-try-use" title="${t("この欄の足す層を、共通の設定の層に入れる(強さは共通の設定のものを使っています)")}">${t("この層を共通の設定に入れる")}</button>
           <span class="muted note" id="fx-status-try"></span></div>
         <div id="fx-prog-try" class="note mono"></div>
         <div id="fx-try"></div>
       </section>
-      <section class="kx-sec"><h4>${t("3. 書き換えるニューロンを選ぶ")}</h4>
+      <section class="kx-sec" data-step="neu">
         <div class="pp-set">
           <label class="muted" title="${t("層ごとに表に出す数")}">${t("表の行数")} <input class="w5" id="fx-top" type="number" min="1" max="200" value="20"></label>
           <span class="muted note" id="fx-need"></span></div>
@@ -180,7 +185,7 @@ export class FishPanel {
         <div id="fx-prog-neu" class="note mono"></div>
         <div id="fx-neu"></div>
       </section>
-      <section class="kx-sec"><h4>${t("4. 鍵を作る")}</h4>
+      <section class="kx-sec" data-step="keys">
         <div class="pp-set">
           <label class="muted" title="${t("比較用の鍵の本数。書き込みたい位置・書き込みたくない位置のラベルをでたらめに入れ替えて、同じ手順で作る鍵")}">${t("比較用の鍵")} <input class="w4" id="fx-pseudo" type="number" min="0" max="64" value="4"></label>
         </div>
@@ -188,14 +193,14 @@ export class FishPanel {
         <div id="fx-prog-keys" class="note mono"></div>
         <div id="fx-keys"></div>
       </section>
-      <section class="kx-sec"><h4>${t("5. レシピを組む")}</h4>
+      <section class="kx-sec" data-step="units">
         <div id="fx-units"><p class="muted note">${t("方向・ニューロン・鍵がそろうと、ここにユニットが出ます")}</p></div>
         <div class="pp-go">
           <button id="fx-add" disabled title="${t("下のユニットをレシピに足す(同じ層・同じニューロンの行は置き換える)。レシピのタブでチャット・保存・LoRA の書き出しができる")}">${t("レシピに足す")}</button>
           <button id="fx-rekey" disabled title="${t("このユニットを当てた状態で返事を作り直し、鍵を作り直す(名前は <名前>_r_…)。ニューロンが書いた後の状態で鍵が反応するようになる")}">${t("このレシピを当てた状態で鍵を作り直す")}</button>
           <span class="muted note" id="fx-status-units"></span></div>
       </section>
-      <section class="kx-sec"><h4>${t("6. 確かめる")}</h4>
+      <section class="kx-sec" data-step="check">
         <div class="pp-go">
           <button id="fx-verify-go" disabled title="${t("LoRA を当てて短い文を読ませ、書き換えたニューロンが式どおりに動くか、ほかのニューロンが変わっていないかを確かめる(数秒)")}">${t("式どおりか確かめる")}</button>
           <span class="muted note" id="fx-status-verify"></span>
@@ -206,7 +211,7 @@ export class FishPanel {
         <div id="fx-prog-check" class="note mono"></div>
         <div id="fx-check"></div>
       </section>
-      <section class="kx-sec"><h4>${t("7. 返事を読む")}</h4>
+      <section class="kx-sec" data-step="behave">
         <div class="pp-set">
           <label class="muted" title="${t("狙う場面・書き込みたくない場面それぞれで、返事を作る質問の数(対照集合の先頭から)")}">${t("質問の数")} <input class="w45" id="fx-bn" type="number" min="1" max="200" value="12"></label>
           <label class="muted" title="${t("返事を生成する長さ")}">${t("返事の長さ")} <input class="w5" id="fx-bmt" type="number" min="1" max="2048" value="120"></label>
@@ -262,8 +267,35 @@ export class FishPanel {
     try { src = localStorage.getItem(SRC) === "file" ? "file" : "json"; } catch { /* 既定は JSON */ }
     this.setSource(src, false);
     this.renderAlphas("fx-alphas", [1, 1, 0.8]);
-    this.renderAlphas("fx-try-alphas", [1, 1, 0.8]);
     this.showNeed();
+    // 左に手順、右に選んだ手順。共通の設定(名前・層・区切り・形・強さ…)は上に 1 回だけ
+    const sec = (k) => () => [root.querySelector(`section[data-step="${k}"]`)];
+    this.steps = new Steps(root, {
+      shared: this.$("#fx-shared"), store: "gne.fish.step", label: t("FiSH の手順"),
+      steps: [["src", t("1. 対照集合")], ["dir", t("2. 方向を作る")], ["try", t("重みに入れる前に試す")], ["neu", t("3. 書き換えるニューロンを選ぶ")],
+              ["keys", t("4. 鍵を作る")], ["units", t("5. レシピを組む")], ["check", t("6. 確かめる")], ["behave", t("7. 返事を読む")],
+              ["all", t("まとめて作る(2〜6)")]].map(([key, label]) => ({ key, label, els: sec(key), shared: true, sep: key === "all" })),
+    });
+    this.marks();
+    for (const ev of ["input", "change"]) root.addEventListener(ev, () => this.marks());   // 対照集合を選んだ・書いた
+  }
+
+  // 手順の印(済・実行中・まだ)を、作ったものと走っているジョブから付け直す
+  marks() {
+    if (!this.steps) return;
+    const st = this.st, run = (w) => !!(this.jobs[w] && !this.handled.has(this.jobs[w])), all = run("all");
+    const m = (k, running, done) => this.steps.mark(k, running ? "run" : done ? "done" : "todo");
+    const src = this.src === "json" ? !!(this.jspec.spec && !(this.jspec.errors || []).length)
+      : !!(this.$("#fx-contrast").value || this.$("#fx-cpath").value.trim());
+    m("src", false, !!st.path || src);
+    m("dir", run("dir") || all, !!st.dir);
+    m("try", run("try"), st.tries.length > 0);
+    m("neu", run("neu") || all, !!st.usage);
+    m("keys", run("keys") || all, !!st.keys);
+    m("units", false, (st.units || []).length > 0);
+    m("check", run("verify") || run("check") || all, !!(st.verify || st.check));
+    m("behave", run("behave"), !!st.behave);
+    m("all", all, !!st.pipe);
   }
 
   // 強さの欄を、区切りの数だけ並べる(box = fx-alphas か fx-try-alphas)。values を渡せばその値(数 1 つ・"1,1,0.8"・並び。足りない分は
@@ -386,7 +418,7 @@ export class FishPanel {
       this.lastSet = sig;
       const put = (sel, v) => { if (v !== undefined && v !== null) this.$(sel).value = String(v); };
       put("#fx-seg", fish.segments); put("#fx-form", fish.form); put("#fx-pseudo", fish.pseudo);
-      if (fish.alpha !== undefined && fish.alpha !== null) { this.renderAlphas("fx-alphas", fish.alpha); this.renderAlphas("fx-try-alphas", fish.alpha); }
+      if (fish.alpha !== undefined && fish.alpha !== null) this.renderAlphas("fx-alphas", fish.alpha);
       put("#fx-mt", fish.max_tokens); put("#fx-rt", fish.response_tokens);
       this.$("#fx-cap").value = fish.cap === undefined || fish.cap === null ? "" : Array.isArray(fish.cap) ? fish.cap.join(",") : String(fish.cap);
       if (typeof fish.iv === "string") put("#fx-iv", fish.iv); else if (Array.isArray(fish.iv)) put("#fx-iv", fish.iv.join(" "));
@@ -492,7 +524,6 @@ export class FishPanel {
     this.$("#fx-cap").disabled = this.$("#fx-form").value !== "cap";
     this.$("#fx-keyc").disabled = this.$("#fx-keyfit").value !== "ridge";
     this.renderAlphas("fx-alphas");
-    this.renderAlphas("fx-try-alphas");
     this.showNeed();
     if (this.st.usage) { this.fillDefaults(); this.renderNeurons(); }
     this.compose();
@@ -510,6 +541,7 @@ export class FishPanel {
         + (j.estimate_stack_first ? ` ${t("(初回は長めに出ます。層ごとの読み直しを、いちばん遅い場合で数えています)")}` : "");
       this.status(which, running + est);
       this.follow(which, j.id);
+      this.marks();
     } catch (e) { this.status(which, `${t("エラー")}: ${e.message}`, true); }
   }
 
@@ -540,6 +572,7 @@ export class FishPanel {
     if (!which || this.handled.has(j.id)) return;
     this.handled.add(j.id);
     this.$(`#fx-prog-${which}`).innerHTML = "";
+    this.marks();
     if (j.status !== "done") {
       const e = j.error || {};
       this.status(which, j.status === "error" ? `${t("失敗")}: ${e.message || ""}${e.hint ? `(${e.hint})` : ""}` : t("止めました"), j.status === "error");
@@ -588,6 +621,7 @@ export class FishPanel {
       this.renderCheck();
     }
     await this.compose();
+    this.marks();
   }
 
   // 「速い読み方」: 2 か所のチェックをそろえる
@@ -708,7 +742,7 @@ export class FishPanel {
       this.status(which, t("足す層を入れてください(1〜{m}。層 0 と最終層には足せません)", { m: this.nLayer ? this.nLayer - 2 : "?" }), true);
       return;
     }
-    const a = this.alphas("fx-try-alphas");
+    const a = this.alphas("fx-alphas");                        // 強さは共通の設定のもの
     const nSeg = dir ? (dir.segments || []).length || 1 : (a || []).length;
     if (a === null || a.length !== nSeg) { this.status(which, t("強さを、方向の区切り({s})ごとに入れてください", { s: dir ? (dir.segments || []).join(",") : v("#fx-seg") }), true); return; }
     const n = +v("#fx-try-n"), mt = +v("#fx-try-mt"), temp = +v("#fx-try-temp"), seed = +v("#fx-try-seed");
@@ -722,11 +756,10 @@ export class FishPanel {
     await this.launch(which, "fish_try", p, t("方向を層の出力に直接足して、返事を作っています…"));
   }
 
-  // 試した層と強さを、上の欄に入れる
+  // 試した層を、共通の設定の層に入れる(強さはもともと共通の設定のもの)
   useTry() {
-    const a = this.alphas("fx-try-alphas"), L = this.$("#fx-try-layers").value.trim();
+    const L = this.$("#fx-try-layers").value.trim();
     if (L) this.$("#fx-layers").value = L;
-    if (a) this.renderAlphas("fx-alphas", a);
     this.settingsChanged();
     this.status("try", t("上の欄に入れました。層を変えたら、方向を作り直してください(重ねる層が変わるため)"));
   }
@@ -867,7 +900,7 @@ export class FishPanel {
         <span class="muted note">${t("{n} 個のニューロン、{p} 位置で測った", { n: row.n_ff, p: row.positions })}${extra.length ? ` · ${t("表に無い選択: {x}", { x: extra.map((j) => `N${j}`).join(" ") })}` : ""}</span></h4>
         <div class="evx-scroll"><table class="evx mono fx-tab fx-neu-tab" data-l="${L}"><thead><tr><th></th><th>${t("ニューロン")}</th><th title="${t("1 位置で残差に書く長さの最大")}">${t("最大")}</th><th title="${t("1 位置で残差に書く長さの平均")}">${t("平均")}</th>
           <th>${t("最大の順位")}</th><th>${t("平均の順位")}</th><th>${t("出力に占める割合")}</th><th></th></tr></thead><tbody>${trs}</tbody></table></div>`;
-    }).join("") + `<p class="muted note">${t("働きの小さい順(最大の順位 + 平均の順位)。書き換えると、そのニューロンの元の働きは無くなります。区切り 0 から順に、選んだものを上から使います")}</p>`;
+    }).join("") + `${noteHTML(t("働きの小さい順(最大の順位 + 平均の順位)。書き換えると、そのニューロンの元の働きは無くなります。区切り 0 から順に、選んだものを上から使います"), "muted note")}`;
   }
 
   renderKeys() {
@@ -894,7 +927,7 @@ export class FishPanel {
         <th>${t("ほかのニューロンの変化")}</th><th>${t("出力の変化の誤差(中央値)")}</th><th></th></tr></thead><tbody>${
       (r.layers || []).map((x) => `<tr><td>L${x.layer}</td><td class="l">${(x.neurons || []).map((j) => `N${j}`).join(" ")}</td><td>${pc(x.gate_err)}</td><td>${pc(x.up_err)}</td><td>${pc(x.act_err)}</td>
         <td>${x.others_changed_max === undefined ? "—" : (+x.others_changed_max).toExponential(1)}</td><td>${pc(x.out_rel_err_median)}</td><td>${mark(x.ok)}</td></tr>`).join("")}</tbody></table></div>
-      <p class="muted note">${t("合格の目安: ゲート・入力・出力の誤差 5% 未満、活性の誤差 0.1% 未満、ほかのニューロンの変化なし。ゲート・入力には、量子化のままの掛け算とのずれが 1〜2% 残る")}</p>`;
+      ${noteHTML(t("合格の目安: ゲート・入力・出力の誤差 5% 未満、活性の誤差 0.1% 未満、ほかのニューロンの変化なし。ゲート・入力には、量子化のままの掛け算とのずれが 1〜2% 残る"), "muted note")}`;
   }
 
   renderBehave() {
@@ -960,7 +993,7 @@ export class FishPanel {
     const worst = (qs.worst || []).map((q) => `<tr><td>${esc(q.segment === "match" ? t("一致の直前") : q.segment)}</td><td class="fx-low">${fmt(q.amount, 2)}</td><td>${fmt(q.rho, 2)}</td>
       <td class="l fx-q">${esc(q.prompt)}</td><td class="l fx-a">${esc(String(q.reply_start || "").slice(0, 20))}${q.loop ? ` <span class="kx-ng">${t("繰り返し")}</span>` : ""}</td></tr>`).join("");
     return `<h4 class="note">${t("質問ごとの値")} <span class="${nLow ? "pp-warn" : "muted"} note" id="fx-q-sum">${t("狙う場面で、ほとんど書けていない質問 {n} 件", { n: nLow })}</span></h4>
-      <p class="muted note">${t("平均だけでは、一部の質問でまったく書けていないことが隠れます。区間(ユニットが担当する返事の位置の範囲)ごとに、質問 1 つずつの書いた量(狙った量 = 1)を数えています")}</p>
+      ${noteHTML(t("平均だけでは、一部の質問でまったく書けていないことが隠れます。区間(ユニットが担当する返事の位置の範囲)ごとに、質問 1 つずつの書いた量(狙った量 = 1)を数えています"), "muted note")}
       <div class="evx-scroll"><table class="evx mono fx-tab" id="fx-q-tab"><thead><tr><th class="l">${t("場面")}</th><th>${t("区間")}</th><th>${t("質問の数")}</th>
         <th title="${t("その区間で書いた量が {v} 未満の質問", { v: qs.low })}">${t("ほとんど書けていない(量 {v} 未満)", { v: qs.low })}</th>
         <th title="${t("その区間の位置で、全部のユニットが書いた量の合計が {v} を超えた質問", { v: qs.over })}">${t("狙った量を超えた(合計 {v} 超)", { v: qs.over })}</th>
@@ -969,7 +1002,7 @@ export class FishPanel {
       ${worst ? `<h4 class="note">${t("書けていない質問(量の小さい順。全部で {n} 件)", { n: qs.n_low })}</h4>
       <div class="evx-scroll"><table class="evx fx-tab" id="fx-q-worst"><thead><tr><th>${t("区間")}</th><th>${t("書いた量")}</th><th title="${t("その区間の鍵の反応の平均。上限つきの形は、しきい値と比べる値")}">${t("鍵の反応")}</th>
         <th class="l">${t("質問")}</th><th class="l">${t("返事の出だし")}</th></tr></thead><tbody>${worst}</tbody></table></div>
-      <p class="muted note">${t("書けていない質問が、返事の書き出し方(かぎかっこで始まる、など)でまとまっていたら、鍵を作る質問を増やします(狙う場面の質問は 100 問以上を勧めます)")}</p>` : ""}`;
+      ${noteHTML(t("書けていない質問が、返事の書き出し方(かぎかっこで始まる、など)でまとまっていたら、鍵を作る質問を増やします(狙う場面の質問は 100 問以上を勧めます)"), "muted note")}` : ""}`;
   }
 
   // 鍵の作り方の 1 行。stages = [[見出し, 最小二乗の鍵の記録 {c, cv, folds, edge, …}], …](記録が無い段は出さない)
@@ -993,7 +1026,7 @@ export class FishPanel {
     return `<h4 class="note">${t("変えたくない場面の群ごとの漏れ")} <span class="muted note">${t("狙った量の {v} 以上を書いた質問の数 / 質問の数。かっこ内は書いた量の平均", { v: lk.leak })}</span></h4>
       <div class="evx-scroll"><table class="evx mono fx-tab" id="fx-leak-tab"><thead><tr><th class="l">${t("群")}</th><th>${t("どれかの区間")}</th>${
         segs.map((sg) => `<th>${sg === "match" ? t("一致の直前") : t("区間 {s}", { s: esc(sg) })}</th>`).join("")}<th title="${t("返事を書き始める直前の 1 位置だけで見た数")}">${t("位置 0 だけ")}</th></tr></thead><tbody>${rows}</tbody></table></div>
-      <p class="muted note">${t("群ごとに見ます。狙う場面と同じ形の発言(質問でない発言など)の群だけに漏れていないか、漏れがある区間から位置 0 に移っただけでないかを確かめます")}</p>`;
+      ${noteHTML(t("群ごとに見ます。狙う場面と同じ形の発言(質問でない発言など)の群だけに漏れていないか、漏れがある区間から位置 0 に移っただけでないかを確かめます"), "muted note")}`;
   }
 
   renderCheck() {
@@ -1028,6 +1061,6 @@ export class FishPanel {
         <span class="muted" id="fx-check-sum">${t("足りない {a} か所 · 書き込みたくない位置で大きい {b} か所", { a: nLow, b: nBad })}</span></p>
       ${tables}
       ${r.positions ? `<p class="muted note">${t("文字の直前に書く形なので、何も当てずに作った返事を、レシピを当てて読んだ値です(書くと、一致する文字が出なくなるため)")}</p>` : ""}
-      <p class="muted note">${t("列は返事の位置(0 = 返事を書き始める直前)。値は平均で、マウスを当てると最小〜最大。区切りの境目で足りないときは、区切りを変えるか、当てた状態で鍵を作り直します。返事の質は、レシピのタブのチャットか behave で読んで確かめてください")}</p>`;
+      ${noteHTML(t("列は返事の位置(0 = 返事を書き始める直前)。値は平均で、マウスを当てると最小〜最大。区切りの境目で足りないときは、区切りを変えるか、当てた状態で鍵を作り直します。返事の質は、レシピのタブのチャットか behave で読んで確かめてください"), "muted note")}`;
   }
 }

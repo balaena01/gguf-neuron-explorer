@@ -8,7 +8,7 @@ import { getJSON, postJSON } from "./api.js";
 import { t } from "./i18n.js";
 import { esc, qHTML } from "./panels.js";
 import { parseProj } from "./recipe.js";
-import { composing } from "./ui.js";
+import { composing, noteHTML } from "./ui.js";
 
 const fmt = (x, d = 2) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : (+x).toFixed(d));
 const pct = (x) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : `${Math.round(x * 100)}%`);
@@ -31,8 +31,9 @@ export function candidateSpecs(c, direction) {
 }
 
 export class CandidatesPanel {
-  constructor(root, { onLoadCandidate, onChatCandidate } = {}) {
+  constructor(root, { onLoadCandidate, onChatCandidate, onMake } = {}) {
     this.root = root;
+    this.onMake = onMake || (() => {});                // 作る欄(CHiPS の手順 5)へ
     this.onLoadCandidate = onLoadCandidate || (async () => null);   // ({ name, specs, direction, withRecipe }) → recipe タブに読み込む(注意の文か null)
     this.onChatCandidate = onChatCandidate || (async () => null);   // 同じ引数 → 読み込んで 1 列チャットで開く
     this.list = [];
@@ -47,9 +48,11 @@ export class CandidatesPanel {
     this.saving = Promise.resolve();   // 保存は 1 つずつ(速く付けても順に書く)
     this.done = false;                 // 全部付けた(集計を出している)
     root.innerHTML = `
-      <p class="muted note pp-help">${t("配分の組を全体の倍率で何段か当てた返事を、どの候補か伏せて採点し(P = 目標の振る舞いがどれだけ出ているか、C = 自然さ、1〜5)、候補ごとに集計します。候補はパイプラインの結果の「候補を作る」で作ります。")}</p>
+      ${noteHTML(t("配分の組を全体の倍率で何段か当てた返事を、どの候補か伏せて採点し(P = 目標の振る舞いがどれだけ出ているか、C = 自然さ、1〜5)、候補ごとに集計します。候補はパイプラインの結果の「候補を作る」で作ります。"))}
+      <div class="pp-actions"><button class="main" id="cd-make" title="${t("CHiPS の結果を開いて、手順 5 で倍率と質問を決めて作る")}">${t("候補を作る(CHiPS の手順 5)")}</button></div>
       <h4>${t("保存した候補")}</h4><div id="cd-list"><p class="muted note">${t("読み込み中…")}</p></div>
       <div id="cd-result"></div>`;
+    root.querySelector("#cd-make").addEventListener("click", () => this.onMake());
     this.$ = (s) => root.querySelector(s);
     this._onKey = (ev) => this.key(ev);
     document.addEventListener("keydown", this._onKey);
@@ -93,7 +96,7 @@ export class CandidatesPanel {
     const d = this.data, out = this.$("#cd-result");
     if (!d) { out.innerHTML = ""; return; }
     const ho = d.held_out || {}, sp = d.sampling;
-    const warn = !(ho.A && ho.B) ? `<p class="pp-warn note">${t("注意: 調整に使った質問で生成しています({sides} 側)。強さを決めるには、調整に使っていない質問で作り直してください。", { sides: ["A", "B"].filter((k) => !ho[k]).join("・") })}</p>` : "";
+    const warn = !(ho.A && ho.B) ? `${noteHTML(t("注意: 調整に使った質問で生成しています({sides} 側)。強さを決めるには、調整に使っていない質問で作り直してください。", { sides: ["A", "B"].filter((k) => !ho[k]).join("・") }), "pp-warn note")}` : "";
     const seg = `<span class="seg" id="cd-mode">${[["summary", t("要約")], ["grid", t("返事を並べる")], ["score", t("名前を伏せて採点する")]].map(([k, l]) =>
       `<button data-cm="${k}" class="${this.mode === k ? "on" : ""}">${l}</button>`).join("")}</span>`;
     out.innerHTML = `<div class="pp-res">
@@ -142,7 +145,7 @@ export class CandidatesPanel {
         <th title="${t("判定(validate.match)に合う返事の割合")}">${t("一致")}</th><th title="${t("4-gram の重複の少なさ(1 = 繰り返し無し)")}">d4</th>
         <th title="${t("採点しない側で、無介入と違う返事の割合(同じ種なので、変わらなければ一致する)")}">${t("反対側の変化")}</th>
         ${has ? `<th title="${t("目標の振る舞いの平均(1〜5)")}">P</th><th title="${t("自然さの平均(1〜5)")}">C</th><th title="${t("消す向きは min(6 − P, C)、強める向きは min(P, C) の平均")}">${t("目的")}</th><th>n</th>` : ""}<th></th></tr></thead><tbody>${rows.join("")}</tbody></table></div>
-      <p class="muted note">${t("一致 = 判定(validate.match)に合う返事の割合、d4 = 繰り返しの少なさ、反対側の変化 = 採点しない側で無介入と違う返事の割合。目的 = 消す向きは min(6 − P, C)、強める向きは min(P, C) の平均。緑の行 = 向きごとにいちばん良い候補。")}</p>
+      ${noteHTML(t("一致 = 判定(validate.match)に合う返事の割合、d4 = 繰り返しの少なさ、反対側の変化 = 採点しない側で無介入と違う返事の割合。目的 = 消す向きは min(6 − P, C)、強める向きは min(P, C) の平均。緑の行 = 向きごとにいちばん良い候補。"), "muted note")}
       <p class="muted note" id="cd-note"></p>`;
     for (const b of el.querySelectorAll("[data-load]")) b.addEventListener("click", () => this.use(b.dataset.load, false));
     for (const b of el.querySelectorAll("[data-chat]")) b.addEventListener("click", () => this.use(b.dataset.chat, true));
@@ -217,7 +220,7 @@ export class CandidatesPanel {
       <div class="cd-reply">${esc(stripThink(it.text)) || `<span class="muted">${t("(空の返事)")}</span>`}</div>
       <div class="cd-pc"><span class="cd-pc-l" title="${t("目標の振る舞いがどれだけ出ているか(1 = まったく出ていない、5 = 典型的に全体に出ている)")}">P</span>${btns("p", P)}
         <span class="cd-pc-l" title="${t("自然さ(1 = 崩れている、5 = 完全に自然)")}">C</span>${btns("c", C)}</div>
-      <p class="muted note">${t("キー: 数字 1〜5 で P、続けてもう一度押すと C(そろうと保存して次へ)。← 前へ、→ とばす、Esc 付けかけを消す。どの候補の返事かは伏せてあります。")}</p>
+      ${noteHTML(t("キー: 数字 1〜5 で P、続けてもう一度押すと C(そろうと保存して次へ)。← 前へ、→ とばす、Esc 付けかけを消す。どの候補の返事かは伏せてあります。"), "muted note")}
       <details class="cd-rub"><summary class="muted note">${t("採点基準")}</summary><pre class="note">${esc(b.rubric || "")}</pre></details></div>`;
     const $ = (s) => el.querySelector(s);
     $("#cd-prev").addEventListener("click", () => this.move(-1));

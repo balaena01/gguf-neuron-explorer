@@ -10,6 +10,7 @@
 import { getJSON, postJSON } from "./api.js";
 import { LANG, t } from "./i18n.js";
 import { esc } from "./panels.js";
+import { noteHTML } from "./ui.js";
 
 const NAME_RE = /^[\w.-]+$/;
 const pct = (x) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : `${Math.round(+x * 1000) / 10}%`);
@@ -30,7 +31,7 @@ export class ChipsLeft {
     this.userPick = 0;                              // behave の結果の選択を手で変えた回数(ジョブの後の自動の選択で上書きしない)
     this.jobId = null;
     root.innerHTML = `<summary class="kb-sum"><b>${t("CHiPS で残った場面から作る")}</b> <span class="muted note">${t("(behave の結果 → keyed の対照集合の JSON)")}</span></summary>
-      <p class="muted note pp-help">${t("CHiPS のレシピを当てても消したい振る舞いがまだ出る A 側の質問だけを集めて、keyed の対照集合の JSON を作る。1. 方向とレシピを選んで「behave を回す」(レシピを当てて A 側の質問に答えさせる)か、保存した結果を選ぶ。2. 判定と positions を決めて「JSON を作る」(<root>/keyed/ に保存し、下の入力欄に入る)。3. 層を入れて「方向から key-check まで」(方向は keyed.direction、介入(iv)は keyed.iv のレシピが自動で入る)。できた keyed のユニットは CHiPS のレシピに足して 1 つの LoRA にする。")}</p>
+      ${noteHTML(t("CHiPS のレシピを当てても消したい振る舞いがまだ出る A 側の質問だけを集めて、keyed の対照集合の JSON を作る。1. 方向とレシピを選んで「behave を回す」(レシピを当てて A 側の質問に答えさせる)か、保存した結果を選ぶ。2. 判定と positions を決めて「JSON を作る」(<root>/keyed/ に保存し、下の入力欄に入る)。3. 層を入れて「方向から key-check まで」(方向は keyed.direction、介入(iv)は keyed.iv のレシピが自動で入る)。できた keyed のユニットは CHiPS のレシピに足して 1 つの LoRA にする。"), "muted note pp-help")}
       <div class="pp-set">
         <label class="muted" title="${t("CHiPS で使った方向(gne direction で作ったもの)。出力の keyed.direction")}">${t("CHiPS の方向")} <select id="kb-dir"></select></label>
         <label class="muted" title="${t("B 側の質問・validate.match・A 側の質問を取る対照集合。既定は方向を作った対照集合")}">${t("対照集合")} <select id="kb-contrast"></select></label>

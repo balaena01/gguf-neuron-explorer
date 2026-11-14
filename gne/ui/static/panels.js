@@ -3,7 +3,7 @@
 // (add = 書き込み方向の押し、×0 / ×2 = 選ばれたときだけ効く gain)。connections(Web)は MoE の層では使えない。
 import { getJSON, postJSON } from "./api.js";
 import { t } from "./i18n.js";
-import { plainEnter } from "./ui.js";
+import { plainEnter, noteHTML } from "./ui.js";
 
 export const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 // 質問(文字列か、会話の履歴 [{role, content}, …])→ 1 行の文字列 / 役割つきの HTML
@@ -249,7 +249,7 @@ export class NeuronPanel {
       <table class="kv mono links">${head(t("押す向き"), t("相手がこのとき書く語(押される側の極)"))}${rows(lk.down, true)}</table>
       <h4>${t("駆動するもの(上流 {n})", { n: lk.up.length })}</h4>
       <table class="kv mono links">${head(t("押す向き"), t("相手が + に光ったときに書く語"))}${rows(lk.up, false)}</table>
-      <p class="muted note">${t("押す向き = 相手(下流)を、またはこのニューロン(上流)を + / − のどちらへ押すか。z = その相手が、すべての層の候補の中でどれだけ飛び抜けているか。重みだけからの近似(SwiGLU の gate·up)。上流の語は、相手が + 側に光ると仮定したもの(2 次の近似なので、押す向きは相手の光る向きによらない)。")}</p>`;
+      ${noteHTML(t("押す向き = 相手(下流)を、またはこのニューロン(上流)を + / − のどちらへ押すか。z = その相手が、すべての層の候補の中でどれだけ飛び抜けているか。重みだけからの近似(SwiGLU の gate·up)。上流の語は、相手が + 側に光ると仮定したもの(2 次の近似なので、押す向きは相手の光る向きによらない)。"), "muted note")}`;
   }
 
   // Web タブ(§5.6): 多段の web の要約。toward = 下流が書く語、away = 抑える語、fed_by / held_by = 上流で + / − に駆動する語
@@ -263,7 +263,7 @@ export class NeuronPanel {
         <span class="grp"><span class="muted">${t("1 段目の本数")}</span><input id="wb-first" type="number" min="1" max="24" value="${p.first}"></span>
         <span class="grp"><span class="muted">${t("2 段目以降の本数")}</span><input id="wb-k" type="number" min="1" max="24" value="${p.k}"></span>
         <span class="grp"><span class="muted">z ≥</span><input id="wb-zmin" type="number" step="0.5" value="${p.zmin}"></span><button class="small" id="wb-run">${t("更新")}</button></div>
-      <p class="muted note">${t("開いたニューロンから下流・上流へたどった配線(header の「線」を web にすると地図に出る)。ここでの符号は経路で掛け合わせたもの(下流の 2 段目以降は途中のニューロンが、上流は相手が、+ 側で光ると仮定)。数字 = その語を lens に持つニューロンの数。並びは、層の中でその語を持つニューロンの割合から見た期待に対する比(lift)の順で、2 ニューロン以上の語が先。大文字・語頭の空白の違いはまとめる。± = toward と away の両方に出る語。")}</p>
+      ${noteHTML(t("開いたニューロンから下流・上流へたどった配線(header の「線」を web にすると地図に出る)。ここでの符号は経路で掛け合わせたもの(下流の 2 段目以降は途中のニューロンが、上流は相手が、+ 側で光ると仮定)。数字 = その語を lens に持つニューロンの数。並びは、層の中でその語を持つニューロンの割合から見た期待に対する比(lift)の順で、2 ニューロン以上の語が先。大文字・語頭の空白の違いはまとめる。± = toward と away の両方に出る語。"), "muted note")}
       ${s ? `<p class="muted note mono">${t("{n} ニューロン · {e} 本", { n: s.n_neurons, e: s.n_edges })}</p>
       <h4>${t("toward(下流が書く語)")}</h4><div class="chips">${words(s.toward)}</div>
       <h4>${t("away(下流で抑えられる語)")}</h4><div class="chips">${words(s.away)}</div>
@@ -396,7 +396,7 @@ export class SearchList {
     this.root.innerHTML = `
       <div class="list-head"><span>${t("「{q}」({m}){n} 件", { q: esc(r.q), m: esc(r.mode), n: r.n_hits })}${r.hits.length < r.n_hits ? t("・先頭 {n}", { n: r.hits.length }) : ""}</span>
         <button id="search-close" class="small quiet">${t("閉じる")}</button></div>
-      <p class="muted note">${t("並び: steer+ → logit+ → steer− → logit−、それぞれ lens の中の順位(#)の順。words は sweep の語の z の順")}</p>
+      ${noteHTML(t("並び: steer+ → logit+ → steer− → logit−、それぞれ lens の中の順位(#)の順。words は sweep の語の z の順"), "muted note")}
       <div class="rank-wrap"><table class="rank mono"><tbody>${rows}</tbody></table></div>`;
     this.root.querySelector("#search-close").addEventListener("click", () => this.onClose());
     this.root.querySelector("tbody").addEventListener("click", (ev) => {

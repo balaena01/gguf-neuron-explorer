@@ -14,7 +14,7 @@ import { getJSON, postJSON } from "./api.js";
 import { t } from "./i18n.js";
 import { targetKind } from "./keys.js";
 import { esc } from "./panels.js";
-import { wireTabs } from "./ui.js";
+import { wireTabs, noteHTML } from "./ui.js";
 
 const fmt = (x, d = 2) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : (+x).toFixed(d));
 const signed = (x, d = 2) => `${x >= 0 ? "+" : "−"}${fmt(Math.abs(x), d)}`;
@@ -402,30 +402,30 @@ export class RecipePanel {
       ${r.units.length ? `<table class="rc mono"><tbody>${rows}</tbody></table>`
         : `<p class="muted note">${t("ユニットがありません。どの画面の「レシピに足す」でも、ここに入ります。")}</p>`}
       ${r.skipped ? `<p class="muted note">${t("UI では扱えないユニット(ニューロンの gain・ヘッドの query・ランダム方向など){n} 個を外しました", { n: r.skipped })}</p>` : ""}
-      ${r.heads().length ? `<p class="muted note">${t("ヘッドの倍率 k は 1 が無介入(0 で消す、2 で倍、負で反転)。LoRA で当てるので cvec には入りません。3 列チャットの − 列は 1 の反対側(×0 なら ×2)。")}</p>` : ""}
+      ${r.heads().length ? `${noteHTML(t("ヘッドの倍率 k は 1 が無介入(0 で消す、2 で倍、負で反転)。LoRA で当てるので cvec には入りません。3 列チャットの − 列は 1 の反対側(×0 なら ×2)。"), "muted note")}` : ""}
       ${r.projs().length || r.keyed().length ? this.projNote() : ""}
       ${r.keyed().length ? this.keyedNote() : ""}
       ${this.keyedAddHTML()}
-      ${r.moe().length ? `<p class="muted note">${t("MoE: 方向押し = 専門家のニューロンの add。専門家が選ばれたかに関係なく全トークンにその書き込み方向を足す(ニューロン押しではない)。選ばれたときだけ効くのは gain(×)。専門家全体の ×k と route はモデルを読み直すパッチで当てる(列ごとに 0.3〜1 秒)。3 列チャットの − 列は ×k が 2 − k、route と add は符号を反転。")}</p>` : ""}
+      ${r.moe().length ? `${noteHTML(t("MoE: 方向押し = 専門家のニューロンの add。専門家が選ばれたかに関係なく全トークンにその書き込み方向を足す(ニューロン押しではない)。選ばれたときだけ効くのは gain(×)。専門家全体の ×k と route はモデルを読み直すパッチで当てる(列ごとに 0.3〜1 秒)。3 列チャットの − 列は ×k が 2 − k、route と add は符号を反転。"), "muted note")}` : ""}
       ${this.ablateHTML()}
       ${r.sampling ? `<div class="rc-sampling muted note" title="${t("このレシピを試すときのサンプリング。チャットの「レシピの設定」で使い、保存するとレシピのファイルに入る(OpenAI 互換 API の既定にもなる)")}">${t("サンプリング")}: <span class="mono">${esc(samplingLabel(r.sampling))}</span><button class="small" id="rc-sp-rm" title="${t("レシピから外す")}">×</button></div>` : ""}
       <p class="muted note">${t("ニューロンの強さは rel(その層の残差ノルムの中央値に対する大きさ)。マップに + は黄、− は赤紫の輪で出ます。")}</p>
       ${r.units.length ? `<div class="rc-actions"><button class="small quiet" id="rc-clear" title="${t("すべてのユニットを外す")}">${t("レシピを空にする")}</button></div>` : ""}
       </div>
       <div ${panel("try")}>
-      <p class="muted note">${t("いまのレシピを当てた返事を、何もしない返事・逆向きに当てた返事と並べて比べます。チャットは「くわしく見る」のニューロンの Chat に開きます。")}</p>
+      ${noteHTML(t("いまのレシピを当てた返事を、何もしない返事・逆向きに当てた返事と並べて比べます。チャットは「くわしく見る」のニューロンの Chat に開きます。"), "muted note")}
       <div class="rc-actions"><button class="main" id="rc-chat"${r.empty() ? " disabled" : ""}>${t("3 列チャットで試す")}</button></div>
       </div>
       <div ${panel("out")}>
-      <p class="muted note">${t("書き出しはここにまとめています。足す押し方(ニューロン・方向)は cvec、ヘッド・鍵つきの書き込みは「LoRA・焼き込み」、計算で作るニューロン(FiSH)は nw の LoRA です。")}</p>
+      ${noteHTML(t("書き出しはここにまとめています。足す押し方(ニューロン・方向)は cvec、ヘッド・鍵つきの書き込みは「LoRA・焼き込み」、計算で作るニューロン(FiSH)は nw の LoRA です。"), "muted note")}
       <div class="rc-actions">
         <button id="rc-export"${r.addSpecs().length && document.body.dataset.cvec !== "off" ? "" : " disabled"}>${t("cvec を書き出す")}</button>
         <label class="muted"><input type="checkbox" id="rc-verify"> ${t("llama.cpp で確かめる")}</label>
         <button id="rc-lora"${r.heads().length || r.projs().length || r.keyed().length ? "" : " disabled"} title="${t("ヘッドの方向成分(proj)と倍率(gain)、鍵つきの書き込み(keyed)を、llama.cpp の --lora で使う LoRA アダプタか、重みに焼き込んだ GGUF に書き出す")}">${t("LoRA・焼き込み")}${this.lxOpen ? " ▴" : " ▾"}</button>
       </div>
-      ${r.keyed().length ? `<p class="muted note">${t("鍵つきの書き込み(keyed)は control vector に入りません(入力の活性で効き分けるので足し算にならない)。「LoRA・焼き込み」で書き出します。")}</p>` : ""}
+      ${r.keyed().length ? `${noteHTML(t("鍵つきの書き込み(keyed)は control vector に入りません(入力の活性で効き分けるので足し算にならない)。「LoRA・焼き込み」で書き出します。"), "muted note")}` : ""}
       ${r.nws().length ? `<div class="rc-actions"><button id="rc-nw" title="${t("計算で作るニューロン(nw)を、llama.cpp の --lora で使う LoRA アダプタに書き出す(焼き込みは無い)")}">${t("nw の LoRA を書き出す")}</button></div>
-        <p class="muted note">${t("計算で作るニューロン(nw)は control vector にも「LoRA・焼き込み」にも入りません。「nw の LoRA を書き出す」で別のアダプタにします。")}</p>` : ""}
+        ${noteHTML(t("計算で作るニューロン(nw)は control vector にも「LoRA・焼き込み」にも入りません。「nw の LoRA を書き出す」で別のアダプタにします。"), "muted note")}` : ""}
       ${this.lxOpen ? this.lxHTML() : ""}
       </div>
       <div id="rc-result"></div>`;
@@ -537,8 +537,8 @@ export class RecipePanel {
       : t("proj のユニットに当てる方向の層。own = そのヘッドがある層の方向 r_L、base = 方向セットの基準層の r(gne direction score で記録した層)");
     return `<div class="rc-ablate"><span class="muted" title="${tip}">${t("方向の層")}</span>
         <select id="rc-dl"><option value="own"${r.directionLayer === "own" ? " selected" : ""}>own</option><option value="base"${r.directionLayer === "base" ? " selected" : ""}>base</option></select></div>
-      ${r.projs().length ? `<p class="muted note">${t("射影 s: ヘッドが残差に書くベクトルのうち方向 r̂ に沿った成分だけを (1 − s) 倍にする(1 で消す、2 で反転、直交成分はそのまま)。LoRA で当てるので cvec には入りません。3 列チャットの − 列は s が負(その方向へ強める)。")}</p>` : ""}${
-        r.directionLayer === "base" ? `<p class="muted note">${t("方向の層 base は保存したレシピのファイルにだけ入ります(3 列チャットと「今のレシピで eval」はユニットの文字列を送るので own で当てます)。")}</p>` : ""}`;
+      ${r.projs().length ? `${noteHTML(t("射影 s: ヘッドが残差に書くベクトルのうち方向 r̂ に沿った成分だけを (1 − s) 倍にする(1 で消す、2 で反転、直交成分はそのまま)。LoRA で当てるので cvec には入りません。3 列チャットの − 列は s が負(その方向へ強める)。"), "muted note")}` : ""}${
+        r.directionLayer === "base" ? `${noteHTML(t("方向の層 base は保存したレシピのファイルにだけ入ります(3 列チャットと「今のレシピで eval」はユニットの文字列を送るので own で当てます)。"), "muted note")}` : ""}`;
   }
 
   // 鍵つきの書き込みの行(CHANGE-07、L14 ffn keyed a+1.00 @方向 #鍵)。書き込み先・方向・鍵の選択(方向・鍵の「既定」は
@@ -596,7 +596,7 @@ export class RecipePanel {
     return `<div class="rc-ablate rc-kdef" title="${t("@方向・#鍵を「既定」にした keyed の行が使う方向と鍵(保存するとレシピの default_direction・default_key)")}"><span class="muted">${t("keyed の既定")}</span>
         <span class="mono">@</span><select id="rc-kdd">${opt(dirs, r.defaultDirection)}</select>
         <span class="mono">#</span><select id="rc-kdk">${opt(keys, r.defaultKey)}</select></div>
-      <p class="muted note">${t("鍵つきの書き込み a: 入力の活性 x に鍵 κ が反応する(鍵の反応の強さ ρ = κᵀx が大きい)ときだけ、方向 r_L を α·ρ 倍で書く(α = 1 で、観測した A − B の平均差をそのまま)。書き込みたくない位置では ρ ≈ 0 で何も足さない。LoRA で当てるので cvec には入りません。3 列チャットの − 列は α が負(打ち消す)。")}</p>`;
+      ${noteHTML(t("鍵つきの書き込み a: 入力の活性 x に鍵 κ が反応する(鍵の反応の強さ ρ = κᵀx が大きい)ときだけ、方向 r_L を α·ρ 倍で書く(α = 1 で、観測した A − B の平均差をそのまま)。書き込みたくない位置では ρ ≈ 0 で何も足さない。LoRA で当てるので cvec には入りません。3 列チャットの − 列は α が負(打ち消す)。"), "muted note")}`;
   }
 
   // 「鍵つきの書き込み(keyed)を足す」: 鍵・その鍵の層・方向・α を選んで行を足す(保存した鍵があるときだけ)

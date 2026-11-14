@@ -5,6 +5,7 @@
 import { getJSON } from "./api.js";
 import { t } from "./i18n.js";
 import { esc, tokHTML } from "./panels.js";
+import { noteHTML } from "./ui.js";
 
 const fmt = (x, d = 2) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : (+x).toFixed(d));
 const sgn = (x, d = 3) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : `${x >= 0 ? "+" : "−"}${Math.abs(x).toFixed(d)}`);
@@ -116,7 +117,7 @@ export class ExpertPanel {
         <tr><td>${t("観測")}</td><td>${u.n_routed.toLocaleString()} / ${u.n_tokens.toLocaleString()}</td><td class="muted">${t("トークン")}</td></tr>
         <tr><td title="${t("選ばれたときの実効のルーティング重み(出力に掛かる重み)の平均")}">${t("重みの平均")}</td><td>${fmt(u.weight_mean, 3)}</td><td></td></tr>
       </table>
-      ${u.reliable ? "" : `<p class="note minus x-few">${t("観測が少ない({n} トークン、200 未満)ので、選択率と分位点(q999)は目安です。gne stats act --tokens を増やすと確かになります。", { n: u.n_routed })}</p>`}
+      ${u.reliable ? "" : `${noteHTML(t("観測が少ない({n} トークン、200 未満)ので、選択率と分位点(q999)は目安です。gne stats act --tokens を増やすと確かになります。", { n: u.n_routed }), "note minus x-few")}`}
       ${toks ? `<div class="muted note">${t("よく選ばれるトークン(数字 = 回数、位置 0 を除く)")}</div>${toks}` : ""}`;
   }
 

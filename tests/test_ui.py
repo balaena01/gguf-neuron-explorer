@@ -210,6 +210,23 @@ def _recipe_tab(pg, tab="units"):
         pg.click("#recipe .toggle")
     pg.click(f"#recipe-tabs button[data-rtab={tab}]")
 
+_STEP_ROOT = {"fish": "#dv-fish", "keys": "#dv-key", "chips": "#dv-pipe", "eval": "#eval-view"}
+
+
+def _step(pg, screen, step):
+    """作る画面の左の手順(作業の一覧)を開く(開いていれば何もしない)。step が shared なら、共通の設定が見える手順にする。"""
+    pg.evaluate("""([root, step]) => {
+      const nav = document.querySelector(`${root} .steps`);
+      if (!nav) return;
+      if (step === "shared") {
+        const sh = document.querySelector(`${root} .stage-shared`);
+        if (!sh || !sh.hidden) return;
+        step = nav.querySelector("[role=tab]").dataset.step;
+      }
+      const b = nav.querySelector(`[role=tab][data-step="${step}"]`);
+      if (b && b.getAttribute("aria-selected") !== "true") b.click();
+    }""", [_STEP_ROOT[screen], step])
+
 
 def _seed(s, L: int = 6) -> None:
     """U1 用の小さな保存データ: 層 L の sweep(ニューロン 100 と 7、対照 1)、steer lens(100 だけ)、名前。"""
@@ -768,6 +785,55 @@ def test_recipe_panel_adds_from_any_entry(server, browser):
     pg.close()
 
 
+@pytest.mark.model
+def test_build_screens_open_one_step_at_a_time(server, browser):
+    """作る画面(FiSH・鍵・CHiPS・評価)は、左に手順(作業の一覧)、右に選んだ手順だけ。手順には状態の印。共通の設定は上に 1 回だけで、
+    それを使う手順のときだけ見える。FiSH の同じ設定(速い読み方・試すときの強さ)は 1 つ。強さの候補の画面から CHiPS の手順 5 へ行ける。
+    長い説明は短い 1 行と、開くと読める全文。"""
+    pg = browser.new_page(viewport={"width": 1500, "height": 860})
+    errors = []
+    pg.on("pageerror", lambda e: errors.append(str(e)))
+    pg.goto(server + "/")
+    pg.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
+    tabs = lambda root: pg.evaluate(f"[...document.querySelectorAll('{root} .steps [role=tab]')].map(b => [b.dataset.step, b.getAttribute('aria-selected')])")  # noqa: E731
+    shown = lambda root: pg.evaluate(f"[...document.querySelectorAll('{root} .stage > [data-step]')].filter(e => !e.hidden).map(e => e.dataset.step)")  # noqa: E731
+    pg.click("#views button[data-view=fish]")
+    pg.wait_for_function("document.querySelector('#dv-fish .steps')", timeout=30000)
+    assert [k for k, _ in tabs("#dv-fish")] == ["src", "dir", "try", "neu", "keys", "units", "check", "behave", "all"]
+    pg.click("#dv-fish [role=tab][data-step=src]")
+    assert shown("#dv-fish") == ["src"] and not pg.evaluate("document.querySelector('#fx-shared').hidden")
+    assert pg.evaluate("document.querySelector('#dv-fish [role=tab][data-step=dir] [data-mark]').textContent") == "まだ"
+    pg.click("#dv-fish [role=tab][data-step=dir]")
+    assert shown("#dv-fish") == ["dir"] and pg.evaluate("document.querySelector('#dv-fish .stage-h').textContent") == "2. 方向を作る"
+    pg.keyboard.press("ArrowDown")                                                   # ↑↓ でも手順が替わる
+    assert shown("#dv-fish") == ["try"]
+    assert pg.evaluate("document.querySelectorAll('#dv-fish input.fx-fast').length") == 1 and not pg.evaluate("document.querySelector('#fx-try-alphas')")
+    assert pg.evaluate("!!document.querySelector('#fx-shared details.more summary')")   # 長い説明は短い 1 行 + 全文
+    pg.click("#views button[data-view=keys]")
+    pg.wait_for_function("document.querySelector('#dv-key .steps')", timeout=30000)
+    assert [k for k, _ in tabs("#dv-key")] == ["make", "causal", "check", "saved", "chips"]
+    pg.click("#dv-key [role=tab][data-step=make]")
+    assert shown("#dv-key") == ["make"] and not pg.evaluate("document.querySelector('#kx-shared').hidden")
+    pg.click("#dv-key [role=tab][data-step=check]")
+    assert shown("#dv-key") == ["check"] and pg.evaluate("document.querySelector('#kx-shared').hidden")   # 確かめるは自分の欄だけ
+    pg.click("#views button[data-view=chips]")
+    pg.wait_for_function("document.querySelector('#dv-pipe .steps')", timeout=30000)
+    assert [k for k, _ in tabs("#dv-pipe")] == ["input", "dir", "causal", "alloc", "cand", "past"]
+    pg.click("#dv-pipe [role=tab][data-step=alloc]")
+    assert pg.evaluate("document.querySelector('#pp-nores').offsetParent !== null")      # 結果が無ければ案内だけ
+    pg.click("#views button[data-view=cand]")
+    pg.click("#cd-make")                                                             # 強さの候補の画面から、作る欄(CHiPS の手順 5)へ
+    pg.wait_for_function("document.querySelector('#views button[aria-current=true]').dataset.view === 'chips'", timeout=10000)
+    assert pg.evaluate("document.querySelector('#dv-pipe [role=tab][aria-selected=true]').dataset.step") == "cand"
+    pg.click("#views button[data-view=eval]")
+    pg.wait_for_function("document.querySelector('#eval-view .steps')", timeout=30000)
+    assert [k for k, _ in tabs("#eval-view")] == ["main", "ft"]
+    pg.click("#eval-view [role=tab][data-step=ft]")
+    assert pg.evaluate("document.querySelector('#evx-ft-wrap').open") and pg.evaluate("document.querySelector('#evx-body').hidden")
+    assert not errors, errors
+    pg.close()
+
+
 def test_chat_single_column_in_browser(server, browser):
     """チャットの 1 列: + の列(レシピあり)だけを生成し、3 列に戻すときは確かめてから会話を消す。選んだ列の数は覚える。"""
     pg = browser.new_page()
@@ -1274,7 +1340,9 @@ def test_eval_view_and_job(server, browser, tmp_path):
     # 今のレシピで投げる(既定のタスク集、倍率 0 と 1)
     pg.evaluate("window.gne.recipe.add(14, 100, 1.0); window.gne.recipe.name = 'ui-run'; window.gne.evalView.refresh()")
     pg.wait_for_function("!document.querySelector('#evx-go').disabled", timeout=10000)
+    _step(pg, "eval", "main")
     pg.fill("#evx-doses", "0,1")
+    _step(pg, "eval", "main")
     pg.click("#evx-go")
     pg.wait_for_function("window.gne.evalView.data && window.gne.evalView.data.name === 'ui-run'", timeout=300000)
     assert pg.evaluate("document.querySelectorAll('table.evx tbody tr').length") == 2
@@ -1288,6 +1356,7 @@ def test_eval_view_and_job(server, browser, tmp_path):
     pg.wait_for_function("window.gne.focus && window.gne.focus.n === 100", timeout=30000)
     pg.click("#neuron-body button[data-tab=details]")
     pg.wait_for_function("document.querySelector('#neuron-body a[data-eval=ui-seed]')", timeout=10000)
+    _step(pg, "chips", "alloc")
     pg.click("#neuron-body a[data-eval=ui-seed]")
     pg.wait_for_function("window.gne.view === 'eval' && window.gne.evalView.data.name === 'ui-seed'", timeout=30000)
     assert not errors, errors
@@ -1345,6 +1414,7 @@ def test_eval_view_late_load_does_not_overwrite(server, browser):
     # 1. 先頭(late_a)を待つ間に late_b を選ぶ → late_a が後から届いても late_b のまま
     pg = open_eval(1)
     pg.wait_for_function("document.querySelector('#evx-pick').options.length === 2", timeout=10000)
+    _step(pg, "eval", "main")
     pg.select_option("#evx-pick", "late_b")
     pg.wait_for_function("window.gne.evalView.data && window.gne.evalView.data.name === 'late_b'", timeout=10000)
     release(pg, 0)
@@ -1482,9 +1552,12 @@ def test_fieldtest_late_open_does_not_overwrite(server, browser):
     pg.click("#views button[data-view=eval]")
     pg.wait_for_function("window.gne.evalView && window.gne.evalView.ft", timeout=30000)
     pg.evaluate("document.querySelector('#evx-ft-wrap').open = true")
+    _step(pg, "eval", "ft")
     pg.wait_for_selector("#ft-list tr[data-ft=ft_b]", timeout=10000)
+    _step(pg, "eval", "ft")
     pg.click("#ft-list tr[data-ft=ft_a]")
     late.wait_held(pg)
+    _step(pg, "eval", "ft")
     pg.click("#ft-list tr[data-ft=ft_b]")
     pg.wait_for_function("window.gne.evalView.ft.data && window.gne.evalView.ft.data.name === 'ft_b'", timeout=10000)
     late.release(pg, "**/api/fieldtests/ft_a")
@@ -2453,6 +2526,7 @@ def test_causal_proj_direction_in_browser(causal_server, browser):
         pg.click("#views button[data-view=eval]")
         pg.wait_for_function("window.gne.evalView && window.gne.evalView.data", timeout=30000)
         pg.wait_for_load_state("networkidle")
+        _step(pg, "eval", "main")
         pg.select_option("#evx-pick", "cz-methods")
         pg.wait_for_function("window.gne.evalView.data.name === 'cz-methods' && document.querySelector('table.evx-methods')", timeout=30000)
         assert pg.evaluate("document.querySelectorAll('table.evx-methods tbody tr').length") == 3
@@ -2461,12 +2535,14 @@ def test_causal_proj_direction_in_browser(causal_server, browser):
         pg.once("dialog", lambda d: d.accept())                                    # いまのレシピを置き換える前に確かめる
         pg.click("table.evx-methods [data-rc]")
         assert pg.evaluate("window.gne.recipe.specs()") == ["12:H5:s6@czdir"]
+        _step(pg, "eval", "main")
         pg.select_option("#evx-pick", "cz-nheads")
         pg.wait_for_function("window.gne.evalView.data.name === 'cz-nheads' && document.querySelector('#evx-nh')", timeout=30000)
         assert pg.evaluate("document.querySelector('#evx-nh').width") > 0
         assert pg.evaluate("document.querySelectorAll('#evx-body table.evx tbody tr').length") == 2
         assert pg.evaluate("document.querySelector('#evx-body table.evx tr.rec td').textContent").startswith("2")
         pg.once("dialog", lambda d: d.accept())                                                # いまのレシピを置き換える前に確かめる
+        _step(pg, "eval", "main")
         pg.click("#evx-body [data-nh='0']")                                                    # x の小さい順(1 ヘッドの組)
         assert pg.evaluate("window.gne.recipe.specs()") == ["12:H5:s12@czdir"]
         pg.evaluate("""(() => {
@@ -2603,14 +2679,18 @@ def test_pipeline_api_and_panel(pipe_server, browser):
         pg.click("#views button[data-view=chips]")
         pg.wait_for_function("window.gne.directionView && window.gne.directionView.mode === 'pipe'", timeout=60000)   # CHiPS(JSON から作る)
         assert not pg.evaluate("window.gne.directionView.busy") and pg.evaluate("window.gne.directionView.scores.size") == 0
+        _step(pg, "chips", "past")
         pg.wait_for_selector("#pp-past tr[data-pp=ppx]", timeout=30000)
+        _step(pg, "chips", "past")
         pg.click("#pp-past tr[data-pp=ppx]")
+        _step(pg, "chips", "alloc")
         pg.wait_for_selector("#pp-result table.pp-cmp", timeout=30000)
         res = "#pp-result"
         assert pg.evaluate(f"document.querySelectorAll('{res} section.pp-stage').length") == 4
         assert pg.evaluate(f"document.querySelectorAll('{res} .pp-chart rect').length") == pg.evaluate("window.gne.arch.n_layer") - 2
         top = pg.evaluate(f"[...document.querySelectorAll('{res} table.pp-top tbody tr')].map(tr => tr.className)")
         assert len(top) == 4 and top[0] == "rnd"                                         # 外したヘッドは灰色(理由つき)
+        _step(pg, "chips", "causal")
         pg.click(f"{res} details summary >> nth=0")                                     # 層ごとのスクリーニング
         layers = pg.evaluate(f"[...document.querySelectorAll('{res} table.pp-layers tbody tr')].map(tr => [tr.className, tr.innerText])")
         assert layers[0][0] == "rnd" and layers[0][1].startswith("L0")                   # 止めるとモデルを壊す層
@@ -2619,11 +2699,13 @@ def test_pipeline_api_and_panel(pipe_server, browser):
         assert pg.evaluate(f"document.querySelectorAll('{res} table.pp-eta tbody tr').length") == 3
         cmp = pg.evaluate(f"[...document.querySelectorAll('{res} table.pp-cmp tbody tr')].map(tr => [tr.className, tr.dataset.n || ''])")
         assert cmp == [["", "3"], ["rec", "2"], ["", ""]]                                # 多い順、推す組に印、作れなかった組は理由
+        _step(pg, "chips", "alloc")
         pg.click(f"{res} table.pp-cmp [data-load='2']")
         assert pg.evaluate("window.gne.recipe.specs()") == ["12:H5:s10@ppx", "12:H3:s7@ppx"] and pg.evaluate("window.gne.recipe.name") == "ppx-n2"
         pg.remove_listener("dialog", accept)
         asked = []
         pg.once("dialog", lambda d: (asked.append(d.message), d.dismiss()))           # 中身のあるレシピを置き換えるときは確かめる(やめれば今のまま)
+        _step(pg, "chips", "alloc")
         pg.click(f"{res} table.pp-cmp [data-load='3']")
         assert asked and pg.evaluate("window.gne.recipe.name") == "ppx-n2"
         pg.on("dialog", accept)
@@ -2650,46 +2732,60 @@ def test_pipeline_api_and_panel(pipe_server, browser):
                                                                                body=f"data: {json.dumps(done)}\n\n"))
         pg.remove_listener("dialog", accept)
         pg.once("dialog", lambda d: d.dismiss())                                        # 見積もりの確認でやめたら、投げずに押せるまま
+        _step(pg, "chips", "alloc")
         pg.click(f"{res} table.pp-cmp [data-eval='3']")
         pg.wait_for_timeout(500)
         assert not pg.evaluate("document.querySelector('#pp-result table.pp-cmp [data-eval=\"3\"]').disabled")
         assert not [b for b in posts if b["kind"] == "eval" and b["params"].get("yes")]
         pg.on("dialog", accept)
+        _step(pg, "chips", "alloc")
         pg.click(f"{res} table.pp-cmp [data-eval='3']")
         pg.wait_for_function("document.querySelector('#pp-result table.pp-cmp [data-eval=\"3\"]').disabled", timeout=10000)
         ev = [b for b in posts if b["kind"] == "eval"]
         assert ev and ev[0]["params"]["recipe"].endswith("ppx.alloc-n3.yaml") and ev[0]["params"]["doses"] == [0, 1] \
             and ev[0]["params"]["random_controls"] == 8
+        _step(pg, "chips", "alloc")
         pg.click(f"{res} table.pp-cmp a.pp-head >> nth=0")                                 # ヘッドの名前から HEAD パネル(Causal)
         pg.wait_for_function("(document.querySelector('#head-body .n-id') || {}).textContent?.startsWith('L12 H5 ')", timeout=30000)
         assert pg.evaluate("window.gne.headPanel.tab") == "causal"
         # 入力の確かめ: 間違いは理由を出して押せない。ひな形は通る(質問が少ない注意だけ)
+        _step(pg, "chips", "input")
         pg.fill("#pp-text", '{"name": "bad name", "user_prompts": ["a"], "system_a": "x", "system_b": "x"}')
         pg.dispatch_event("#pp-text", "input")
         assert pg.evaluate("document.querySelector('#pp-go').disabled") and pg.evaluate("document.querySelectorAll('#pp-check .err').length") == 3
+        _step(pg, "chips", "input")
         pg.click("#pp-tpl")
         assert not pg.evaluate("document.querySelector('#pp-go').disabled") and pg.evaluate("document.querySelectorAll('#pp-check .err').length") == 0
         assert "pirate" in pg.evaluate("document.querySelector('#pp-check').textContent")
         # 用途別のひな形: 選ぶと入る(説明つき)。書き換えた入力欄は、確かめて断れば残る。小さな例に戻せる
         pg.wait_for_function("document.querySelectorAll('#pp-tpl-sel option').length === 6", timeout=10000)
+        _step(pg, "chips", "input")
         pg.select_option("#pp-tpl-sel", "question_kinds.json")
         assert pg.evaluate("JSON.parse(document.querySelector('#pp-text').value).name") == "ja_vs_en"
         assert pg.evaluate("document.querySelector('#pp-tpl-about').textContent").strip()
         assert not pg.evaluate("document.querySelector('#pp-go').disabled")
+        _step(pg, "chips", "input")
         pg.fill("#pp-text", '{"name": "mine"}')
         pg.dispatch_event("#pp-text", "input")
         pg.remove_listener("dialog", accept)
         pg.once("dialog", lambda d: d.dismiss())
+        _step(pg, "chips", "input")
         pg.select_option("#pp-tpl-sel", "recipe_persona.json")
         assert pg.evaluate("document.querySelector('#pp-text').value") == '{"name": "mine"}'
         pg.on("dialog", accept)
+        _step(pg, "chips", "input")
         pg.select_option("#pp-tpl-sel", "small")
         assert "pirate" in pg.evaluate("document.querySelector('#pp-check').textContent")
+        _step(pg, "chips", "input")
         pg.fill("#pp-nheads", "3,2")
+        _step(pg, "chips", "input")
         pg.fill("#pp-mx", "8")
+        _step(pg, "chips", "input")
         pg.fill("#pp-tl", "1")
+        _step(pg, "chips", "input")
         pg.fill("#pp-hard", "4")
         pg.evaluate("window.gne.directionView.pipe.data = null; document.querySelector('#pp-result').innerHTML = ''")
+        _step(pg, "chips", "input")
         pg.click("#pp-go")
         pg.wait_for_function("window.gne.directionView.pipe.data && window.gne.directionView.pipe.data.name === 'ppx' && document.querySelector('#pp-result table.pp-cmp')",
                              timeout=30000)                                                # 終わりの知らせ(app.js の onJobFinished)で結果を開く
@@ -2700,10 +2796,13 @@ def test_pipeline_api_and_panel(pipe_server, browser):
         assert p["spec"]["name"] == "pirate" and len(p["spec"]["user_prompts"]) == 8
         # 目標の欄: 数のほかに B(B 側の平均)と mid。読めない書き方は投げない
         for v, want in (("b", "B"), ("mid", "mid"), ("-3.5", -3.5)):
+            _step(pg, "chips", "input")
             pg.fill("#pp-target", v)
             assert pg.evaluate("window.gne.directionView.pipe.params().target") == want
+        _step(pg, "chips", "input")
         pg.fill("#pp-target", "half")
         assert pg.evaluate("window.gne.directionView.pipe.params()") is None
+        _step(pg, "chips", "input")
         pg.fill("#pp-target", "")
         if lang == "en":
             assert pg.evaluate("[...window.gneI18n.missing]") == []
@@ -2813,9 +2912,12 @@ def test_pipeline_late_open_does_not_overwrite(pipe_server, browser):
     pg.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
     pg.click("#views button[data-view=chips]")
     pg.wait_for_function("window.gne.directionView && window.gne.directionView.mode === 'pipe'", timeout=60000)
+    _step(pg, "chips", "past")
     pg.wait_for_selector("#pp-past tr[data-pp=ppx2]", timeout=30000)
+    _step(pg, "chips", "past")
     pg.click("#pp-past tr[data-pp=ppx]")
     late.wait_held(pg)                                                               # ppx の中身を止めている(返すときは本物のサーバへ)
+    _step(pg, "chips", "past")
     pg.click("#pp-past tr[data-pp=ppx2]")
     pg.wait_for_function("window.gne.directionView.pipe.data && window.gne.directionView.pipe.data.name === 'ppx2'", timeout=30000)
     late.release(pg, "**/api/pipelines/ppx")
@@ -2924,6 +3026,7 @@ def test_candidates_blind_scoring_in_browser(cand_server, browser):
     assert pg.evaluate("document.querySelectorAll('#cd-done table.cd-sum tr.best').length") == 2
     c = next(x for x in pg.evaluate(f"{cand}.data.candidates") if x["name"] == best["remove"]["name"])
     want = [f"{u.split(':')[0]}:{u.split(':')[1]}:s{float(u.split(':s')[1].split('@')[0]) * c['scale']:g}@evil" for u in c["units"]]
+    _step(pg, "chips", "alloc")
     pg.click("#cd-done .cd-best >> nth=0 >> [data-load]")
     assert pg.evaluate("window.gne.recipe.specs()") == want and pg.evaluate("window.gne.recipe.name") == f"cand_ui-{c['name']}"
     pg.click("#cd-done .cd-best >> nth=1 >> [data-chat]")                             # 強める向き: 負の倍率のまま 1 列チャットへ
@@ -2946,21 +3049,29 @@ def test_candidates_blind_scoring_in_browser(cand_server, browser):
                                                                            body=f"data: {json.dumps(done)}\n\n"))
     pg.click("#views button[data-view=direction]")
     pg.click("#views button[data-view=chips]")
+    _step(pg, "chips", "past")
     pg.wait_for_selector("#pp-past tr[data-pp=ppx]", timeout=30000)
+    _step(pg, "chips", "past")
     pg.click("#pp-past tr[data-pp=ppx]")
+    _step(pg, "chips", "cand")
     pg.wait_for_selector("#pc-go", timeout=30000)
     assert pg.evaluate("document.querySelector('#pc-scales').value") == "0.5,1,1.5,2,3"     # 既定の倍率(1 より大きい側を厚く)
+    _step(pg, "chips", "cand")
     pg.fill("#pc-scales", "0.5,0, 1")
     pg.dispatch_event("#pc-scales", "input")
+    _step(pg, "chips", "cand")
     pg.click("#pc-go")
     assert pg.evaluate("document.querySelector('#pc-status').classList.contains('err')") and not posts   # 0 は使えない
     for sel, v in (("#pc-scales", "0.5,1,-1"), ("#pc-mp", "5"), ("#pc-mt", "40"), ("#pc-seed", "7"), ("#pc-qa", "Q1?\nQ2?\n\n"), ("#pc-qb", "R1?"),
                    ("#pc-with", "seed_r"), ("#pc-nheads", "2")):
         pg.fill(sel, v)
         pg.dispatch_event(sel, "input")
+    _step(pg, "chips", "cand")
     pg.select_option("#pc-sp", "greedy")
     pg.dispatch_event("#pc-sp", "change")
+    _step(pg, "chips", "cand")
     pg.click("#pc-jb")
+    _step(pg, "chips", "cand")
     pg.click("#pc-go")
     pg.wait_for_function(f"window.gne.directionView.mode === 'cand' && {cand}.data && {cand}.data.name === 'cand_ui'", timeout=30000)
     assert len(posts) == 1 and posts[0]["kind"] == "heads_candidates"
@@ -3110,8 +3221,11 @@ def test_pipeline_refine_button_and_note(refine_server, browser):
     pg.evaluate("window.gne.recipe.clear(); try { localStorage.removeItem('gne.pipeline.draft') } catch {}")
     pg.click("#views button[data-view=chips]")
     pg.wait_for_function("window.gne.directionView && window.gne.directionView.mode === 'pipe'", timeout=60000)
+    _step(pg, "chips", "past")
     pg.wait_for_selector("#pp-past tr[data-pp=ppx]", timeout=30000)
+    _step(pg, "chips", "past")
     pg.click("#pp-past tr[data-pp=ppx]")
+    _step(pg, "chips", "alloc")
     pg.wait_for_selector("#pp-result table.pp-cmp [data-refine='2']", timeout=30000)
     assert not pg.evaluate("document.querySelector(\"#pp-result [data-refine='2']\").disabled")
     assert pg.evaluate("document.querySelectorAll('#pp-result .pp-refine').length") == 0
@@ -3130,20 +3244,25 @@ def test_pipeline_refine_button_and_note(refine_server, browser):
             "yields": 0, "seconds": 5.0, "result": {"name": "ppx_r1"}, "error": None}
     pg.route("**/api/jobs/fake-ref/events", lambda route, req: route.fulfill(status=200, content_type="text/event-stream",
                                                                           body=f"data: {json.dumps(done)}\n\n"))
+    _step(pg, "chips", "alloc")
     pg.click("#pp-result [data-refine='2']")
     pg.wait_for_function("window.gne.directionView.pipe.data && window.gne.directionView.pipe.data.name === 'ppx_r1'", timeout=30000)
     assert posts and posts[0]["kind"] == "heads_refine" and posts[0]["params"] == {"name": "ppx", "n_heads": 2}
     pg.wait_for_selector("#pp-result .pp-refine", timeout=10000)
     note = pg.evaluate("document.querySelector('#pp-result .pp-refine').textContent")
     assert "ppx" in note and "3 問" in note and "残り 3 → 1 問" in note and "4 問で作りました" in note
+    _step(pg, "chips", "alloc")
     pg.click("#pp-rf-load")
     assert pg.evaluate("window.gne.recipe.specs()") == ["12:H5:s10@ppx", "12:H3:s7@ppx", "16:H2:s4@ppx_r1"]
     # 比較表の行は「元の組 + この組」: 読み込むと元の組の 2 個と、その行の追加のヘッド
     assert "元の組と合わせると" in pg.evaluate("document.querySelector(\"#pp-result table.pp-cmp [data-load='3']\").closest('td').textContent")
+    _step(pg, "chips", "alloc")
     pg.click("#pp-result table.pp-cmp [data-load='3']")
     assert pg.evaluate("window.gne.recipe.specs()") == ["12:H5:s10@ppx", "12:H3:s7@ppx", "16:H2:s4@ppx_r1", "16:H5:s2@ppx_r1", "17:H1:s1@ppx_r1"]
+    _step(pg, "chips", "alloc")
     pg.click("#pp-result table.pp-cmp [data-eval='2']")
     assert [b for b in posts if b["kind"] == "eval"][-1]["params"]["recipe"].endswith("ppx_r1.combined-n2.yaml")
+    _step(pg, "chips", "alloc")
     pg.click("#pp-rf-eval")
     ev = [b for b in posts if b["kind"] == "eval"]
     assert ev and ev[-1]["params"]["recipe"].endswith("ppx_r1.combined.yaml")
@@ -3154,7 +3273,9 @@ def test_pipeline_refine_button_and_note(refine_server, browser):
     pe.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
     pe.click("#views button[data-view=chips]")
     pe.wait_for_function("window.gne.directionView && window.gne.directionView.mode === 'pipe'", timeout=60000)
+    _step(pe, "chips", "past")
     pe.wait_for_selector("#pp-past tr[data-pp=ppx_r1]", timeout=30000)
+    _step(pe, "chips", "past")
     pe.click("#pp-past tr[data-pp=ppx_r1]")
     pe.wait_for_selector("#pp-result .pp-refine", timeout=30000)
     assert pe.evaluate("[...window.gneI18n.missing]") == []
@@ -3303,14 +3424,23 @@ def test_eval_tab_direction_metric_options(refine_server, browser):
         pg.evaluate("window.gne.recipe.clear(); window.gne.recipe.loadProj('ppx-n2', ['12:H5:s10@ppx', '12:H3:s7@ppx'], 'ppx')")
         pg.click("#views button[data-view=eval]")
         pg.wait_for_function("window.gne.evalView && !document.querySelector('#evx-go').disabled", timeout=30000)
+        _step(pg, "eval", "main")
         pg.fill("#evx-doses", "0,1")
+        _step(pg, "eval", "main")
         pg.click("#evx-go")
+        _step(pg, "eval", "main")
         pg.uncheck("#evx-dm")
+        _step(pg, "eval", "main")
         pg.click("#evx-go")
+        _step(pg, "eval", "main")
         pg.check("#evx-dm")
+        _step(pg, "eval", "main")
         pg.fill("#evx-dm-n", "0")
+        _step(pg, "eval", "main")
         pg.click("#evx-go")
+        _step(pg, "eval", "main")
         pg.fill("#evx-dm-n", "16")
+        _step(pg, "eval", "main")
         pg.click("#evx-go")
         pg.wait_for_function(f"true", timeout=1000)
         ps = [b["params"] for b in posts if b["kind"] == "eval"]
@@ -3378,17 +3508,28 @@ def test_fieldtest_panel(refine_server, browser, tmp_path):
         pg.click("#views button[data-view=eval]")
         pg.wait_for_function("window.gne.evalView && window.gne.evalView.ft", timeout=30000)
         pg.evaluate("document.querySelector('#evx-ft-wrap').open = true")
+        _step(pg, "eval", "ft")
         pg.fill("#ft-prompts", "broken line")
+        _step(pg, "eval", "ft")
         pg.click("#ft-go")
         assert not posts and pg.evaluate("document.querySelector('#ft-status').classList.contains('err')")   # 質問集の書き方の誤り
+        _step(pg, "eval", "ft")
         pg.fill("#ft-model", "/m/a.gguf")
+        _step(pg, "eval", "ft")
         pg.fill("#ft-against", "/m/b.gguf")
+        _step(pg, "eval", "ft")
         pg.fill("#ft-prompts", "mine=/q/x.json\n")
+        _step(pg, "eval", "ft")
         pg.fill("#ft-match", "abc")
+        _step(pg, "eval", "ft")
         pg.fill("#ft-long", "2048")
+        _step(pg, "eval", "ft")
         pg.uncheck("#ft-ppl")
+        _step(pg, "eval", "ft")
         pg.check("#ft-gsm8k")
+        _step(pg, "eval", "ft")
         pg.click("#ft-go")
+        _step(pg, "eval", "ft")
         pg.wait_for_selector("#ft-result .ft-table", timeout=15000)
         p = posts[0]["params"]
         assert posts[0]["kind"] == "fieldtest" and p == {"long_tokens": 2048, "tool_tokens": 1536, "prompt_tokens": 1536, "ppl": False, "model": "/m/a.gguf",

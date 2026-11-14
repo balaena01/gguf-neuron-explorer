@@ -14,6 +14,7 @@
 import { getJSON } from "./api.js";
 import { t } from "./i18n.js";
 import { esc } from "./panels.js";
+import { noteHTML } from "./ui.js";
 
 const fmt = (x, d = 3) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : (+x).toFixed(d));
 const sgn = (x, d = 3) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : `${+x >= 0 ? "+" : "−"}${Math.abs(+x).toFixed(d)}`);
@@ -66,7 +67,8 @@ function eff(e) {
 const range = (r) => (r ? `${sgn(r.min)}〜${sgn(r.max)}` : "—");
 
 export class KeyCausal {
-  constructor(root, { onRun, onAddKeyed, source, defaults, moe } = {}) {
+  constructor(root, { onRun, onAddKeyed, source, defaults, moe, onShown } = {}) {
+    this.onShown = onShown || (() => {});   // 結果を出したとき(鍵の画面が作業の一覧の印を付け直す)
     this.root = root;
     this.onRun = onRun || (async () => null);       // (kind, params) → Promise<ジョブ | null>
     this.onAddKeyed = onAddKeyed || (() => {});     // ({ layer, kind, expert, alpha, direction, key }) → レシピに足す
@@ -85,7 +87,7 @@ export class KeyCausal {
     this.sort = { col: null, dir: 1 };              // 表の並べ替え(見出しのクリック)
     this.selKeys = new Set();                       // 選んだ行(書き込み先:層。並べ替え・強さの切り替えで描き直しても残す)
     root.innerHTML = `<h4>${t("効く層を探す")} <span class="muted note">${t("(keyed の効く場所: 生成なしのふるい分け → 生成での確かめ)")}</span></h4>
-      <p class="muted note pp-help">${t("key-check は鍵が場面を分けるか(鍵の反応の強さ)しか見ません。どの層・どの書き込み先に書けば振る舞いが変わるかは別の問題です。第 1 段は、上の「鍵を作る」の対照集合で、候補(層 × 書き込み先)ごとに鍵を作り(偶数番目)、作成に使っていない奇数番目の返事で、keyed を当てたときに振る舞いの部分(positions の正規表現に一致した文字)の対数確率がどれだけ下がるかを、比較用の鍵と並べて生成なしで測ります。生成なしの値は保証ではないので、表から候補を数行選び、第 2 段の生成で振る舞いの数を確かめます。介入(iv)と返事の長さは「鍵を作る」の欄のものを使います。")}</p>
+      ${noteHTML(t("key-check は鍵が場面を分けるか(鍵の反応の強さ)しか見ません。どの層・どの書き込み先に書けば振る舞いが変わるかは別の問題です。第 1 段は、上の「鍵を作る」の対照集合で、候補(層 × 書き込み先)ごとに鍵を作り(偶数番目)、作成に使っていない奇数番目の返事で、keyed を当てたときに振る舞いの部分(positions の正規表現に一致した文字)の対数確率がどれだけ下がるかを、比較用の鍵と並べて生成なしで測ります。生成なしの値は保証ではないので、表から候補を数行選び、第 2 段の生成で振る舞いの数を確かめます。介入(iv)と返事の長さは「鍵を作る」の欄のものを使います。"), "muted note pp-help")}
       <div class="pp-set">
         <label class="muted" title="${t("候補の層(カンマ区切りか 10-16)。空なら全層(最終層と MTP の層は除く)")}">${t("層")} <input id="kz-layers" size="12" placeholder="${t("空なら全層")}" spellcheck="false"></label>
         <span class="muted" title="${t("候補の書き込み先。ffn = ffn_down、attn = attn_output。書けない書き込み先・層は外す")}">${t("書き込み先")}
@@ -241,6 +243,7 @@ export class KeyCausal {
   show(r) {
     this.result = r;
     this.shown++;
+    this.onShown();
     this.selKeys = new Set();
     const al = (r && r.alphas) || [];
     this.ralpha = al.length ? String(al.reduce((a, b) => (Math.abs(b) > Math.abs(a) ? b : a))) : null;   // 既定は |α| が最大の強さ

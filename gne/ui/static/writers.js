@@ -4,6 +4,7 @@
 import { getJSON } from "./api.js";
 import { t } from "./i18n.js";
 import { esc } from "./panels.js";
+import { noteHTML } from "./ui.js";
 
 const C = { text: "#aeb9c8", muted: "#6b7686", grid: "#1a212b", mlp: "#e8b04a", mixer: "#9fb3cf", cum: "#6fcf8f", zero: "#39424f" };
 const L0 = 52, R0 = 16, T0 = 14, B0 = 30, H = 240;
@@ -31,7 +32,7 @@ export class WritersView {
           <label class="muted" title="${t("A の返事を生成せずに読ませる(別のモデルの返事を借りるとき)。空なら生成する")}">${t("A の返事")} <input id="wrx-replies" placeholder="${t("(生成する)")}" size="16" spellcheck="false"></label>
           <label class="muted">${t("参照の層")} <input id="wrx-ref" placeholder="${t("既定")}" size="4"></label>
           <button class="main" id="wrx-go">${t("測る")}</button></span></div>
-      <p class="muted note evx-help">${t("A(見たい状態、例 ヤンデレの system)と B(中立)の返事のトークンで、各ニューロンが残差に書き足した量(活性の差 × 書く向き)を測る。寄与は、参照の層の A − B の方向 r* への直接の成分。活性の差だけを見る「読み手」と違い、方向に実際に書いているものが上に来る。")}</p>
+      ${noteHTML(t("A(見たい状態、例 ヤンデレの system)と B(中立)の返事のトークンで、各ニューロンが残差に書き足した量(活性の差 × 書く向き)を測る。寄与は、参照の層の A − B の方向 r* への直接の成分。活性の差だけを見る「読み手」と違い、方向に実際に書いているものが上に来る。"), "muted note evx-help")}
       <div id="wrx-body"></div>`;
     this.$ = (s) => root.querySelector(s);
     this.$("#wrx-pick").addEventListener("change", (ev) => this.load(ev.target.value));
@@ -89,7 +90,7 @@ export class WritersView {
 
   render() {
     const body = this.$("#wrx-body"), d = this.data;
-    if (!d) { body.innerHTML = `<p class="muted note">${t("分析がまだありません。上の「測る」か gne writers --contrast で作ります(MCP の writers でも)。")}</p>`; return; }
+    if (!d) { body.innerHTML = `${noteHTML(t("分析がまだありません。上の「測る」か gne writers --contrast で作ります(MCP の writers でも)。"), "muted note")}`; return; }
     const tt = d.totals;
     const rows = (xs, start = 1) => xs.map((x, i) => `<tr class="pick" data-layer="${x.layer}" data-n="${x.neuron}">
         <td>${i + start}</td><td>L${x.layer} N${x.neuron}</td><td class="${x.share >= 0 ? "ok" : "ng"}">${pct(x.share, 2)}</td>

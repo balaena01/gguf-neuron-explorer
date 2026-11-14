@@ -12,16 +12,32 @@ export function wireTabs(list, onSelect) {
   const tabs = () => [...list.querySelectorAll('[role="tab"]:not([disabled])')];
   list.addEventListener("click", (ev) => {
     const b = ev.target.closest('[role="tab"]');
-    if (b && list.contains(b) && !b.disabled) onSelect(b.dataset.rtab ?? b.dataset.tab);
+    if (b && list.contains(b) && !b.disabled) onSelect(b.dataset.rtab ?? b.dataset.step ?? b.dataset.tab);
   });
   list.addEventListener("keydown", (ev) => {
     const xs = tabs(), i = xs.indexOf(document.activeElement);
     if (i < 0) return;
-    const j = { ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: xs.length - 1 }[ev.key];
+    const vert = list.getAttribute("aria-orientation") === "vertical";
+    const j = { [vert ? "ArrowDown" : "ArrowRight"]: i + 1, [vert ? "ArrowUp" : "ArrowLeft"]: i - 1, Home: 0, End: xs.length - 1 }[ev.key];
     if (j === undefined) return;
     ev.preventDefault();
     const b = xs[(j + xs.length) % xs.length];
-    onSelect(b.dataset.rtab ?? b.dataset.tab);
+    onSelect(b.dataset.rtab ?? b.dataset.step ?? b.dataset.tab);
     b.focus();
   });
+}
+
+// 長い説明: 最初の文を短い 1 行にして、開くと全文が読めるようにする(<details> なので、閉じていてもページ内検索で見つかる)。
+// 短い文はそのまま。text は t() を通した文(中の <code> などはそのまま出す)
+export function noteHTML(text, cls = "muted note") {
+  const s = String(text);
+  if (s.length < 60) return `<p class="${cls}">${s}</p>`;
+  const i = s.search(/。|\. /);
+  let head = i >= 0 ? s.slice(0, i + 1) : s;
+  if (head.length > 56) {
+    const cut = Math.max(head.lastIndexOf("、", 44), head.lastIndexOf("(", 44), head.lastIndexOf(", ", 44), head.lastIndexOf(": ", 44));
+    head = `${head.slice(0, cut > 12 ? cut : 44)}…`;
+  }
+  if (head === s) return `<p class="${cls}">${s}</p>`;
+  return `<details class="more ${cls}"><summary>${head}</summary><p>${s}</p></details>`;
 }

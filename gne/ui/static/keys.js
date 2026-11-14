@@ -25,6 +25,8 @@ import { ChipsLeft } from "./chips_left.js";
 import { KeyCausal } from "./keys_causal.js";
 import { LANG, t } from "./i18n.js";
 import { esc } from "./panels.js";
+import { Steps } from "./steps.js";
+import { noteHTML } from "./ui.js";
 
 const fmt = (x, d = 2) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : (+x).toFixed(d));
 const short = (s, n = 60) => { const x = String(s ?? ""); return x.length > n ? `${x.slice(0, n - 1)}…` : x; };
@@ -255,9 +257,10 @@ export class KeyPanel {
     this.loaded = false;
     const n = this.nLayer, sug = n ? [0.3, 0.5, 0.7].map((f) => Math.round((n - 1) * f)).join(",") : "";
     root.innerHTML = `
-      <p class="muted note pp-help">${t("鍵つきの書き込み(keyed): 残差に書き込む重み行列(ffn_down など)にランク 1 の ΔW = α·d·κᵀ を足し、入力の活性 x に鍵 κ が反応する(鍵の反応の強さ ρ = κᵀx が大きい)ときだけ方向 d(方向セットの r_L)を書く。κ は書き込みたい位置の活性の平均 μ から、書き込みたくない位置と dont_touch の活性が張る部分空間を除いたもの(κᵀμ = 1)。鍵を作ったら、作成に使っていない例(subset odd か別の対照集合)で key-check を回し、比較用の鍵(ラベルをシャッフルして同じ手順で作った鍵)より選択性が高いことを確かめてから、レシピに足す。")}</p>
-      <details class="kx-sec kb" id="kb-wrap"></details>
-      <section class="kx-sec"><h4>${t("鍵を作る")}</h4>
+      <details class="kx-sec kb" id="kb-wrap" data-step="chips" open></details>
+      <section class="kx-sec" data-step="make">
+        ${noteHTML(t("鍵つきの書き込み(keyed): 残差に書き込む重み行列(ffn_down など)にランク 1 の ΔW = α·d·κᵀ を足し、入力の活性 x に鍵 κ が反応する(鍵の反応の強さ ρ = κᵀx が大きい)ときだけ方向 d(方向セットの r_L)を書く。κ は書き込みたい位置の活性の平均 μ から、書き込みたくない位置と dont_touch の活性が張る部分空間を除いたもの(κᵀμ = 1)。鍵を作ったら、作成に使っていない例(subset odd か別の対照集合)で key-check を回し、比較用の鍵(ラベルをシャッフルして同じ手順で作った鍵)より選択性が高いことを確かめてから、レシピに足す。"))}
+        <div id="kx-shared"><p class="stage-shared-h">${t("共通の設定(作る・効く層を探す が使う)")}</p>
         <div class="pp-in"><span class="muted">${t("対照集合")}</span>
           <span class="seg" id="kx-src"><button data-src="file" title="${t("configs/contrast/ か <root>/contrasts/ の YAML を選ぶ")}">${t("ファイルを選ぶ")}</button><button data-src="json" title="${t("用途別のひな形(configs/keyed/)から始めて、入力欄の JSON を手で直す")}">${t("JSON を書く(ひな形から)")}</button></span>
           <label class="muted" title="${t("用途別のひな形(configs/keyed/)と、自分で作ったひな形(<root>/keyed/)。選ぶと入力欄に入る")}">${t("ひな形")}
@@ -301,6 +304,7 @@ export class KeyPanel {
           <label class="muted" title="${t("比較用の鍵のシャッフルの種")}">seed <input class="w45" id="kx-seed" type="number" value="0"></label>
           <label class="muted" title="${t("「方向から key-check まで」で方向を作るとき、A・B の返事を生成する長さ")}">${t("方向の返事の長さ")} <input class="w5" id="kx-rt" type="number" min="1" max="2048" value="96"></label>
         </div></details>
+        </div>
         <div class="pp-go">
           <button class="main" id="kx-pipe-go" title="${t("方向(gne direction --positions response と同じ)→ 鍵 → 作成と反対側の subset での key-check を 1 回のジョブで回す")}">${t("方向から key-check まで")}</button>
           <label class="muted" title="${t("同じ名前の方向があっても使い回さず、返事を作って作り直す")}"><input type="checkbox" id="kx-rebuild"> ${t("方向を作り直す")}</label>
@@ -311,13 +315,15 @@ export class KeyPanel {
         <div id="kx-prog" class="note mono"></div>
         <div id="kx-exp" class="hidden"><h4 class="note">${t("専門家の選ばれ方(MoE)")} <span class="muted note" id="kx-estatus"></span></h4><div id="kx-eprog" class="note mono"></div><div id="kx-eres"></div></div>
         <div id="kx-pipe"></div>
+        <div data-anchor="make">
         <div id="kx-build"></div>
         <div id="kx-verify" class="hidden"><h4 class="note">${t("LoRA が式どおりに書くか(key-verify)")} <span class="muted note" id="kx-vstatus"></span></h4>
           <details><summary class="muted note">${t("流す文")}</summary><textarea id="kx-vtexts" class="mono" rows="3" spellcheck="false" placeholder="${t("1 行に 1 文。空なら既定の 2 文(語尾の違う日本語と英語)。専門家の鍵は、その専門家が選ばれる文を")}"></textarea></details>
           <div id="kx-vprog" class="note mono"></div><div id="kx-vres"></div></div>
+        </div>
       </section>
-      <section class="kx-sec" id="kz-wrap"></section>
-      <section class="kx-sec"><h4>${t("鍵の分離を確かめる(key-check)")}</h4>
+      <section class="kx-sec" id="kz-wrap" data-step="causal"></section>
+      <section class="kx-sec" data-step="check">
         <div class="pp-set">
           <label class="muted">${t("鍵")} <select id="kc-key"></select></label>
           <label class="muted" title="${t("確かめる対照集合。鍵を作ったものと同じなら、作成と反対側の subset で(重なると AUC が甘くなる)。なしなら鍵に保存した作成時の例で測る(甘い)")}">${t("対照集合")} <select id="kc-contrast"></select></label>
@@ -329,9 +335,9 @@ export class KeyPanel {
         </div>
         <div class="pp-go"><button class="main" id="kc-go">${t("key-check を回す")}</button> <span class="muted note" id="kc-status"></span></div>
         <div id="kc-prog" class="note mono"></div>
-        <div id="kc-res"></div>
+        <div data-anchor="check"><div id="kc-res"></div></div>
       </section>
-      <section class="kx-sec"><h4>${t("保存した鍵")}</h4><div id="kx-keys"><p class="muted note">${t("読み込み中…")}</p></div></section>`;
+      <section class="kx-sec" data-step="saved"><div id="kx-keys"><p class="muted note">${t("読み込み中…")}</p></div><div data-anchor="saved"></div></section>`;
     this.$ = (s) => root.querySelector(s);
     this.chips = new ChipsLeft(this.$("#kb-wrap"), {
       onRun: (kind, p) => this.onRun(kind, p), dirs: () => this.dirs, contrasts: () => this.contrasts,
@@ -345,7 +351,7 @@ export class KeyPanel {
     });
     this.causal = new KeyCausal(this.$("#kz-wrap"), {
       onRun: (kind, p) => this.onRun(kind, p), onAddKeyed: (u) => this.onAddKeyed(u), moe: this.moe.size > 0,
-      source: () => this.currentSource(),
+      source: () => this.currentSource(), onShown: () => this.marks(),
       defaults: () => {                                      // 介入(iv)と返事の長さは「鍵を作る」の欄のもの
         const iv = this.$("#kx-iv").value.trim(), mt = +this.$("#kx-mt").value;
         const kd = this.src === "json" && this.jspec.spec && this.jspec.spec.keyed && typeof this.jspec.spec.keyed === "object" ? this.jspec.spec.keyed : {};
@@ -382,6 +388,38 @@ export class KeyPanel {
     try { src = localStorage.getItem(SRC) === "json" ? "json" : "file"; } catch { /* 既定はファイル */ }
     this.setSource(src, false);
     root.addEventListener("click", (ev) => this.onClick(ev));
+    // 左の作業の一覧で切り替える(作る・効く層を探す・分かれ方を確かめる・保存した鍵・CHiPS の残りから作る)
+    const sec = (k) => () => [root.querySelector(`.kx-sec[data-step="${k}"]`)];
+    this.steps = new Steps(root, {
+      shared: this.$("#kx-shared"), store: "gne.keys.step", label: t("鍵の作業"),
+      steps: [{ key: "make", label: t("鍵を作る"), els: sec("make"), shared: true },
+              { key: "causal", label: t("効く層を探す"), els: sec("causal"), shared: true },
+              { key: "check", label: t("分かれ方を確かめる(key-check)"), els: sec("check") },
+              { key: "saved", label: t("保存した鍵"), els: sec("saved") },
+              { key: "chips", label: t("CHiPS の残りから作る"), els: sec("chips"), sep: true }],
+    });
+    this.marks();
+  }
+
+  // 結果の置き場所を替える(押した所のすぐ下に出す)。where: make・check・saved
+  placeBuild(where) {
+    const a = this.root.querySelector(`[data-anchor="${where}"]`);
+    a.prepend(this.$("#kx-verify"));
+    a.prepend(this.$("#kx-build"));
+  }
+
+  placeCheck(where) {
+    this.root.querySelector(`[data-anchor="${where}"]`).append(this.$("#kc-res"));
+  }
+
+  // 作業の一覧の印(済・実行中・まだ)
+  marks() {
+    if (!this.steps) return;
+    const run = (w) => !!(this.jobs[w] && !this.handled.has(this.jobs[w]));
+    const m = (k, running, done) => this.steps.mark(k, running ? "run" : done ? "done" : "todo");
+    m("make", run("build") || run("pipe") || run("exp") || run("verify"), !!(this.built && this.built.kind === "build"));
+    m("causal", false, !!(this.causal && this.causal.result));
+    m("check", run("check"), !!this.checked);
   }
 
   // ひな形の一覧(configs/keyed/ と <root>/keyed/)を取り直して「ひな形」の選択に入れる。<root>/keyed/ のものは別の組に
@@ -695,6 +733,7 @@ export class KeyPanel {
       this.jobs[which] = j.id;
       this.status(which, running);
       this.follow(j.id, progSel);
+      this.marks();
     } catch (e) { this.status(which, `${t("エラー")}: ${e.message}`, true); }
   }
 
@@ -752,6 +791,7 @@ export class KeyPanel {
     }
     if (this.handled.has(j.id)) return;
     this.handled.add(j.id);
+    this.marks();
     this.$({ build: "#kx-prog", pipe: "#kx-prog", check: "#kc-prog", exp: "#kx-eprog", verify: "#kx-vprog" }[which]).innerHTML = "";
     if (j.status !== "done") {
       const e = j.error || {};
@@ -767,6 +807,7 @@ export class KeyPanel {
       this.built = { kind: "build", params: j.params || {}, r };
       await this.refresh();
       this.fillKeys(r.name);
+      this.placeBuild("make");
       this.renderBuilt();
     } else if (which === "pipe") {
       done();
@@ -779,15 +820,18 @@ export class KeyPanel {
       await this.refresh();
       this.fillKeys(r.name);
       this.renderPipe();
+      this.placeBuild("make");
       this.renderBuilt();
-      if (r.check) {
+      if (r.check) {                                         // 一括の結果は 1 か所に(作る の下に、key-check の結果も続けて)
         this.checked = r.check;
         this.prepareCheck(r.name, false);
+        this.placeCheck("make");
         this.renderCheck();
       }
     } else if (which === "check") {
       done();
       this.checked = r;
+      this.placeCheck("check");
       this.renderCheck();
     } else if (which === "exp") {
       done();
@@ -1005,6 +1049,7 @@ export class KeyPanel {
       const k = await getJSON(`/api/keys/${encodeURIComponent(name)}`);
       if (stale()) return;
       this.built = { kind: "saved", r: { ...k, n_pseudo: k.n_pseudo } };
+      this.placeBuild("saved");                              // 「見る」の結果は保存した鍵の一覧のすぐ下に
       this.renderBuilt();
       this.$("#kx-build").scrollIntoView({ block: "nearest" });
     } catch (e) { if (!stale()) this.status("build", `${t("エラー")}: ${e.message}`, true); }
@@ -1024,7 +1069,7 @@ export class KeyPanel {
       if (v && [...sel.options].some((o) => o.value === v)) sel.value = v;
       this.$("#kc-replies").value = typeof p.replies_a === "string" ? p.replies_a : "";
     }
-    if (scroll) this.$("#kc-go").scrollIntoView({ block: "nearest" });
+    if (scroll) { if (this.steps) this.steps.select("check"); this.$("#kc-go").scrollIntoView({ block: "nearest" }); }
   }
 
   onClick(ev) {
