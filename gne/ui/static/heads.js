@@ -207,7 +207,7 @@ export class HeadPanel {
     const canCmp = p.chat && !!p.system.trim();
     el.innerHTML = `
       <div class="ch-input"><textarea id="hp-text" rows="3" placeholder="${t("文章を入れて「流す」(このヘッドがどのトークンを見ているか)")}">${esc(p.text)}</textarea>
-        <button id="hp-run"${this.busy ? " disabled" : ""}>${t("流す")}</button></div>
+        <button class="main" id="hp-run"${this.busy ? " disabled" : ""}>${t("流す")}</button></div>
       <div class="ch-tools hp-opts">
         <label class="muted" title="${t("文章をユーザーの発話としてチャットテンプレートに入れる")}"><input type="checkbox" id="hp-chat"${p.chat ? " checked" : ""}> ${t("チャットの形")}</label>
         <label class="muted" title="${t("同じユーザーの発話を system あり/なしで流し、共通の末尾で注目の差を見る")}"><input type="checkbox" id="hp-compare"${p.compare ? " checked" : ""}${canCmp ? "" : " disabled"}> ${t("ペルソナあり/なしを比べる")}</label></div>
@@ -576,7 +576,7 @@ export class HeadPanel {
       <p class="muted note">${t("返事のトークンが、選んだヘッドで文脈のどのトークンに注目しているか。方向を選ぶと、文脈の各トークンがヘッドの出力を通してその方向にどれだけ寄与したか(注目 × ゲート × OV)も出す。")}</p>
       <textarea id="ls-system" class="hp-sys" rows="3" placeholder="${t("system(空なら system なし)")}">${esc(L.system)}</textarea>
       <div class="ch-input"><textarea id="ls-user" rows="2" placeholder="${t("ユーザーの発話")}">${esc(L.user)}</textarea>
-        <button id="ls-run"${this.busy ? " disabled" : ""}>${t("流す")}</button></div>
+        <button class="main" id="ls-run"${this.busy ? " disabled" : ""}>${t("流す")}</button></div>
       <textarea id="ls-reply" class="hp-sys" rows="2" placeholder="${t("返事(空なら greedy に作る)")}">${esc(L.reply)}</textarea>
       <div class="list-tools ls-opts">
         <label class="muted">${t("ヘッド")} <input id="ls-heads" class="mono" value="${esc(L.heads)}" spellcheck="false" title="${t("例 14:H0-3,16:H2(L:H* で層の全ヘッド)")}"></label>

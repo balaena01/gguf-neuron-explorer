@@ -37,7 +37,7 @@ export class FiresPanel {
       })].join("") : "";
     this.root.innerHTML = `
       <div class="ch-input"><textarea id="fi-text" rows="4" placeholder="${tr("文章を貼る(トークンごとに、どの層のどのニューロンが光るか)")}">${esc(this.text)}</textarea>
-        <button id="fi-run">${tr("流す")}</button></div>
+        <button class="main" id="fi-run">${tr("流す")}</button></div>
       <div class="ch-status muted note">${esc(this.status || tr("スコア = 活性 ÷ その層の基準(活性統計の q999)。先頭のトークンは除く"))}</div>
       ${r ? `<div class="fi-toks">${chips}</div>${this.routedHTML()}
       <div class="list-tools fi-filt">

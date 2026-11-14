@@ -395,7 +395,7 @@ export class SearchList {
     }).join("");
     this.root.innerHTML = `
       <div class="list-head"><span>${t("「{q}」({m}){n} 件", { q: esc(r.q), m: esc(r.mode), n: r.n_hits })}${r.hits.length < r.n_hits ? t("・先頭 {n}", { n: r.hits.length }) : ""}</span>
-        <button id="search-close" class="small">${t("閉じる")}</button></div>
+        <button id="search-close" class="small quiet">${t("閉じる")}</button></div>
       <p class="muted note">${t("並び: steer+ → logit+ → steer− → logit−、それぞれ lens の中の順位(#)の順。words は sweep の語の z の順")}</p>
       <div class="rank-wrap"><table class="rank mono"><tbody>${rows}</tbody></table></div>`;
     this.root.querySelector("#search-close").addEventListener("click", () => this.onClose());

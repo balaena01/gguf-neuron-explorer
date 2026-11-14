@@ -230,8 +230,8 @@ export class EmbedView {
       row = it(t("この run の順位の上位 8 本: ")) + row;
     }
     const f = this.getFocus(), nf = f ? this.data.points.filter((p) => this._isFocus(p, f)).length : 0;
-    const ring = nf ? it('<span class="sw ring" style="border-color:#fff"></span>', t("開いている {who} の rollout({n} 本)", { who: f.kind === "random" ? `random ${f.n}` : `L${f.layer} N${f.n}`, n: nf })) : "";
-    el.innerHTML = `<div>${row}${ring}${it('<span class="sw ring" style="border-color:#6fe3ff"></span>', t("マウスの下の点"))}</div>
+    const ring = nf ? it('<span class="sw ring white"></span>', t("開いている {who} の rollout({n} 本)", { who: f.kind === "random" ? `random ${f.n}` : `L${f.layer} N${f.n}`, n: nf })) : "";
+    el.innerHTML = `<div>${row}${ring}${it('<span class="sw ring agent"></span>', t("マウスの下の点"))}</div>
       <div class="note">${t("すぐ近くの点どうしは文が似ている。かたまり同士の距離・大きさ・向き、座標軸には意味がない(UMAP)")}</div>`;
   }
 

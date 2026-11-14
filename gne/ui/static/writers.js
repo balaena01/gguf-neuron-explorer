@@ -30,7 +30,7 @@ export class WritersView {
           <label class="muted">${t("対照集合")} <input id="wrx-contrast" placeholder="configs/contrast/yandere.yaml" size="30" spellcheck="false"></label>
           <label class="muted" title="${t("A の返事を生成せずに読ませる(別のモデルの返事を借りるとき)。空なら生成する")}">${t("A の返事")} <input id="wrx-replies" placeholder="${t("(生成する)")}" size="16" spellcheck="false"></label>
           <label class="muted">${t("参照の層")} <input id="wrx-ref" placeholder="${t("既定")}" size="4"></label>
-          <button id="wrx-go">${t("測る")}</button></span></div>
+          <button class="main" id="wrx-go">${t("測る")}</button></span></div>
       <p class="muted note evx-help">${t("A(見たい状態、例 ヤンデレの system)と B(中立)の返事のトークンで、各ニューロンが残差に書き足した量(活性の差 × 書く向き)を測る。寄与は、参照の層の A − B の方向 r* への直接の成分。活性の差だけを見る「読み手」と違い、方向に実際に書いているものが上に来る。")}</p>
       <div id="wrx-body"></div>`;
     this.$ = (s) => root.querySelector(s);

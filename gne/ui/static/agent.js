@@ -78,7 +78,7 @@ export class AgentLink {
       h.dose === null || h.dose === undefined ? "" : ` <span class="${h.dose >= 0 ? "plus" : "minus"}">${h.dose >= 0 ? "+" : "−"}${Math.abs(h.dose)}</span>`}</div>`).join("");
     const nt = s.notes.map((x) => `<div class="ag-row" data-open="${x.layer}:${x.neuron}"><b>L${x.layer} N${x.neuron}</b> ${esc(x.text)}</div>`).join("");
     const ago = s.last ? Math.round((Date.now() / 1000 - s.last.t) / 60) : null;
-    this.pop.innerHTML = `<div class="ag-head"><b>${t("エージェント")}</b><button class="small" id="ag-close">${t("閉じる")}</button>
+    this.pop.innerHTML = `<div class="ag-head"><b>${t("エージェント")}</b><button class="small quiet" id="ag-close">${t("閉じる")}</button>
         <span class="muted">${t(this.connected ? "接続中" : "未接続")}${s.last ? ` · ${t("最後")}: ${esc(this.lastText().replace(`${t("エージェント")}: `, ""))} (${ago < 1 ? t("1 分以内") : t("{n} 分前", { n: ago })})` : ""}</span></div>
       <p class="muted note">${t("Claude Code などから {cmd} で繋ぐと、エージェントの ui_highlight(強調)・ui_note(注釈)・ui_open(開く)がここと地図に出ます。行のクリックでそのニューロンを開きます。", { cmd: `<code>gne mcp --ui-url ${esc(location.origin)}</code>` })}</p>
       <h4>${t("強調 {n} 個", { n: s.highlights.length })}${s.label ? ` — ${esc(s.label)}` : ""}</h4>${hl || `<p class="muted note">${t("なし")}</p>`}

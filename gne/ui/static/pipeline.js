@@ -150,7 +150,7 @@ export class PipelinePanel {
         <label class="muted" title="${t("層ごとのスクリーニングのあと、ヘッドを 1 個ずつ止めて測る層の数")}">top_layers <input id="pp-tl" type="number" min="1" max="64" value="${DEFAULTS.top_layers}"></label>
         <label class="muted" title="${t("効率を測るときの、射影の値が残りやすい質問の数")}">hard <input id="pp-hard" type="number" min="1" max="1024" value="${DEFAULTS.hard}"></label>
         <label class="muted" title="${t("同じ JSON・同じ設定で作り済みの方向と因果の結果があっても使い回さず、最初から作り直す(止めて流し直すときは外したままにすると配分からやり直せる)")}"><input type="checkbox" id="pp-fresh"> ${t("最初から作り直す")}</label></div>
-      <div class="pp-go"><button id="pp-go" disabled>${t("方向とヘッドを作る")}</button> <span class="muted note" id="pp-status"></span></div>
+      <div class="pp-go"><button class="main" id="pp-go" disabled>${t("方向とヘッドを作る")}</button> <span class="muted note" id="pp-status"></span></div>
       <h4>${t("これまでの実行")}</h4><div id="pp-past"><p class="muted note">${t("読み込み中…")}</p></div>
       <div id="pp-result"></div>`;
     this.$ = (s) => root.querySelector(s);
@@ -423,7 +423,7 @@ export class PipelinePanel {
       <div class="pp-cand-q"><textarea id="pc-qa" rows="4" spellcheck="false" placeholder="${t("A 側の質問(調整に使っていないもの。1 行に 1 つ。空なら対照集合の質問)")}">${esc(f.qa)}</textarea>
         <textarea id="pc-qb" rows="4" spellcheck="false" placeholder="${t("B 側の質問(空なら A と同じ質問)")}">${esc(f.qb)}</textarea></div>
       <div class="pp-set"><label class="muted" title="${t("全部の候補(無介入も)に重ねるレシピ(ニューロンの種火など)。保存したレシピの名前か .yaml のパス")}">${t("重ねるレシピ")} <input id="pc-with" size="28" value="${esc(f.with_recipe)}" placeholder="${t("なし")}" spellcheck="false"></label></div>
-      <div class="pp-go"><button id="pc-go">${t("候補を作る")}</button>${this.candSaved ? ` <button class="small" id="pc-open">${t("保存した候補を開く")}</button>` : ""} <span class="muted note" id="pc-status">${esc(this.candStatus || "")}</span></div></div>`;
+      <div class="pp-go"><button class="main" id="pc-go">${t("候補を作る")}</button>${this.candSaved ? ` <button class="small" id="pc-open">${t("保存した候補を開く")}</button>` : ""} <span class="muted note" id="pc-status">${esc(this.candStatus || "")}</span></div></div>`;
   }
 
   wireCand(out, d) {

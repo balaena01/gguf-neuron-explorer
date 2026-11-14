@@ -128,7 +128,7 @@ export class JobsBar {
     const shown = [...live, ...ended.slice(0, 2)];
     this.root.innerHTML = `<span class="jb-list">${shown.map(one).join(`<span class="muted"> │ </span>`)}${
       ended.length > 2 ? `<span class="muted"> ${tr("ほか {n} 件", { n: ended.length - 2 })}</span>` : ""}</span>${
-      ended.length ? ` <button class="small" data-clear="1" title="${tr("終わったジョブを一覧から消す(ジョブの結果は消えない)")}">${tr("終わった分を消す")}</button>` : ""}`;
+      ended.length ? ` <button class="small quiet" data-clear="1" title="${tr("終わったジョブを一覧から消す(ジョブの結果は消えない)")}">${tr("終わった分を消す")}</button>` : ""}`;
   }
 }
 

@@ -129,10 +129,10 @@ export class FishPanel {
             <select id="fx-keyfit"><option value="mean">${t("いまの作り方(既定)")}</option><option value="ridge">${t("最小二乗(ますごとの重み)")}</option></select></label>
           <label class="muted" title="${t("最小二乗の鍵の正則化の強さ(行列の対角の平均の何倍か。例 1)。空なら、鍵を作る質問だけを使った質問単位の 5 分割で、0.01・0.1・1・10・100 から決める(選ばれた値は鍵の表の上に出る)")}">${t("正則化の強さ")} <input id="fx-keyc" size="7" placeholder="${t("5 分割で決める")}" spellcheck="false" disabled></label>
           <label class="muted" title="${t("先に当てておく介入: 保存したレシピの名前か、ユニットを空白区切りで。CHiPS のレシピを当てた状態で作るときに入れる。空なら無介入")}">${t("先に当てておくレシピ(iv)")} <input id="fx-iv" size="18" spellcheck="false"></label>
-          <label class="muted" title="${t("鍵づくりと確かめで返事を生成する長さ")}">max_tokens <input id="fx-mt" type="number" min="1" max="2048" value="96" style="width:5em"></label>
+          <label class="muted" title="${t("鍵づくりと確かめで返事を生成する長さ")}">max_tokens <input class="w5" id="fx-mt" type="number" min="1" max="2048" value="96"></label>
         </div>
         <div class="pp-go">
-          <button id="fx-all" title="${t("方向 → ニューロンの表 → 鍵 → レシピ → 当てた状態で鍵を作り直す → 確かめ、を 1 回のジョブで回す。ニューロンは既定の候補(表の上から)を使い、あとで選び直せる")}">${t("まとめて作る")}</button>
+          <button class="main" id="fx-all" title="${t("方向 → ニューロンの表 → 鍵 → レシピ → 当てた状態で鍵を作り直す → 確かめ、を 1 回のジョブで回す。ニューロンは既定の候補(表の上から)を使い、あとで選び直せる")}">${t("まとめて作る")}</button>
           <label class="muted" title="${t("レシピを当てた状態で鍵を作り直す段を入れる(例ではこのほうがよかった)")}"><input type="checkbox" id="fx-rekey-on" checked> ${t("当てた状態で鍵を作り直す")}</label>
           <label class="muted" title="${t("前に作った方向の名前を入れると、「まとめて作る」は方向を作り直さずにそれを使う(層が多いと、方向づくりがいちばん時間がかかる)。区切り・層・重ねる層が合わなければエラーになる。空なら作る")}">${t("すでにある方向を使う")} <input id="fx-usedir" size="14" spellcheck="false"></label>
           <label class="muted" title="${t("速い読み方(区切りごとにまとめて読む)。大きいモデルで方向づくりがずっと速くなるが、方向がわずかに変わる(今までの方向との cos 0.999 以上)。層や強さを比べる探索向け。配るものを作るときは切のまま。この読み方の方向での口調・正答は測っていない。効くのは方向を作る段だけで、「すでにある方向を使う」に名前を入れたときは効かない")}"><input type="checkbox" class="fx-fast" id="fx-fast-all"> ${t("速い読み方(区切りごとにまとめて読む。探索向け。方向がわずかに変わる)")}</label>
@@ -147,7 +147,7 @@ export class FishPanel {
           <label class="muted" title="${t("下の層に書いた後に残る差を、上の層の方向にする(上の欄の層に重ねて書く前提)")}"><input type="checkbox" id="fx-stack" checked> ${t("下の層に書いた後の残りを使う")}</label>
           <label class="muted" title="${t("速い読み方(区切りごとにまとめて読む)。大きいモデルで方向づくりがずっと速くなるが、方向がわずかに変わる(今までの方向との cos 0.999 以上)。層や強さを比べる探索向け。配るものを作るときは切のまま。この読み方の方向での口調・正答は測っていない。効くのは方向を作る段だけで、「すでにある方向を使う」に名前を入れたときは効かない")}"><input type="checkbox" class="fx-fast" id="fx-fast"> ${t("速い読み方(区切りごとにまとめて読む。探索向け。方向がわずかに変わる)")}</label>
           <label class="muted" title="${t("今までの作り方の方向も作って、向きの近さ(cos)を表に出す")}"><input type="checkbox" id="fx-compare" checked> ${t("今までの作り方と比べる")}</label>
-          <label class="muted" title="${t("方向を作るとき、返事を生成する長さ")}">${t("方向の返事の長さ")} <input id="fx-rt" type="number" min="1" max="2048" value="96" style="width:5em"></label>
+          <label class="muted" title="${t("方向を作るとき、返事を生成する長さ")}">${t("方向の返事の長さ")} <input class="w5" id="fx-rt" type="number" min="1" max="2048" value="96"></label>
         </div>
         <div class="pp-go"><button id="fx-dir-go">${t("方向を作る")}</button> <span class="muted note" id="fx-status-dir"></span></div>
         <div id="fx-prog-dir" class="note mono"></div>
@@ -158,10 +158,10 @@ export class FishPanel {
         <div class="pp-set">
           <label class="muted" title="${t("足す層(カンマ区切りか 11-23)。空なら上の欄の層。足せるのは層 1 から、最終層の 1 つ手前まで")}">${t("足す層")} <input id="fx-try-layers" size="12" spellcheck="false"></label>
           <span class="muted" title="${t("区切りごとの強さ。1 で、その区切りの方向をそのままの長さで足す")}">${t("強さ(区切りごと)")} <span id="fx-try-alphas"></span></span>
-          <label class="muted" title="${t("狙う場面・書き込みたくない場面それぞれで、返事を作る質問の数(対照集合の先頭から)")}">${t("質問の数")} <input id="fx-try-n" type="number" min="1" max="200" value="12" style="width:4.5em"></label>
-          <label class="muted" title="${t("返事を生成する長さ")}">${t("返事の長さ")} <input id="fx-try-mt" type="number" min="1" max="2048" value="120" style="width:5em"></label>
-          <label class="muted" title="${t("0 なら毎回同じ返事(greedy)。0 より大きいとサンプリング")}">${t("温度")} <input id="fx-try-temp" type="number" min="0" max="2" step="0.1" value="0" style="width:4.5em"></label>
-          <label class="muted" title="${t("サンプリングの乱数の種")}">${t("種")} <input id="fx-try-seed" type="number" min="0" value="0" style="width:4.5em"></label>
+          <label class="muted" title="${t("狙う場面・書き込みたくない場面それぞれで、返事を作る質問の数(対照集合の先頭から)")}">${t("質問の数")} <input class="w45" id="fx-try-n" type="number" min="1" max="200" value="12"></label>
+          <label class="muted" title="${t("返事を生成する長さ")}">${t("返事の長さ")} <input class="w5" id="fx-try-mt" type="number" min="1" max="2048" value="120"></label>
+          <label class="muted" title="${t("0 なら毎回同じ返事(greedy)。0 より大きいとサンプリング")}">${t("温度")} <input class="w45" id="fx-try-temp" type="number" min="0" max="2" step="0.1" value="0"></label>
+          <label class="muted" title="${t("サンプリングの乱数の種")}">${t("種")} <input class="w45" id="fx-try-seed" type="number" min="0" value="0"></label>
           <label class="muted" title="${t("一致した返事を数える正規表現。空なら対照集合の validate.match。繰り返しの中の語も数えるので、返事は読んで確かめる")}">${t("数える正規表現")} <input id="fx-try-match" size="18" spellcheck="false"></label>
         </div>
         <details class="kx-adv"><summary class="muted note">${t("狙う場面の質問を自分で入れる")}</summary>
@@ -174,7 +174,7 @@ export class FishPanel {
       </section>
       <section class="kx-sec"><h4>${t("3. 書き換えるニューロンを選ぶ")}</h4>
         <div class="pp-set">
-          <label class="muted" title="${t("層ごとに表に出す数")}">${t("表の行数")} <input id="fx-top" type="number" min="1" max="200" value="20" style="width:5em"></label>
+          <label class="muted" title="${t("層ごとに表に出す数")}">${t("表の行数")} <input class="w5" id="fx-top" type="number" min="1" max="200" value="20"></label>
           <span class="muted note" id="fx-need"></span></div>
         <div class="pp-go"><button id="fx-neu-go" title="${t("ふつうの質問への返事と文章を読ませて、各ニューロンのふだんの働きを測る")}">${t("ニューロンの表を出す")}</button> <span class="muted note" id="fx-status-neu"></span></div>
         <div id="fx-prog-neu" class="note mono"></div>
@@ -182,7 +182,7 @@ export class FishPanel {
       </section>
       <section class="kx-sec"><h4>${t("4. 鍵を作る")}</h4>
         <div class="pp-set">
-          <label class="muted" title="${t("比較用の鍵の本数。書き込みたい位置・書き込みたくない位置のラベルをでたらめに入れ替えて、同じ手順で作る鍵")}">${t("比較用の鍵")} <input id="fx-pseudo" type="number" min="0" max="64" value="4" style="width:4em"></label>
+          <label class="muted" title="${t("比較用の鍵の本数。書き込みたい位置・書き込みたくない位置のラベルをでたらめに入れ替えて、同じ手順で作る鍵")}">${t("比較用の鍵")} <input class="w4" id="fx-pseudo" type="number" min="0" max="64" value="4"></label>
         </div>
         <div class="pp-go"><button id="fx-keys-go" title="${t("区切りごとの位置の鍵と、形に要る鍵(鍵 2 つの形は場面の鍵、上限つきの形はほぼ 1 を返す鍵)をまとめて作る")}">${t("鍵をまとめて作る")}</button> <span class="muted note" id="fx-status-keys"></span></div>
         <div id="fx-prog-keys" class="note mono"></div>
@@ -208,8 +208,8 @@ export class FishPanel {
       </section>
       <section class="kx-sec"><h4>${t("7. 返事を読む")}</h4>
         <div class="pp-set">
-          <label class="muted" title="${t("狙う場面・書き込みたくない場面それぞれで、返事を作る質問の数(対照集合の先頭から)")}">${t("質問の数")} <input id="fx-bn" type="number" min="1" max="200" value="12" style="width:4.5em"></label>
-          <label class="muted" title="${t("返事を生成する長さ")}">${t("返事の長さ")} <input id="fx-bmt" type="number" min="1" max="2048" value="120" style="width:5em"></label>
+          <label class="muted" title="${t("狙う場面・書き込みたくない場面それぞれで、返事を作る質問の数(対照集合の先頭から)")}">${t("質問の数")} <input class="w45" id="fx-bn" type="number" min="1" max="200" value="12"></label>
+          <label class="muted" title="${t("返事を生成する長さ")}">${t("返事の長さ")} <input class="w5" id="fx-bmt" type="number" min="1" max="2048" value="120"></label>
           <label class="muted" title="${t("一致した返事を数える正規表現。空なら対照集合の validate.match。繰り返しの中の語も数えるので、返事は読んで確かめる")}">${t("数える正規表現")} <input id="fx-bmatch" size="22" spellcheck="false"></label>
         </div>
         <details class="kx-adv"><summary class="muted note">${t("狙う場面の質問を自分で入れる")}</summary>
@@ -286,7 +286,7 @@ export class FishPanel {
     if (values === undefined && el.dataset.sig === sig && cur.length === segs.length) return;
     el.dataset.sig = sig;
     const id = (i) => (main ? (i === 0 ? "fx-alpha" : `fx-alpha-${i}`) : `fx-try-alpha-${i}`);
-    el.innerHTML = segs.map((x, i) => `<label class="fx-al"><span class="mono">${esc(x.before ? "" : x.text)}</span> <input id="${id(i)}" ${main ? "data-fxa" : "data-fxta"}="${i}" type="number" step="0.05" value="${esc(mem[Math.min(i, mem.length - 1)])}" style="width:4.5em" aria-label="${t("強さ")} ${esc(x.text)}"></label>`).join(" ");
+    el.innerHTML = segs.map((x, i) => `<label class="fx-al"><span class="mono">${esc(x.before ? "" : x.text)}</span> <input class="w45" id="${id(i)}" ${main ? "data-fxa" : "data-fxta"}="${i}" type="number" step="0.05" value="${esc(mem[Math.min(i, mem.length - 1)])}" aria-label="${t("強さ")} ${esc(x.text)}"></label>`).join(" ");
   }
 
   // 区切りごとの強さ(数の並び)。読めない欄があれば null

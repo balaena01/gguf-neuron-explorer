@@ -93,13 +93,13 @@ export class KeyCausal {
           <span class="${this.moe ? "" : "hidden"}"><label><input type="checkbox" id="kz-t-shared"> shared</label>
           <label title="${t("専門家の番号(カンマ区切り)。空なら専門家は測らない")}">expert <input id="kz-t-exp" size="6" placeholder="e" spellcheck="false"></label></span></span>
         <label class="muted" title="${t("α の段(カンマ区切り)。空なら 1,2,4 に表の keyed.alpha の符号を掛けたもの")}">${t("α の段")} <input id="kz-alphas" size="10" spellcheck="false"></label>
-        <label class="muted" title="${t("候補ごとに測る比較用の鍵(ラベルをシャッフルして作った鍵)の本数。全候補の比較用の鍵をまとめた分布の 5% 点が印の基準")}">${t("比較用の鍵")} <input id="kz-pseudo" type="number" min="1" max="16" value="3" style="width:4em"></label>
+        <label class="muted" title="${t("候補ごとに測る比較用の鍵(ラベルをシャッフルして作った鍵)の本数。全候補の比較用の鍵をまとめた分布の 5% 点が印の基準")}">${t("比較用の鍵")} <input class="w4" id="kz-pseudo" type="number" min="1" max="16" value="3"></label>
         <label class="muted" title="${t("効き目を測る振る舞いの部分の正規表現。空なら positions の before: の正規表現")}">${t("効き目の正規表現")} <input id="kz-match" size="18" spellcheck="false"></label>
         <label class="muted" title="${t("選択式の振る舞い向け: 1 行 1 問の JSONL({\"prompt\", \"prefix\": \"Answer:\", \"behavior\": \" B\", \"desired\": \" C\"}。書き込みたくない場面の行は \"group\" に群の名前)。その位置での log p(振る舞いの答え) − log p(望む答え) の変化を測る")}">probe <input type="file" id="kz-probe" accept=".jsonl,.json,application/json"></label>
         <span class="muted note" id="kz-pinfo"></span>
         <label class="muted" title="${t("結果と鍵の名前。空なら <対照集合の名前>-causal(鍵は <名前>-ffn などで保存)")}">${t("名前")} <input id="kz-name" size="16" spellcheck="false"></label>
       </div>
-      <div class="pp-go"><button id="kz-go" title="${t("候補ごとに鍵を作り、生成なしで効き目・副作用・比較用の鍵を測る(direction_key_causal のジョブ)")}">${t("第 1 段: 生成なしで測る")}</button>
+      <div class="pp-go"><button class="main" id="kz-go" title="${t("候補ごとに鍵を作り、生成なしで効き目・副作用・比較用の鍵を測る(direction_key_causal のジョブ)")}">${t("第 1 段: 生成なしで測る")}</button>
         <span class="muted note" id="kz-status"></span></div>
       <div id="kz-prog" class="note mono"></div>
       <div class="pp-in"><span class="muted">${t("保存した結果")}</span> <select id="kz-saved"><option value="">${t("(なし)")}</option></select>
@@ -108,7 +108,7 @@ export class KeyCausal {
       <div id="kz-vwrap" class="hidden">
         <h4 class="note">${t("第 2 段: 選んだ行を生成で確かめる")} <span class="muted note" id="kz-vsel"></span></h4>
         <div class="pp-set">
-          <label class="muted" title="${t("返事の長さ(behave と同じ)")}">${t("返事の長さ")} <input id="kz-vmt" type="number" min="1" max="4096" value="256" style="width:5em"></label>
+          <label class="muted" title="${t("返事の長さ(behave と同じ)")}">${t("返事の長さ")} <input class="w5" id="kz-vmt" type="number" min="1" max="4096" value="256"></label>
           <label class="muted" title="${t("振る舞いを数える正規表現。空なら第 1 段で測った正規表現(無ければ対照集合の validate.match)")}">${t("判定の正規表現")} <input id="kz-vmatch" size="18" spellcheck="false"></label>
           <label class="muted" title="${t("書き込みたくない場面(dont_touch)の質問にも答えさせ、返事が変わった数を数える")}"><input type="checkbox" id="kz-vdt" checked> dont_touch</label>
         </div>
@@ -116,7 +116,7 @@ export class KeyCausal {
           <label class="muted" title="${t("読み手の判定の文面({q} に質問、{a} に返事)。空なら正規表現で数える")}">judge <textarea id="kz-vjudge" class="mono" rows="2" cols="40" spellcheck="false"></textarea></label>
           <label class="muted">labels <input id="kz-vlabels" size="8" value="R,P,C" spellcheck="false"></label>
           <label class="muted" title="${t("振る舞いとみなすラベル(judge のとき)")}">${t("振る舞いのラベル")} <input id="kz-vlabel" size="6" spellcheck="false"></label>
-          <label class="muted">${t("温度")} <input id="kz-vtemp" type="number" min="0" max="2" step="0.1" value="0" style="width:4.5em"></label>
+          <label class="muted">${t("温度")} <input class="w45" id="kz-vtemp" type="number" min="0" max="2" step="0.1" value="0"></label>
           <label class="muted" title="${t("種(カンマ区切り。温度があるとき)")}">${t("種")} <input id="kz-vseeds" size="8" spellcheck="false"></label>
         </div></details>
         <div class="pp-go"><button id="kz-vgo" disabled title="${t("選んだ候補と、それぞれの比較用の鍵 1 本で、作成に使っていない質問に生成させる(direction_key_causal_verify のジョブ)")}">${t("選んだ行を生成で確かめる")}</button>

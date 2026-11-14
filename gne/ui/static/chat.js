@@ -197,7 +197,7 @@ export class ChatPanel {
           : tr("同じ発話を 3 列で生成します(左から −、無介入、+)。返答は列ごとに別の履歴になります。")}</p>`}
       </div>
       <div class="ch-input"><textarea id="ch-text" rows="2" placeholder="${tr("メッセージ(Ctrl+Enter で送る)")}"${this.busy ? " disabled" : ""}>${esc(this.draft)}</textarea>
-        <button id="ch-send"${this.busy ? " disabled" : ""}>${tr("送る")}</button><button id="ch-mic" class="${this.mic.recording ? "rec" : ""}" title="${tr("音声で話しかける(押して話し、もう一度押すと送る。入力欄の文も一緒に送る)")}"${this.busy ? " disabled" : ""}>${this.mic.recording ? `■ ${tr("止めて送る")}` : `🎤 ${tr("話す")}`}</button><button id="ch-stop"${this.busy ? "" : " disabled"}>${tr("止める")}</button><button id="ch-reset" title="${tr("会話を消して、最初から話す(どの列も)")}"${this.busy ? " disabled" : ""}>${tr("新しい会話")}</button></div>
+        <button class="main" id="ch-send"${this.busy ? " disabled" : ""}>${tr("送る")}</button><button id="ch-mic" class="${this.mic.recording ? "rec" : ""}" title="${tr("音声で話しかける(押して話し、もう一度押すと送る。入力欄の文も一緒に送る)")}"${this.busy ? " disabled" : ""}>${this.mic.recording ? `■ ${tr("止めて送る")}` : `🎤 ${tr("話す")}`}</button><button id="ch-stop"${this.busy ? "" : " disabled"}>${tr("止める")}</button><button id="ch-reset" title="${tr("会話を消して、最初から話す(どの列も)")}"${this.busy ? " disabled" : ""}>${tr("新しい会話")}</button></div>
       <div class="ch-status muted note" id="ch-status">${esc(this.status || "")}</div>`;
   }
 
@@ -383,7 +383,7 @@ export class ChatPanel {
     const base = o && o.normalization === "text_p99" ? tr("文章の中の層内 p99(この層は活性統計が無い)") : tr("この層の基準(活性統計の q999)");
     return `
       <div class="ch-input"><textarea id="rd-text" rows="4" placeholder="${tr("文章を貼る(このニューロンがどこで光るかを見る)")}">${esc(this.readsText)}</textarea>
-        <button id="rd-run">${tr("流す")}</button></div>
+        <button class="main" id="rd-run">${tr("流す")}</button></div>
       <p class="muted note">${tr("スコア = 活性 ÷ {base}。濃さはこの文章の中の最大 |スコア|{mx}に対する割合(fires の地図の色は絶対値)。黄 = 正、赤紫 = 負。先頭のトークン(灰色)は除く。マウスを当てると値。", { base, mx: o ? ` (${fmt(mx, 1)})` : "" })}</p>
       <div class="rd-out">${first}${toks}</div>
       ${top.length ? `<p class="muted note">${tr("強い順")}: ${top.map(([, t, s]) => `${tokHTML(t)}${fmt(s, 2)}`).join(" ")}</p>` : ""}

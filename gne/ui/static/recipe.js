@@ -53,27 +53,27 @@ const unitOrder = (u) => (isNw(u) ? [u.layer, 4, u.neuron ?? 0, 0]
 
 // スライダーは 0(中央)から値まで塗る。+ は黄、− は赤紫。中央に 0 の目盛り
 function trackBG(v, max = 3) {
-  const p = ((Math.max(-max, Math.min(max, v)) + max) / (2 * max)) * 100, c = v >= 0 ? "#f2d24b" : "#c94fa7", bg = "#1f2630";
+  const p = ((Math.max(-max, Math.min(max, v)) + max) / (2 * max)) * 100, c = v >= 0 ? "var(--plus)" : "var(--minus)", bg = "var(--line)";
   const [a, b] = v >= 0 ? [50, p] : [p, 50];
-  return `linear-gradient(to right, transparent calc(50% - 1px), #8a96a7 calc(50% - 1px), #8a96a7 calc(50% + 1px), transparent calc(50% + 1px)),` +
+  return `linear-gradient(to right, transparent calc(50% - 1px), var(--text-4) calc(50% - 1px), var(--text-4) calc(50% + 1px), transparent calc(50% + 1px)),` +
          `linear-gradient(to right, ${bg} ${a}%, ${c} ${a}%, ${c} ${b}%, ${bg} ${b}%)`;
 }
 
 // ヘッドの倍率のスライダー: 無介入の 1 から値まで塗る。強める(k > 1)は黄、弱める・消す(k < 1)は赤紫。1 に目盛り
 function gainBG(k) {
   const at = (x) => ((Math.max(GAIN.min, Math.min(GAIN.max, x)) - GAIN.min) / (GAIN.max - GAIN.min)) * 100;
-  const one = at(1), p = at(k), c = k >= 1 ? "#f2d24b" : "#c94fa7", bg = "#1f2630";
+  const one = at(1), p = at(k), c = k >= 1 ? "var(--plus)" : "var(--minus)", bg = "var(--line)";
   const [a, b] = k >= 1 ? [one, p] : [p, one];
-  return `linear-gradient(to right, transparent calc(${one}% - 1px), #8a96a7 calc(${one}% - 1px), #8a96a7 calc(${one}% + 1px), transparent calc(${one}% + 1px)),` +
+  return `linear-gradient(to right, transparent calc(${one}% - 1px), var(--text-4) calc(${one}% - 1px), var(--text-4) calc(${one}% + 1px), transparent calc(${one}% + 1px)),` +
          `linear-gradient(to right, ${bg} ${a}%, ${c} ${a}%, ${c} ${b}%, ${bg} ${b}%)`;
 }
 const kLabel = (k) => `×${fmt(k, 2)}`;
 // 射影の強さのスライダー: 0(無介入)から値まで赤紫(方向成分を引く)。1(消す)と 2(反転)に目盛り
 function projBG(v) {
   const at = (x) => ((Math.max(PROJ.min, Math.min(PROJ.max, x)) - PROJ.min) / (PROJ.max - PROJ.min)) * 100;
-  const p = at(v), tick = (x) => `transparent calc(${at(x)}% - 1px), #8a96a7 calc(${at(x)}% - 1px), #8a96a7 calc(${at(x)}% + 1px), transparent calc(${at(x)}% + 1px)`;
+  const p = at(v), tick = (x) => `transparent calc(${at(x)}% - 1px), var(--text-4) calc(${at(x)}% - 1px), var(--text-4) calc(${at(x)}% + 1px), transparent calc(${at(x)}% + 1px)`;
   return `linear-gradient(to right, ${tick(1)}), linear-gradient(to right, ${tick(2)}),` +
-         `linear-gradient(to right, #c94fa7 0%, #c94fa7 ${p}%, #1f2630 ${p}%, #1f2630 100%)`;
+         `linear-gradient(to right, var(--minus) 0%, var(--minus) ${p}%, var(--line) ${p}%, var(--line) 100%)`;
 }
 const sLabel = (s) => `s${+(+s).toFixed(2)}`;
 const aLabel = (a) => `a${a >= 0 ? "+" : "−"}${fmt(Math.abs(a), 2)}`;
@@ -360,7 +360,7 @@ export class RecipePanel {
         : isMoe(u) ? this.moeId(u, i)
         : `<a href="#" data-open="${i}">L${u.layer} N${u.neuron}</a> <span class="muted w">${esc(this.unitWords(u.layer, u.neuron))}</span>`;
       return `
-      <tr data-i="${i}"${isMoe(u) ? ` class="rc-moe"` : ""}><td class="id">${id}<button class="small rm" data-rm="${i}" title="${t("外す")}">×</button>
+      <tr data-i="${i}"${isMoe(u) ? ` class="rc-moe"` : ""}><td class="id">${id}<button class="small quiet rm" data-rm="${i}" title="${t("外す")}">×</button>
         <div class="sl"><span class="muted">−${g.max}</span><input type="range" class="dose" min="-${g.max}" max="${g.max}" step="${g.step}" value="${u.dose}" data-i="${i}" style="background:${trackBG(u.dose, g.max)}"><span class="muted">+${g.max}</span>
           <span class="sg mono ${u.dose >= 0 ? "plus" : "minus"}">${signed(u.dose, g.d)}</span>
           <input type="number" min="-10" max="10" step="${g.step}" value="${u.dose}" data-i="${i}" class="num" title="${t("値を直接入れる")}"></div></td></tr>`;
@@ -390,7 +390,7 @@ export class RecipePanel {
       ${r.nws().length ? `<div class="rc-actions"><button id="rc-nw" title="${t("計算で作るニューロン(nw)を、llama.cpp の --lora で使う LoRA アダプタに書き出す(焼き込みは無い)")}">${t("nw の LoRA を書き出す")}</button></div>
         <p class="muted note">${t("計算で作るニューロン(nw)は control vector にも「LoRA・焼き込み」にも入りません。「nw の LoRA を書き出す」で別のアダプタにします。")}</p>` : ""}
       ${this.lxOpen ? this.lxHTML() : ""}
-      ${r.units.length ? `<div class="rc-actions"><button class="small" id="rc-clear" title="${t("すべてのユニットを外す")}">${t("レシピを空にする")}</button></div>` : ""}
+      ${r.units.length ? `<div class="rc-actions"><button class="small quiet" id="rc-clear" title="${t("すべてのユニットを外す")}">${t("レシピを空にする")}</button></div>` : ""}
       <div id="rc-result"></div>`;
     const $ = (s) => this.root.querySelector(s);
     $("#rc-name").addEventListener("input", (ev) => r.setName(ev.target.value));
@@ -489,7 +489,7 @@ export class RecipePanel {
     return `
       <tr data-i="${i}" class="rc-proj"><td class="id"><a href="#" data-open="${i}" title="${t("HEAD パネルで開く")}">L${u.layer} H${u.head}</a>
         <span class="sg mono minus">${sLabel(u.s)}</span> <span class="mono">@</span><select class="rc-pdir" data-pdir="${i}" title="${t("射影する方向(gne direction の方向セット)")}">${opts}</select>
-        ${rk}<button class="small rm" data-rm="${i}" title="${t("外す")}">×</button>
+        ${rk}<button class="small quiet rm" data-rm="${i}" title="${t("外す")}">×</button>
         <div class="sl"><span class="muted">${PROJ.min}</span><input type="range" class="dose" min="${PROJ.min}" max="${PROJ.max}" step="${PROJ.step}" value="${u.s}" data-i="${i}" style="background:${projBG(u.s)}"><span class="muted">${PROJ.max}</span>
           <input type="number" min="-300" max="300" step="${PROJ.step}" value="${+(+u.s).toFixed(3)}" data-i="${i}" class="num" title="${t("値を直接入れる")}"></div></td></tr>`;
   }
@@ -516,7 +516,7 @@ export class RecipePanel {
     return `
       <tr data-i="${i}" class="rc-nw"><td class="id"><span class="mono">${esc(what)}</span>
         <span class="badge keyed" title="${t("計算で作るニューロン: ニューロンを計算した重みで上書きし、鍵が反応する位置でだけ方向を書く(LoRA)")}">nw</span>
-        <button class="small rm" data-rm="${i}" title="${t("外す")}">×</button>
+        <button class="small quiet rm" data-rm="${i}" title="${t("外す")}">×</button>
         <div class="rc-kx muted mono" title="${t("方向・鍵・形は direction ビューの FiSH のタブ(か CLI・MCP の gne nw …)で決める(docs/fish.md)")}">@${esc(u.direction || "—")} #${esc(u.key || "—")}${u.key2 ? `&amp;${esc(u.key2)}` : ""} · ${esc(form)}</div></td>
         <td class="sl"><input type="range" class="dose" data-i="${i}" min="${-KEYED.max}" max="${KEYED.max}" step="${KEYED.step}" value="${a}" style="background:${trackBG(a, KEYED.max)}"></td>
         <td class="nm"><input type="number" class="num" data-i="${i}" step="${KEYED.step}" value="${a}"></td>
@@ -543,7 +543,7 @@ export class RecipePanel {
         <select class="rc-kkind" data-kkind="${i}" title="${t("書き込み先: ffn = ffn_down、attn = attn_output、S = shared expert、E = 専門家 e(鍵を作った書き込み先と同じにする)")}">${kinds}</select>${
           u.kind === "expert" ? `<input type="number" class="num rc-kexp" data-kexp="${i}" min="0" value="${esc(String(this.kexpDraft && this.kexpDraft.u === u ? this.kexpDraft.v : u.expert ?? 0))}" title="${t("専門家の番号")}">` : ""}
         <span class="badge keyed" title="${t("鍵つきの書き込み: 入力の活性に鍵が反応するときだけ方向を書く(LoRA)")}">keyed</span>
-        <button class="small rm" data-rm="${i}" title="${t("外す")}">×</button>
+        <button class="small quiet rm" data-rm="${i}" title="${t("外す")}">×</button>
         <div class="rc-kx"><span class="mono">@</span><select data-kdir="${i}" title="${t("書き込む方向(gne direction の方向セットの r_L)")}">${opts(dirs, u.direction, r.defaultDirection)}</select>
           <span class="mono">#</span><select data-kkey="${i}" title="${t("鍵(direction ビューの「鍵」か gne direction key で作ったもの)")}">${opts(keys.map((k) => k.name), u.key, r.defaultKey)}</select>
           ${warn.map((w) => `<span class="badge warn">${esc(w)}</span>`).join(" ")}</div>
@@ -618,7 +618,7 @@ export class RecipePanel {
     const id = isHead(u) ? `<a href="#" data-open="${i}" title="${t("HEAD パネルで開く")}">L${u.layer} H${u.head}</a> <span class="muted w">${esc(this.headKind(u.layer))} · gain</span>`
       : this.moeId(u, i);
     return `
-      <tr data-i="${i}" class="rc-gain${isHead(u) ? " rc-head" : " rc-moe"}"><td class="id">${id}<button class="small rm" data-rm="${i}" title="${t("外す")}">×</button>
+      <tr data-i="${i}" class="rc-gain${isHead(u) ? " rc-head" : " rc-moe"}"><td class="id">${id}<button class="small quiet rm" data-rm="${i}" title="${t("外す")}">×</button>
         <div class="sl"><span class="muted">${GAIN.min}</span><input type="range" class="dose" min="${GAIN.min}" max="${GAIN.max}" step="${GAIN.step}" value="${u.k}" data-i="${i}" style="background:${gainBG(u.k)}"><span class="muted">${GAIN.max}</span>
           <span class="sg mono ${u.k >= 1 ? "plus" : "minus"}">${kLabel(u.k)}</span>
           <input type="number" min="-4" max="8" step="${GAIN.step}" value="${u.k}" data-i="${i}" class="num" title="${t("値を直接入れる")}"></div></td></tr>`;
@@ -750,7 +750,7 @@ export class RecipePanel {
       <div class="rc-lx-row"><label title="${t("gne が書く記録(gne.* のメタデータ: レシピ・ヘッド・強さ・方向の鍵、名前の印、横の .headproj.json)を入れない。人に渡すファイル用。書いたあと、メタデータに手元のパスが残っていないかも確かめる")}"><input type="checkbox" id="lx-strip"${f.strip ? " checked" : ""}> ${t("gne の記録(メタデータ)を入れない(人に渡す用)")}</label></div>
       ${bake ? "" : `<div class="rc-lx-row"><span class="muted" title="${t("LoRA のファイルの中の名前の欄(general.name)。空なら「元のモデルの名前 gain レシピの名前」、記録を入れないときは adapter")}">${t("名前の欄")}</span>
         <input id="lx-adname" size="26" value="${esc(f.adapterName)}" placeholder="${f.strip ? "adapter" : ""}" spellcheck="false"></div>`}
-      <div class="rc-lx-row"><button id="lx-go">${t(bake ? "焼き込む" : "LoRA を書き出す")}</button>
+      <div class="rc-lx-row"><button class="main" id="lx-go">${t(bake ? "焼き込む" : "LoRA を書き出す")}</button>
         <span class="muted note">${nk ? t("名前は上のレシピの名前(空なら headproj)。LoRA に入るユニット {n} 個(ヘッド {h}・鍵つきの書き込み {k})", { n, h: n - nk, k: nk })
           : t("名前は上のレシピの名前(空なら headproj)。ヘッドのユニット {n} 個が入る", { n })}${nAdd ? ` · ${t("add のユニット {k} 個は入らない(cvec で書き出す)", { k: nAdd })}` : ""}${bake ? ` · ${t("焼き込みはモデルを丸ごともう 1 つ書く(同じくらいのディスク・時間)")}` : ""}</span></div>
       <div id="lx-result">${this.lxMsg ? this.lxMsg.html : ""}</div></div>`;

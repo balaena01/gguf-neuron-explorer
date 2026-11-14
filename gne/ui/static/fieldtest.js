@@ -38,7 +38,7 @@ export class FieldtestPanel {
         <label class="muted" title="${t("能力を測るベンチマーク。データは初回に取得する。合わせて数時間かかる")}"><input id="ft-mmlu" type="checkbox"> MMLU-Pro</label>
         <label class="muted" title="${t("能力を測るベンチマーク。データは初回に取得する。合わせて数時間かかる")} ${t("採点に bench extra が要る")}"><input id="ft-math500" type="checkbox"> MATH-500</label>
         <label class="muted" title="${t("能力を測るベンチマーク。データは初回に取得する。合わせて数時間かかる")} ${t("採点に bench extra が要る")}"><input id="ft-ifeval" type="checkbox"> IFEval</label>
-        <button id="ft-go">${t("実地テストを走らせる")}</button> <span class="muted note" id="ft-status"></span></div>
+        <button class="main" id="ft-go">${t("実地テストを走らせる")}</button> <span class="muted note" id="ft-status"></span></div>
       <div id="ft-list"></div><div id="ft-result"></div>`;
     this.$ = (s) => root.querySelector(s);
     this.$("#ft-go").addEventListener("click", () => this.run());

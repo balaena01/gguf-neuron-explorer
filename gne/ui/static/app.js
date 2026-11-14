@@ -89,24 +89,24 @@ function headTooltipHTML(h) {
   const ho = state.heads, v = ho && ho.values.get(L);
   if (ho && ho.field.startsWith("heads:")) {
     const r = ho.info.get(`${L}:${h.head}`);
-    if (r) lines.push(`<span class="t-k">color</span><span class="t-v" style="margin:0">z ${fmt(r.z, 2)} · #${r.rank}/${ho.n} · null ${fmt(r.null_pct, 2)}${
+    if (r) lines.push(`<span class="t-k">color</span><span class="t-v t-c">z ${fmt(r.z, 2)} · #${r.rank}/${ho.n} · null ${fmt(r.null_pct, 2)}${
       r.trigger_mass !== null && r.trigger_mass !== undefined ? ` · trigger ${fmt(r.trigger_mass, 3)}` : ""}${r.dir_cos !== null && r.dir_cos !== undefined ? ` · dir_cos ${fmt(r.dir_cos, 3)}` : ""}</span>`);
   } else if (ho && (ho.field.startsWith("causal:") || ho.field.startsWith("eta:"))) {               // 因果スクリーニング(CHANGE-06 G)
     const r = ho.info.get(`${L}:${h.head}`), P = ho.scale.primary;
     if (r && ho.field.startsWith("causal:")) {
-      lines.push(`<span class="t-k">color</span><span class="t-v" style="margin:0">causal_max ${fmt(r.causal_max, 2)} · #${r.rank}/${ho.n} · L${P} ${fmt(r.causal, 2)} · contrib ${fmt(r.contrib, 2)} · ratio ${fmt(r.ratio, 2)}${
+      lines.push(`<span class="t-k">color</span><span class="t-v t-c">causal_max ${fmt(r.causal_max, 2)} · #${r.rank}/${ho.n} · L${P} ${fmt(r.causal, 2)} · contrib ${fmt(r.contrib, 2)} · ratio ${fmt(r.ratio, 2)}${
         r.b_side_delta !== null && r.b_side_delta !== undefined ? ` · B ${fmt(r.b_side_delta, 2)}` : ""}</span>`);
     } else if (r) {
-      lines.push(`<span class="t-k">color</span><span class="t-v" style="margin:0">η ${fmt(r.eta, 3)} · #${r.rank}/${ho.n}${r.in_base ? ` · ${t("いまの組")}` : ""}${
+      lines.push(`<span class="t-k">color</span><span class="t-v t-c">η ${fmt(r.eta, 3)} · #${r.rank}/${ho.n}${r.in_base ? ` · ${t("いまの組")}` : ""}${
         r.excluded ? ` · ${t("除外")}` : ""}${r.b_side_delta !== null && r.b_side_delta !== undefined ? ` · B ${fmt(r.b_side_delta, 2)}` : ""}</span>`);
     }
   } else if (ho && v && Number.isFinite(v[h.head])) {
-    lines.push(`<span class="t-k">color</span><span class="t-v" style="margin:0">${t("注目 {v}({tok} へ)", { v: fmt(v[h.head], 3), tok: esc(ho.label || "") })}</span>`);
+    lines.push(`<span class="t-k">color</span><span class="t-v t-c">${t("注目 {v}({tok} へ)", { v: fmt(v[h.head], 3), tok: esc(ho.label || "") })}</span>`);
   }
   const r = state.recipe && state.recipe.hasHead(L, h.head);
-  if (r) lines.push(`<span class="t-k">recipe</span><span class="t-v" style="margin:0">×${fmt(r.k, 2)}</span>`);
+  if (r) lines.push(`<span class="t-k">recipe</span><span class="t-v t-c">×${fmt(r.k, 2)}</span>`);
   for (const u of state.recipe ? state.recipe.projs().filter((x) => x.layer === L && x.head === h.head) : []) {
-    lines.push(`<span class="t-k">recipe</span><span class="t-v" style="margin:0">s${fmt(u.s, 2)} @${esc(u.direction || "")}</span>`);
+    lines.push(`<span class="t-k">recipe</span><span class="t-v t-c">s${fmt(u.s, 2)} @${esc(u.direction || "")}</span>`);
   }
   if (state.model) lines.push(`<span class="t-wait">${t("クリックで HEAD パネル")}</span>`);
   return lines.join("<br>");
@@ -123,7 +123,7 @@ function expertTooltipHTML(h) {
   lines.push(`<span class="t-id">L${L} E${h.expert} N${h.neuron}</span>${name ? `<span class="t-name">${esc(name)}</span>` : ""}`);
   if (!state.model) return lines.join("<br>");
   const f = state.overlay.field, v = state.overlay.values.get(L), meta = state.overlay.metas.get(L);
-  const kv = (k, x) => lines.push(`<span class="t-k">${k}</span><span class="t-v" style="margin:0">${x}</span>`);
+  const kv = (k, x) => lines.push(`<span class="t-k">${k}</span><span class="t-v t-c">${x}</span>`);
   if (f === "expert_usage" && meta && meta.rate) {
     kv("color", t("E{e} の選択率 {p}(一様 {u})", { e: h.expert, p: pct(meta.rate[h.expert]), u: pct(li.n_expert_used / li.n_expert) }));
   } else if (f.startsWith("experts:") && meta && meta.experts) {
@@ -182,7 +182,7 @@ function tooltipHTML(h) {
   }
   const f = state.overlay.field, v = state.overlay.values.get(L);
   if (v && f !== "none" && !f.startsWith("search:") && Number.isFinite(v[n])) {
-    lines.push(`<span class="t-k">color</span><span class="t-v" style="margin:0">${esc(fieldLabel(f))} = ${fmt(v[n], f.startsWith("cos:") || f.startsWith("writers:") ? 4 : 3)}</span>`);
+    lines.push(`<span class="t-k">color</span><span class="t-v t-c">${esc(fieldLabel(f))} = ${fmt(v[n], f.startsWith("cos:") || f.startsWith("writers:") ? 4 : 3)}</span>`);
   }
   if (waiting) lines.push(`<span class="t-wait">${t("読み込み中…")}</span>`);
   return lines.join("<br>");
@@ -252,8 +252,8 @@ function legend() {
     .concat(rx.some((u) => u.kind === "expert") ? [it(tile("#f2d24b"), tile("#c94fa7"), t("レシピの専門家(黄 = 強める・選ばれやすく、赤紫 = 弱める・消す・選ばれにくく)"))] : [])
     .concat(state.expertFocus ? [it(tile("#ffffff"), t("開いている専門家"))] : [])
     .concat(state.firesRouted ? [it(tile("#6fe3ff"), t("fires のトークンで選ばれた専門家"))] : [])
-    .concat(ag && ag.highlights.length ? [it(`<span class="sw ring dash" style="border-color:#6fe3ff"></span>`, `${t("エージェントの強調")}${ag.label ? ` (${esc(ag.label)})` : ""}`)] : [])
-    .concat(ag && ag.notes.length ? [itl(`<span class="sw ring" style="border-color:#6fe3ff;width:9px;height:9px"></span><span class="ag-note-sw">agent ✎</span>` +
+    .concat(ag && ag.highlights.length ? [it(`<span class="sw ring dash agent"></span>`, `${t("エージェントの強調")}${ag.label ? ` (${esc(ag.label)})` : ""}`)] : [])
+    .concat(ag && ag.notes.length ? [itl(`<span class="sw ring agent small"></span><span class="ag-note-sw">agent ✎</span>` +
       t("エージェントの注釈(小さな輪。札は 28 字まで、マウスを当てると全文、クリックで開く)"))] : [])
     .concat(ag && ag.highlights.length + ag.notes.length > 30 ? [itl(t("(札は 30 枚まで。残りは輪だけで、全部は header の agent の一覧)"))] : []);
   const line = (c) => `<span class="sw line" style="background:${c}"></span>`;
@@ -873,7 +873,7 @@ async function setView(v) {
   wv.classList.toggle("hidden", v !== "writers");
   dv.classList.toggle("hidden", v !== "direction");
   if (v === "direction") {                                                 // 方向の速い指標(CHANGE-06 G)
-    if (!state.model) { dv.innerHTML = `<p class="muted" style="padding:16px">${t("合成の構造には direction ビューのデータがありません")}</p>`; return; }
+    if (!state.model) { dv.innerHTML = `<p class="muted view-empty">${t("合成の構造には direction ビューのデータがありません")}</p>`; return; }
     if (!directionView) {
       directionView = new DirectionView(dv, {
         onChanged: async () => { await refreshModel(); fillColorSelect(); },   // 基準層を記録・上書きした
@@ -912,7 +912,7 @@ async function setView(v) {
     return;
   }
   if (v === "writers") {                                                   // 書き手の強さ(gne writers)
-    if (!state.model) { wv.innerHTML = `<p class="muted" style="padding:16px">${t("合成の構造には writers がありません")}</p>`; return; }
+    if (!state.model) { wv.innerHTML = `<p class="muted view-empty">${t("合成の構造には writers がありません")}</p>`; return; }
     if (!writersView) {
       writersView = new WritersView(wv, {
         onRun: (p) => startJob("writers", p),
@@ -925,7 +925,7 @@ async function setView(v) {
     return;
   }
   if (v === "eval") {
-    if (!state.model) { xv.innerHTML = `<p class="muted" style="padding:16px">${t("合成の構造には eval がありません")}</p>`; return; }
+    if (!state.model) { xv.innerHTML = `<p class="muted view-empty">${t("合成の構造には eval がありません")}</p>`; return; }
     if (!evalView) {
       evalView = new EvalView(xv, { recipe: state.recipe, onRun: (p) => startJob("eval", p), onRunJob: (kind, params) => jobsBar.start(kind, params),          // CHANGE-06 G: 組・方式のレシピを読み込む
                                     onLoadProj: (name, specs) => { state.recipe.loadProj(name, specs); expand("list"); listTab("recipe"); },
@@ -941,7 +941,7 @@ async function setView(v) {
     return;
   }
   if (v === "embed") {
-    if (!state.model) { ev.innerHTML = `<p class="muted" style="padding:16px">${t("合成の構造には rollout がありません")}</p>`; return; }
+    if (!state.model) { ev.innerHTML = `<p class="muted view-empty">${t("合成の構造には rollout がありません")}</p>`; return; }
     if (!embedView) {
       embedView = new EmbedView(ev, {
         onOpen: (u) => { openNeuron(u, { focus: false }); embedView.draw(); },
@@ -957,7 +957,7 @@ async function setView(v) {
     return;
   }
   if (v === "layers") {
-    if (!state.model) { lv.innerHTML = `<p class="muted" style="padding:16px">${t("合成の構造には layers ビューのデータがありません")}</p>`; return; }
+    if (!state.model) { lv.innerHTML = `<p class="muted view-empty">${t("合成の構造には layers ビューのデータがありません")}</p>`; return; }
     if (!layersView) layersView = new LayersView(lv, { onPick: (L) => { setView("map"); state.map.frontView(L); } });
     state.note = t("layers ビューを読み込み中(初回は逆引きの cos を全層で計算)");
     updateStatus();
@@ -990,18 +990,18 @@ function wireHeader() {
     const j = parseJump(ev.target.value);
     if (j && j.head !== undefined) {                                     // ヘッドは HEAD パネルで(視点は動かさない)
       const ok = !!state.model && openHead({ layer: j.layer, head: j.head });
-      ev.target.style.borderColor = ok ? "" : "#c94fa7";
+      ev.target.classList.toggle("bad", !ok);
       return;
     }
     if (j && j.neuron === null) {                                        // 専門家は EXPERT パネルで(視点は動かさない)
       const ok = !!state.model && openExpert({ layer: j.layer, expert: j.expert });
-      ev.target.style.borderColor = ok ? "" : "#c94fa7";
+      ev.target.classList.toggle("bad", !ok);
       return;
     }
     const li = j && state.arch.layers[j.layer];
     const moe = li && li.ffn.startsWith("moe");
     const ok = li && (moe ? j.expert !== null && j.expert < li.n_expert && j.neuron < li.n_ff : j.expert === null && j.neuron < li.n_ff);
-    ev.target.style.borderColor = ok ? "" : "#c94fa7";
+    ev.target.classList.toggle("bad", !ok);
     if (!ok) return;
     if (moe && state.model) openNeuron({ layer: j.layer, n: j.expert * li.n_ff + j.neuron });   // 通し番号で NEURON パネル
     else if (moe) {
@@ -1061,7 +1061,7 @@ async function checkStale() {
   const el = document.createElement("div");
   el.id = "stale-banner";
   el.innerHTML = `<span>${t("サーバを立ち上げた後で gne のコードが更新されています。新しい機能(ボタン)を使うには、サーバを立ち上げ直してください(ターミナルで Ctrl+C → gne serve …)。")}</span>
-    <button class="small" title="${t("この帯を閉じる")}">×</button>`;
+    <button class="small quiet" title="${t("この帯を閉じる")}">×</button>`;
   el.querySelector("button").addEventListener("click", () => el.remove());
   document.body.prepend(el);
 }
