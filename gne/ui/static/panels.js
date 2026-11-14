@@ -3,6 +3,7 @@
 // (add = 書き込み方向の押し、×0 / ×2 = 選ばれたときだけ効く gain)。connections(Web)は MoE の層では使えない。
 import { getJSON, postJSON } from "./api.js";
 import { t } from "./i18n.js";
+import { plainEnter } from "./ui.js";
 
 export const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 // 質問(文字列か、会話の履歴 [{role, content}, …])→ 1 行の文字列 / 役割つきの HTML
@@ -210,7 +211,7 @@ export class NeuronPanel {
         setTimeout(() => name.classList.remove("saved"), 800);
         this.onNamed(r.names);
       };
-      name.addEventListener("keydown", (ev) => { if (ev.key === "Enter") save(); });
+      name.addEventListener("keydown", (ev) => { if (plainEnter(ev)) save(); });
       name.addEventListener("blur", save);
     }
     for (const b of this.root.querySelectorAll("[data-rc]")) {

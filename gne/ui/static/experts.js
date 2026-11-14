@@ -143,7 +143,7 @@ export class ExpertPanel {
   // ニューロンの上位(活性統計があれば q999 × ‖W_down‖ = 書き込みの大きさ、無ければ ‖W_down‖ の順)
   neurons(d) {
     if (!d.neurons.length) return "";
-    const rows = d.neurons.map((x) => `<tr data-n="${x.neuron}" title="${t("NEURON パネルで開く(L{L} E{e} N{n})", { L: d.layer, e: d.expert, n: x.neuron })}">
+    const rows = d.neurons.map((x) => `<tr class="pick" data-n="${x.neuron}" title="${t("NEURON パネルで開く(L{L} E{e} N{n})", { L: d.layer, e: d.expert, n: x.neuron })}">
       <td>N${x.neuron}</td><td>${fmt(x.q999, 3)}</td><td>${fmt(x.down_norm, 3)}</td><td>${fmt(x.write, 3)}</td></tr>`).join("");
     return `<h4>${d.usage ? t("ニューロンの上位(q999 × ‖W_down‖ の順)") : t("ニューロンの上位(‖W_down‖ の順)")}</h4>
       <div class="x-wrap"><table class="rank mono x-top"><thead><tr><th>N</th><th>q999</th><th>‖W_down‖</th><th title="${t("q999 × ‖W_down‖(選ばれたときに残差へ書ける大きさの目安)")}">write</th></tr></thead><tbody>${rows}</tbody></table></div>

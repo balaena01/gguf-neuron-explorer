@@ -1914,4 +1914,6 @@ export const EN = {
   "ユニットの鍵の作り方: 最小二乗(ますごとの重み)": "Key method of the units: least squares (weights per cell)",
   "ユニットの鍵の作り方: いまの作り方と最小二乗が混ざっています": "Key method of the units: current method and least squares are mixed",
   "ユニットの鍵の作り方: いまの作り方": "Key method of the units: current method",
+  "いまのレシピ({n} ユニット)を {name} で置き換えますか?": "Replace the current recipe ({n} {n|unit|units}) with {name}?",
+  "前に測った結果です(A {a} / B {b} 例)。測り直すには「測り直す」": "Result from an earlier run (A {a} / B {b} examples). Press “measure again” to measure anew",
 };

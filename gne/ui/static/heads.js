@@ -13,6 +13,7 @@
 import { getJSON, postJSON } from "./api.js";
 import { t } from "./i18n.js";
 import { esc, toksHTML } from "./panels.js";
+import { plainEnter } from "./ui.js";
 
 const fmt = (x, d = 2) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : (+x).toFixed(d));
 const sgn = (x, d = 3) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : `${x >= 0 ? "+" : "−"}${Math.abs(x).toFixed(d)}`);
@@ -158,7 +159,7 @@ export class HeadPanel {
       setTimeout(() => name.classList.remove("saved"), 800);
       this.onNamed(r.names);
     };
-    name.addEventListener("keydown", (ev) => { if (ev.key === "Enter") save(); });
+    name.addEventListener("keydown", (ev) => { if (plainEnter(ev)) save(); });
     name.addEventListener("blur", save);
     for (const b of this.root.querySelectorAll("[data-hk]")) b.addEventListener("click", () => { this.onRecipe(d.layer, d.head, +b.dataset.hk); this.render(); });
     const pb = this.root.querySelector("[data-hp]");
@@ -398,7 +399,7 @@ export class HeadPanel {
         const v = c[k], f = fl[k], hot = v !== null && v !== undefined && f !== undefined && (signed ? Math.abs(v) : v) > f;
         return `<tr title="${esc(tip())}"><td>${label()}</td><td class="mono ${hot ? "hot" : ""}">${v === null || v === undefined ? "—" : signed ? sgn(v, 4) : fmt(v, 4)}</td><td class="mono muted">${f === undefined ? "—" : fmt(f, 4)}</td><td class="muted">${k}</td></tr>`;
       }).join("");
-      const top = sm ? sm.rows.slice(0, 12).map((x, i) => `<tr data-go="${x.layer}:${x.head}" class="${x.layer === d.layer && x.head === d.head ? "sel" : ""}"><td>${i + 1}</td><td>L${x.layer} H${x.head}</td><td>${x.kind === "attn" ? "attn" : "linear"}</td><td>${fmt(x.z, 2)}</td><td>${fmt(x.null_pct, 2)}</td></tr>`).join("") : "";
+      const top = sm ? sm.rows.slice(0, 12).map((x, i) => `<tr data-go="${x.layer}:${x.head}" class="pick${x.layer === d.layer && x.head === d.head ? " sel" : ""}"><td>${i + 1}</td><td>L${x.layer} H${x.head}</td><td>${x.kind === "attn" ? "attn" : "linear"}</td><td>${fmt(x.z, 2)}</td><td>${fmt(x.null_pct, 2)}</td></tr>`).join("") : "";
       const samples = sm && sm.samples ? sm.samples.filter((s) => s.triggers && s.triggers.length) : [];
       return `<div class="h-con">
         <h4><b class="mono">${esc(c.name)}</b> <span class="mono">#${c.rank}/${c.n_ranked} · z ${fmt(c.z, 2)} · null ${fmt(c.null_pct, 2)}</span>
@@ -525,7 +526,7 @@ export class HeadPanel {
     const th = (key, label, tip) => `<th data-czsort="${key}" class="${cz.sort === key ? "on" : ""}" title="${esc(tip)}">${label}${cz.sort === key ? " ▾" : ""}</th>`;
     const body = rows.slice(0, 40).map((x, i) => {
       const b = x.a || x.m;
-      return `<tr data-go="${x.layer}:${x.head}" class="${x.layer === d.layer && x.head === d.head ? "sel" : ""}${x.m && x.m.excluded ? " rnd" : ""}"><td>${i + 1}</td><td>L${x.layer} H${x.head}</td>
+      return `<tr data-go="${x.layer}:${x.head}" class="pick${x.layer === d.layer && x.head === d.head ? " sel" : ""}${x.m && x.m.excluded ? " rnd" : ""}"><td>${i + 1}</td><td>L${x.layer} H${x.head}</td>
         <td>${fmt(val(x, "causal_max"), 2)}</td><td>${fmt(val(x, "causal"), 2)}</td><td>${fmt(val(x, "contrib"), 2)}</td><td>${fmt(val(x, "ratio"), 2)}</td>
         <td>${fmt(val(x, "eta"), 3)}${x.m && x.m.in_base ? "*" : ""}</td><td>${fmt(b.b_side_delta, 2)}</td><td>${fmt(b.drift_orth_b, 3)}</td></tr>`;
     }).join("");

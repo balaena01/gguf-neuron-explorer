@@ -601,6 +601,68 @@ def test_chat_mic_sends_wav(server, browser):
     ctx.close()
 
 
+@pytest.mark.model
+def test_enter_while_composing_does_nothing(server, browser):
+    """日本語の変換を確定する Enter / Esc(isComposing)では、jump・検索・名前の保存が走らない。ふつうの Enter では走る。"""
+    pg = browser.new_page()
+    errors, names = [], []
+    pg.on("pageerror", lambda e: errors.append(str(e)))
+    pg.on("request", lambda rq: names.append(rq.url) if rq.url.endswith("/api/name") else None)
+    pg.goto(server + "/")
+    pg.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
+    ime = {"key": "Enter", "isComposing": True}
+    pg.fill("#jump", "L6 N7")
+    pg.dispatch_event("#jump", "keydown", ime)
+    pg.wait_for_timeout(300)
+    assert not pg.evaluate("document.querySelector('#neuron-body .n-id')")
+    pg.press("#jump", "Enter")
+    pg.wait_for_function("document.querySelector('#neuron-body .n-id')", timeout=30000)
+    pg.fill("#neuron-body .n-name", "かり")                                          # 名前: 変換の確定では保存しない
+    pg.dispatch_event("#neuron-body .n-name", "keydown", ime)
+    pg.wait_for_timeout(300)
+    assert names == []
+    pg.fill("#neuron-body .n-name", "")                                              # 元の空に戻す(欄を出ても保存しない)
+    pg.fill("#search-q", "alien")
+    pg.dispatch_event("#search-q", "keydown", ime)
+    pg.dispatch_event("#search-q", "keydown", {"key": "Escape", "isComposing": True})   # 変換の取り消しで欄を消さない
+    pg.wait_for_timeout(300)
+    assert pg.input_value("#search-q") == "alien" and not pg.evaluate("window.gne.overlay.field.startsWith('search:')")
+    pg.press("#search-q", "Enter")
+    pg.wait_for_function("window.gne.overlay.field === 'search:alien'", timeout=30000)
+    assert names == [] and not errors, errors
+    pg.close()
+
+
+@pytest.mark.model
+def test_saved_recipe_load_asks_before_replacing(server, browser):
+    """保存したレシピを読むとき、いまのレシピが空でなければ確かめる(断れば今のレシピを残し、選択も戻す)。空なら確かめない。"""
+    pg = browser.new_page()
+    errors, asked = [], []
+    pg.on("pageerror", lambda e: errors.append(str(e)))
+    pg.goto(server + "/")
+    pg.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
+    pg.evaluate("""fetch('/api/recipes/ui_replace', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                   body: JSON.stringify({units: ['6:7:+0.5']})})""")
+    pg.evaluate("window.gne.recipe.clear(); window.gne.recipe.add(6, 100, 1); document.querySelector('#list').classList.remove('collapsed')")
+    pg.click("#list-tabs button[data-tab=recipe]")
+    pg.wait_for_function("[...document.querySelectorAll('#rc-load option')].some((o) => o.value === 'ui_replace')", timeout=10000)
+    pg.once("dialog", lambda d: (asked.append(d.message), d.dismiss()))
+    pg.select_option("#rc-load", "ui_replace")
+    assert len(asked) == 1 and pg.evaluate("window.gne.recipe.specs()") == ["6:100:+1"] and pg.input_value("#rc-load") == ""
+    pg.once("dialog", lambda d: (asked.append(d.message), d.accept()))
+    pg.select_option("#rc-load", "ui_replace")
+    assert len(asked) == 2 and pg.evaluate("window.gne.recipe.specs()") == ["6:7:+0.5"]
+    pg.evaluate("window.gne.recipe.clear()")
+    pg.click("#list-tabs button[data-tab=rank]")
+    pg.click("#list-tabs button[data-tab=recipe]")
+    pg.wait_for_function("[...document.querySelectorAll('#rc-load option')].some((o) => o.value === 'ui_replace')", timeout=10000)
+    pg.select_option("#rc-load", "ui_replace")                                       # 空なら確かめずに読む
+    assert len(asked) == 2 and pg.evaluate("window.gne.recipe.specs()") == ["6:7:+0.5"]
+    pg.evaluate("window.gne.recipe.clear()")
+    assert not errors, errors
+    pg.close()
+
+
 def test_chat_single_column_in_browser(server, browser):
     """チャットの 1 列: + の列(レシピあり)だけを生成し、3 列に戻すときは確かめてから会話を消す。選んだ列の数は覚える。"""
     pg = browser.new_page()
@@ -1591,8 +1653,10 @@ def test_head_panel_in_browser(server, browser):
     pg.click("#list-tabs button[data-tab=rank]")
     pg.click("#list-tabs button[data-tab=recipe]")
     pg.wait_for_function("[...document.querySelectorAll('#rc-load option')].some((o) => o.value === 'ui_heads')", timeout=10000)
+    asked = []
+    pg.once("dialog", lambda d: (asked.append(d.message), d.accept()))             # いまのレシピ(×0.5)を置き換える前に確かめる
     pg.select_option("#rc-load", "ui_heads")
-    assert pg.evaluate("window.gne.recipe.specs()") == ["12:H3:x2", "14:100:+1"] and pg.evaluate("window.gne.recipe.skipped") == 0
+    assert asked and pg.evaluate("window.gne.recipe.specs()") == ["12:H3:x2", "14:100:+1"] and pg.evaluate("window.gne.recipe.skipped") == 0
     pg.click("#recipe-list tr.rc-head a[data-open]")                                # 行から HEAD パネルへ
     pg.fill("#jump", "L5 H2")
     pg.press("#jump", "Enter")
@@ -1950,6 +2014,7 @@ def test_moe_neuron_recipe_buttons(moe_server, browser):
     _open_list(pg, "rank")
     _open_list(pg, "recipe")
     pg.wait_for_function("[...document.querySelectorAll('#rc-load option')].some((o) => o.value === 'ui_moe')", timeout=10000)
+    pg.once("dialog", lambda d: d.accept())                                        # いまのレシピを置き換える前に確かめる
     pg.select_option("#rc-load", "ui_moe")
     assert specs() == [f"{L}:E{E}:N7:+0.8", f"{L}:E{E}:N7:x2", f"{L}:E{E}:x0"] and pg.evaluate("window.gne.recipe.skipped") == 0
     pg.click("#n-expert")                                                              # EXPERT パネルで開く
@@ -2228,6 +2293,7 @@ def test_causal_proj_direction_in_browser(causal_server, browser):
         pg.click("#list-tabs button[data-tab=rank]")
         pg.click("#list-tabs button[data-tab=recipe]")
         pg.wait_for_function("[...document.querySelectorAll('#rc-load option')].some((o) => o.value === 'czr')", timeout=10000)
+        pg.once("dialog", lambda d: d.accept())                                    # いまのレシピを置き換える前に確かめる
         pg.select_option("#rc-load", "czr")
         assert pg.evaluate("window.gne.recipe.specs()") == ["12:H3:s6@czdir", "12:H5:s4@czdir", "14:H0:x0"]
         assert pg.evaluate("window.gne.recipe.skipped") == 0
@@ -2235,9 +2301,17 @@ def test_causal_proj_direction_in_browser(causal_server, browser):
         pg.dispatch_event("#recipe-list tr.rc-proj input.num >> nth=1", "input")
         assert pg.evaluate("window.gne.recipe.specs()")[1] == "12:H5:s2.5@czdir"
         assert "s2.5" in pg.evaluate("document.querySelectorAll('#recipe-list tr.rc-proj')[1].innerText")
-        # direction ビュー: 開くと測り、基準層が無ければ cohen_d 最大の層を記録する。別の層を基準層にできる
+        # direction ビュー: 開いただけでは測らない(モデルを流す計算は「測り直す」を押したときだけ)
+        score_posts = []
+        pg.on("request", lambda rq: score_posts.append(rq.url) if rq.method == "POST" and rq.url.endswith("/score") else None)
         pg.click("#views button[data-view=direction]")
-        pg.wait_for_function("window.gne.directionView && window.gne.directionView.scores.size && !window.gne.directionView.busy", timeout=180000)
+        pg.wait_for_function("window.gne.directionView && window.gne.directionView.meta", timeout=60000)
+        pg.wait_for_load_state("networkidle")
+        assert score_posts == []                                                         # 出るのは前の回(別の言語)に測って残した結果だけ
+        assert pg.evaluate("[...window.gne.directionView.scores.values()].every((r) => r.saved)")
+        # 「測り直す」で測り、基準層が無ければ cohen_d 最大の層を記録する。別の層を基準層にできる
+        pg.click("#dv-run")
+        pg.wait_for_function("window.gne.directionView.scores.size && !window.gne.directionView.busy", timeout=180000)
         base = pg.evaluate("window.gne.directionView.meta.base_layer")
         assert base is not None and pg.evaluate("document.querySelector('#dv-base').disabled")
         assert pg.evaluate("document.querySelector('#dv-line').width") > 0 and pg.evaluate("document.querySelector('#dv-hist').width") > 0
@@ -2247,6 +2321,12 @@ def test_causal_proj_direction_in_browser(causal_server, browser):
         pg.wait_for_function(f"window.gne.directionView.meta.base_layer === {other} && !window.gne.directionView.busy", timeout=180000)
         pg.click("#dv-ex summary")
         assert pg.evaluate("document.querySelectorAll('#dv-ex table.dv-ex tbody tr').length") == 12
+        # 測った結果は残り、開き直すと測らずに出る(GET だけ)
+        n_posts = len(score_posts)
+        pg.evaluate("(() => { const v = window.gne.directionView; v.scores.clear(); v.select(v.name); })()")
+        pg.wait_for_function("window.gne.directionView.scores.size === 1", timeout=30000)
+        assert len(score_posts) == n_posts and pg.evaluate("window.gne.directionView.scores.get(window.gne.directionView.name).saved")
+        assert pg.evaluate("window.gne.directionView.meta.base_layer") == other
         # eval ビュー: 方式の比較(外した方式は理由)、ヘッド数の曲線(推奨の組、行の組をレシピに)、方向の列
         pg.click("#views button[data-view=eval]")
         pg.wait_for_function("window.gne.evalView && window.gne.evalView.data", timeout=30000)
@@ -2425,7 +2505,7 @@ def test_pipeline_api_and_panel(pipe_server, browser):
             body = json.loads(req.post_data)
             posts.append(body)
             p = body["params"]
-            if body["kind"] == "head_pipeline" and not p.get("yes"):                     # 1 回目は見積もりの確認
+            if body["kind"] in ("head_pipeline", "eval") and not p.get("yes"):            # 1 回目は見積もりの確認
                 route.fulfill(status=400, content_type="application/json",
                               body=json.dumps({"error": {"code": "NEEDS_CONFIRM", "message": "long"}, "estimate": {"seconds": 3600}}))
                 return
@@ -2438,6 +2518,13 @@ def test_pipeline_api_and_panel(pipe_server, browser):
                 "yields": 0, "seconds": 3.0, "result": {"name": "ppx"}, "error": None}
         pg.route("**/api/jobs/fake-pipe/events", lambda route, req: route.fulfill(status=200, content_type="text/event-stream",
                                                                                body=f"data: {json.dumps(done)}\n\n"))
+        pg.remove_listener("dialog", accept)
+        pg.once("dialog", lambda d: d.dismiss())                                        # 見積もりの確認でやめたら、投げずに押せるまま
+        pg.click(f"{res} table.pp-cmp [data-eval='3']")
+        pg.wait_for_timeout(500)
+        assert not pg.evaluate("document.querySelector('#pp-result table.pp-cmp [data-eval=\"3\"]').disabled")
+        assert not [b for b in posts if b["kind"] == "eval" and b["params"].get("yes")]
+        pg.on("dialog", accept)
         pg.click(f"{res} table.pp-cmp [data-eval='3']")
         pg.wait_for_function("document.querySelector('#pp-result table.pp-cmp [data-eval=\"3\"]').disabled", timeout=10000)
         ev = [b for b in posts if b["kind"] == "eval"]

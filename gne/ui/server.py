@@ -323,7 +323,28 @@ def create_app(session, *, warm: bool = True, openai: bool = False) -> FastAPI:
         層を省くと全層を測り、基準層がまだ無ければ cohen_d が最大の層を記録する(record_base=False で記録しない)。"""
         data.direction_one(name)                                 # 名前を確かめる(無ければ 404 相当)
         r, warns = live._gpu(lambda: session.direction_score(name, layers=layers, set_base=set_base, record_base=record_base))
+        if layers is None:                                       # 全層を測った結果は残す(画面を開き直したときに、測り直さずに出す)
+            from fastapi.encoders import jsonable_encoder
+            try:
+                _score_path(name).write_text(json.dumps(jsonable_encoder({**r, "warnings": warns}), ensure_ascii=False), encoding="utf-8")
+            except OSError:
+                pass
         return {**r, "warnings": warns, "meta": data.direction_one(name)}
+
+    def _score_path(name: str) -> Path:
+        return session.store.direction_dir(session.meta.model_id) / f"{name}.score.json"
+
+    @app.get("/api/directions/{name}/score")
+    def direction_score_saved(name: str):
+        """最後に全層を測った結果(モデルは使わない)。まだ測っていないか、測った後で方向を作り直していれば null。"""
+        meta = data.direction_one(name)
+        p = _score_path(name)
+        try:
+            if not p.exists() or p.stat().st_mtime < session.direction_set(name).path.stat().st_mtime:
+                return None
+            return {**json.loads(p.read_text(encoding="utf-8")), "meta": meta, "saved": True}
+        except (OSError, ValueError):
+            return None
 
     # --- CHANGE-05 G: MoE の専門家(EXPERT パネル、地図の expert_usage・experts:<name>) -----------------------
     @app.get("/api/expert")

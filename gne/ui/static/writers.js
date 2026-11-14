@@ -91,7 +91,7 @@ export class WritersView {
     const body = this.$("#wrx-body"), d = this.data;
     if (!d) { body.innerHTML = `<p class="muted note">${t("分析がまだありません。上の「測る」か gne writers --contrast で作ります(MCP の writers でも)。")}</p>`; return; }
     const tt = d.totals;
-    const rows = (xs, start = 1) => xs.map((x, i) => `<tr data-layer="${x.layer}" data-n="${x.neuron}">
+    const rows = (xs, start = 1) => xs.map((x, i) => `<tr class="pick" data-layer="${x.layer}" data-n="${x.neuron}">
         <td>${i + start}</td><td>L${x.layer} N${x.neuron}</td><td class="${x.share >= 0 ? "ok" : "ng"}">${pct(x.share, 2)}</td>
         <td>${fmt(x.act_a)}</td><td>${fmt(x.act_b)}</td><td>${fmt(x.act_diff)}</td><td>${fmt(x.align)}</td></tr>`).join("");
     const head = `<thead><tr><th>#</th><th>${t("住所")}</th><th title="${t("参照の方向 r* への直接の寄与(‖r*‖ に対する割合)")}">${t("寄与")}</th>

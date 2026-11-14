@@ -395,8 +395,8 @@ table.evx td.units { text-align: left; white-space: normal; max-width: 300px; co
 .evx-scroll { overflow-x: auto; max-width: 100%; }
 .evx-notes { margin: 4px 0 8px; padding-left: 18px; color: #d9b36a; font-size: 12px; }
 #evx-nh { display: block; margin: 4px 0; }
-table.wrx tbody tr { cursor: pointer; }
-table.wrx tbody tr:hover { background: #121820; }
+tr.pick { cursor: pointer; }                                          /* 押すと何か起きる行だけ(表ごとに付けない) */
+tr.pick:hover td { background: #121820; }
 .evx-tools { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; padding: 10px 0 2px; }
 .evx-run { display: inline-flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .evx-help { margin: 4px 0 8px; }
@@ -407,7 +407,6 @@ table.wrx tbody tr:hover { background: #121820; }
 table.evx { border-collapse: collapse; font-size: 12px; margin: 6px 0 10px; }
 table.evx th, table.evx td { padding: 3px 10px 3px 0; text-align: right; border-bottom: 1px solid #141a22; white-space: nowrap; }
 table.evx th { color: #8692a3; font-weight: normal; }
-table.evx tbody tr { cursor: pointer; }
 table.evx tbody tr.on { background: #121923; }
 table.evx td.ok { color: #6fcf8f; text-align: left; }
 table.evx td.ng { color: #ff8a8a; text-align: left; }
@@ -561,7 +560,6 @@ table.fi-tab.moe th:nth-child(1) { width: 52px; } table.fi-tab.moe th:nth-child(
 .ft-form input[type=number] { width: 6em; }
 .ft-table tr.ft-sec td { font-weight: 500; padding-top: 8px; color: var(--text); }
 .ft-table tr.ft-worse td { background: #2a1616; }
-.ft-past tr[data-ft] { cursor: pointer; }
 .ft-past tr.on td { background: #15202c; }
 /* CHANGE-07 G: 鍵つきの書き込み(direction ビューの「鍵」、recipe タブの keyed の行)。ヒストグラムの色は変数にまとめる */
 :root { --kx-a: #e8b04a; --kx-b: #9fb3cf; --kx-d0: #6fcf8f; --kx-d1: #c38cf0; --kx-d2: #5ec8d8; --kx-ok: #6fcf8f; --kx-ng: #ff8a8a; }

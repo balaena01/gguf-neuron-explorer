@@ -71,14 +71,15 @@ export class DirectionView {
     new ResizeObserver(() => this.draw()).observe(root);
   }
 
-  // 方向を見る / JSON から作る の切り替え。方向を見るに替えたとき、まだ測っていなければ測る
+  // 方向を見る / JSON から作る の切り替え。方向を見るでは、測った結果が残っていればそれを出す(測り直すのは「測り直す」を押したときだけ。
+  // モデルを流して GPU を使うので、開いただけでは始めない)
   setMode(m) {
     this._modeUI(m);
     if (m === "pipe") this.pipe.refreshList();
     else if (m === "cand") this.cand.refreshList();
     else if (m === "key") this.key.refresh();
     else if (m === "fish") this.fish.refresh();
-    else if (this.name && this.meta && this.meta.name === this.name && !this.scores.has(this.name) && this.meta.contrast_ok) this.measure();
+    else if (this.name && this.meta && this.meta.name === this.name && !this.scores.has(this.name)) this.loadSaved(this.name);
   }
 
   _modeUI(m) {
@@ -146,7 +147,19 @@ export class DirectionView {
     this.sel = this.meta.base_layer;
     this.status("");
     this.draw();
-    if (!this.scores.has(name) && this.meta.contrast_ok && this.mode === "dir") await this.measure();
+    if (!this.scores.has(name) && this.mode === "dir") await this.loadSaved(name);
+  }
+
+  // 前に全層を測った結果(サーバに残したもの)を出す。無ければ「まだ測っていません」のまま
+  async loadSaved(name) {
+    let r = null;
+    try { r = await getJSON(`/api/directions/${encodeURIComponent(name)}/score`); } catch { r = null; }
+    if (!r || this.name !== name || this.scores.has(name)) return;
+    this.scores.set(name, r);
+    if (r.meta) this.meta = r.meta;
+    if (this.sel === null) this.sel = this.meta.base_layer;
+    this.status(t("前に測った結果です(A {a} / B {b} 例)。測り直すには「測り直す」", { a: r.n?.A ?? "—", b: r.n?.B ?? "—" }));
+    this.draw();
   }
 
   status(s) { this.$("#dv-status").textContent = s; }
@@ -174,8 +187,6 @@ export class DirectionView {
     } catch (e) { if (this.name === name) this.status(`${t("エラー")}: ${e.message}`); }
     finally { this.busy = false; }
     this.draw();
-    // 測っている間に別の方向を選んでいたら、そちらも測る
-    if (this.name !== name && this.meta && this.meta.name === this.name && !this.scores.has(this.name) && this.meta.contrast_ok) await this.measure();
   }
 
   // グラフの層(測った層。まだ測っていなければ方向セットの層)

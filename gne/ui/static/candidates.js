@@ -8,6 +8,7 @@ import { getJSON, postJSON } from "./api.js";
 import { t } from "./i18n.js";
 import { esc, qHTML } from "./panels.js";
 import { parseProj } from "./recipe.js";
+import { composing } from "./ui.js";
 
 const fmt = (x, d = 2) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : (+x).toFixed(d));
 const pct = (x) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : `${Math.round(x * 100)}%`);
@@ -59,7 +60,7 @@ export class CandidatesPanel {
     const el = this.$("#cd-list");
     if (!this.list.length) { el.innerHTML = `<p class="muted note">${t("まだありません")}</p>`; return; }
     el.innerHTML = `<table class="evx mono pp-past"><thead><tr><th class="l">${t("名前")}</th><th class="l">${t("方向")}</th><th>${t("候補")}</th><th>${t("採点する返事")}</th><th>${t("集計")}</th><th class="l">${t("更新")}</th></tr></thead><tbody>${
-      this.list.map((x) => `<tr data-cd="${esc(x.name)}" class="${this.data && this.data.name === x.name ? "on" : ""}"><td class="l">${esc(x.name)}</td><td class="l">${esc(x.direction || "—")}</td>
+      this.list.map((x) => `<tr data-cd="${esc(x.name)}" class="pick${this.data && this.data.name === x.name ? " on" : ""}"><td class="l">${esc(x.name)}</td><td class="l">${esc(x.direction || "—")}</td>
         <td>${x.n_candidates ?? "—"}</td><td>${x.n_judge ?? "—"}</td><td>${x.scored ? "✓" : ""}</td><td class="l">${esc((x.updated || "").replace("T", " ").slice(0, 16))}</td></tr>`).join("")}</tbody></table>`;
     for (const tr of el.querySelectorAll("tr[data-cd]")) tr.addEventListener("click", () => this.open(tr.dataset.cd));
   }
@@ -271,7 +272,7 @@ export class CandidatesPanel {
   key(ev) {
     if (this.mode !== "score" || !this.blind || this.done || !this.root.offsetParent) return;
     const tag = (ev.target && ev.target.tagName) || "";
-    if (["INPUT", "TEXTAREA", "SELECT"].includes(tag) || ev.ctrlKey || ev.metaKey || ev.altKey) return;
+    if (["INPUT", "TEXTAREA", "SELECT"].includes(tag) || ev.ctrlKey || ev.metaKey || ev.altKey || composing(ev)) return;
     if (/^[1-5]$/.test(ev.key)) { ev.preventDefault(); this.setPC(this.cur.P === null ? "P" : "C", +ev.key); }
     else if (ev.key === "ArrowLeft") { ev.preventDefault(); this.move(-1); }
     else if (ev.key === "ArrowRight") { ev.preventDefault(); this.move(1); }

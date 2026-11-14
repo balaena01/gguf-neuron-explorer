@@ -400,7 +400,14 @@ export class RecipePanel {
     if (clr) clr.addEventListener("click", () => { if (confirm(t("レシピの {n} ユニットをすべて外しますか", { n: r.units.length }))) { r.clear(); this.render(); } });
     $("#rc-load").addEventListener("change", (ev) => {
       const x = this.saved.find((y) => y.name === ev.target.value);
-      if (x) { r.load(x.name, x.units, x.ablate, x.sampling, x.direction_layer, { default_direction: x.default_direction, default_key: x.default_key }); this.render(); }
+      if (!x) return;
+      // いまのレシピが空でなければ、置き換える前に確かめる(やめたら選択を戻す)
+      if (!r.empty() && !window.confirm(t("いまのレシピ({n} ユニット)を {name} で置き換えますか?", { n: r.units.length + (r.ablate ? 1 : 0), name: x.name }))) {
+        ev.target.value = "";
+        return;
+      }
+      r.load(x.name, x.units, x.ablate, x.sampling, x.direction_layer, { default_direction: x.default_direction, default_key: x.default_key });
+      this.render();
     });
     for (const el of this.root.querySelectorAll("input[data-i]")) {
       el.addEventListener("input", (ev) => {

@@ -91,7 +91,7 @@ export class FieldtestPanel {
     const el = this.$("#ft-list");
     if (!list.length) { el.innerHTML = `<p class="muted note">${t("まだありません")}</p>`; return; }
     el.innerHTML = `<table class="evx mono ft-past"><thead><tr><th class="l">${t("名前")}</th><th class="l">${t("対象")}</th><th class="l">${t("比較")}</th><th>${t("結論")}</th><th class="l">${t("更新")}</th></tr></thead><tbody>${
-      list.map((x) => `<tr data-ft="${esc(x.name)}" class="${this.data && this.data.name === x.name ? "on" : ""}"><td class="l">${esc(x.name)}</td><td class="l">${esc(x.target || "—")}</td><td class="l">${esc(x.reference || "—")}</td>
+      list.map((x) => `<tr data-ft="${esc(x.name)}" class="pick${this.data && this.data.name === x.name ? " on" : ""}"><td class="l">${esc(x.name)}</td><td class="l">${esc(x.target || "—")}</td><td class="l">${esc(x.reference || "—")}</td>
         <td class="${x.same_level === false ? "ng" : x.same_level ? "ok" : ""}">${x.same_level === null || x.same_level === undefined ? "—" : x.same_level ? t("同程度") : t("悪化 {n} 項目", { n: x.n_worse })}</td>
         <td class="l">${esc((x.updated || "").replace("T", " ").slice(0, 16))}</td></tr>`).join("")}</tbody></table>`;
     for (const tr of el.querySelectorAll("tr[data-ft]")) tr.addEventListener("click", () => this.open(tr.dataset.ft));

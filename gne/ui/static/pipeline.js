@@ -119,7 +119,7 @@ export class PipelinePanel {
     this.onShowDirection = onShowDirection || (() => {});   // (名前) → 上の「方向を見る」でその方向を開く
     this.onOpenHead = onOpenHead || (() => {});   // ({ layer, head, tab }) → HEAD パネル
     this.onLoadProj = onLoadProj || (() => {});   // (名前, ["L:Hh:sS@NAME"], 方向) → レシピを置き換える
-    this.onEval = onEval || (() => {});           // (params) → ジョブ eval
+    this.onEval = onEval || (async () => null);   // (params) → ジョブ eval。投げたジョブ(やめたら null)を返す
     this.onOverlay = onOverlay || (() => {});     // (field) → 地図の色(causal:<name>)
     this.onOpenCandidates = onOpenCandidates || (() => {});   // (名前) → 「強さの候補」で開く
     this.list = [];
@@ -306,7 +306,7 @@ export class PipelinePanel {
     const el = this.$("#pp-past");
     if (!this.list.length) { el.innerHTML = `<p class="muted note">${t("まだありません")}</p>`; return; }
     el.innerHTML = `<table class="evx mono pp-past"><thead><tr><th class="l">${t("名前")}</th><th>${t("質問")}</th><th>${t("推す組")}</th><th>${t("目標")}</th><th>${t("時間")}</th><th class="l">${t("更新")}</th></tr></thead><tbody>${
-      this.list.map((x) => `<tr data-pp="${esc(x.name)}" class="${this.data && this.data.name === x.name ? "on" : ""}"><td class="l">${esc(x.name)}</td><td>${x.n_prompts ?? "—"}</td>
+      this.list.map((x) => `<tr data-pp="${esc(x.name)}" class="pick${this.data && this.data.name === x.name ? " on" : ""}"><td class="l">${esc(x.name)}</td><td>${x.n_prompts ?? "—"}</td>
         <td>${x.recommended ? t("{n} ヘッド", { n: x.recommended.n_heads }) : "—"}</td><td>${fmt(x.target, 2)}</td><td>${x.seconds ? t("{n} 秒", { n: Math.round(x.seconds) }) : "—"}</td>
         <td class="l">${esc((x.updated || "").replace("T", " ").slice(0, 16))}</td></tr>`).join("")}</tbody></table>`;
     for (const tr of el.querySelectorAll("tr[data-pp]")) tr.addEventListener("click", () => this.open(tr.dataset.pp));
@@ -385,23 +385,24 @@ export class PipelinePanel {
     const rf = d.refine && d.refine.combined;
     const rl = $("#pp-rf-load"), re = $("#pp-rf-eval");
     if (rf && rl) rl.addEventListener("click", () => this.onLoadProj(`${d.name}-combined`, rf.units, d.name));
-    if (rf && re) {
-      re.addEventListener("click", () => {
-        this.onEval({ recipe: rf.recipe, doses: [0, 1], random_controls: 8 });
-        re.textContent = t("eval を投げました");
-        re.disabled = true;
-      });
-    }
+    if (rf && re) re.addEventListener("click", () => this.fireEval(re, { recipe: rf.recipe, doses: [0, 1], random_controls: 8 }));
     for (const b of out.querySelectorAll("[data-eval]")) {
       b.addEventListener("click", () => {
         const r = table.find((x) => String(x.n_heads) === b.dataset.eval);
         if (!r || !r.recipe) return;
         const c = crow(b.dataset.eval);
-        this.onEval({ recipe: c ? c.recipe : r.recipe, doses: [0, 1], random_controls: 8 });
-        b.textContent = t("eval を投げました");
-        b.disabled = true;
+        this.fireEval(b, { recipe: c ? c.recipe : r.recipe, doses: [0, 1], random_controls: 8 });
       });
     }
+  }
+
+  // eval を投げる。見積もりの確認でやめたとき・投げられなかったときは、ボタンを元に戻す(もう一度押せる)
+  async fireEval(btn, params) {
+    btn.disabled = true;
+    let j = null;
+    try { j = await this.onEval(params); } catch (e) { btn.title = e.message; }
+    if (j) btn.textContent = t("eval を投げました");
+    else btn.disabled = false;
   }
 
   // 「候補を作る」: 組 × 全体の倍率で返事を作り、名前を伏せて採点する(heads_candidates のジョブ)

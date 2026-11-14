@@ -235,7 +235,7 @@ export class EvalView {
       kctrl ? `<th class="wrap" title="${t("鍵を比較用の鍵に替えた対照の eval の選択性の 95% 点")}">${t("比較用の鍵の p95")}</th><th title="${t("eval の選択性が、比較用の鍵の対照の何割より大きいか(0.95 未満は鍵が状態を選んでいるとは言えない)")}">null</th>` : ""}` : "";
     const notes = [...(d.notes || [])];
     const ok = d.rows.filter((r) => r.shippable && r.dose > 0).map((r) => r.dose);
-    const rows = d.rows.map((r) => `<tr class="${r.dose === this.dose ? "on" : ""}" data-dose="${r.dose}">
+    const rows = d.rows.map((r) => `<tr class="pick${r.dose === this.dose ? " on" : ""}" data-dose="${r.dose}">
         <td>${fmt(r.dose, 2)}</td><td>${pct(r.capability)}</td><td>${fmt(r.capability_drop_pt, 1)}</td>
         <td>${fmt(r.ppl_mean, 2)}</td><td>${r.ppl_worse_pct >= 0 ? "+" : ""}${fmt(r.ppl_worse_pct, 1)}%</td>
         <td>${pct(r.mix_zh + r.mix_other, 2)}</td><td>${fmt(r.persona.novelty, 2)}</td><td>${fmt(r.persona.distinct4, 2)}</td>

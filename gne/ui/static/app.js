@@ -24,6 +24,7 @@ import { FIELDS, colorize, colorizeHeads, colorizeHits, emphasisFactor, emphasiz
 import { HeadPanel } from "./heads.js";
 import { ExpertPanel } from "./experts.js";
 import { NeuronPanel, RankList, SearchList, esc, toksHTML } from "./panels.js";
+import { plainEnter, plainEscape } from "./ui.js";
 import { Recipe, RecipePanel, parseProj } from "./recipe.js";
 
 const $ = (s) => document.querySelector(s);
@@ -880,7 +881,7 @@ async function setView(v) {
           onRun: (kind, params) => jobsBar.start(kind, params),
           onOpenHead: (u) => openHead(u),
           onLoadProj: (name, specs, dir) => { state.recipe.loadProj(name, specs, dir); expand("list"); listTab("recipe"); },
-          onEval: (params) => startJob("eval", params),
+          onEval: (params) => jobsBar.start("eval", params).catch((e) => { state.note = `${t("エラー")}: ${e.message}`; updateStatus(); return null; }),
           onOverlay: (field) => { setView("map"); applyOverlay(field); },
         },
         candidates: {                                                     // 強さの候補(heads_candidates)の候補を使う
@@ -985,7 +986,7 @@ function wireHeader() {
   const jump = $("#jump");
   jump.placeholder = isMoE() ? "L10 E0 N0" : "L14 N8949";
   jump.addEventListener("keydown", (ev) => {
-    if (ev.key !== "Enter") return;
+    if (!plainEnter(ev)) return;                                         // 変換を確定する Enter では飛ばない
     const j = parseJump(ev.target.value);
     if (j && j.head !== undefined) {                                     // ヘッドは HEAD パネルで(視点は動かさない)
       const ok = !!state.model && openHead({ layer: j.layer, head: j.head });
@@ -1047,7 +1048,7 @@ function wireHeader() {
     $("#cos-thr-val").textContent = `${wr ? t("|寄与|") : "|cos|"} ≥ ${state.overlay.threshold.toFixed(wr ? 4 : 3)}`;
     recolor();
   });
-  $("#search-q").addEventListener("keydown", (ev) => { if (ev.key === "Enter") runSearch(); if (ev.key === "Escape") { ev.target.value = ""; closeSearch(); } });
+  $("#search-q").addEventListener("keydown", (ev) => { if (plainEnter(ev)) runSearch(); if (plainEscape(ev)) { ev.target.value = ""; closeSearch(); } });
   if (!state.model) { $("#search").classList.add("hidden"); $("#color-select").disabled = true; }
 }
 
