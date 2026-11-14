@@ -19,6 +19,8 @@ CMAKE_ARGS="-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=86" uv pip install --pytho
 GNE_TEST_MODEL=models/Qwen3.5-4B-Q8_0.gguf .venv/bin/python -m pytest -q tests/test_model.py
 ```
 
+
+> Web UI の名前について: この記録の UI の名前(recipe タブ、NEURON パネル、direction ビューのタブなど)は、作業をしたときの名前のまま。画面の組み直し(2026-11)のあとは、recipe タブは右の「レシピ」のパネル、NEURON・HEAD・EXPERT のパネルは「くわしく見る」の 1 枚、direction ビューの中のタブは上の帯の「方向」「CHiPS」「強さの候補」「鍵」「FiSH」の画面。
 ## 1. 受け入れテスト
 
 両モデルとも **V1〜V4・V6〜V8 は合格**(Phase 1 で Capture を直した後に SmolLM2(llama)でも 8/8 合格)。V5(任意)は未実施(§5)。既定の層は n_layer/2。端の層(0.6B: L1・L25、4B: L1・L3(full attention 層)・L29)でも V2〜V4 は合格。CPU のみ(`--n-gpu-layers 0`、0.6B)でも合格。

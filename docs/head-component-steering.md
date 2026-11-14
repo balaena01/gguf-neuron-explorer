@@ -329,7 +329,7 @@ A 側と B 側のそれぞれで射影の値を出す。生成しないので 1 
 | attention の出力だけから方向を消す(全ヘッドの射影、MoE でも LoRA) | `gne headproj ablate --direction <方向> --per-layer`(`--bake` で焼き込み) | なし |
 | どこを探すかを決める(方向の差を attention・専門家・共有の専門家に分ける) | `gne heads writers --name <方向>`(`--expert-layers` で専門家ごとにも) | なし |
 | 3.5〜3.6 組を作り、効率で配り直す・ヘッド数を減らす | `gne heads allocate --name <方向> --target <射影の値>`(`heads_allocate`)。比を固定しないなら `--method greedy` | なし |
-| 3.2〜3.6 をまとめて回す | `gne heads pipeline --spec <JSON>`(`heads_pipeline`、UI の direction ビューで JSON を読み込んでも回せる。用途別のひな形は `configs/pipeline/`) | なし |
+| 3.2〜3.6 をまとめて回す | `gne heads pipeline --spec <JSON>`(`heads_pipeline`、UI の「CHiPS」の画面で JSON を読み込んでも回せる。用途別のひな形は `configs/pipeline/`) | なし |
 | 組で消し切れない質問から、足すヘッドを探す | `gne heads refine --name <配分> --n-heads N`(`heads_refine`、UI の比較表の「残りから追加」)。組を当てても射影の値が目標まで下がらない質問を A、元の B を B にし、両側に組を当てたまま方向を作り直して `heads pipeline` に流す。元の組と合わせたレシピを作って測り直す | なし |
 | 全体の倍率を返事で決める | `gne heads candidates --alloc <配分>`(組 × 倍率で返事を作り、どの候補か伏せた採点のファイルを書く)→ 採点 → `gne heads candidates --tally <名前>`(`heads_candidates`・`heads_candidates_tally`、UI のパイプラインのタブからも) | あり |
 | 3.7 書き出す | `gne headproj export --recipe <レシピ>`(`--bake` で焼き込み、`--verify` で LoRA 版との一致) | なし |

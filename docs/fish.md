@@ -346,9 +346,9 @@ gne nw try --direction tsundere_thanks --contrast $C --layers 11-23 --alpha 1,1,
 - MCP は `nw_try`、ジョブは `fish_try`、Python は `Session.nw_try(direction, contrast, layers=…, alpha=…)`。UI は FiSH のタブの
   「重みに入れる前に試す」。
 
-### Web UI だけで作る(direction ビューの「FiSH」)
+### Web UI だけで作る(「FiSH」の画面)
 
-`gne serve` の direction ビューの「FiSH」のタブで、上のコマンドと同じことを順に行える。層と強さは使う人が入れる(自動では決めない)。
+`gne serve` の上の帯の「FiSH」の画面で、上のコマンドと同じことを手順ごとに行える(左に手順、右に選んだ手順。名前・層・区切り・強さなどの共通の設定は上に 1 回だけ)。層と強さは使う人が入れる(自動では決めない)。
 
 1. **対照集合**: 「JSON を書く(ひな形)」で `configs/fish/` のひな形(6 つ。下の表)を選ぶと入力欄に入るので、
    `system_a`(出したい口調の指示)、`user_prompts`(狙う場面の質問。最初から多め(100 問以上)に用意すると、鍵の取りこぼしが起きにくい。§3 の「鍵を作る質問の数」)、
@@ -778,7 +778,7 @@ gne nw check  --recipe R --contrast C [--subset odd] [--replies own|base] [--low
   qwen35。ほかの arch、ゲートの無い MLP、バイアスや倍率(.scale)のある MLP、MoE の層、MTP の層、最終層は、エラーになる。
 - **同じレシピの proj・keyed・gain と一緒に 1 つの LoRA にするなら** `gne headproj export`(§2)。
 - **UI**: レシピの欄で、nw のユニットの表示・強さの変更・保存・LoRA の書き出し(「nw の LoRA を書き出す」)ができる。方向・
-  ニューロンの表・鍵・確かめ・重みに入れる前に試す、は direction ビューの「FiSH」のタブ(§2)。
+  ニューロンの表・鍵・確かめ・重みに入れる前に試す、は「FiSH」の画面(§2)。
 
 ---
 
