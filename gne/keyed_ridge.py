@@ -428,11 +428,13 @@ def _pseudo_layer(Xt, Gd, table, idx_t, b_i, key_bin, cell, n_dt, weights, om, d
 
 
 def gflops() -> float:
-    """この機械の行列の掛け算の速さ(GFLOP/秒)の、ごく短い測定(見積もり用。結果は覚えておく)。"""
+    """この機械の行列の掛け算の速さ(GFLOP/秒)の、短い測定(見積もり用。結果は覚えておく)。小さい行列や 1 回目(スレッドの立ち上げ)は
+    遅く出てばらつく(600 次元の 1 回目で 70〜130)ので、1 回空回ししてから 1,500 次元で 3 回測り、いちばん速い値を使う(この機械で 190〜210)。"""
     v = getattr(gflops, "_v", None)
     if v is None:
-        n = 600
+        n = 1500
         a = np.random.default_rng(0).standard_normal((n, n))
+        a @ a
         best = 0.0
         for _ in range(3):
             t = time.perf_counter()
@@ -453,4 +455,5 @@ def estimate_seconds(n_rows: int, n_target_rows: int, dim: int, n_layers: int, n
     if pseudo:
         per += (gram(n_rows - n_target_rows) if cv else 0.0) + n_keys * pseudo * (gram(n_target_rows) + chol)
     # 掛け算だけの測定より、実際の計算は遅い(行の取り出し・写し・分解の並列の効きにくさ)。実測に合わせて 3 倍にする
+    # (2,560 次元・13 層・13,824 行・区間 3・5 分割で、比較用の鍵なし 148 秒・4 本 274 秒。掛け算の速さ 190〜210 で、この式は 3.0 倍・2.95 倍)
     return 3.0 * n_layers * per / (gflops() * 1e9)

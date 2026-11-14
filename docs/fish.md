@@ -526,8 +526,10 @@ G = Σ_i w_i x_i x_iᵀ(W と U の全部)、b = Σ_{i∈W} w_i x_i、λ = c × 
   いまの作り方で作ったもの。`gne direction key`・`gne nw pipeline` の結果と要約(「鍵の作り方: ridge …。正則化の強さ: 1 段目 c = …」)、
   `gne nw check` の最初の行(ユニットの鍵の作り方)、UI の鍵の表・まとめて作った結果・足した量の上に出る。
 - **時間とメモリ**: 鍵の計算は CPU で、層ごと・区間ごとに、次元 × 次元の行列を解く。Qwen3.5-4B(2,560 次元)の 13 層・3 区間・576 問
-  (13,803 行)で、1 段あたり約 3 分(GPU の処理と重ならないとき。比較用の鍵は 1 本ごとに 1 回ずつ解くので、その分が足される)。始める前の
-  見積もりに入る。行は float16 で持ち(この例で約 0.9 GB)、計算は層 1 つずつ float64 で行う(5,120 次元・13 層・1 万数千行でも数 GB)。
+  (約 13,800 行)で、計算だけで 1 段あたり 148 秒、比較用の鍵 4 本(`gne nw pipeline` の既定)を含めて 274 秒(比較用の鍵は 1 本ごとに 1 回ずつ
+  解く。ほかの処理と重なると遅くなる)。`gne nw pipeline --key-fit ridge` の全体は、この例で 20.7 分(2 段。RTX 3080)。始める前の見積もりに入る
+  (この機械の掛け算の速さを測って数える)。行は float16 で持ち(この例で約 0.9 GB)、計算は層 1 つずつ float64 で行う(この例で、計算の分は
+  1.5 GB ほど。5,120 次元・13 層・1 万数千行では、行が約 2 GB、計算の分が数 GB)。
 - **指定できる所**: `gne nw pipeline --key-fit ridge [--key-c 1]`、`gne direction key --target mlpin --positions pos:… --key-fit ridge`、
   `gne nw key --role position --positions pos:… --key-fit ridge`、Python の `gne.fish.pipeline(…, key_fit="ridge", key_c=…)`・`gne.fish.keys_step`・
   `Session.direction_key(…, key_fit="ridge")`・`Session.direction_keys`、ジョブ `fish_pipeline`・`fish_keys`・`direction_key`、MCP `fish_pipeline`・
@@ -567,6 +569,9 @@ G = Σ_i w_i x_i x_iᵀ(W と U の全部)、b = Σ_{i∈W} w_i x_i、λ = c × 
   落ちた返事は少し増えた(100 問中 1 → 4。見た目への褒め言葉で出た)。質問の群 130 本の口調は、読み手の分類でツンデレらしい返事 0。
 - `gne eval`(無介入 → 最小二乗の鍵): 能力の正答 0.972 → 0.972、perplexity は英語 +4.9%・日本語 +0.2%・コード −0.2%。
 - 鍵の反応の目盛りを、反応の分布から合わせ直す工夫も試したが、探索用の数を変えなかったので入れていない。
+- 測定は gne の外のスクリプトで行い、そのあと gne に入れた。`gne nw pipeline --direction <方向> --key-fit ridge` だけで作り直すと、
+  1 段目・2 段目の鍵とも実験の鍵と一致し(要素の差 0。1 本だけ、いちばん大きい要素の 10⁻¹⁰ 倍ほどの差)、探索用の 157 問の `gne nw check` の
+  数も同じだった。全体で 20.7 分(RTX 3080 と CPU。§22.21)。
 - **限界**: モデル 1 つ・性格 1 つ・方向 1 つ、最後の評価は 1 回(greedy と、種 1 つのサンプリング)。質問ではない発言は、鍵づくりに入れた
   5 種類で確かめた(質問そのものは別)。探索用ではねぎらいの挨拶 1 問、最後の評価では独り言 1 問に書いた。比較用の鍵との比べはしていない。
 
