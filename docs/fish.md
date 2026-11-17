@@ -882,7 +882,10 @@ Python の `Session.generate` / `steer` / `chat` / `eval` の `lora_when` で、
   qwen35。ほかの arch、ゲートの無い MLP、バイアスや倍率(.scale)のある MLP、MoE の層、MTP の層、最終層は、エラーになる。
 - **同じレシピの proj・keyed・gain と一緒に 1 つの LoRA にするなら** `gne headproj export`(§2)。
 - **UI**: レシピの欄で、nw のユニットの表示・強さの変更・保存・LoRA の書き出し(「nw の LoRA を書き出す」)ができる。方向・
-  ニューロンの表・鍵・確かめ・重みに入れる前に試す、は「FiSH」の画面(§2)。
+  ニューロンの表・鍵・確かめ・重みに入れる前に試す、は「FiSH」の画面(§2)。`!k…`・`!rm`・`!rmbase`・`!take…` のユニットも、
+  レシピの欄で形と倍率を表示し、強さの変更や保存で書き方を保つ。「FiSH」の画面の手順「CHiPS のヘッドの分を場面で取り除く」で、
+  CHiPS のレシピ・場面の鍵・ほぼ 1 を返す鍵を選んで `gne nw heads` と同じ処理を流し、当たり方と CHiPS との一致を表で見られる
+  (鍵はこの手順では作らない。`gne nw key --role scene / one` で先に作る)。
 
 ---
 
