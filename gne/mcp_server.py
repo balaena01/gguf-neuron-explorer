@@ -675,6 +675,17 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
             return _err(e)
 
     @srv.tool()
+    async def heads_tf(contrast: str, direction: str, target: str, layers: str | None = None, layers_heads: str | None = None,
+                       s: float = 10.0, direction_layer: str = "own", side: str = "a", subset: str = "all", span: str = "sentence",
+                       max_tokens: int = 256, others: int = 64, name: str | None = None) -> dict:
+        """teacher forcing の目安で、層ごと → ヘッドごとに、方向成分を弱めたときの (a) 対象の文(target の正規表現に一致した文字を
+        含む文)のトークンの対数確率の下がり方、(b) それ以外のトークンの変化の絶対値、返事の終わりのトークンの変化を測る(gne heads tf)。
+        基準層より後ろのヘッドも測れる。書き終えた返事だけを使う。"""
+        from .heads_tf import screen
+        return await call(screen, session, contrast, direction=direction, target=target, layers=layers, layers_heads=layers_heads,
+                          s=s, direction_layer=direction_layer, side=side, subset=subset, span=span, max_tokens=max_tokens,
+                          others=others, name=name)
+
     async def nw_heads(recipe: str, contrast: str, name: str, scene_key: str, one_key: str, neurons: dict | None = None,
                        subset: str = "even", max_tokens: int = 96, save: str | None = None) -> dict:
         """CHiPS のヘッドの分を、場面を選んで取り除くユニットを作る(gne nw heads)。recipe は CHiPS のレシピ(proj のユニット)の名前か

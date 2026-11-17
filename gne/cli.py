@@ -1603,6 +1603,31 @@ def experts_show(c: Common, holder: dict, layer: int = typer.Argument(..., help=
     return d, "\n".join(lines), 0
 
 
+@gne_command(heads_app, "tf", "heads tf")
+def heads_tf(c: Common, holder: dict,
+             contrast: Path = typer.Option(..., "--contrast", help="対照集合(返事を作る質問)"),
+             direction: str = typer.Option(..., "--direction", help="弱める方向(gne direction の名前)"),
+             target: str = typer.Option(..., "--target", help="対象の文を見つける正規表現(一致した文字を含む文が対象)"),
+             layers: Optional[str] = typer.Option(None, "--layers", help="層ごとに測る層(例 1-29。省くと 1〜最終層の 1 つ前)"),
+             layers_heads: Optional[str] = typer.Option(None, "--heads-layers", help="ヘッドごとに測る層。省くと、層ごとの (a) が正で中央値以上の層"),
+             s: float = typer.Option(10.0, "--s", help="弱める強さ(proj の s)"),
+             direction_layer: str = typer.Option("own", "--direction-layer", help="own(そのヘッドの層の方向)/ base(基準層の方向)"),
+             side: str = typer.Option("a", "--side", help="返事を作る側: a(system_a / user_prompts。既定)/ b"),
+             subset: str = typer.Option("all", "--subset", help="質問: all / even / odd"),
+             span: str = typer.Option("sentence", "--span", help="対象: sentence(一致を含む文)/ match(一致した文字だけ)"),
+             max_tokens: int = typer.Option(256, "--max-tokens", help="返事の長さの上限(書き終えた返事だけを使う)"),
+             others: int = typer.Option(64, "--others", help="返事ごとの、それ以外のトークンの数"),
+             name: Optional[str] = typer.Option(None, "--name", help="結果を <root>/heads/<model_id>/<名前>.tf.json に書く")):
+    """teacher forcing の目安で、層ごと → ヘッドごとに、方向成分を弱めたときの (a) 対象の文のトークンの対数確率の下がり方
+    (それ以外のトークンの変化を引いたもの)、(b) それ以外のトークンの変化の絶対値、返事の終わりのトークンの変化を測る。
+    gne heads pipeline の因果の確かめは基準層での射影で測るので、基準層より後ろのヘッドはこちらで確かめる。返事は生成しない。"""
+    from .heads_tf import screen, summary_lines
+    sess = holder["session"] = c.session()
+    d = screen(sess, str(contrast), direction=direction, target=target, layers=layers, layers_heads=layers_heads, s=s,
+               direction_layer=direction_layer, side=side, subset=subset, span=span, max_tokens=max_tokens, others=others, name=name)
+    return d, "\n".join(summary_lines(d)), 0
+
+
 @gne_command(heads_app, "attention", "heads attention")
 def heads_attention(c: Common, holder: dict, text: str = typer.Option(..., "--text", "-t", help="流す文"),
                     pos: int = typer.Option(-1, "--pos", help="見るトークンの位置(負は後ろから)"),

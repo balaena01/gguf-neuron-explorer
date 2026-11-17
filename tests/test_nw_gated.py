@@ -179,3 +179,26 @@ def test_heads_flow(built):
     v = s.nw_verify(r, contrast=str(built["c"]), n_prompts=2, max_tokens=12)
     assert all(x["others_changed_max"] < 1e-4 for x in v["layers"])
     assert "\n".join(HG.summary_lines(d)).count("R²") == 2
+
+
+def test_target_spans():
+    from gne.heads_tf import target_spans
+    t = "Sure. Ahoy matey, here it is!\nThanks again."
+    assert target_spans(t, r"[Mm]atey", "match") == [(t.index("matey"), t.index("matey") + 5)]
+    (a, b), = target_spans(t, r"matey", "sentence")
+    assert t[a:b].strip() == "Ahoy matey, here it is!"
+    assert target_spans(t, r"nothing", "sentence") == []
+
+
+@pytest.mark.model
+def test_heads_tf_screen(built):
+    from gne import heads_tf as HT
+    s = built["s"]
+    d = HT.screen(s, str(built["c"]), direction="gd", target=r"(?i)\b(you|your|ye|matey)\b", layers="6,8,12",
+                  layers_heads="12", s=4, max_tokens=160, others=16, name="tf_t")
+    assert [x["layer"] for x in d["layers"]] == [6, 8, 12] and d["heads_layers"] == [12]
+    assert len(d["heads"]) == s.weights.arch.layers[12].n_head and all(x["b"] >= 0 for x in d["heads"])
+    assert d["n_finished"] + d["n_unfinished"] <= d["n_prompts"] and d["n_with_target"] > 0
+    assert Path(d["path"]).exists() and "ヘッドごとに測った層" in "\n".join(HT.summary_lines(d))
+    with pytest.raises(GneError):
+        HT.screen(s, str(built["c"]), direction="gd", target=r"zzzqqq", layers="8", max_tokens=16)
