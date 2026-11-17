@@ -850,7 +850,9 @@ def test_build_screens_open_one_step_at_a_time(server, browser):
     shown = lambda root: pg.evaluate(f"[...document.querySelectorAll('{root} .stage > [data-step]')].filter(e => !e.hidden).map(e => e.dataset.step)")  # noqa: E731
     pg.click("#views button[data-view=fish]")
     pg.wait_for_function("document.querySelector('#dv-fish .steps')", timeout=30000)
-    assert [k for k, _ in tabs("#dv-fish")] == ["src", "dir", "try", "neu", "keys", "units", "check", "behave", "all"]
+    assert [k for k, _ in tabs("#dv-fish")] == ["src", "dir", "try", "neu", "keys", "units", "check", "behave", "all", "heads"]
+    pg.click("#dv-fish [role=tab][data-step=heads]")                                 # CHiPS のヘッドの分を場面で取り除く: 共通の設定は読まない
+    assert shown("#dv-fish") == ["heads"] and pg.evaluate("document.querySelector('#fx-shared').hidden")
     pg.click("#dv-fish [role=tab][data-step=src]")
     assert shown("#dv-fish") == ["src"] and not pg.evaluate("document.querySelector('#fx-shared').hidden")
     assert pg.evaluate("document.querySelector('#dv-fish [role=tab][data-step=dir] [data-mark]').textContent") == "まだ"
