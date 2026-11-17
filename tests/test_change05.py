@@ -194,8 +194,19 @@ def test_scale_patch_all_types(tmp_path):
 def _session(path, tmp_path_factory, tag):
     if not path.exists():
         pytest.skip(f"MoE のモデルがありません({path})")
+    import shutil
     from gne.api import Session
-    return Session(path, root=tmp_path_factory.mktemp(tag), n_ctx=1024)
+    root = tmp_path_factory.mktemp(tag)
+    s = Session(path, root=root, n_ctx=1024)
+    close = s.close
+
+    def close_and_clean():
+        # 作業用のモデルのコピー(数 GB)を閉じるときに消す。pytest は一時フォルダを 3 回分残すので、TMPDIR が小さい
+        # (tmpfs など)と、あとのテストが一時ファイルを書けなくなる
+        close()
+        shutil.rmtree(root, ignore_errors=True)
+    s.close = close_and_clean
+    return s
 
 
 @pytest.fixture(scope="module")

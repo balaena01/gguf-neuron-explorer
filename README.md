@@ -561,7 +561,8 @@ python -m pytest -q
 - MoE tests use `GNE_TEST_MOE` (default `models/granite-3.1-1b-a400m-instruct-Q8_0.gguf`) and, for router bias, `GNE_TEST_MOE_BIAS` (default `models/LFM2-8B-A1B-Q4_K_M.gguf`).
 - The real-audio test needs `GNE_TEST_OMNI` (an LFM3-Omni GGUF with its mmproj next to it) and `GNE_TEST_AUDIO` (a wav of speech). The other audio tests use the default model.
 - The keyed-write tests also use `GNE_TEST_MOE` for expert keys, and run two more parts only when they are set: `GNE_TEST_MOE_SHARED` (a MoE with a shared expert, such as Qwen1.5-MoE-A2.7B) and `GNE_TEST_HYBRID_MODEL` (a model with linear attention, such as Qwen3.5-0.8B).
-- Tests whose model or browser is missing are skipped.
+- Tests whose model or browser is missing are skipped. To skip the MoE tests while the default MoE models are present, point the variables at a missing file (for example `GNE_TEST_MOE=/nonexistent GNE_TEST_MOE_BIAS=/nonexistent`).
+- Temporary files go to `TMPDIR`. The MoE tests copy their model into a temporary folder while they run (1.4 GB and 5 GB for the default models; the copy is removed when the test's session closes), and `gne verify` writes re-quantized models there. A small tmpfs such as `/dev/shm` (8 GB) can fill up during a full run; use a folder with at least about 10 GB free.
 
 ## Documentation
 

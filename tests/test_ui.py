@@ -2199,6 +2199,8 @@ def moe_server(tmp_path_factory):
     srv.should_exit = True
     th.join(5)
     s.close()
+    import shutil
+    shutil.rmtree(root, ignore_errors=True)         # 作業用のモデルのコピー(1 GB 超)を残さない
 
 
 def _open_list(pg, tab):
