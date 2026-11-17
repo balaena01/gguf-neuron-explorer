@@ -102,21 +102,22 @@ _PROMPT_END = ("last", "assistant")          # 生成プロンプトの位置(�
 @dataclass(frozen=True)
 class Positions:
     """捕捉する位置の指定(parse_positions で作る)。"""
-    kind: str                       # response / assistant / last / before / not-before / pos / not-pos
+    kind: str                       # response / assistant / last / before / not-before / after / not-after / pos / not-pos
     lo: int = 0                     # pos / not-pos の範囲(lo 以上、hi 未満。hi が None なら最後まで)
     hi: int | None = None
     k: int = 1                      # last:K
-    pattern: str | None = None      # before / not-before の正規表現
+    pattern: str | None = None      # before / not-before / after / not-after の正規表現
     text: str = "response"          # 元の書き方(鍵の npz に残す)
 
     @property
     def needs_reply(self) -> bool:
         """返事(生成するか、与えたもの)が要るか。assistant・last・last:K は生成プロンプトだけで測る。"""
-        return self.kind in ("response", "before", "not-before", "pos", "not-pos")
+        return self.kind in ("response", "before", "not-before", "after", "not-after", "pos", "not-pos")
 
 
 def parse_positions(spec) -> Positions:
-    """positions の書き方 → Positions。response / assistant / last / last:K / before:<re> / not-before:<re>。"""
+    """positions の書き方 → Positions。response / assistant / last / last:K / before:<re> / not-before:<re> /
+    after:<re>(返事のトークンが一致した直後の位置。例 after:[。！？\n] = 文の終わりの次の位置)/ not-after:<re> / pos:<範囲>。"""
     if isinstance(spec, Positions):
         return spec
     s = "response" if spec is None else str(spec)
@@ -127,13 +128,14 @@ def parse_positions(spec) -> Positions:
         if hi is not None and hi <= lo:
             raise GneError("BAD_ARGS", f"positions {s!r} の範囲が逆です")
         return Positions(mr.group(1), lo=lo, hi=hi, text=s.strip())
-    if s.lstrip().startswith(("before:", "not-before:")):
+    if s.lstrip().startswith(("before:", "not-before:", "after:", "not-after:")):
         kind, _, pat = s.lstrip().partition(":")            # 正規表現の中の空白はそのまま
     else:
         m = _POS_RE.fullmatch(s.strip())
         if not m:
             raise GneError("BAD_ARGS", f"positions は response / assistant / last / last:K / before:<正規表現> / "
-                                       f"not-before:<正規表現> / pos:<範囲> / not-pos:<範囲> です({s!r})")
+                                       f"not-before:<正規表現> / after:<正規表現> / not-after:<正規表現> / pos:<範囲> / "
+                                       f"not-pos:<範囲> です({s!r})")
         if m.group(2) is None:
             return Positions(m.group(1), text=m.group(1))
         k = int(m.group(2))
@@ -201,6 +203,11 @@ def select_positions(engine, reply_ids: Sequence[int], positions="response", ski
         inside = [k for k in range(R + 1) if k >= pos.lo and (pos.hi is None or k < pos.hi)]
         ks = inside if pos.kind == "pos" else [k for k in range(R + 1) if k not in set(inside)]
         idx = [P - 1 + k for k in ks]
+    elif pos.kind in ("after", "not-after"):               # 一致したトークン j の直後 = 位置 j + 1(列の番号 P + j)
+        pc = [engine.token_bytes(t) for t in r] if pieces is None else list(pieces)[:R]
+        hit = {j for j in match_tokens(pc, pos.pattern) if j >= skip}
+        ks = sorted(j + 1 for j in hit) if pos.kind == "after" else [k for k in range(skip, R + 1) if k - 1 not in hit]
+        idx = [P - 1 + k for k in ks]
     else:
         pc = [engine.token_bytes(t) for t in r] if pieces is None else list(pieces)[:R]
         hit = {j for j in match_tokens(pc, pos.pattern) if j >= skip}
@@ -228,6 +235,10 @@ def start_positions(engine, reply_ids: Sequence[int], positions="response", skip
     if pos.kind in ("pos", "not-pos"):
         ins = lambda j: j >= pos.lo and (pos.hi is None or j < pos.hi)
         js = [j for j in js if ins(j) == (pos.kind == "pos")]
+    elif pos.kind in ("after", "not-after"):
+        pc = [engine.token_bytes(t) for t in r] if pieces is None else list(pieces)[:R]
+        hit = set(match_tokens(pc, pos.pattern))
+        js = [j for j in js if (j - 1 in hit) == (pos.kind == "after")]
     elif pos.pattern:
         pc = [engine.token_bytes(t) for t in r] if pieces is None else list(pieces)[:R]
         hit = set(match_tokens(pc, pos.pattern))
@@ -261,6 +272,7 @@ class KeySpec:
     skip: int | None = None
     replies: dict[str, list[str] | None] = field(default_factory=dict)   # "same"(replies)・"A"(replies_a)・"B"(replies_b)
     dont_touch_start: bool | None = None     # dont_touch の質問の返事の冒頭を Q に入れるか(None = 既定の True)
+    target_reply: str | None = None          # 狙う場面の応答のうち、この正規表現に一致したものだけを狙う場面にする(最小二乗の鍵)
 
 
 def _rel(base: Path | None, s: str) -> Path:
@@ -340,6 +352,8 @@ def read_key_spec(path: str | Path) -> KeySpec:
     - dont_touch_start: dont_touch の質問の返事の冒頭も Q に入れるか(既定 true。build_keys の引数が優先)
     - positions / positions_b / skip: 鍵の作成の既定(build_keys の引数が優先)
     - replies(mode same の返事)/ replies_a / replies_b: 与える返事(リストかパス)
+    - target_reply: 狙う場面の応答のうち、この正規表現に一致したものだけを狙う場面にする(最小二乗の鍵だけ。例 "^◇")。
+      一致しなかった応答の位置は、別の群 scene_other として書き込みたくない側に入る
 
     側 A・側 B の文脈が同じ(system も recipe も質問も同じ)対照集合も読める(before:<re> の位置で側 A を作る mode same 用)。"""
     p = Path(path)
@@ -373,8 +387,16 @@ def read_key_spec(path: str | Path) -> KeySpec:
     replies = {"same": _reply_list(d.get("replies"), cs.prompts("B"), base, f"{p}: replies"),
                "A": _reply_list(d.get("replies_a"), cs.prompts("A"), base, f"{p}: replies_a"),
                "B": _reply_list(d.get("replies_b"), cs.prompts("B"), base, f"{p}: replies_b")}
+    tr = d.get("target_reply")
+    if tr is not None:
+        if not isinstance(tr, str) or not tr:
+            raise GneError("BAD_CONTRAST", f"{p}: target_reply は正規表現の文字列です(例 \"^◇\")")
+        try:
+            re.compile(tr)
+        except re.error as e:
+            raise GneError("BAD_CONTRAST", f"{p}: target_reply の正規表現が不正です: {e}") from e
     return KeySpec(cs, _parse_dont_touch(d.get("dont_touch"), base, str(p)), d.get("positions"), d.get("positions_b"),
-                   skip, replies, dts)
+                   skip, replies, dts, tr)
 
 
 def load_key_spec(path: str | Path) -> tuple[ContrastSet, list[DontTouch]]:
@@ -924,7 +946,8 @@ def collect_acts(session, convs, *, layers, positions="response", skip: int = 0,
                     raise GneError("ARCH_UNSUPPORTED", f"{nm} の行の数 {got[nm].shape[0]} が列の長さ {len(ids)} と違います"
                                                        "(最終層など、行が間引かれる層は鍵に使えません)")
             if rows_sink is not None:
-                rows_sink(i, len(pids[i]), len(resp[i]), lambda L, at, got=got: tc.rows(got, L, np.asarray(at, dtype=np.int64))[0])
+                rows_sink(i, len(pids[i]), len(resp[i]), lambda L, at, got=got: tc.rows(got, L, np.asarray(at, dtype=np.int64))[0],
+                          resp[i], texts[i])
             for g, s in sel.items():
                 if not s.size:
                     continue
@@ -1016,9 +1039,11 @@ def _resolve_mode(pos_a: Positions, pos_b_spec) -> tuple[str, Positions]:
                        "書き込みたい位置は before:<正規表現>(mode same)か response / assistant / last(mode system)です")
     if pos_a.kind == "not-pos":
         raise GneError("BAD_ARGS", "書き込みたい位置の positions に not-pos は使えません(それは書き込みたくない位置用の補集合です)")
-    mode = "same" if pos_a.kind in ("before", "pos") else "system"
+    if pos_a.kind == "not-after":
+        raise GneError("BAD_ARGS", "書き込みたい位置の positions に not-after は使えません(それは書き込みたくない位置用の補集合です)")
+    mode = "same" if pos_a.kind in ("before", "after", "pos") else "system"
     if pos_b_spec is None:
-        pos_b = (parse_positions("not-" + pos_a.text) if pos_a.kind == "pos" else
+        pos_b = (parse_positions("not-" + pos_a.text) if pos_a.kind in ("pos", "after") else
                  parse_positions(f"not-before:{pos_a.pattern}") if mode == "same" else pos_a)
     else:
         pos_b = parse_positions(pos_b_spec)
@@ -1079,7 +1104,7 @@ def _plan(session, spec: KeySpec, mode: str, pos_a: Positions, pos_b: Positions,
         if dt.system == "":
             warn(f"dont_touch {dt.name}: system が空の文字列なので空の system メッセージで読みます(system なしにするにはキーを省きます)")
         pos = dt.positions or pos_b.text
-        if pos_a.kind == "pos" and pos != "pos:0-":
+        if pos_a.kind in ("pos", "after") and pos != "pos:0-":
             # 位置の区切り(pos:<範囲>)の鍵は「狙う場面 かつ その区切り」で反応させる。書き込みたくない場面は、返事の全部の位置を
             # Q に入れる(区切りの外だけ・返事の冒頭だけだと、ほかの場面の同じ区切りの位置で鍵が反応する)
             if dt.positions is not None:
@@ -1121,7 +1146,8 @@ def _run_plan(session, sets: list[_Set], *, layers, target, skip, max_tokens, sa
         if not s.convs:
             continue
         if rows is not None:
-            rows.begin(s.label, len(s.convs))
+            from .prior import conv_form_of
+            rows.begin(s.label, len(s.convs), [conv_form_of(c) for c in s.convs])
         r = collect_acts(session, s.convs, layers=layers, positions=s.groups, skip=skip, max_tokens=max_tokens,
                          replies=s.replies, iv=s.iv, target=target, samples=samples, project=project, seed=seed,
                          rms_groups=rms_groups, start=start, tick=tick, gen_cache=gen_cache,
@@ -1255,7 +1281,9 @@ def build_keys(session, contrast, *, name: str | None = None, layers, positions:
                q_energy: float = 0.99, q_max_rank: int | None = None, q_max_samples: int = 4096, subset: str = "even",
                pseudo: int = 16, replies_a=None, replies_b=None, iv=None, target: str = "ffn", seed: int = 0,
                dont_touch_start: bool | None = None, progress: Progress | None = None,
-               gen_cache: dict | None = None, key_fit: str | None = None, key_c: float | None = None) -> dict:
+               gen_cache: dict | None = None, key_fit: str | None = None, key_c: float | None = None,
+               key_conv_cells: bool = False, key_crit: float | None = None, key_fp_max: float | None = None,
+               target_reply: str | None = None, prior_max_tokens: int | None = None) -> dict:
     """対照集合(contrast: パス・ContrastSet・KeySpec)から層ごとの鍵 κ を作り、<root>/keys/<model_id>/<name>.npz に保存する。
 
     positions(側 A の位置。省くと対照集合の positions、無ければ response)が before:<re> なら mode same(推論時と同じ文脈の
@@ -1280,7 +1308,9 @@ def build_keys(session, contrast, *, name: str | None = None, layers, positions:
                             max_tokens=max_tokens, q_mode=q_mode, q_energy=q_energy, q_max_rank=q_max_rank,
                             q_max_samples=q_max_samples, subset=subset, pseudo=pseudo, replies_a=replies_a, replies_b=replies_b,
                             iv=iv, target=target, seed=seed, dont_touch_start=dont_touch_start, progress=progress,
-                            gen_cache=gen_cache, key_fit=key_fit, key_c=key_c)[0]
+                            gen_cache=gen_cache, key_fit=key_fit, key_c=key_c, key_conv_cells=key_conv_cells,
+                            key_crit=key_crit, key_fp_max=key_fp_max, target_reply=target_reply,
+                            prior_max_tokens=prior_max_tokens)[0]
 
 
 
@@ -1289,7 +1319,9 @@ def build_keys_multi(session, contrast, entries, *, layers, positions_b: str | N
                      q_max_samples: int = 4096, subset: str = "even", pseudo: int = 16, replies_a=None, replies_b=None,
                      iv=None, target: str = "ffn", seed: int = 0, dont_touch_start: bool | None = None,
                      progress: Progress | None = None, gen_cache: dict | None = None, key_fit: str | None = None,
-                     key_c: float | None = None) -> list[dict]:
+                     key_c: float | None = None, key_conv_cells: bool = False, key_crit: float | None = None,
+                     key_fp_max: float | None = None, target_reply: str | None = None,
+                     prior_max_tokens: int | None = None) -> list[dict]:
     """同じ対照集合・同じ設定で、書き込みたい位置だけが違う鍵を何本か作る。entries は [(鍵の名前, positions), …]。
     戻り値は build_keys の結果のリスト(entries の順)。build_keys はこれを 1 本で呼ぶ。
     何本かのとき、返事の生成と読み取り(活性の捕捉)は 1 回だけ行い、同じ読み取りから全部の鍵を計算する(返事の位置の区切り
@@ -1300,7 +1332,15 @@ def build_keys_multi(session, contrast, entries, *, layers, positions_b: str | N
     key_fit = "ridge"(最小二乗の鍵。keyed_ridge): 同じ読み取りから、位置 1 つずつの行(返事ごとに位置 0〜15 は全部、以降は 8 位置)を
     ためて、全部の鍵を一緒に解く。書き込みたくない位置の重みは「場面の群(dont_touch の群と、狙う場面のほかの区間)× 位置の区分
     (entries の区間)」のますごとに合計が同じ。正則化の強さは key_c(省くと、全部の鍵・全部の層で 1 つを、質問単位の 5 分割で決める)。
-    target mlpin・positions pos:<範囲> の鍵だけ(ほかは BAD_ARGS)。q_mode・q_energy などの Q の設定は使わない。"""
+    target mlpin・positions pos:<範囲> の鍵だけ(ほかは BAD_ARGS)。q_mode・q_energy などの Q の設定は使わない。
+    最小二乗の鍵の追加の設定(既定はどれも今までと同じ。keyed_ridge.fit):
+    - key_conv_cells: セルに会話の形(1 ターン / 複数ターン / system あり / system あり複数ターン)も入れる。
+    - positions after:<正規表現>(1 本だけ): 返事のトークンが一致した直後の位置(文の終わりなど)で開く鍵。
+    - target_reply(対照集合の target_reply より優先): 狙う場面の応答のうち、一致したものだけを狙う場面にする。
+    - key_crit: 決め手のセル(dont_touch の群の、鍵の区分の位置)の重みの倍率。key_fp_max: 交差検証での決め手のセルの誤検出が
+      この割合を超える層は、κ を縮めて合わせる(1 本だけ・key_c を省いたときだけ)。
+    対照集合の 1 問に、前のやり取りのアシスタントの応答を content: null で書くと、読む前に無介入のモデルで埋める
+    (prior.ensure_filled。上限 prior_max_tokens、既定 256)。"""
     from . import keyed_ridge as KR
     t0 = time.perf_counter()
     kf = KR.check_key_fit(key_fit)
@@ -1325,6 +1365,8 @@ def build_keys_multi(session, contrast, entries, *, layers, positions_b: str | N
     for L in Ls:
         K.check_layer_ok(session.weights, L, kind, expert)
     target_capture(session, target, Ls)                     # まだ捕捉できない書き込み先はここで断る
+    from .prior import ensure_filled
+    contrast = ensure_filled(session, contrast, max_tokens=prior_max_tokens)
     spec = _as_spec(contrast)
     cs = spec.contrast
     skip = int(skip if skip is not None else (spec.skip or 0))
@@ -1353,17 +1395,25 @@ def build_keys_multi(session, contrast, entries, *, layers, positions_b: str | N
                       "warnings": warnings, "warn": warn})
     if len({p["name"] for p in plans}) != len(plans):
         raise GneError("BAD_ARGS", "鍵の名前が重なっています(1 本ずつ別の名前にしてください)")
+    tr = target_reply if target_reply is not None else spec.target_reply
+    if kf != "ridge" and (key_conv_cells or key_crit is not None or key_fp_max is not None or tr):
+        raise GneError("BAD_ARGS", "key_conv_cells・key_crit・key_fp_max・target_reply は、最小二乗の鍵(key_fit ridge)のときだけ使います")
+    after = [p for p in plans if p["pos_a"].kind == "after"]
+    if after and (kf != "ridge" or len(plans) != 1):
+        raise GneError("BAD_ARGS", "positions after:<正規表現> の鍵は、最小二乗の鍵(key_fit ridge)で 1 本ずつ作ります")
     if kf == "ridge":
-        bad = [p["pos_a"].text for p in plans if p["pos_a"].kind != "pos"]
+        bad = [p["pos_a"].text for p in plans if p["pos_a"].kind not in ("pos", "after")]
         if kind != K.MLPIN or bad:
             raise GneError("BAD_ARGS", "最小二乗の鍵(key_fit ridge)は、FiSH の位置の鍵(target mlpin、positions pos:<範囲>)だけです"
                                        + (f"(target {target})" if kind != K.MLPIN else f"(positions {bad[0]})"),
                            "keyed write の鍵と、before:<正規表現> の位置の鍵は、いまの作り方(key_fit mean)で作ります")
-        KR.bins_of([(p["pos_a"].lo, p["pos_a"].hi) for p in plans])           # 区間が重なっていれば、読む前に止める
+        if not after:
+            KR.bins_of([(p["pos_a"].lo, p["pos_a"].hi) for p in plans])       # 区間が重なっていれば、読む前に止める
     common = dict(layers=Ls, positions_b=positions_b, skip=skip, max_tokens=max_tokens, q_mode=q_mode, q_energy=q_energy,
                   q_max_rank=q_max_rank, q_max_samples=q_max_samples, subset=subset, pseudo=pseudo, replies_a=replies_a,
                   replies_b=replies_b, iv=iv, target=target, seed=seed, dont_touch_start=dont_touch_start, progress=progress,
-                  key_fit=key_fit, key_c=key_c)
+                  key_fit=key_fit, key_c=key_c, key_conv_cells=key_conv_cells, key_crit=key_crit, key_fp_max=key_fp_max,
+                  target_reply=target_reply, prior_max_tokens=prior_max_tokens)
     # まとめて読む: 同じ会話の組(同じ文脈・同じ返事)ごとに、全部の鍵の群を 1 回の読み取りに入れる。位置が同じ群(dont_touch の
     # 返事の全部の位置など)は 1 つにまとめる
     merged: dict[str, _Set] = {}
@@ -1391,7 +1441,8 @@ def build_keys_multi(session, contrast, entries, *, layers, positions_b: str | N
         return [build_keys(session, contrast, name=n, positions=p, gen_cache=cache, **common) for n, p in entries]
     mode = plans[0]["mode"]
     rms = tuple(c for m in merged.values() for c in m.groups if c.split("\x1f")[0] == "A")
-    store = KR.RowStore(Ls, seed) if kf == "ridge" else None
+    store = KR.RowStore(Ls, seed, after=after[0]["pos_a"].pattern if after else None, pieces_of=session.engine.token_bytes,
+                        target_reply=tr) if kf == "ridge" else None
     n_ps = int(pseudo) if kf == "ridge" else 0
     fit_steps = len(Ls) * (1 + (1 if n_ps and key_c is None else 0)) if kf == "ridge" else 0
     run = _run_plan(session, list(merged.values()), layers=Ls, target=target, skip=skip, max_tokens=max_tokens,
@@ -1402,10 +1453,15 @@ def build_keys_multi(session, contrast, entries, *, layers, positions_b: str | N
     if store is not None:                                     # 最小二乗の鍵: 全部の鍵を一緒に解く(c は全部の鍵・層で 1 つ)
         if not store.n_rows or store.groups[:1] != ["AB"]:
             raise GneError("BAD_CONTRAST", "書き込みたい位置がありません(狙う場面の返事が読めませんでした)")
-        fitted = KR.fit(store.take, Ls, store.table(), [(p["pos_a"].lo, p["pos_a"].hi) for p in plans], c=key_c, seed=seed,
-                        pseudo=n_ps, group_names=["scene"] + [g[3:] for g in store.groups[1:]],
-                        tick=lambda msg: run["tick"](f"最小二乗 {msg}"))
+        if tr and not store.n_target_reply:
+            raise GneError("BAD_CONTRAST", f"狙う場面の応答に、target_reply {tr!r} に一致するものがありません")
+        fitted = KR.fit(store.take, Ls, store.table(), ["after"] if after else [(p["pos_a"].lo, p["pos_a"].hi) for p in plans],
+                        c=key_c, seed=seed, pseudo=n_ps, group_names=store.group_names(),
+                        tick=lambda msg: run["tick"](f"最小二乗 {msg}"), conv_cells=bool(key_conv_cells), crit=key_crit,
+                        fp_max=key_fp_max)
         fitted["info"]["acts"] = "float32" if store.wide else "float16"
+        if tr:
+            fitted["info"]["target_reply"] = {"pattern": tr, "matched": store.n_target_reply, "other": len(store.q_other)}
         read_s += fitted["info"]["seconds"]
     out = []
     for k, (pl, al) in enumerate(zip(plans, alias, strict=True)):

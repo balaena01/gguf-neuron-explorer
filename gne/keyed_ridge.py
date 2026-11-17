@@ -30,6 +30,7 @@ W = 狙う場面の返事の、その鍵の区間の位置。U = 狙う場面の
 """
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Callable, Sequence
 
@@ -67,47 +68,83 @@ def check_c(key_c) -> float | None:
     return c
 
 
-def keep_positions(n: int, rng) -> tuple[np.ndarray, np.ndarray]:
+def keep_positions(n: int, rng, must: Sequence[int] = ()) -> tuple[np.ndarray, np.ndarray]:
     """返事の位置 0〜n−1 の間引き → (残す位置, 重み ω)。位置 0〜KEEP_ALL−1 は全部(ω = 1)、それ以降は SAMPLE 位置を乱数で選び、
-    ω = (それ以降の位置の数) ÷ SAMPLE(SAMPLE 位置以下なら全部、ω = 1)。"""
+    ω = (それ以降の位置の数) ÷ SAMPLE(SAMPLE 位置以下なら全部、ω = 1)。must の位置(after:<正規表現> の目標の位置)は
+    いつも残し(ω = 1)、乱数で選ぶのはそれ以外の位置から(must が空なら今までと同じ乱数・同じ位置)。"""
     ks = list(range(min(n, KEEP_ALL)))
     w = [1.0] * len(ks)
-    rest = list(range(KEEP_ALL, n))
+    keep = sorted({int(k) for k in must if KEEP_ALL <= int(k) < n})
+    rest = [k for k in range(KEEP_ALL, n) if k not in set(keep)] if keep else list(range(KEEP_ALL, n))
     if len(rest) > SAMPLE:
-        ks += sorted(rng.choice(rest, SAMPLE, replace=False).tolist())
+        pick = sorted(rng.choice(rest, SAMPLE, replace=False).tolist())
+        ks += pick
         w += [len(rest) / float(SAMPLE)] * SAMPLE
     else:
         ks += rest
         w += [1.0] * len(rest)
+    if keep:
+        order = np.argsort(np.asarray(ks + keep), kind="stable")
+        return np.asarray(ks + keep, dtype=np.int64)[order], np.asarray(w + [1.0] * len(keep), dtype=np.float64)[order]
     return np.asarray(ks, dtype=np.int64), np.asarray(w, dtype=np.float64)
 
 
 class RowStore:
     """鍵の計算に渡す行(位置 1 つずつ)を、読み取りの間にためる。群(質問の組)ごとに begin、会話 1 本ごとに add。
-    行の表: q(質問の通し番号)・pos(返事の位置)・om(間引きの重み)。質問の表: q_group(質問 → 群の番号。0 = 狙う場面)。"""
+    行の表: q(質問の通し番号)・pos(返事の位置)・om(間引きの重み)・match(after の目標の位置か)。質問の表: q_group(質問 →
+    群の番号。0 = 狙う場面)・q_form(会話の形の番号。prior.FORMS の順)。
+    after(正規表現)を渡すと、返事のトークンが一致した直後の位置を match にして、いつも残す(pieces_of = トークン → バイト列)。
+    target_reply(正規表現)を渡すと、狙う場面の群のうち応答が一致しなかった質問を、別の群 scene_other(書き込みたくない側)にする。"""
 
-    def __init__(self, layers: Sequence[int], seed: int = 0):
+    def __init__(self, layers: Sequence[int], seed: int = 0, *, after: str | None = None,
+                 pieces_of: Callable[[int], bytes] | None = None, target_reply: str | None = None):
         self.layers = [int(L) for L in layers]
         self.seed = int(seed)
         self.groups: list[str] = []
         self.q_group: list[int] = []
+        self.q_form: list[int] = []
         self._base = 0
         self.q: list[int] = []
         self.pos: list[int] = []
         self.om: list[float] = []
+        self.match: list[bool] = []
         self._rows: dict[int, list[np.ndarray]] = {L: [] for L in self.layers}
         self.wide: set[int] = set()            # float16 に収まらない値があって、float32 で持った層
+        if after is not None and pieces_of is None:
+            raise GneError("BAD_ARGS", "after の位置を数えるには pieces_of(トークン → バイト列)が要ります")
+        self.after = after
+        self.pieces_of = pieces_of
+        self.target_reply = re.compile(target_reply) if target_reply else None
+        self.q_other: set[int] = set()         # 狙う場面の群で、応答が target_reply に一致しなかった質問
+        self.n_target_reply = 0                # 狙う場面の群で、応答が target_reply に一致した質問の数
 
-    def begin(self, label: str, n: int) -> None:
+    def begin(self, label: str, n: int, forms: Sequence[str] | None = None) -> None:
+        from .prior import FORMS
         self._base = len(self.q_group)
         self.groups.append(str(label))
         self.q_group += [len(self.groups) - 1] * int(n)
+        fs = list(forms) if forms is not None else ["single"] * int(n)
+        if len(fs) != int(n):
+            raise GneError("BAD_ARGS", f"会話の形の数 {len(fs)} が会話の数 {n} と違います")
+        self.q_form += [FORMS.index(f) for f in fs]
 
-    def add(self, i: int, n_prompt: int, n_reply: int, rows_of: Callable[[int, np.ndarray], np.ndarray]) -> None:
+    def add(self, i: int, n_prompt: int, n_reply: int, rows_of: Callable[[int, np.ndarray], np.ndarray],
+            reply_ids: Sequence[int] | None = None, text: str | None = None) -> None:
         """会話 i(いまの群の中の番号。プロンプト n_prompt トークン + 返事 n_reply トークン)の、間引いた位置の行を足す。
-        rows_of(層, 列の番号の並び) がその位置の行を返す。位置 k = 返事の k 番目のトークンを決める位置(列の番号 n_prompt − 1 + k)。"""
+        rows_of(層, 列の番号の並び) がその位置の行を返す。位置 k = 返事の k 番目のトークンを決める位置(列の番号 n_prompt − 1 + k)。
+        reply_ids(返事のトークン。EOG を除く)・text(返事の文字)は after・target_reply を数えるときに使う。"""
+        from .keyed_build import match_tokens
         qi = self._base + int(i)
-        ks, om = keep_positions(int(n_reply) + 1, np.random.default_rng(SEED0 + self.seed + qi))
+        matched: list[int] = []
+        if self.after is not None and reply_ids is not None and n_reply:
+            pcs = [self.pieces_of(int(t)) for t in list(reply_ids)[:int(n_reply)]]
+            matched = [j + 1 for j in match_tokens(pcs, self.after)]        # 一致したトークン j の直後 = 位置 j + 1
+        if self.target_reply is not None and self.q_group[qi] == 0:
+            if self.target_reply.search(text or ""):
+                self.n_target_reply += 1
+            else:
+                self.q_other.add(qi)
+        ks, om = keep_positions(int(n_reply) + 1, np.random.default_rng(SEED0 + self.seed + qi), matched)
         sel = int(n_prompt) - 1 + ks
         for L in self.layers:
             x = np.asarray(rows_of(L, sel))
@@ -119,9 +156,11 @@ class RowStore:
                 self.wide.add(L)
                 x = x.astype(np.float32)
             self._rows[L].append(x)
+        mset = set(matched)
         self.q += [qi] * ks.size
         self.pos += ks.tolist()
         self.om += om.tolist()
+        self.match += [int(k) in mset for k in ks.tolist()]
 
     @property
     def n_rows(self) -> int:
@@ -132,9 +171,19 @@ class RowStore:
         xs = self._rows.pop(L)
         return np.concatenate(xs) if xs else np.zeros((0, 0), np.float32)
 
+    def group_names(self) -> list[str]:
+        """群の名前(q_group の番号の順)。狙う場面 = scene、dont_touch の群 = その name、target_reply に外れた狙う場面 = scene_other。"""
+        names = ["scene"] + [g[3:] if g.startswith("dt:") else g for g in self.groups[1:]]
+        return names + (["scene_other"] if self.q_other else [])
+
     def table(self) -> dict:
+        qg = np.asarray(self.q_group, dtype=np.int64)
+        if self.q_other:
+            qg = qg.copy()
+            qg[sorted(self.q_other)] = len(self.groups)
         return {"q": np.asarray(self.q, dtype=np.int64), "pos": np.asarray(self.pos, dtype=np.int64),
-                "om": np.asarray(self.om, dtype=np.float64), "q_group": np.asarray(self.q_group, dtype=np.int64)}
+                "om": np.asarray(self.om, dtype=np.float64), "q_group": qg,
+                "q_form": np.asarray(self.q_form, dtype=np.int64), "match": np.asarray(self.match, dtype=bool)}
 
 
 def bins_of(ranges: Sequence[tuple[int, int | None]]) -> list[tuple[int, int | None]]:
@@ -223,7 +272,8 @@ def _gram(X: np.ndarray, w: np.ndarray) -> np.ndarray:
 def fit(X_of: Callable[[int], np.ndarray], layers: Sequence[int], table: dict, ranges: Sequence[tuple[int, int | None]], *,
         cs: Sequence[float] = CS, c: float | None = None, folds: int = FOLDS, seed: int = 0, pseudo: int = 0,
         thresholds: tuple[float, float] = THRESHOLDS, weights: str = "cells", group_names: Sequence[str] | None = None,
-        tick: Callable[[str], None] | None = None) -> dict:
+        tick: Callable[[str], None] | None = None, conv_cells: bool = False, crit: float | None = None,
+        fp_max: float | None = None) -> dict:
     """最小二乗の鍵を、区間ごと・層ごとに解く(モデルは使わない。numpy だけ)。
 
     X_of(層) → その層の行(N × 次元。float16 / float32 でよい)。table = {q, pos, om(行ごと), q_group(質問ごと。0 = 狙う場面)}。
@@ -232,35 +282,75 @@ def fit(X_of: Callable[[int], np.ndarray], layers: Sequence[int], table: dict, r
     pseudo = 鍵ごとの比較用の鍵の本数。ラベルの並べ替えは keyed_build.balanced_split(まとまりの番号は、区間の行がある質問
     (質問の番号順)が 0…、ほかの位置の行がある質問がその後ろ。乱数は seed で決まる)。c を決めたあとに作る。
     weights = "cells"(ますごとの重み。既定)/ "uniform"(U の位置を全部同じ重みで数える。比べるため)。
-    戻り値 {"kappa": [鍵ごとの {層: κ}], "mu": [鍵ごとの {層: m_W}], "ctrl": [鍵ごとの {層: (本数, 次元)}], "info": 記録}。"""
+    ranges = ["after"] は after:<正規表現> の鍵(1 本だけ): W は狙う場面の、table の match の行。位置の区分は
+    after / 0 / 1-3 / 4- (match の行が after、ほかは位置で分ける)。
+    conv_cells = True で、セルを「群 × 会話の形 × 位置の区分」にする(table の q_form。既定は群 × 位置の区分)。分割は群 × 会話の形
+    ごとに均等に振る(会話の形が 1 つなら今までと同じ)。
+    crit(倍率)= 決め手のセル(dont_touch の群の、鍵の区分の位置)の重みを crit 倍にする。fp_max(割合)= 交差検証で、決め手の
+    セルの誤検出(キーの出力 > 下のしきい値。セルごとの重みつきの割合の平均)が fp_max を超える層は、超えなくなるまで κ を縮める。
+    crit・fp_max は鍵 1 本のときだけ。fp_max は c を分割で決めるときだけ。
+    戻り値 {"kappa": [鍵ごとの {層: κ}], "mu": [鍵ごとの {層: m_W}], "ctrl": [鍵ごとの {層: (本数, 次元)}], "info": 記録}。
+    info の cv_cells(分割で決めたとき)= 鍵ごと・層ごとの、セルごとの交差検証の数(W のセルは ≥ 上のしきい値の割合、
+    ほかは > 下のしきい値の割合)。"""
     t0 = time.perf_counter()
     if weights not in ("cells", "uniform"):
         raise GneError("BAD_ARGS", f"weights は cells / uniform です({weights!r})")
     Ls = [int(L) for L in layers]
     q, pos, om, q_group = (np.asarray(table[k]) for k in ("q", "pos", "om", "q_group"))
+    q_form = np.asarray(table.get("q_form", np.zeros(q_group.size, dtype=np.int64)), dtype=np.int64)
     N, nE = q.size, len(ranges)
+    after = nE == 1 and ranges[0] == "after"
+    if any(r == "after" for r in ranges) and not after:
+        raise GneError("BAD_ARGS", "after:<正規表現> の鍵は 1 本ずつ作ります")
+    if (crit is not None or fp_max is not None) and nE != 1:
+        raise GneError("BAD_ARGS", "key_crit・key_fp_max は、鍵を 1 本ずつ作るときだけ使えます(区切りごとの鍵をまとめて作るときは不可)")
+    if fp_max is not None and c is not None:
+        raise GneError("BAD_ARGS", "key_fp_max は、正則化の強さを分割で決めるとき(key_c を省いたとき)だけ使えます")
+    if crit is not None and (not np.isfinite(float(crit)) or float(crit) <= 0):
+        raise GneError("BAD_ARGS", f"key_crit は 0 より大きい数です({crit!r})")
+    if fp_max is not None and not 0 <= float(fp_max) < 1:
+        raise GneError("BAD_ARGS", f"key_fp_max は 0 以上 1 未満の割合です({fp_max!r})")
     g = q_group[q]
     tgt = g == 0
     dt = ~tgt
-    bins = bins_of(ranges)
-    b_i = _bin_index(pos, bins)
-    key_bin = [bins.index((int(lo), None if hi is None else int(hi))) for lo, hi in ranges]
-    cell = g * len(bins) + b_i
+    if after:
+        match = np.asarray(table["match"], dtype=bool)
+        b_i = np.where(match, 0, 1 + np.where(pos == 0, 0, np.where(pos <= 3, 1, 2))).astype(np.int64)
+        bin_names = ["after", "0", "1-3", "4-"]
+        key_bin = [0]
+    else:
+        bins = bins_of(ranges)
+        b_i = _bin_index(pos, bins)
+        bin_names = [bin_text(b) for b in bins]
+        key_bin = [bins.index((int(lo), None if hi is None else int(hi))) for lo, hi in ranges]
+    n_bins = len(bin_names)
+    nF = int(q_form.max()) + 1 if q_form.size else 1
+    gq = q_group * nF + q_form if conv_cells else q_group
+    cell = gq[q] * n_bins + b_i
+    n_groups = int(q_group.max()) + 1 if q_group.size else 1
+    names0 = list(group_names) if group_names is not None else [str(k) for k in range(n_groups)]
+    is_dt_group = np.asarray([n not in ("scene", "scene_other") for n in names0] + [True] * max(0, n_groups - len(names0)))
+    decisive = dt & (b_i == key_bin[0]) & is_dt_group[g] if nE == 1 else np.zeros(N, dtype=bool)
     wd, n_dt = (_cell_weights(om, cell, dt) if weights == "cells" else (np.where(dt, om, 0.0), 0))
+    n_dt_eff = float(n_dt)
+    if crit is not None and weights == "cells":
+        crit_cells = np.unique(cell[decisive])
+        wd = np.where(decisive, wd * float(crit), wd)
+        n_dt_eff = n_dt + (float(crit) - 1.0) * crit_cells.size
     # 鍵ごとの行の重み(層に関係なく決まる)
     Wm, wt, scale_dt, n_cells = [], [], [], []
     for e in range(nE):
         W = tgt & (b_i == key_bin[e])
         Ut = tgt & ~W
         if not W.any():
-            raise GneError("BAD_CONTRAST", f"書き込みたい位置がありません(区間 {bin_text(bins[key_bin[e]])})", "返事が空か、区間に入る位置がありません")
+            raise GneError("BAD_CONTRAST", f"書き込みたい位置がありません(区間 {bin_names[key_bin[e]]})", "返事が空か、区間に入る位置がありません")
         if not (Ut.any() or dt.any()):
-            raise GneError("BAD_CONTRAST", f"書き込みたくない位置がありません(区間 {bin_text(bins[key_bin[e]])})")
+            raise GneError("BAD_CONTRAST", f"書き込みたくない位置がありません(区間 {bin_names[key_bin[e]]})")
         w = np.zeros(N)
         w[W] = om[W] / om[W].sum()
         if weights == "cells":
             wu, n_t = _cell_weights(om, cell, Ut)
-            M = n_dt + n_t
+            M = n_dt_eff + n_t
             w[Ut] = wu[Ut] / M
             sd = 1.0 / M
         else:
@@ -287,7 +377,7 @@ def fit(X_of: Callable[[int], np.ndarray], layers: Sequence[int], table: dict, r
     if cv and n_f < 2:
         raise GneError("BAD_CONTRAST", "狙う場面の質問が 1 問だけなので、正則化の強さを分割で決められません",
                        "質問を増やすか、正則化の強さを直接渡してください(key_c。例 1)")
-    fold = _folds(q_group, n_f, seed)[q] if cv else None
+    fold = _folds(q_group * nF + q_form if nF > 1 else q_group, n_f, seed)[q] if cv else None
     lo_thr, hi_thr = float(thresholds[0]), float(thresholds[1])
     solve = _solver()
     tick = tick or (lambda msg: None)
@@ -299,6 +389,7 @@ def fit(X_of: Callable[[int], np.ndarray], layers: Sequence[int], table: dict, r
     TAU = [{} for _ in range(nE)]
     keep_x = bool(perms) and cv                # 比較用の鍵は c を決めてから作るので、行を取っておく(層ごとに float16 のまま)
     held: dict[int, np.ndarray] = {}
+    OOF: dict[tuple[int, int], np.ndarray] = {}   # (層の番号, 鍵) → 外した組での反応(行, c の数)。セルごとの表と縮め方に使う
 
     def split(X):
         if X.shape[0] != N:
@@ -337,8 +428,12 @@ def fit(X_of: Callable[[int], np.ndarray], layers: Sequence[int], table: dict, r
                     wh = Wt[ht][:, None]
                     E_w[li, e] += (wv * (wh & (rt < hi_thr))).sum(0)
                     E_u[li, e] += (wv * (~wh & (rt > lo_thr))).sum(0)
+                    oof = OOF.setdefault((li, e), np.full((N, len(cs)), np.nan, dtype=np.float32))
+                    oof[idx_t[ht]] = rt
                     if hd.any():
-                        E_u[li, e] += ((wd_d[hd] * sd)[:, None] * ((Xd[hd] @ kap.T) > lo_thr)).sum(0)
+                        rd = Xd[hd] @ kap.T
+                        oof[idx_d[hd]] = rd
+                        E_u[li, e] += ((wd_d[hd] * sd)[:, None] * (rd > lo_thr)).sum(0)
                 del Ht
             else:
                 G = Gd * sd + _gram(Xt, w_t)
@@ -347,7 +442,7 @@ def fit(X_of: Callable[[int], np.ndarray], layers: Sequence[int], table: dict, r
             MU[e][L] = bb
             del G
         if perms and not cv:
-            held[L] = _pseudo_layer(Xt, Gd, table, idx_t, b_i, key_bin, cell, n_dt, weights, om, dt, perms, cs[0], solve)
+            held[L] = _pseudo_layer(Xt, Gd, table, idx_t, b_i, key_bin, cell, n_dt_eff, weights, om, dt, perms, cs[0], solve)
         del Xt, Xd, Gd
         tick(f"L{L}")
     S_w, S_u = E_w.sum((0, 1)), E_u.sum((0, 1))
@@ -358,7 +453,7 @@ def fit(X_of: Callable[[int], np.ndarray], layers: Sequence[int], table: dict, r
         for L in Ls:
             if cv:                             # c が決まったので、取っておいた行から比較用の鍵を作る
                 Xt, Xd = split(held.pop(L))
-                C = _pseudo_layer(Xt, _gram(Xd, wd_d), table, idx_t, b_i, key_bin, cell, n_dt, weights, om, dt, perms, cs[best], solve)
+                C = _pseudo_layer(Xt, _gram(Xd, wd_d), table, idx_t, b_i, key_bin, cell, n_dt_eff, weights, om, dt, perms, cs[best], solve)
                 del Xt, Xd
                 tick(f"L{L}(比較用の鍵)")
             else:
@@ -366,16 +461,74 @@ def fit(X_of: Callable[[int], np.ndarray], layers: Sequence[int], table: dict, r
             for e in range(nE):
                 if C[e] is not None:
                     ctrl[e][L] = C[e]
-    names = list(group_names) if group_names is not None else [str(k) for k in range(int(q_group.max()) + 1)]
+    names = names0
+    from .prior import FORMS
+
+    def cell_name(cc: int) -> tuple[str, str]:
+        gi, bi = divmod(int(cc), n_bins)
+        if conv_cells:
+            gi, fi = divmod(gi, nF)
+            return f"{names[gi]}|{FORMS[fi]}", bin_names[bi]
+        return names[gi], bin_names[bi]
     rows_cell = {}
     for cc in np.unique(cell):
-        gi, bi = divmod(int(cc), len(bins))
-        rows_cell.setdefault(names[gi], {})[bin_text(bins[bi])] = int((cell == cc).sum())
+        gname, bname = cell_name(cc)
+        rows_cell.setdefault(gname, {})[bname] = int((cell == cc).sum())
+
+    def frac(r: np.ndarray, m: np.ndarray, want: bool) -> float:
+        w = om[m]
+        hit = (r[m] >= hi_thr) if want else (r[m] > lo_thr)
+        return float((w * hit).sum() / w.sum()) if w.sum() > 0 else float("nan")
+
+    def fp_rate(r: np.ndarray) -> float:                # 決め手のセルの誤検出の、セルごとの割合の平均
+        vals = [frac(r, decisive & (cell == cc), False) for cc in np.unique(cell[decisive])]
+        return float(np.mean(vals)) if vals else 0.0
+    cv_cells: list[dict] = [{} for _ in range(nE)]
+    shrink: dict[int, dict] = {}
+    if cv:
+        for li, L in enumerate(Ls):
+            for e in range(nE):
+                r = OOF.get((li, e))
+                if r is None:
+                    continue
+                r = r[:, best].astype(np.float64)
+                ok = ~np.isnan(r)
+                W = Wm[e]
+                tab = []
+                for cc in np.unique(cell[ok]):
+                    m = ok & (cell == cc)
+                    gname, bname = cell_name(cc)
+                    want = bool(W[m].all())
+                    tab.append({"group": gname, "bin": bname, "rows": int(m.sum()), "want": want,
+                                "decisive": bool(decisive[m].any()), "rate": frac(r, m, want)})
+                cv_cells[e][L] = tab
+                if fp_max is not None and e == 0:
+                    rr = np.where(ok, r, 0.0)
+                    before = fp_rate(rr)
+                    sc = 1.0
+                    if before > float(fp_max):
+                        lo_, hi_ = 0.0, 1.0
+                        for _ in range(40):
+                            mid = (lo_ + hi_) / 2
+                            if fp_rate(mid * rr) > float(fp_max):
+                                hi_ = mid
+                            else:
+                                lo_ = mid
+                        sc = lo_
+                    KAP[e][L] = KAP[e][L] * sc
+                    shrink[L] = {"scale": sc, "fp_before": before, "fp_after": fp_rate(sc * rr),
+                                 "want_before": frac(rr, W & ok, True), "want_after": frac(sc * rr, W & ok, True)}
+    if fp_max is not None and not decisive.any():
+        raise GneError("BAD_CONTRAST", "決め手のセル(dont_touch の群の、鍵の区分の位置)がありません。key_fp_max は使えません",
+                       "dont_touch の群を足してください")
     info = {"weights": weights, "c": cs[best], "cv": cv, "cs": cs if cv else None, "folds": n_f if cv else None,
             "score": [float(x) for x in S] if cv else None, "score_want": [float(x) for x in S_w] if cv else None,
             "score_unwant": [float(x) for x in S_u] if cv else None,
             "edge": bool(cv and best in (0, len(cs) - 1)), "thresholds": [lo_thr, hi_thr] if cv else None,
-            "rows": int(N), "questions": int(q_group.size), "groups": names, "bins": [bin_text(b) for b in bins],
+            "rows": int(N), "questions": int(q_group.size), "groups": names, "bins": bin_names,
+            "conv_cells": bool(conv_cells), "forms": {FORMS[k]: int((q_form == k).sum()) for k in range(nF)},
+            "crit": None if crit is None else float(crit), "fp_max": None if fp_max is None else float(fp_max),
+            "decisive_rows": int(decisive.sum()), "cv_cells": cv_cells if cv else None, "shrink": shrink or None,
             "cells": n_cells if weights == "cells" else None, "rows_want": [int(W.sum()) for W in Wm], "rows_by_cell": rows_cell,
             "keep_all": KEEP_ALL, "sample": SAMPLE, "seed": int(seed), "seconds": time.perf_counter() - t0}
     return {"kappa": [{L: KAP[e][L][best] for L in Ls} for e in range(nE)], "mu": MU, "ctrl": ctrl,

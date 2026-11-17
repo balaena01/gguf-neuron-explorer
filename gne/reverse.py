@@ -168,18 +168,29 @@ def is_multi(q) -> bool:
 
 def check_question(q, where: str = "質問", *, in_progress: bool = True) -> None:
     """1 問を確かめる。文字列か、[{"role": "user", "content": …}, {"role": "assistant", …}, …, {"role": "user", …}]。
-    assistant で終われば書きかけの返事(その最後のトークンで測り、生成はその続きから)。in_progress=False の道具は断る。"""
+    assistant で終われば書きかけの返事(その最後のトークンで測り、生成はその続きから)。in_progress=False の道具は断る。
+    先頭に {"role": "system", "content": …} を置くと、その問だけのシステムプロンプト(群の system より優先)。最後でない
+    assistant の content を null にすると、前のやり取りの応答を無介入のモデルで埋める(prior.py。キーの作成・gne nw check・
+    gne nw prior が埋める)。"""
     if isinstance(q, str):
         return
     if not isinstance(q, list) or not q:
         raise GneError("BAD_CONTRAST", f"{where}: 1 問は文字列か、会話の履歴(メッセージのリスト)です")
+    off = 1 if isinstance(q[0], dict) and q[0].get("role") == "system" else 0
+    if off and len(q) < 2:
+        raise GneError("BAD_CONTRAST", f"{where}: system のあとに user の発話が要ります")
     for i, m in enumerate(q):
-        if not isinstance(m, dict) or set(m) - {"role", "content"} or not isinstance(m.get("content"), str):
-            raise GneError("BAD_CONTRAST", f"{where}: 会話の {i + 1} 番目は {{\"role\": …, \"content\": 文字列}} の形にしてください")
-        want = "user" if i % 2 == 0 else "assistant"
+        last = i == len(q) - 1
+        ok_null = (isinstance(m, dict) and m.get("role") == "assistant" and m.get("content") is None and not last)
+        if not isinstance(m, dict) or set(m) - {"role", "content"} or not (isinstance(m.get("content"), str) or ok_null):
+            raise GneError("BAD_CONTRAST", f"{where}: 会話の {i + 1} 番目は {{\"role\": …, \"content\": 文字列}} の形にしてください"
+                                           "(前のやり取りの assistant だけ content: null で、無介入のモデルに埋めさせられます)")
+        if i < off:
+            continue
+        want = "user" if (i - off) % 2 == 0 else "assistant"
         if m.get("role") != want:
             raise GneError("BAD_CONTRAST", f"{where}: 会話は user と assistant が交互で、user で始めてください({i + 1} 番目が "
-                                           f"{m.get('role')!r}、{want!r} のはず)")
+                                           f"{m.get('role')!r}、{want!r} のはず。system は先頭に 1 つだけ)")
     if q[-1]["role"] != "user":
         if not in_progress:
             raise GneError("BAD_CONTRAST", f"{where}: ここでは会話の履歴を user の発話で終えてください(書きかけの返事は読めません)")
@@ -197,10 +208,15 @@ def check_questions(v, where: str, *, in_progress: bool = True) -> None:
 
 
 def turns(q) -> list[dict]:
-    """質問 → メッセージの列(system は含まない)。assistant で終わる履歴の最後には書きかけの印を付ける。"""
+    """質問 → メッセージの列(system は含まない。その問の system は _conv が使う)。assistant で終わる履歴の最後には書きかけの
+    印を付ける。埋めていない前のやり取りの応答(content: null)があれば断る。"""
     if isinstance(q, str):
         return [{"role": "user", "content": q}]
-    out = [{"role": m["role"], "content": m["content"]} for m in q]
+    body = q[1:] if q and q[0].get("role") == "system" else q
+    if any(m.get("content") is None for m in body):
+        raise GneError("BAD_CONTRAST", "前のやり取りの応答(assistant の content: null)が埋まっていません",
+                       "キーの作成・gne nw check は自動で埋めます。ほかの道具には gne nw prior で埋めた対照集合を渡してください")
+    out = [{"role": m["role"], "content": m["content"]} for m in body]
     if out[-1]["role"] == "assistant":
         out[-1][IN_PROGRESS] = True
     return out
@@ -210,11 +226,14 @@ def question_text(q, *, sep: str = " / ") -> str:
     """表示・採点のファイル用の 1 行。会話の履歴は「user: … / assistant: … / user: …」。"""
     if isinstance(q, str):
         return q
-    return sep.join(f"{m['role']}: {m['content']}" for m in q)
+    return sep.join(f"{m['role']}: {'…' if m['content'] is None else m['content']}" for m in q)
 
 
 def _conv(system: str | None, user) -> list[dict]:
-    """system が None なら system なしの会話(空の文字列は空の system として残す)。user は質問(文字列か会話の履歴)。"""
+    """system が None なら system なしの会話(空の文字列は空の system として残す)。user は質問(文字列か会話の履歴)。
+    質問の先頭に system があれば、そちらを使う(群の system より優先)。"""
+    if isinstance(user, list) and user and isinstance(user[0], dict) and user[0].get("role") == "system":
+        system = user[0]["content"]
     return ([] if system is None else [{"role": "system", "content": system}]) + turns(user)
 
 

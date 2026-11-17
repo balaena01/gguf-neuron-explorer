@@ -33,7 +33,7 @@ from .steer import GneError
 FORMS = ("one", "two", "cap")                 # 鍵 1 つ / 鍵 2 つ(場面 かつ 位置)/ 上限つきの 2 個組
 PER_SEGMENT = {"one": 1, "two": 1, "cap": 2}  # 区切り 1 つに要るニューロンの数
 SETTINGS = ("layers", "segments", "form", "alpha", "cap", "same_reply", "stack", "stack_fast", "pseudo", "max_tokens",
-            "response_tokens", "iv", "rekey", "key_fit", "key_c")
+            "response_tokens", "iv", "rekey", "key_fit", "key_c", "key_conv_cells", "prior_max_tokens", "kscale", "remove")
 DEFAULTS = {"segments": "0,1-3,4-", "form": "cap", "alpha": 0.9, "same_reply": True, "stack": True, "stack_fast": False, "pseudo": 4,
             "max_tokens": 96, "response_tokens": 96, "key_fit": "mean"}
 
@@ -136,9 +136,10 @@ def alpha_out(al: list[float]):
     return al[0] if len(set(al)) == 1 else list(al)
 
 
-def resolve(session, contrast=None, spec: dict | None = None) -> tuple[str, dict, str]:
+def resolve(session, contrast=None, spec: dict | None = None, prior_max_tokens=None) -> tuple[str, dict, str]:
     """対照集合(パスか、UI の入力欄の表)→ (パス, 表の fish の設定, 対照集合の名前)。表は <root>/contrasts/<name>.yaml に書く
-    (fish・about・keyed は対照集合に入れない)。"""
+    (fish・about・keyed は対照集合に入れない)。前のやり取りの応答(content: null)があれば、無介入のモデルで埋めた対照集合の
+    パスを返す(prior.ensure_filled。上限は prior_max_tokens、無ければ表の fish.prior_max_tokens、無ければ既定)。"""
     from .keyed_build import read_key_spec
     if (contrast is None) == (spec is None):
         raise GneError("BAD_ARGS", "対照集合は contrast(パス)か spec(表)のどちらかで渡してください")
@@ -155,6 +156,9 @@ def resolve(session, contrast=None, spec: dict | None = None) -> tuple[str, dict
         from .keyed_pipeline import save_spec
         path, _ = save_spec(session, d)
         contrast = str(path)
+    from .prior import ensure_filled
+    contrast = ensure_filled(session, str(contrast),
+                             max_tokens=prior_max_tokens if prior_max_tokens is not None else settings.get("prior_max_tokens"))
     ks = read_key_spec(Path(str(contrast)))
     if not ks.dont_touch:
         session.warn("対照集合に dont_touch(書き込みたくない場面の質問の群)がありません。ほかの場面でも鍵が反応しやすくなります")
@@ -185,13 +189,41 @@ def default_neurons(usage: dict, n_seg: int, form: str) -> dict[int, list[int]]:
     return out
 
 
+def unit_options(kscale=None, remove=None, form: str = "cap") -> dict:
+    """ユニットの追加の印(units の kscale・remove)を確かめる。kscale: None / "auto"(!kauto)/ 1 以上の数(!k<n>)。
+    remove: None / "rm" / "rmbase"(成分を取り除く形。上限つきの形だけ)。→ units に渡す {kscale, remove}(無いものは入れない)。"""
+    out: dict = {}
+    if kscale not in (None, "", "none"):
+        if str(kscale) == "auto":
+            out["kscale"] = "auto"
+        else:
+            try:
+                k = float(kscale)
+            except (TypeError, ValueError):
+                raise GneError("BAD_ARGS", f"kscale は auto か 1 以上の数です({kscale!r})") from None
+            if not np.isfinite(k) or k < 1:
+                raise GneError("BAD_ARGS", f"kscale は auto か 1 以上の数です({kscale!r})")
+            out["kscale"] = k
+    if remove not in (None, "", "none"):
+        if remove not in ("rm", "rmbase"):
+            raise GneError("BAD_ARGS", f"remove は rm / rmbase です({remove!r})")
+        if form != "cap":
+            raise GneError("BAD_ARGS", "成分を取り除く形(remove)は、上限つきの形(form cap)だけです")
+        out["remove"] = remove
+    return out
+
+
 def units(layers, n_seg: int, neurons: dict, form: str, direction: str, base: str, alpha=0.9, whole: bool = False,
-          cap=None) -> list[str]:
+          cap=None, kscale=None, remove=None) -> list[str]:
     """層 × 区切りごとのユニット(書き方の文字列)。neurons は {層: [番号, …]}(層ごとに needed 個。区切り 0 から順に使う)。
     alpha は強さ(数 1 つなら全部の区切りに同じ値。"1,1,0.8" か [1, 1, 0.8] なら区切りごと。alphas_of)。
     cap は上限つきの形のしきい値(caps_of。省くとユニットに書かない = 既定の 0.4-0.8。渡すと、区切りごとに !cap<a-b> を付ける)。
-    whole(書く位置が before:<正規表現> のとき): 方向は区切りに分けず、direction をそのまま使う。"""
+    whole(書く位置が before:<正規表現> のとき): 方向は区切りに分けず、direction をそのまま使う。
+    kscale("auto" か数)を渡すとユニットに !kauto / !k<n>、remove("rm" / "rmbase")を渡すと !rm / !rmbase を付ける(unit_options)。"""
     _form(form)
+    opt = unit_options(kscale, remove, form)
+    tail = ((f"!k{opt['kscale']}" if opt["kscale"] == "auto" else f"!k{opt['kscale']:g}") if "kscale" in opt else "") \
+        + (f"!{opt['remove']}" if "remove" in opt else "")
     al = alphas_of(alpha, n_seg)
     caps = caps_of(cap, n_seg, form)
     names = key_names(base, n_seg, form)
@@ -207,7 +239,8 @@ def units(layers, n_seg: int, neurons: dict, form: str, direction: str, base: st
             pk = names["position"][i]
             head = f"{L}:N{js[i * per]}" + (f"+N{js[i * per + 1]}" if form == "cap" else "")
             keys = f"#{names['scene']}&{pk}" if form == "two" else (f"#{pk}&{names['one']}" if form == "cap" else f"#{pk}")
-            out.append(f"{head}:nw:a{al[i]:g}@{direction}{'' if whole else f'.seg{i}'}{keys}" + (f"!cap{caps[i]}" if caps else ""))
+            out.append(f"{head}:nw:a{al[i]:g}@{direction}{'' if whole else f'.seg{i}'}{keys}" + (f"!cap{caps[i]}" if caps else "")
+                       + tail)
     return out
 
 
@@ -281,11 +314,13 @@ def _build_stats(session, name: str) -> dict:
 
 
 def keys_step(session, contrast: str, *, base: str, layers=None, segments=None, form: str = "cap", pseudo: int = 4,
-              max_tokens: int = 96, subset: str = "all", iv=None, seed: int = 0, key_fit: str | None = None, key_c=None) -> dict:
+              max_tokens: int = 96, subset: str = "all", iv=None, seed: int = 0, key_fit: str | None = None, key_c=None,
+              key_conv_cells: bool = False) -> dict:
     """区切りごとの位置の鍵と、形に要る鍵(鍵 2 つの形は場面の鍵、上限つきの形はほぼ 1 を返す鍵)をまとめて作る。
     iv(レシピの名前・パスか、ユニットの書き方のリスト)を渡すと、それを当てた状態で作る。
     key_fit = "ridge" で、位置の鍵を最小二乗の鍵(ますごとの重み)にする(既定は mean = いまの作り方)。key_c はその正則化の強さ
-    (省くと 5 分割で決める。選ばれた値と、候補の端だったかは、結果の ridge と notes)。書く位置が before:<正規表現> の鍵には使えない。"""
+    (省くと 5 分割で決める。選ばれた値と、候補の端だったかは、結果の ridge と notes)。書く位置が before:<正規表現> の鍵には使えない。
+    key_conv_cells = True で、最小二乗の鍵のセルに会話の形(1 ターン / 複数ターン / system あり)も入れる(key_fit ridge のときだけ)。"""
     from .keyed_ridge import check_c, check_key_fit
     t0 = time.perf_counter()
     Ls = _layers(layers)
@@ -297,6 +332,8 @@ def keys_step(session, contrast: str, *, base: str, layers=None, segments=None, 
                        "書く位置が before:<正規表現> のときは、いまの作り方(key_fit mean)で作ります")
     if key_c is not None and kf != "ridge":
         raise GneError("BAD_ARGS", "正則化の強さ(key_c)は、最小二乗の鍵(key_fit ridge)のときだけ使います")
+    if key_conv_cells and kf != "ridge":
+        raise GneError("BAD_ARGS", "セルに会話の形を入れる(key_conv_cells)のは、最小二乗の鍵(key_fit ridge)のときだけです")
     names = key_names(base, len(segs), _form(form))
     rows, notes = [], []
 
@@ -323,7 +360,8 @@ def keys_step(session, contrast: str, *, base: str, layers=None, segments=None, 
                                            for i, sg in enumerate(segs)],
                                 target="mlpin", layers=Ls, subset=subset, max_tokens=int(max_tokens), pseudo=int(pseudo), iv=iv,
                                 seed=int(seed), progress=session.progress, gen_cache=cache,
-                                **({"key_fit": kf, "key_c": key_c} if kf != "mean" else {}))
+                                **({"key_fit": kf, "key_c": key_c} if kf != "mean" else {}),
+                                **({"key_conv_cells": True} if key_conv_cells else {}))
     for sg, r in zip(segs, rs, strict=True):
         add("position", sg, r)
     stage["position"] = time.perf_counter() - t
@@ -488,7 +526,8 @@ def pipeline(session, contrast: str, *, name: str, layers=None, segments=None, f
              same_reply: bool = True, stack: bool = True, compare: bool = True, pseudo: int = 4, max_tokens: int = 96,
              response_tokens: int = 96, iv=None, rekey: bool = True, neurons: dict | None = None, top: int = 20,
              save: str | Path | None = None, direction: str | None = None, cap=None, stack_fast: bool = False,
-             key_fit: str | None = None, key_c=None) -> dict:
+             key_fit: str | None = None, key_c=None, key_conv_cells: bool = False, kscale: str | None = None,
+             remove: str | None = None) -> dict:
     """方向 → ニューロンの表 → 鍵 → ユニット →(そのユニットを当てた状態で鍵を作り直す)→ 式どおりか → 足した量、を順に回す。
     ニューロンは既定の候補(表の上から)を使う(neurons を渡せばそれ)。層と強さは渡されたものをそのまま使う。
     alpha は数 1 つ(全部の区切りに同じ値)か、区切りごとの "1,1,0.8"・[1, 1, 0.8]。
@@ -500,7 +539,9 @@ def pipeline(session, contrast: str, *, name: str, layers=None, segments=None, f
     方向を使ったかは、結果の direction_stack_fast と要約に出る(すでにある方向を使ったときも、方向のファイルの記録から出す)。
     key_fit = "ridge" で、位置の鍵を最小二乗の鍵(ますごとの重み)にする(keys_step。既定は mean = いまの作り方)。当てた状態で鍵を
     作り直す段にも同じ作り方を使う(正則化の強さは段ごとに決め直す。key_c を渡せば両方の段でその値)。結果・要約の key_fit と ridge
-    (段ごとの c・候補の端だったか)に残る。
+    (段ごとの c・候補の端だったか)に残る。key_conv_cells = True で、そのセルに会話の形も入れる(key_fit ridge のときだけ)。
+    kscale = "auto" でユニットに !kauto(量子化の丸めを避ける倍率)、remove = "rm" / "rmbase" でユニットを成分を取り除く形
+    (!rm / !rmbase。上限つきの形だけ)にする(units_step。既定はどちらも付けない)。
     save を渡すと、できたユニットをレシピのファイルに書く(save_recipe。.yaml / .yml で終わればそのパス、そうでなければ名前として
     <root>/recipes/<名前>.yaml)。結果の recipe_path が、gne nw verify --recipe などにそのまま渡せるパス。省くと書かない(今までどおり)。
     結果は大きい(ニューロンの表・鍵の表・足した量の細目)ので、短く見るなら結果の summary(summary() と同じ)か summary_text()。"""
@@ -518,7 +559,10 @@ def pipeline(session, contrast: str, *, name: str, layers=None, segments=None, f
                        "書く位置が before:<正規表現> のときは、いまの作り方(key_fit mean)で作ります")
     if key_c is not None and kf != "ridge":
         raise GneError("BAD_ARGS", "正則化の強さ(key_c)は、最小二乗の鍵(key_fit ridge)のときだけ使います")
-    kfit = {"key_fit": kf, "key_c": key_c} if kf != "mean" else {}
+    if key_conv_cells and kf != "ridge":
+        raise GneError("BAD_ARGS", "セルに会話の形を入れる(key_conv_cells)のは、最小二乗の鍵(key_fit ridge)のときだけです")
+    kfit = ({"key_fit": kf, "key_c": key_c} if kf != "mean" else {}) | ({"key_conv_cells": True} if key_conv_cells else {})
+    uopt = unit_options(kscale, remove, form)
     save_to = None if save is None or not str(save).strip() else recipe_file(session, save)   # 名前が悪ければ、モデルを流す前に止める
     stage = {}
 
@@ -549,7 +593,7 @@ def pipeline(session, contrast: str, *, name: str, layers=None, segments=None, f
     keys = keys_step(session, contrast, base=name, layers=Ls, segments=segs, form=form, pseudo=pseudo, max_tokens=max_tokens, iv=iv,
                      **kfit)
     whole = before_mode(segs)
-    specs = units(Ls, len(segs), picked, form, dname, name, al, whole, caps)
+    specs = units(Ls, len(segs), picked, form, dname, name, al, whole, caps, **uopt)
     lap("keys", t)
     keys2 = None
     if whole:
@@ -561,7 +605,7 @@ def pipeline(session, contrast: str, *, name: str, layers=None, segments=None, f
         base2 = f"{name}_r"
         keys2 = keys_step(session, contrast, base=base2, layers=Ls, segments=segs, form=form, pseudo=pseudo, max_tokens=max_tokens,
                           iv=iv_units(session, iv, specs), **kfit)
-        specs = units(Ls, len(segs), picked, form, dname, base2, al, whole, caps)
+        specs = units(Ls, len(segs), picked, form, dname, base2, al, whole, caps, **uopt)
         lap("rekey", t)
     t = time.perf_counter()
     ver = verify_step(session, specs, iv=iv)

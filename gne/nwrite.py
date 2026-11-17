@@ -402,7 +402,7 @@ SCENE_BUCKETS = ("pos:0", "pos:1-3", "pos:4-15", "pos:16-")
 
 def build_role_key(session, contrast, *, role: str, layers, name: str | None = None, subset: str = "even",
                    max_tokens: int = 96, pseudo: int = 16, iv=None, seed: int = 0, q_energy: float = 0.99,
-                   progress=None, gen_cache: dict | None = None) -> dict:
+                   progress=None, gen_cache: dict | None = None, prior_max_tokens: int | None = None) -> dict:
     """role = scene: 対照集合の質問(user_prompts)への返事の位置で反応し、dont_touch の群の質問への返事では反応しない鍵。
       返事の位置を 0 / 1〜3 / 4〜15 / 16 以降に分けた例ごとの平均を行にして、keyed と同じ式(κ = k/(μᵀk)、k = μ − QQᵀμ)で作る。
       比較用の鍵は、質問のラベル(狙う質問か、dont_touch か)をでたらめに入れ替えて同じ手順で作る。
@@ -416,7 +416,8 @@ def build_role_key(session, contrast, *, role: str, layers, name: str | None = N
     if role not in ("scene", "one"):
         raise GneError("BAD_ARGS", f"role は scene / one です({role!r})")
     t0 = time.perf_counter()
-    spec = _as_spec(contrast)
+    from .prior import ensure_filled
+    spec = _as_spec(ensure_filled(session, contrast, max_tokens=prior_max_tokens))
     cs = spec.contrast
     Ls = sorted({int(L) for L in (layers or [])})
     if not Ls:
@@ -715,7 +716,8 @@ def _question_summary(rows: list[dict], segs: list[str], wanted: bool, low: floa
 
 def check(session, recipe, contrast, *, subset: str = "odd", max_tokens: int = 96, replies: str = "own", n_pos: int = 8,
           iv=None, positions: str | None = None, low: float = LOW_DEFAULT, over: float = OVER_DEFAULT,
-          leak: float = LEAK_DEFAULT, top: int = 5, save: str | None = None) -> dict:
+          leak: float = LEAK_DEFAULT, top: int = 5, save: str | None = None, pos_bins: str | None = None,
+          prior_max_tokens: int | None = None) -> dict:
     """位置の種類ごとに、鍵の反応と実際に足した量を出す。対照集合の質問(狙う場面)と dont_touch の群(書き込みたくない場面)に
     ついて、返事の位置 0〜n_pos−1 とそれ以降で、ユニットごとの「鍵の反応(ゲートの鍵・入力の鍵)」と「足した量(α·d を 1 として)」の
     平均・最小・最大を返す。replies = own: レシピを当てて作った返事を、当てたまま読む(実際に起きること)。base: 無介入の返事を、
@@ -735,7 +737,13 @@ def check(session, recipe, contrast, *, subset: str = "odd", max_tokens: int = 9
     leaks は、書き込みたくない場面の群ごとの漏れの表(leak_table): 群ごと・区間ごとに、合計の大きさが leak 以上の質問の数と、書いた量
     (合計)の平均。どれかの区間で書いた質問の数(any)と、位置 0(返事を書き始める直前)だけで見た数(pos0)も出す。
     key_fit は、ユニットの鍵がどちらの作り方で作ったものか(mean = いまの作り方、ridge = 最小二乗の鍵。鍵ごとの値は keys)。
-    save(名前)を渡すと、結果を <root>/behave/<model_id>/<名前>_check.json に書く(結果の path)。"""
+    save(名前)を渡すと、結果を <root>/behave/<model_id>/<名前>_check.json に書く(結果の path)。
+    positions に after:<正規表現> も使える(一致したトークンの直後の位置 = 文の終わりの次の位置などを match にする)。
+    pos_bins(例 "0,1-3,4-15,16-63,64-")を渡すと、位置ごとの表を位置 0〜n_pos−1 の代わりにその区分で出す(長い応答の後ろの
+    位置まで読むとき。max_tokens を応答を書き終える長さにする)。
+    by_form: 群ごと・会話の形(single / multi_turn / system / system_multi_turn)ごと・区間ごとの数(狙う場面は ρ ≥ b・ρ > a の
+    割合と書いた量の平均、書き込みたくない場面は合計の大きさが leak 以上の質問の数)。対照集合の前のやり取りの応答(content: null)は、
+    読む前に無介入のモデルで埋める(上限 prior_max_tokens)。"""
     from .direction import _subset, parse_segments
     from .keyed_build import intervention
     iv_vecs, iv_lora, iv_desc = intervention(session, iv)
@@ -756,6 +764,8 @@ def check(session, recipe, contrast, *, subset: str = "odd", max_tokens: int = 9
     if not rows:
         raise GneError("BAD_RECIPE", "nw のユニットがありません")
     lora = [*iv_lora, (str(session.nw_lora(recipe)), 1.0)]
+    from .prior import conv_form_of, ensure_filled
+    contrast = ensure_filled(session, contrast, max_tokens=prior_max_tokens)
     spec = _as_spec(contrast)
     cs = spec.contrast
     prompts = cs.prompts("B")
@@ -767,11 +777,25 @@ def check(session, recipe, contrast, *, subset: str = "odd", max_tokens: int = 9
     Ls = sorted({r["layer"] for r in rows})
     names = None
     buckets = [str(k) for k in range(n_pos)] + [f"{n_pos}+"]
+    bins = None
+    if pos_bins is not None:
+        if positions is not None:
+            raise GneError("BAD_ARGS", "pos_bins と positions は一緒に使えません")
+        bins = parse_segments(str(pos_bins))
+        buckets = [str(x).strip() for x in str(pos_bins).split(",")]
     if positions is not None:
         from .keyed_build import parse_positions, select_positions
-        if parse_positions(positions).kind != "before":
-            raise GneError("BAD_ARGS", f"check の positions は before:<正規表現> です({positions!r})")
+        if parse_positions(positions).kind not in ("before", "after"):
+            raise GneError("BAD_ARGS", f"check の positions は before:<正規表現> か after:<正規表現> です({positions!r})")
         buckets = ["match", "other"]
+
+    def bucket_of(k: int) -> str | None:
+        if bins is None:
+            return str(k) if k < n_pos else f"{n_pos}+"
+        for name, (lo, hi) in zip(buckets, bins, strict=True):
+            if k >= lo and (hi is None or k < hi):
+                return name
+        return None
     # 質問ごとの値の区間: ユニットごとに、担当する返事の位置の範囲(positions を渡したときは、一致の直前の位置 "match" の 1 つ)
     seg_of = {id(r): ("match" if positions is not None else unit_segment(session, r)) for r in rows}
     seg_names = list(dict.fromkeys(seg_of.values()))
@@ -805,7 +829,9 @@ def check(session, recipe, contrast, *, subset: str = "odd", max_tokens: int = 9
                 amt = sum(g * a[:, j] for (j, _, _, _, g) in r["parts"])
                 rg, ru = h @ r["kappa_gate"], h @ r["kappa_up"]
                 for k in range(amt.shape[0]):
-                    b = ("match" if k in hit else "other") if hit is not None else (str(k) if k < n_pos else f"{n_pos}+")
+                    b = ("match" if k in hit else "other") if hit is not None else bucket_of(k)
+                    if b is None:
+                        continue
                     acc[id(r)][b]["amount"].append(float(amt[k]))
                     acc[id(r)][b]["rho_gate"].append(float(rg[k]))
                     acc[id(r)][b]["rho_up"].append(float(ru[k]))
@@ -828,12 +854,15 @@ def check(session, recipe, contrast, *, subset: str = "odd", max_tokens: int = 9
                     "amount": float(own[sg][mask].mean()), "total": float(total[mask].mean()),
                     "rho": float(np.mean(per[sg]["rho"], axis=0)[mask].mean()), "n_pos": int(mask.sum())}
             qrows.append({"i": qi, "prompt": qtexts[qi], "reply_start": (o["text"] or "")[:40], "n_tokens": len(rid), "loop": looped,
-                          "segments": qsegs, "pos0_total": float(total[0])})
+                          "segments": qsegs, "pos0_total": float(total[0]), "form": conv_form_of(c),
+                          "finish": o.get("finish")})
         st = lambda v: None if not v else {"mean": float(np.mean(v)), "min": float(np.min(v)), "max": float(np.max(v)), "n": len(v)}
         res[label] = {"n": len(convs), "loops": loops,
                       "units": [{"unit": spec_of(r["unit"]), "layer": r["layer"], "form": r["form"],
                                  "positions": {b: {k: st(v) for k, v in d.items()} for b, d in acc[id(r)].items()}} for r in rows],
                       "by_question": _question_summary(qrows, seg_names, label == "scene", float(low), float(over), float(leak)),
+                      "by_form": _form_summary(qrows, seg_names, label == "scene", rows, float(leak)),
+                      "finished": sum(q["finish"] != "length" for q in qrows),
                       "questions": qrows}
     worst = sorted(({"group": "scene", "segment": sg, "i": q["i"], "prompt": q["prompt"], "reply_start": q["reply_start"],
                      "amount": q["segments"][sg]["amount"], "rho": q["segments"][sg]["rho"], "loop": q["loop"]}
@@ -854,6 +883,29 @@ def check(session, recipe, contrast, *, subset: str = "odd", max_tokens: int = 9
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
         out = {**out, "path": str(path)}
+    return out
+
+
+def _form_summary(qrows: list[dict], segs: list[str], scene: bool, rows: list[dict], leak: float) -> dict:
+    """check の質問ごとの値 → 会話の形ごと・区間ごとの数。狙う場面: n、rho_ge_b(ρ ≥ b の割合。上限つきの形の b、無ければ 0.8)、
+    rho_gt_a(ρ > a の割合)、amount_mean。書き込みたくない場面: n、leak(合計の大きさが leak 以上の質問の数)、total_mean。"""
+    caps = [(float(r["a"]), float(r["b"])) for r in rows if r.get("form") == "cap"]
+    a, b = caps[0] if caps else (0.4, 0.8)
+    out: dict[str, dict] = {}
+    for f in dict.fromkeys(q.get("form", "single") for q in qrows):
+        qs = [q for q in qrows if q.get("form", "single") == f]
+        sg_out = {}
+        for sg in segs:
+            v = [q["segments"][sg] for q in qs if q["segments"].get(sg)]
+            if not v:
+                continue
+            if scene:
+                sg_out[sg] = {"n": len(v), "rho_ge_b": float(np.mean([x["rho"] >= b for x in v])),
+                              "rho_gt_a": float(np.mean([x["rho"] > a for x in v])), "amount_mean": float(np.mean([x["amount"] for x in v]))}
+            else:
+                sg_out[sg] = {"n": len(v), "leak": int(sum(abs(x["total"]) >= leak for x in v)),
+                              "total_mean": float(np.mean([x["total"] for x in v]))}
+        out[f] = {"n": len(qs), "segments": sg_out}
     return out
 
 

@@ -410,7 +410,7 @@ def test_templates_list_non_question_groups(tmp_path):
         ks = read_key_spec(p)
         assert [g.name for g in ks.dont_touch] == [g["name"] for g in d["dont_touch"]], name
     text = json.loads((root / "tone_in_scene.json").read_text(encoding="utf-8"))["about"]
-    assert "数十問" in text["ja"]["text"] and "several dozen" in text["en"]["text"] and "1 つのモデル・1 つの性格" in text["ja"]["text"]
+    assert "数十問" in _all(text["ja"]) and "several dozen" in _all(text["en"]) and "1 つのモデル・1 つの性格" in _all(text["ja"])
 
 
 # --- モデルあり ----------------------------------------------------------------------------------------

@@ -1917,6 +1917,39 @@ _KEY_FIT = ("鍵の作り方: mean(既定。いまの作り方 = 書き込みた
             "ridge(最小二乗の鍵。位置 1 つずつを行にして、書き込みたい位置で 1・書き込みたくない位置で 0 を返す鍵を閉じた式で解く。"
             "書き込みたくない位置の重みは「場面の群 × 位置の区分」のますごとに同じ。FiSH の位置の鍵 = --target mlpin --positions pos:<範囲> だけ)")
 _KEY_C = "--key-fit ridge の正則化の強さ(行列の対角の平均の何倍か。例 1)。省くと、鍵を作る質問だけを使った質問単位の 5 分割で、0.01・0.1・1・10・100 から決める"
+_KEY_CONV = ("--key-fit ridge のセルに、会話の形(single = system なしの 1 ターン / multi_turn = 複数ターン / system = system あり / "
+             "system_multi_turn)も入れる(既定は入れない。docs/fish.md §3「会話の形を混ぜる」)")
+_KEY_CRIT = ("--key-fit ridge で、決め手のセル(dont_touch の群の、鍵が開く位置と同じ種類の位置)の重みを何倍にするか(既定 1 = そのまま。例 10)。"
+             "鍵を 1 本ずつ作るときだけ")
+_KEY_FPMAX = ("--key-fit ridge で、交差検証の決め手のセルの誤検出(キーの出力 > 0.4 の割合。セルごとの平均)がこの割合を超える層は、"
+              "超えなくなるまでキーを縮める(例 0.02。既定は縮めない)。鍵を 1 本ずつ・--key-c を省いたときだけ")
+_TARGET_REPLY = ("--key-fit ridge で、狙う場面の応答のうち、この正規表現に一致したものだけを狙う場面にする(例 '^◇'。"
+                 "対照集合の target_reply より優先。一致しなかった応答は scene_other の群として書き込みたくない側に入る)")
+_PRIOR_MT = "対照集合の前のやり取りの応答(assistant の content: null)を無介入のモデルで埋めるときの上限(既定 256)"
+
+
+def _ridge_lines(d: dict) -> list[str]:
+    """最小二乗の鍵の追加の記録(会話の形・target_reply・縮め方・決め手のセルの誤検出)を数行に。"""
+    ri = d.get("ridge") or {}
+    out = []
+    forms = ri.get("forms") or {}
+    if len(forms) > 1 or ri.get("conv_cells"):
+        out.append("  会話の形: " + "、".join(f"{k} {v} 問" for k, v in forms.items()) + ("(セルに形も入れた)" if ri.get("conv_cells") else ""))
+    tr = ri.get("target_reply")
+    if tr:
+        out.append(f"  target_reply {tr['pattern']!r}: 一致した応答 {tr['matched']}、一致しなかった応答 {tr['other']}(scene_other)")
+    if ri.get("crit"):
+        out.append(f"  決め手のセルの重み ×{ri['crit']:g}(決め手の行 {ri.get('decisive_rows')})")
+    for L, x in sorted((ri.get("shrink") or {}).items(), key=lambda kv: int(kv[0])):
+        out.append(f"  L{L}: 決め手のセルの誤検出 {x['fp_before']:.3f} → {x['fp_after']:.3f}(キーを ×{x['scale']:.3f}。"
+                   f"書き込みたい位置で ≥0.8 の割合 {x['want_before']:.3f} → {x['want_after']:.3f})")
+    for L, tab in sorted((ri.get("cv_cells") or [{}])[0].items(), key=lambda kv: int(kv[0])) if ri.get("cv_cells") else []:
+        dec = [c for c in tab if c.get("decisive")]
+        want = [c for c in tab if c.get("want")]
+        if want:
+            out.append(f"  L{L}(交差検証): 書き込みたい位置で ≥0.8 " + "、".join(f"{c['group']} {c['bin']} {c['rate']:.3f}" for c in want)
+                       + ("。決め手のセルで >0.4 " + "、".join(f"{c['group']} {c['rate']:.3f}" for c in dec[:6]) if dec else ""))
+    return out
 
 
 @gne_command(direction_app, "key", "direction key")
@@ -1941,7 +1974,12 @@ def direction_key(c: Common, holder: dict,
                   target: str = typer.Option("ffn", "--target", help="書き込み先: mlpin(計算で作るニューロン用。dense の MLP の入力 = 正規化の後の空間。返事の位置の鍵は --positions pos:1-3 のように書く)/ ffn(dense の ffn_down の入力)/ attn(attn_output・ssm_out の入力 = ヘッド出力の連結)/ shared(MoE の層の shared expert の ffn_down_shexp の入力)/ expert:e(ffn_down_exps の専門家 e の入力。専門家 e が選ばれた位置だけで作る)"),
                   dont_touch_start: Optional[bool] = typer.Option(None, "--dont-touch-start/--no-dont-touch-start", help="dont_touch の各群の質問の、返事を書き始める直前の位置も Q に入れる(既定は対照集合の dont_touch_start、無ければ入れる)。書き込みたくない側の質問のこの位置は入れない"),
                   key_fit: str = typer.Option("mean", "--key-fit", help=_KEY_FIT),
-                  key_c: Optional[float] = typer.Option(None, "--key-c", help=_KEY_C)):
+                  key_c: Optional[float] = typer.Option(None, "--key-c", help=_KEY_C),
+                  key_conv_cells: bool = typer.Option(False, "--key-conv-cells", help=_KEY_CONV),
+                  key_crit: Optional[float] = typer.Option(None, "--key-crit", help=_KEY_CRIT),
+                  key_fp_max: Optional[float] = typer.Option(None, "--key-fp-max", help=_KEY_FPMAX),
+                  target_reply: Optional[str] = typer.Option(None, "--target-reply", help=_TARGET_REPLY),
+                  prior_max_tokens: Optional[int] = typer.Option(None, "--prior-max-tokens", help=_PRIOR_MT)):
     """keyed write の鍵 κ_L を作る(CHANGE-07)。書き込みたい位置の活性の平均 μ_L を、書き込みたくない位置と dont_touch の
     活性が張る空間 Q_L に直交させ、κ_Lᵀμ_L = 1 に正規化して保存する(方向とは別のファイル)。鍵は無介入で作る(--iv は重ねるときだけ)。
     作ったら gne direction key-check で、作成に使っていない例(既定 subset odd)で分離を確かめる。
@@ -1954,7 +1992,8 @@ def direction_key(c: Common, holder: dict,
                         max_tokens=max_tokens, q_mode=q_mode, q_energy=q_energy, q_max_rank=q_max_rank,
                         q_max_samples=q_max_samples, subset=subset, pseudo=pseudo, replies_a=replies_a,
                         replies_b=replies_b, iv=_iv_arg(iv), target=target, seed=c.seed, dont_touch_start=dont_touch_start,
-                        progress=s.progress, key_fit=key_fit, key_c=key_c)
+                        progress=s.progress, key_fit=key_fit, key_c=key_c, key_conv_cells=key_conv_cells, key_crit=key_crit,
+                        key_fp_max=key_fp_max, target_reply=target_reply, prior_max_tokens=prior_max_tokens)
     d.pop("warnings", None)                        # 警告はエンベロープの warnings に入っている
     n = d["counts"]
     moe = any("rows_a" in r for r in d["layers"])            # 書き込み先 shared・expert:e の鍵(層ごとの行の数を出す)
@@ -2003,6 +2042,56 @@ def _start_rho_text(sr: dict | None) -> str:
     items = ([("書き込みたくない側", sr["B"])] if sr.get("B") else []) + list((sr.get("dont_touch") or {}).items())
     out = [f"{g} {_f(v['median'][0], '+.2f')}" for g, v in items if v.get("median") and v["median"][0] is not None]
     return "・".join(out)
+
+
+_TOKEN = ("トークン(1 トークンになる文字、特殊トークンの書き方 '<|im_end|>'、または #<ID>)。何度でも書ける(複数なら行の平均)")
+_TOKEN_MINUS = "引くトークン(何度でも。その行の平均を引く = 足すトークンとの差の向き)"
+_RBAR = "r̄(最終層の出力の、正規化の前の rms の中央値)を直接渡す。省くと --contrast の入力の位置 0 で測る"
+
+
+@gne_command(direction_app, "token", "direction token")
+def direction_token(c: Common, holder: dict,
+                    token: list[str] = typer.Option(..., "--token", help=_TOKEN),
+                    layers: str = typer.Option(..., "--layers", help="方向を書く層(例 22 か 22,25。どの層にも同じ ±β·û を書く)"),
+                    delta: float = typer.Option(..., "--delta", help="目標のロジットの上がり Δ(例 32)。β = Δ × r̄ ÷ ((γ⊙u)·û) で長さを決める"),
+                    name: str = typer.Option(..., "--name", help="方向の名前(<root>/directions/<model_id>/<名前>.npz)"),
+                    minus: Optional[list[str]] = typer.Option(None, "--minus", help=_TOKEN_MINUS),
+                    down: bool = typer.Option(False, "--down", help="逆向き(−β·û。そのトークンを出にくくする向き)"),
+                    contrast: Optional[Path] = typer.Option(None, "--contrast", help="r̄ を測る入力の対照集合(狙う側と dont_touch の全部の入力の位置 0)。省くと configs/prompts/default.yaml の質問"),
+                    rbar: Optional[float] = typer.Option(None, "--rbar", help=_RBAR)):
+    """出力層の重み行列の、トークンの行から方向を作る(docs/fish.md §5「トークンの行の方向」)。u = 足すトークンの行の平均 − 引く
+    トークンの行の平均、û = u ÷ ‖u‖。層の残差に β·û を足すと、足すトークンのロジットが約 Δ 上がる(後ろの層が変えないときの見積もり)。
+    書いた方向は nw のユニット(L:Na+Nb:nw:a1@NAME#KEY&ONE)や L:dir:NAME:1 で使える。入力の振り分け(終了トークンで応答しない・
+    マーカーで相づち)の作り方は docs/fish.md §5。どの層・どの Δ にするかは gne direction token-scan で選ぶ。"""
+    s = holder["session"] = c.session()
+    d = s.direction_token(token, layers=parse_layers(layers), delta=delta, name=name, minus=minus, down=down,
+                          contrast=contrast, rbar=rbar)
+    lines = [f"{d['path']}(トークン {d['token_text']}" + (f" − {d['minus_text']}" if d["minus"] else "") + f"、層 {d['layers']}"
+             + ("、逆向き" if d["down"] else "") + ")",
+             f"  Δ {d['delta']:g}、r̄ {d['rbar']:.4f}({d['rbar_from']})、(γ⊙u)·û {d['gdot']:.4f} → β {d['beta']:.3f}"]
+    return d, "\n".join(lines), 0
+
+
+@gne_command(direction_app, "token-scan", "direction token-scan")
+def direction_token_scan(c: Common, holder: dict,
+                         token: list[str] = typer.Option(..., "--token", help=_TOKEN),
+                         contrast: Path = typer.Option(..., "--contrast", help="対照集合(user_prompts = そのトークンを出したい入力、dont_touch = 出したくない入力)"),
+                         layers: Optional[str] = typer.Option(None, "--layers", help="走査する層(省くと最終層を除く全部)"),
+                         minus: Optional[list[str]] = typer.Option(None, "--minus", help=_TOKEN_MINUS),
+                         deltas: Optional[str] = typer.Option(None, "--deltas", help="試す Δ(例 2,4,8,16,32,64。既定 2〜256 の 15 段)"),
+                         need: float = typer.Option(0.95, "--need", help="狙う側の入力のうち、この割合以上でトークンが 1 位になる最小の Δ を探す"),
+                         leaks: str = typer.Option("0.2,0.5", "--leaks", help="dont_touch の入力に足す倍率(必要な Δ の何倍か)"),
+                         rbar: Optional[float] = typer.Option(None, "--rbar", help=_RBAR)):
+    """層の走査(生成しない)。層ごとに、狙う側の入力の位置 0(応答の最初のトークンを決める位置)にだけ β(Δ)·û を足し、トークンが
+    1 位になる最小の Δ を探す。その Δ の 0.2 倍・0.5 倍を dont_touch の入力の位置 0 に足したときの、トークンが 1 位になった数・
+    位置 0 の KL・1 位が変わった数も出す(キーが少し開いてしまったときの影響の目安)。入力の手前までを 1 回だけ読み、最後の
+    トークンだけを読み直すので速い。"""
+    from .tokendir import DELTAS, scan_lines
+    s = holder["session"] = c.session()
+    ds = [float(x) for x in deltas.split(",")] if deltas else list(DELTAS)
+    d = s.direction_token_scan(token, contrast, layers=parse_layers(layers) if layers else None, minus=minus, deltas=ds, need=need,
+                               leaks=[float(x) for x in leaks.split(",") if x.strip()], rbar=rbar)
+    return d, "\n".join(scan_lines(d) + [f"({d['seconds']:.0f} 秒)"]), 0
 
 
 @gne_command(direction_app, "key-check", "direction key-check")
@@ -3101,9 +3190,14 @@ def nw_key(c: Common, holder: dict,
            contrast: Path = typer.Option(..., "--contrast", help="対照集合(user_prompts = 狙う場面の質問、dont_touch = 反応させたくない質問の群)"),
            layers: str = typer.Option(..., "--layers", help="鍵を作る層(例 11-23 か 11,18,23)"),
            role: str = typer.Option("scene", "--role", help="scene(狙う場面の質問への返事の間ずっと反応する鍵)/ one(どの位置でもほぼ 1 を返す鍵。上限つきの形で使う)/ position(返事の位置の区切りで反応する位置の鍵。--positions pos:<範囲> と一緒に。gne direction key --target mlpin と同じ)"),
-           positions: Optional[str] = typer.Option(None, "--positions", help="--role position のとき: 鍵が反応する返事の位置(pos:0 / pos:1-3 / pos:4-。位置 0 = 返事を書き始める直前)"),
+           positions: Optional[str] = typer.Option(None, "--positions", help="--role position のとき: 鍵が反応する返事の位置(pos:0 / pos:1-3 / pos:4-。位置 0 = 返事を書き始める直前。--key-fit ridge なら after:<正規表現> = 返事のトークンが一致した直後の位置、例 'after:[。！？\\n]' = 文の終わりの次)"),
            key_fit: str = typer.Option("mean", "--key-fit", help=_KEY_FIT + "。--role position のときだけ"),
            key_c: Optional[float] = typer.Option(None, "--key-c", help=_KEY_C),
+           key_conv_cells: bool = typer.Option(False, "--key-conv-cells", help=_KEY_CONV),
+           key_crit: Optional[float] = typer.Option(None, "--key-crit", help=_KEY_CRIT),
+           key_fp_max: Optional[float] = typer.Option(None, "--key-fp-max", help=_KEY_FPMAX),
+           target_reply: Optional[str] = typer.Option(None, "--target-reply", help=_TARGET_REPLY),
+           prior_max_tokens: Optional[int] = typer.Option(None, "--prior-max-tokens", help=_PRIOR_MT),
            name: Optional[str] = typer.Option(None, "--name", help="鍵の名前(既定 <対照集合の name>_<role>)"),
            subset: str = typer.Option("even", "--subset", help="使う質問: even(既定)/ odd / all"),
            max_tokens: int = typer.Option(96, "--max-tokens", help="返事を生成するときの長さ"),
@@ -3118,23 +3212,29 @@ def nw_key(c: Common, holder: dict,
     if not Ls:
         raise GneError("BAD_ARGS", "--layers に層を指定してください", "例 --layers 11-23")
     kf = check_key_fit(key_fit)
-    if role != "position" and (kf != "mean" or key_c is not None or positions is not None):
-        raise GneError("BAD_ARGS", "--key-fit ridge・--key-c・--positions は、位置の鍵(--role position)のときだけ使います",
-                       "場面の鍵(scene)とほぼ 1 を返す鍵(one)の作り方は 1 つです")
+    ridge_opts = {"key_conv_cells": key_conv_cells, "key_crit": key_crit, "key_fp_max": key_fp_max, "target_reply": target_reply}
+    if role != "position" and (kf != "mean" or key_c is not None or positions is not None
+                               or any(v not in (None, False) for v in ridge_opts.values())):
+        raise GneError("BAD_ARGS", "--key-fit ridge・--key-c・--positions・--key-conv-cells・--key-crit・--key-fp-max・--target-reply は、"
+                                   "位置の鍵(--role position)のときだけ使います",
+                       "場面の鍵(scene)と定数キー(one)の作り方は 1 つです")
     s = holder["session"] = c.session()
     if role == "position":
-        if not positions or not positions.strip().startswith("pos:"):
-            raise GneError("BAD_ARGS", "--role position には --positions pos:<範囲> が要ります", "例 --positions pos:1-3")
+        if not positions or not positions.strip().startswith(("pos:", "after:")):
+            raise GneError("BAD_ARGS", "--role position には --positions pos:<範囲>(--key-fit ridge なら after:<正規表現> も)が要ります",
+                           "例 --positions pos:1-3")
         d = s.direction_key(contrast, name=name, layers=Ls, positions=positions, subset=subset, max_tokens=max_tokens, pseudo=pseudo,
-                            iv=_iv_arg(iv), seed=c.seed, target="mlpin", progress=s.progress, key_fit=kf, key_c=key_c)
+                            iv=_iv_arg(iv), seed=c.seed, target="mlpin", progress=s.progress, key_fit=kf, key_c=key_c,
+                            prior_max_tokens=prior_max_tokens, **ridge_opts)
         d.pop("warnings", None)
         lines = [f"{d['path']}(鍵 {d['name']}、位置の鍵 {d['positions']}、MLP の入力の空間、鍵の作り方 {d['key_fit']}、{d['seconds']:.1f} 秒)"]
         for r in d["layers"]:
             lines.append(f"  L{r['layer']}: kn {r['kn']:.3f}、作成に使った例での AUC {_fc(r['build_auc'], '.3f')}")
+        lines += _ridge_lines(d)
         lines += [f"注: {n}" for n in d["notes"]]
         return {**d, "role": "position"}, "\n".join(lines), 0
     d = s.direction_key(contrast, role=role, name=name, layers=Ls, subset=subset, max_tokens=max_tokens, pseudo=pseudo,
-                        iv=_iv_arg(iv), seed=c.seed, progress=s.progress)
+                        iv=_iv_arg(iv), seed=c.seed, progress=s.progress, prior_max_tokens=prior_max_tokens)
     lines = [f"{d['path']}(鍵 {d['name']}、{d['role']}、MLP の入力の空間、{d['seconds']:.1f} 秒)"]
     for r in d["layers"]:
         if d["role"] == "one":
@@ -3189,7 +3289,10 @@ def nw_check(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Op
              over: float = typer.Option(1.2, "--over", help="質問ごとの値: 区間の位置で全部のユニットが書いた量の合計がこれを超えた質問を「狙った量を超えて書いた」と数える"),
              top: int = typer.Option(5, "--top", help="書けていない質問を、量の小さい順に何件出すか"),
              name: Optional[str] = typer.Option(None, "--name", help="結果のファイルの名前(<root>/behave/<model_id>/<名前>_check.json。質問ごとの行が入る)。省くとレシピの名前"),
-             iv: Optional[list[str]] = typer.Option(None, "--iv", help="この介入(レシピの名前かパス、またはユニットの書き方)を先に当てた状態で測る")):
+             iv: Optional[list[str]] = typer.Option(None, "--iv", help="この介入(レシピの名前かパス、またはユニットの書き方)を先に当てた状態で測る"),
+             pos_bins: Optional[str] = typer.Option(None, "--pos-bins", help="位置ごとの表を、この区分で出す(例 0,1-3,4-15,16-63,64-)。長い応答の後ろの位置まで読むときに、--max-tokens を応答を書き終える長さ(例 2048)にして使う"),
+             match: Optional[str] = typer.Option(None, "--match", help="before:<正規表現> か after:<正規表現>(例 'after:[。！？\\n]' = 文の終わりの次の位置)。一致した位置(match)とそれ以外(other)に分けて出す"),
+             prior_max_tokens: Optional[int] = typer.Option(None, "--prior-max-tokens", help=_PRIOR_MT)):
     """位置の種類ごとに、鍵の反応と実際に足した量(α·d を 1 として)を出す。狙う場面(対照集合の質問)と、書き込みたくない場面
     (dont_touch の群)で、返事の位置 0(書き始める直前)から順に。足す量が 1 を大きく超える位置、書き込みたくない場面で 0 から
     離れる位置、負(逆向き)になる位置が無いかを見る。
@@ -3197,14 +3300,16 @@ def nw_check(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Op
     狙った量を超えて書いた質問の数、書けていない質問の上位(質問と、返事の出だし)。平均だけでは、一部の質問でまったく書けていない
     ことが隠れる。質問ごとの行は --json と結果のファイルに入る。
     最後に、書き込みたくない場面の群ごとの漏れの表を出す: 群ごと・区間ごとに、狙った量の --leak(既定 0.2)以上を書いた質問の数と、
-    書いた量の平均。位置 0(返事を書き始める直前)だけで見た数も出す。最初の行に、ユニットの鍵がどちらの作り方(mean / ridge)かを出す。"""
+    書いた量の平均。位置 0(返事を書き始める直前)だけで見た数も出す。最初の行に、ユニットの鍵がどちらの作り方(mean / ridge)かを出す。
+    対照集合に会話の形(1 ターン / 複数ターン / system あり)が混ざっていれば、形ごとの数(狙う場面で ρ ≥ b の割合、書き込みたくない
+    場面で書いてしまった質問の数)も出す。前のやり取りの応答(content: null)は、読む前に無介入のモデルで埋める。"""
     import re as _re
     from .nwrite import key_fit_line, question_lines
     s = holder["session"] = c.session()
     r = s.recipe(units=unit, path=recipe, default_direction=direction, default_key=key)
     save = name or (r.name if r.name and _re.fullmatch(r"[\w.\-]+", r.name) else "recipe")
     d = s.nw_check(r, contrast, subset=subset, max_tokens=max_tokens, replies=replies, n_pos=n_pos, iv=_iv_arg(iv), low=low, over=over,
-                   leak=leak, top=top, save=save)
+                   leak=leak, top=top, save=save, pos_bins=pos_bins, positions=match, prior_max_tokens=prior_max_tokens)
     lines = [f"対照集合 {d['contrast']}(subset {d['subset']}、返事 {d['replies']}、{d['seconds']:.0f} 秒)。値は足した量の平均(α·d を 1。かっこ内は最小〜最大)",
              key_fit_line(d.get("key_fit"))]
     for g, x in d["groups"].items():
@@ -3216,7 +3321,43 @@ def nw_check(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Op
                 cells.append(f"{b}: " + ("—" if a is None else f"{a['mean']:+.2f}({a['min']:+.2f}〜{a['max']:+.2f})"))
             lines.append(f"  {u['unit']}\n    " + "  ".join(cells))
     lines += question_lines(d)
+    lines += form_lines(d)
     lines += [f"注: {n}" for n in d["notes"]] + [f"結果(質問ごとの行): {d['path']}"]
+    return d, "\n".join(lines), 0
+
+
+def form_lines(d: dict) -> list[str]:
+    """nw check の会話の形ごとの数(形が 2 つ以上あるときだけ)。"""
+    out = []
+    for g, x in d["groups"].items():
+        bf = x.get("by_form") or {}
+        if len(bf) < 2:
+            continue
+        out.append(f"[{g}] 会話の形ごと(書き終えた応答 {x.get('finished')}/{x['n']})")
+        for f, y in bf.items():
+            cells = []
+            for sg, v in y["segments"].items():
+                cells.append(f"{sg}: ρ≥b {v['rho_ge_b']:.0%}" if "rho_ge_b" in v else f"{sg}: 書いた {v['leak']}/{v['n']}")
+            out.append(f"  {f} {y['n']} 問  " + "  ".join(cells))
+    return out
+
+
+@gne_command(nw_app, "prior", "nw prior")
+def nw_prior(c: Common, holder: dict,
+             contrast: Path = typer.Option(..., "--contrast", help="対照集合(1 問に {\"role\": \"assistant\", \"content\": null} の前のやり取りがあるもの)"),
+             out: Optional[Path] = typer.Option(None, "--out", help="書き出す先(YAML)。省くと <root>/contrasts/prior/<名前>-<ハッシュ>.yaml"),
+             max_tokens: Optional[int] = typer.Option(None, "--max-tokens", help=_PRIOR_MT)):
+    """対照集合の、前のやり取りのアシスタントの応答(content: null)を、無介入のモデルに書かせて埋めた対照集合を書く。
+    埋めるときに使うのは、その問の system(あれば)とその応答より前のメッセージだけ(群の system・レシピは使わない)。greedy、
+    思考なし。埋めた応答は <root>/prior/<model_id>/replies.json に覚えておき、同じ会話・同じ上限なら作り直さない。
+    キーの作成(gne nw key・gne direction key・gne nw pipeline)と gne nw check は、これを読む前に自動で行う。ほかの道具に渡すときや、
+    埋めた応答を読んで確かめるときに使う。会話の形(single / multi_turn / system / system_multi_turn)ごとの数も出す。"""
+    from .prior import fill_file
+    s = holder["session"] = c.session()
+    d = fill_file(s, contrast, max_tokens=max_tokens, out=out, progress=s.progress)
+    lines = [f"{d['path']}(埋めた応答 {d['filled']}: 新しく作った {d['generated']}、覚えていた {d['cached']}、上限 {d['max_tokens']} で切れた {d['cut']})"]
+    for g, f in d["forms"].items():
+        lines.append(f"  {g}: " + "、".join(f"{k} {v}" for k, v in f.items()))
     return d, "\n".join(lines), 0
 
 
@@ -3280,6 +3421,10 @@ def nw_pipeline(c: Common, holder: dict,
                 rekey: Optional[bool] = typer.Option(None, "--rekey/--no-rekey", help="できたユニットを当てた状態で鍵を作り直す(既定は作り直す)"),
                 key_fit: Optional[str] = typer.Option(None, "--key-fit", help="位置の鍵の作り方: mean(既定。いまの作り方)/ ridge(最小二乗の鍵。位置 1 つずつを行にして、書き込みたい位置で 1・書き込みたくない位置で 0 を返す鍵を閉じた式で解く。書き込みたくない位置の重みは「場面の群(dont_touch の群の name と、狙う場面のほかの区間)× 位置の区分(--segments)」のますごとに同じ)。当てた状態で鍵を作り直す段にも同じ作り方を使う。鍵の計算は CPU で、層・質問が多いと数分かかる(見積もりに入る)。1 つのモデル・1 つの性格で確かめた段階(docs/fish.md §3)"),
                 key_c: Optional[float] = typer.Option(None, "--key-c", help=_KEY_C),
+                key_conv_cells: Optional[bool] = typer.Option(None, "--key-conv-cells", help=_KEY_CONV),
+                kscale: Optional[str] = typer.Option(None, "--kscale", help="auto でユニットに !kauto を付ける(量子化の丸めを避ける倍率。docs/fish.md §6)。既定は付けない"),
+                remove: Optional[str] = typer.Option(None, "--remove", help="rm / rmbase でユニットを成分を取り除く形(!rm / !rmbase。上限つきの形だけ)にする。既定は足す形"),
+                prior_max_tokens: Optional[int] = typer.Option(None, "--prior-max-tokens", help=_PRIOR_MT),
                 pseudo: Optional[int] = typer.Option(None, "--pseudo", help="比較用の鍵の本数(既定 4)"),
                 max_tokens: Optional[int] = typer.Option(None, "--max-tokens", help="鍵と足した量で返事を生成する長さ(既定 96)"),
                 response_tokens: Optional[int] = typer.Option(None, "--response-tokens", help="方向で返事を生成する長さ(既定 96)"),
@@ -3304,7 +3449,8 @@ def nw_pipeline(c: Common, holder: dict,
     p = {"contrast": str(contrast), "layers": layers, "alpha": alpha, "cap": cap, "direction": direction, "segments": segments,
          "form": form, "name": name, "save": save,
          "same_reply": same_reply, "stack": stack, "stack_fast": stack_fast, "rekey": rekey, "pseudo": pseudo,
-         "max_tokens": max_tokens, "response_tokens": response_tokens, "top": top, "iv": _iv_arg(iv), "key_fit": key_fit, "key_c": key_c}
+         "max_tokens": max_tokens, "response_tokens": response_tokens, "top": top, "iv": _iv_arg(iv), "key_fit": key_fit, "key_c": key_c,
+         "key_conv_cells": key_conv_cells, "kscale": kscale, "remove": remove, "prior_max_tokens": prior_max_tokens}
     p = {k: v for k, v in p.items() if v is not None}
     if save is not None:
         fish.recipe_file(s, save)                    # 保存先が読めなければ、見積もりの前に止める

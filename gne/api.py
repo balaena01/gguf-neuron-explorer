@@ -2757,7 +2757,8 @@ round_01.scores.txt に「番号 P C」を 1 行ずつ書く(例: 17 3 4)。全�
             if kw.pop("key_fit", None) not in (None, "mean") or kw.pop("key_c", None) is not None:
                 raise GneError("BAD_ARGS", "最小二乗の鍵(key_fit ridge・key_c)は位置の鍵だけです",
                                "場面の鍵(scene)とほぼ 1 を返す鍵(one)の作り方は 1 つです")
-            keep = ("layers", "name", "subset", "max_tokens", "pseudo", "iv", "seed", "q_energy", "progress", "gen_cache")
+            keep = ("layers", "name", "subset", "max_tokens", "pseudo", "iv", "seed", "q_energy", "progress", "gen_cache",
+                    "prior_max_tokens")
             extra = sorted(k for k, v in kw.items() if k not in keep and v not in (None, False))
             if extra:
                 raise GneError("BAD_ARGS", f"role {role} の鍵では {', '.join(extra)} は使えません")
@@ -2766,6 +2767,26 @@ round_01.scores.txt に「番号 P C」を 1 行ずつ書く(例: 17 3 4)。全�
             raise GneError("BAD_ARGS", f"role は position / scene / one です({role!r})")
         from .keyed_build import build_keys
         return build_keys(self, contrast, **kw)
+
+    def direction_token(self, tokens, **kw) -> dict:
+        """出力層の重み行列のトークンの行から方向を作る(gne direction token。tokendir.token_direction)。tokens はトークンの指定
+        (文字か #ID)のリスト。layers・delta(目標のロジットの上がり Δ)・name は必須。minus(引くトークン)・down(逆向き)・
+        contrast(r̄ を測る入力)・rbar(r̄ を直接)。"""
+        from .tokendir import token_direction
+        return token_direction(self, tokens, **kw)
+
+    def direction_token_scan(self, tokens, contrast: str | Path, **kw) -> dict:
+        """層の走査(gne direction token-scan。tokendir.token_scan): 層ごとに、狙う側の入力の位置 0 でトークンが 1 位になる最小の Δ と、
+        dont_touch の入力に 0.2 倍・0.5 倍を足したときの影響。"""
+        from .tokendir import token_scan
+        kw.setdefault("progress", self.progress)
+        return token_scan(self, tokens, contrast, **kw)
+
+    def prior_fill(self, contrast: str | Path, **kw) -> dict:
+        """対照集合の前のやり取りの応答(content: null)を無介入のモデルで埋めた対照集合を書く(gne nw prior。prior.fill_file)。"""
+        from .prior import fill_file
+        kw.setdefault("progress", self.progress)
+        return fill_file(self, contrast, **kw)
 
     def direction_keys(self, contrast: str | Path, entries, **kw) -> list[dict]:
         """書き込みたい位置だけが違う鍵を何本か、返事を 1 回だけ作って読んで作る(keyed_build.build_keys_multi)。entries は

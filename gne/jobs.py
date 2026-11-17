@@ -275,11 +275,12 @@ def _direction_key_verify(s, layer, key: str, direction: str, alphas=None, targe
 def _fish_args(s, contrast, spec, p: dict, keys) -> tuple[str, dict, str]:
     """FiSH のジョブの対照集合と引数: 渡していない引数(None)は、表の fish の設定、その次に既定で埋める。"""
     from . import fish
-    path, settings, cname = fish.resolve(s, contrast, spec)
+    path, settings, cname = fish.resolve(s, contrast, spec, prior_max_tokens=p.pop("prior_max_tokens", None))
     q = {k: v for k, v in p.items() if v is not None}
     for k in keys:
         if k not in q and (k in settings or k in fish.DEFAULTS):
             q[k] = settings.get(k, fish.DEFAULTS.get(k))
+    q.pop("prior_max_tokens", None)                     # 対照集合の穴埋め(fish.resolve)で使った
     iv = q.get("iv")
     if isinstance(iv, str) and not iv.strip():
         q.pop("iv")
@@ -301,9 +302,11 @@ def _fish_keys(s, contrast=None, spec: dict | None = None, with_units=None, **p)
     それを当てた状態で作る(iv に足す。レシピを当てた状態で鍵を作り直すとき)。返事は質問の群ごとに 1 回だけ作り、区切りごとの
     位置の鍵は 1 回の読み取りから全部作る(1 本ずつ作ったときと同じ鍵になる)。
     key_fit="ridge" で、位置の鍵を最小二乗の鍵(ますごとの重み)にする(既定は mean = いまの作り方。表の fish.key_fit でも書ける)。
-    key_c はその正則化の強さ(省くと質問単位の 5 分割で決める)。結果の key_fit・ridge に残る。"""
+    key_c はその正則化の強さ(省くと質問単位の 5 分割で決める)。結果の key_fit・ridge に残る。key_conv_cells=True で、そのセルに
+    会話の形も入れる。対照集合の前のやり取りの応答(content: null)は、読む前に無介入のモデルで埋める(fish.prior_max_tokens)。"""
     from . import fish
-    path, q, cname = _fish_args(s, contrast, spec, p, ("layers", "segments", "form", "pseudo", "max_tokens", "iv", "key_fit", "key_c"))
+    path, q, cname = _fish_args(s, contrast, spec, p, ("layers", "segments", "form", "pseudo", "max_tokens", "iv", "key_fit", "key_c",
+                                                       "key_conv_cells"))
     if with_units:
         q["iv"] = fish.iv_units(s, q.get("iv"), [str(u) for u in with_units])
     d = fish.keys_step(s, path, base=q.pop("base", None) or cname, **q)
@@ -526,6 +529,9 @@ def standard_kinds() -> dict[str, Callable[..., dict]]:
         "fish_try": _fish_try,                                                          # FiSH: 重みに入れる前に試す(層の出力に直接足す)
         "fish_pipeline": _fish_pipeline,                                                # FiSH: 最初から最後まで
         "fish_heads": _fish_heads,                                                      # FiSH: CHiPS のヘッドの分を場面で取り除く(nw heads)
+        "direction_token": lambda s, tokens, **p: s.direction_token(tokens, **p),        # トークンの行の方向
+        "direction_token_scan": lambda s, tokens, contrast, **p: s.direction_token_scan(tokens, contrast, **p),   # 層の走査
+        "nw_prior": lambda s, contrast, **p: s.prior_fill(contrast, **p),               # 前のやり取りの応答を埋める
     }
 
 
