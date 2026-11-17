@@ -190,8 +190,9 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
     @srv.tool()
     async def steer(units: list[str], prompt: str | None = None, messages: list[dict[str, str]] | None = None,
                     max_tokens: int = 128, compare: bool = True, dose_unit: str = "rel",
-                    system: str | None = None, when: str = "all", ablate: str | None = None) -> dict:
+                    system: str | None = None, when: str = "all", ablate: str | None = None, lora_when: str = "all") -> dict:
         """ユニット(例 ["14:8949:+1.0", "13:7956:-1.0"])で押して生成する(greedy)。compare=True なら無介入も並べる。
+        lora_when は LoRA(gain・proj・keyed・nw)を当てる位置: all(既定)/ prompt(プロンプトを読む間だけ)/ reply(生成するトークンだけ)。
         "14:8949:x2" のように x を付けると gain(そのニューロンの出力を k 倍、x0 で消去。§6.16)。
         when は足す位置: all(全位置) / gen(生成中だけ、プロンプトの理解を壊さない) / assistant(assistant の発話だけ) /
         after:<文字列>(出力にその文字列が出てから) / ramp:<a>-<b>(倍率を a から b へ)。
@@ -199,7 +200,7 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
         def fn():
             r = session.recipe(units=units or None, dose_unit=dose_unit, when=when, ablate=ablate)
             return session.steer(r, prompt=prompt, messages=messages, system=system, max_tokens=max_tokens,
-                                 compare=compare)
+                                 compare=compare, lora_when=lora_when)
         return await call(fn)
 
     @srv.tool()
@@ -291,7 +292,7 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
 
     @srv.tool(name="eval")
     async def eval_recipe(recipe: str | None = None, units: list[str] | None = None, doses: list[float] | None = None,
-                   when: str | None = None, random_controls: int = 0, reactivity: str | None = None,
+                   when: str | None = None, lora_when: str = "all", random_controls: int = 0, reactivity: str | None = None,
                    head_controls: int = 0, compare_methods: bool = False, match_effect: float | None = None,
                    score_layer: int | None = None, alloc: str | None = None, n_heads: list[int] | None = None,
                    control_pool: str = "before", direction_metrics: bool = True, dir_max_examples: int = 64,
@@ -323,6 +324,8 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
                 return jobs.start("eval", {"alloc": alloc, "n_heads": n_heads, "when": when,
                                            "random_controls": random_controls}).view()
             p = {"recipe": recipe, "units": units, "when": when, "random_controls": random_controls}
+            if lora_when != "all":                             # LoRA を当てる位置(prompt / reply)。ppl は全位置のまま
+                p["lora_when"] = lora_when
             if compare_methods:
                 p.update({"compare_methods": True, "match_effect": match_effect, "score_layer": score_layer})
                 p.pop("random_controls")
