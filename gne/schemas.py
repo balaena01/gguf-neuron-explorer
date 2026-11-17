@@ -195,6 +195,9 @@ class UnitModel(_Strict):
     pair: int | None = None                   # nw: 上限つきの形で組にする 2 個目のニューロン
     s: float | None = None                    # nw: ゲートの倍率
     cap: str | None = None                    # nw: 上限つきの形のしきい値 a-b
+    kscale: str | None = None                 # nw: 入力の行を 1/k、出力の列を k 倍(数か auto。量子化の丸めへの対処)
+    remove: str | None = None                 # nw: 成分を取り除く形(part / excess。上限つきの形だけ)
+    take: str | None = None                   # nw: 取り除く量を当てる鍵(gne nw heads が作る。上限つきの形だけ)
 
 
 class RecipeModel(_Strict):

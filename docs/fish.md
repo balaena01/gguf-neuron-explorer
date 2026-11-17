@@ -805,6 +805,44 @@ gne nw check  --recipe R --contrast C [--subset odd] [--replies own|base] [--low
 - `!kauto` と一緒に使える(入力の行·h の大きさは、中立の文での |入力の行·h| の 90 パーセンタイルで見積もる)。
 - verify・check・export・`gne headproj export` は、ほかの nw のユニットと同じに扱う。
 
+### ヘッドの分を場面で取り除く(`gne nw heads`)
+
+CHiPS(`gne headproj`、proj のユニット)は、選んだヘッドの書き込みの方向成分を、どの場面でも弱める。`gne nw heads` は、
+ヘッドの重みは変えず、同じ層の MLP の 2 個 1 組(上限つきの形)が、**鍵が開いた場面でだけ**、CHiPS がそのヘッドで変えるはずの
+量を取り除くユニットを作る。
+
+```bash
+gne nw key --contrast C --layers 6,7,11,12 --role scene --name c_scene   # 場面の鍵(返事の全部の位置で開く)
+gne nw key --contrast C --layers 6,7,11,12 --role one   --name c_one
+gne nw heads --recipe CHIPS --contrast C --name hg --scene-key c_scene --one-key c_one --save hg_r
+gne nw verify --recipe hg_r --contrast C
+```
+
+- 取り除く量 T_L(層 L で CHiPS が残差を −T_L·r̂_L だけ変える量)を、ヘッドの出力の手前のテンソルと CHiPS の行列から位置ごとに
+  計算し、MLP の入力 h から最小二乗(リッジ、切片あり、質問単位の 5 分割で正則化を選ぶ)で当てる。h は「その層のヘッドの分を
+  まだ取り除いていない状態」にそろえる(CHiPS を当てた実行の残差に T_L·r̂_L を足し戻して正規化)。当てる鍵は `<名前>_amount`、
+  CHiPS の r̂_L は方向 `<名前>_dir` に書く。ユニットは `L:Na+Nb:nw:a1@<名前>_dir#場面の鍵&1を返す鍵!kauto!take<名前>_amount`
+  (入力の行 = 量の鍵、出力の列 = −r̂)。
+- 結果: 層ごとの当たり方(R²)と、CHiPS との一致(いちばん後ろのヘッドの層の出力の変化を、返事の位置で比べた cos と大きさの比)。
+  どこでも開く鍵で当てたとき(open)・本物の鍵で狙う場面(scene)・dont_touch(other)の 3 つ。
+- CHiPS を常に当てたときとの比べは、CHiPS のレシピとできたレシピを並べて、gne eval・gne behave などで行う。
+- 対応: CHiPS のヘッドの層が、nw を入れられる dense の MLP の層であること(MoE の層・最終層は不可)。1 つの層のヘッドは同じ
+  方向を使うこと(direction_layer own・base のどちらも可)。ヘッドの出力の手前のテンソル(`attn_gated`・`kqv_out`・
+  `final_output`)と、MLP の入力の正規化の前の残差が捕捉できる arch(llama・qwen2・qwen3・qwen35)。
+
+**分かっている限界**(Qwen3.5-4B、深刻な相談にだけ付く「医師に相談を」のような注意書きを題材にした確かめ。数値は
+[verification.md](verification.md) §23):
+- 場面の切り替えは働いた。注意書きは深刻な相談だけで減り、軽い質問ではほぼ残った。シャッフルした鍵との差も有意だった。
+- しかし、**答えの中身(正確さ)の劣化は防げなかった**。注意書きをはっきり減らすヘッドの組は、深刻な相談の答えの正確さも下げた
+  (取り除く場面の中では、CHiPS の劣化がそのまま出る)。中身を保った弱い組は、注意書きもほとんど減らさなかった。振る舞いが
+  答えの質と結びついているときは、場面を選んでも質の劣化は避けられない。
+- **強さを上げても解決しない**。CHiPS の倍率を 1.5・2 倍にすると、効き目より先に、書き終えない・繰り返す返事が急に増えた。
+- **材料のラベルは書き終えた返事で付ける**。注意書きのように返事の終わりに出る振る舞いは、長さの上限で切れた返事では
+  「出なかった」が確かでない。
+- **答えの質は、無介入の作り直しとの読み比べで確かめる**。介入した返事と無介入の返事を読み比べると、文面が変わるだけで
+  「悪い」が 3〜4 割出る。無介入をサンプリングで作り直したもの(土台)を同じやり方で読み比べ、その差で判断する。90 問では
+  判断が分かれることがあった。
+
 ## 7. 書き出しと制限
 
 - **実行時の LoRA だけ**(`gne nw export`、llama.cpp の `--lora`)。ニューロン 1 個につき、ffn_gate・ffn_up・ffn_down の 3 つの

@@ -155,3 +155,27 @@ def test_remove_component(built):
     _, rows_b = _plan(s, [f"8:N{n8[0]}+N{n8[1]}:nw:a{alpha}@gd#g_one&g_one!cap0.1-0.2!rmbase"])
     up_b = rows_b[0]["parts"][0][2] * rows_b[0]["kscale_used"]
     assert np.allclose(up_b, rh / gm - rows_b[0]["layer_stats"]["b_up"] * rows_b[0]["kappa_up"])
+
+
+@pytest.mark.model
+def test_heads_flow(built):
+    """CHiPS のヘッド(層 8・12 の 2 個)の分を、場面を選んで取り除くユニットを作る。量の当たり方・CHiPS との一致・場面の差。"""
+    from gne import headgate as HG
+    s = built["s"]
+    chips = s.recipe(units=["8:H3:s4@gd", "12:H5:s4@gd"], name="chips_t")
+    s.recipe_save("chips_t", chips)
+    lay = HG.chips_layers(s, chips)
+    assert sorted(lay) == [8, 12] and all(abs(np.linalg.norm(v["rhat"]) - 1) < 1e-5 for v in lay.values())
+    d = HG.build(s, "chips_t", str(built["c"]), name="hg", scene_key="g_scene", one_key="g_one", subset="all", max_tokens=24,
+                 neurons={8: built["n8"][2:4], 12: built["n12"][2:4]}, save="hg_r")
+    assert [r["layer"] for r in d["layers"]] == [8, 12]
+    assert all(r["r2_cv"] > 0.5 for r in d["layers"]), d["layers"]
+    assert d["units"][0].startswith(f"8:N{built['n8'][2]}+N{built['n8'][3]}:nw:a1@hg_dir#g_scene&g_one!kauto!takehg_amount")
+    m = d["match"]
+    # 小さいモデル・6 問の対照集合なので緩い目安(Qwen3.5-4B での値は docs/verification.md)
+    assert m["open"]["cos_median"] > 0.4 and 0.3 < m["open"]["ratio_median"] < 2.0, m
+    assert m["scene"]["n_positions"] > 0 and m["other"]["n_positions"] > 0
+    r = s.recipe(path=d["recipe_path"])
+    v = s.nw_verify(r, contrast=str(built["c"]), n_prompts=2, max_tokens=12)
+    assert all(x["others_changed_max"] < 1e-4 for x in v["layers"])
+    assert "\n".join(HG.summary_lines(d)).count("R²") == 2

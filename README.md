@@ -370,6 +370,8 @@ gne nw neurons --layers 11-23                          # table of the least acti
 gne direction key --contrast C --target mlpin --layers 11-23 --positions pos:1-3 --name k_p1   # key for "this scene, reply positions 1–3"
 gne nw key --contrast C --layers 11-23 --role scene    # key that stays on for the whole reply in this kind of scene
 gne nw verify --unit 11:N2045:nw:a1@NAME.seg1#k_scene\&k_p1   # does the LoRA do what the formula says?
+gne nw verify --recipe R --contrast C                  # the same, on the target questions and replies where the keys open (quantization rounding shows here; !kauto on a unit avoids it)
+gne nw heads --recipe CHIPS --contrast C --name hg --scene-key K --one-key K1 --save hg_r   # remove what CHiPS heads write, only where the scene key opens
 gne nw check  --recipe R --contrast C                  # key responses and amounts written, by position and kind of scene, then per question
 gne nw export --recipe R -o R-nw.lora.gguf             # LoRA only (no baking); with proj/keyed units, gne headproj export puts them in one file
 gne nw pipeline --contrast C --layers 11-23 --alpha 1,1,0.8 --save R.yaml   # or all of the building steps in one go; --save writes the recipe for the commands above

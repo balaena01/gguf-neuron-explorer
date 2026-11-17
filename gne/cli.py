@@ -3012,6 +3012,33 @@ def fieldtest_cmd(c: Common, holder: dict,
 
 # --- 計算で作るニューロン(mode: nw)--------------------------------------------------------------------------
 
+@gne_command(nw_app, "heads", "nw heads")
+def nw_heads(c: Common, holder: dict,
+             recipe: Path = typer.Option(..., "--recipe", help="CHiPS のレシピ(proj のユニット L:Hh:sS@方向。名前かパス)"),
+             contrast: Path = typer.Option(..., "--contrast", help="対照集合(user_prompts = 取り除きたい場面、dont_touch = 残したい場面)"),
+             name: str = typer.Option(..., "--name", help="作るものの名前(方向 <名前>_dir、取り除く量の鍵 <名前>_amount)"),
+             scene_key: str = typer.Option(..., "--scene-key", help="場面の鍵(gne nw key --role scene。CHiPS のヘッドの層を含む)"),
+             one_key: str = typer.Option(..., "--one-key", help="ほぼ 1 を返す鍵(gne nw key --role one)"),
+             neuron: Optional[list[str]] = typer.Option(None, "--neurons", help="層:番号,番号(例 12:101,102)。省くと働きの小さい順の上 2 個"),
+             subset: str = typer.Option("even", "--subset", help="取り除きたい場面の質問のうち使うもの: even(既定)/ odd / all"),
+             max_tokens: int = typer.Option(96, "--max-tokens", help="材料にする無介入の返事の長さ"),
+             save: Optional[str] = typer.Option(None, "--save", help="できたユニットをレシピに書く(名前か .yaml のパス)")):
+    """CHiPS のヘッドの分を、場面を選んで取り除くユニットを作る。ヘッドは書き換えず、同じ層の MLP の 2 個 1 組が、鍵が開いた場面で
+    だけ、CHiPS がそのヘッドで変えるはずの量を MLP の入力から当てて取り除く(取り除く量の鍵は最小二乗)。当たり方(R²)と、
+    CHiPS との一致(いちばん後ろのヘッドの層の出力の変化の cos と大きさの比。どこでも開く鍵・本物の鍵の狙う場面・dont_touch)を出す。"""
+    from .headgate import build, summary_lines
+    s = holder["session"] = c.session()
+    nmap = None
+    if neuron:
+        nmap = {}
+        for x in neuron:
+            L, js = x.split(":", 1)
+            nmap[int(L)] = [int(v) for v in js.split(",")]
+    d = build(s, str(recipe), str(contrast), name=name, scene_key=scene_key, one_key=one_key, neurons=nmap, subset=subset,
+              max_tokens=max_tokens, save=save)
+    return d, "\n".join(summary_lines(d)), 0
+
+
 @gne_command(nw_app, "neurons", "nw neurons")
 def nw_neurons(c: Common, holder: dict,
                layers: str = typer.Option(..., "--layers", help="測る層(例 11-23 か 11,18,23)"),

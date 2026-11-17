@@ -66,6 +66,8 @@ class Unit:
     # "excess" = 中立の文での成分の平均(基準値)を超えた分だけを取り除く
     kscale: str | None = None
     remove: str | None = None
+    # take = 取り除く量を当てる鍵(MLP の入力の空間)。pair つきだけ。入力の行 = その鍵、出力の列 = −alpha·r̂(gne nw heads が作る)
+    take: str | None = None
 
     def label(self) -> str:
         who = {"neuron": f"N{self.neuron}", "random": f"random{self.seed}", "direction": f"dir:{self.direction}",
@@ -77,7 +79,7 @@ class Unit:
             return (f"L{self.layer} N{self.neuron}" + (f"+N{self.pair}" if self.pair is not None else "") + f" nw {a}"
                     + (f" @{self.direction}" if self.direction else "") + (f" #{self.key}" if self.key else "")
                     + (f"&{self.key2}" if self.key2 else "") + (f" k{self.kscale}" if self.kscale else "")
-                    + ({"part": " rm", "excess": " rmbase"}.get(self.remove or "", "")))
+                    + ({"part": " rm", "excess": " rmbase"}.get(self.remove or "", "")) + (f" take {self.take}" if self.take else ""))
         if self.mode == "keyed":                     # CHANGE-07: L19 ffn keyed a1.25 @zundamon_r #zundamon_k
             a = "a?" if self.k is None else f"a{self.k:g}"
             return (f"L{self.layer} {who} keyed {a}" + (f" @{self.direction}" if self.direction else "")
@@ -212,7 +214,7 @@ class Recipe:
     def to_dict(self) -> dict:
         return {"name": self.name, "model_id": self.model_id, "dose_unit": self.dose_unit, "when": self.when,
                 # key(CHANGE-07)は keyed のときだけ載せる(他のユニットの記録・名前のハッシュを前と同じにする)
-                "units": [{f: v for f, v in asdict(u).items() if not (f in ("key", "key2", "pair", "s", "cap") and v is None)}
+                "units": [{f: v for f, v in asdict(u).items() if not (f in ("key", "key2", "pair", "s", "cap", "kscale", "remove", "take") and v is None)}
                           for u in self.units],
                 "ablate": self.ablate.to_dict() if self.ablate else None,
                 "sampling": self.sampling,
@@ -382,6 +384,11 @@ class Recipe:
             if u.pair is None:
                 raise GneError("BAD_RECIPE", f"{u.label()}: 成分を取り除く形(remove)は上限つきの形(pair と key2)だけです",
                                "例 11:N2045+N3001:nw:a1@NAME#SCENE&ONE!rm")
+        if u.take is not None:
+            if u.pair is None or u.remove is not None:
+                raise GneError("BAD_RECIPE", f"{u.label()}: 量を当てる鍵(take)は上限つきの形(pair と key2)だけで、remove とは一緒に使えません")
+            if not _KEY_NAME_RE.fullmatch(str(u.take)):
+                raise GneError("BAD_RECIPE", f"{u.label()}: take の鍵の名前 {u.take!r} が不正です")
         if u.pair is not None:
             if u.pair == u.neuron:
                 raise GneError("BAD_RECIPE", f"{u.label()}: 組にする 2 個目のニューロン(pair)は別の番号にしてください")
@@ -437,7 +444,7 @@ _KEYED_RE = re.compile(r"^(\d+):(ffn|attn|S|E(\d+)):keyed:a([+-]?[\d.]+(?:e[+-]?
 _NUM = r"[+-]?[\d.]+(?:e[+-]?\d+)?"
 _NW_RE = re.compile(r"^(\d+):N(\d+)(?:\+N(\d+))?:nw:a(" + _NUM + r")(?:@(-?[\w.][\w.\-]*))?"
                     r"(?:#([\w.][\w.\-]*(?:~\d+)?)(?:&([\w.][\w.\-]*(?:~\d+)?))?)?"
-                    r"(?:!s([\d.]+))?(?:!cap([\d.]+-[\d.]+))?(?:!k(auto|[\d.]+))?(?:!(rmbase|rm))?$", re.I)
+                    r"(?:!s([\d.]+))?(?:!cap([\d.]+-[\d.]+))?(?:!k(auto|[\d.]+))?(?:!(rmbase|rm))?(?:!take([\w.][\w.\-]*))?$", re.I)
 _KEY_NAME_RE = re.compile(r"[\w.][\w.\-]*(?:~\d+)?")      # 鍵の名前。比較用の鍵(ランダム対照)は NAME~j。先頭の - は不可(符号は alpha に)
 
 
@@ -466,16 +473,17 @@ def parse_unit(spec: str) -> Unit:
     default_direction / default_key。@-DIR は α の符号に畳む(打ち消し)。KEY は比較用の鍵 NAME~j も可。"""
     mn = _NW_RE.match(spec.strip())
     if mn:
-        L, n, pair, av, dname, key, key2, sv, cap, ks, rm = mn.groups()
+        L, n, pair, av, dname, key, key2, sv, cap, ks, rm, take = mn.groups()
         dname, alpha = fold_sign(dname, float(av))
         return Unit(int(L), int(n), 0.0, "neuron", mode="nw", k=alpha, direction=dname, key=key, key2=key2,
                     pair=None if pair is None else int(pair), s=None if sv is None else float(sv), cap=cap,
-                    kscale=None if ks is None else ks.lower(), remove=None if rm is None else {"rm": "part", "rmbase": "excess"}[rm.lower()])
+                    kscale=None if ks is None else ks.lower(), remove=None if rm is None else {"rm": "part", "rmbase": "excess"}[rm.lower()],
+                    take=take)
     if ":nw:" in spec.lower():
         raise GneError("BAD_UNIT", f"nw のユニット {spec!r} を読めません",
                        "L:Nn:nw:aα@方向#鍵(鍵 1 つ)、L:Nn:nw:aα@方向#場面の鍵&位置の鍵(鍵 2 つ)、"
                        "L:Nn+Nm:nw:aα@方向#鍵&1を返す鍵(上限つき、2 個を組)。後ろに !s4・!cap0.4-0.8・!k4(か !kauto)・"
-                       "!rm(成分を取り除く)・!rmbase(基準値を超えた分だけ取り除く)をこの順で付けられます")
+                       "!rm(成分を取り除く)・!rmbase(基準値を超えた分だけ取り除く)・!takeKEY(取り除く量を鍵で当てる)をこの順で付けられます")
     mk = _KEYED_RE.match(spec.strip())
     if mk:
         L, where, e, av, dname, key = mk.groups()
@@ -543,7 +551,8 @@ def _unit_from_yaml(u: dict) -> Unit:
                 s=None if u.get("s") is None or u.get("mode") != "nw" else float(u["s"]),
                 cap=None if u.get("cap") in (None, "") else str(u["cap"]),
                 kscale=None if u.get("kscale") in (None, "") else str(u["kscale"]).lower(),
-                remove=None if u.get("remove") in (None, "") else str(u["remove"]))
+                remove=None if u.get("remove") in (None, "") else str(u["remove"]),
+                take=None if u.get("take") in (None, "") else str(u["take"]))
     if unit.mode == "nw":
         unit.k = None if u.get("alpha", u.get("k")) is None else float(u.get("alpha", u.get("k")))
     if unit.mode in ("keyed", "nw") and unit.direction:

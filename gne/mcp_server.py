@@ -675,6 +675,17 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
             return _err(e)
 
     @srv.tool()
+    async def nw_heads(recipe: str, contrast: str, name: str, scene_key: str, one_key: str, neurons: dict | None = None,
+                       subset: str = "even", max_tokens: int = 96, save: str | None = None) -> dict:
+        """CHiPS のヘッドの分を、場面を選んで取り除くユニットを作る(gne nw heads)。recipe は CHiPS のレシピ(proj のユニット)の名前か
+        パス、contrast は対照集合(user_prompts = 取り除きたい場面、dont_touch = 残したい場面)、scene_key・one_key は場面の鍵と
+        ほぼ 1 を返す鍵(mlpin、CHiPS のヘッドの層を含む)。neurons は {層: [番号, 番号]}(省くと働きの小さい順)。
+        返す値: 層ごとの当たり方(R²)、CHiPS との一致(open・scene・other の cos と大きさの比)、ユニット、レシピの保存先。"""
+        from .headgate import build
+        nmap = None if not neurons else {int(k): [int(v) for v in vs] for k, vs in neurons.items()}
+        return await call(build, session, recipe, contrast, name=name, scene_key=scene_key, one_key=one_key, neurons=nmap,
+                          subset=subset, max_tokens=max_tokens, save=save)
+
     async def nw_verify(units: list[str] | None = None, recipe: str | None = None, texts: list[str] | None = None,
                         iv: str | list[str] | None = None, contrast: str | None = None, subset: str = "all",
                         n_prompts: int = 6, max_tokens: int = 48) -> dict:

@@ -97,7 +97,8 @@ def _gate_matrix(weights, L: int) -> np.ndarray:
 
 def form_of(u) -> dict:
     """ユニットの形: one(鍵 1 つ)/ two(鍵 2 つ)/ cap(上限つき、2 個を組)と、s・a・b。成分を取り除く形(remove)は cap の一種。"""
-    extra = {**({"kscale": u.kscale} if getattr(u, "kscale", None) else {}), **({"remove": u.remove} if getattr(u, "remove", None) else {})}
+    extra = {**({"kscale": u.kscale} if getattr(u, "kscale", None) else {}), **({"remove": u.remove} if getattr(u, "remove", None) else {}),
+             **({"take": u.take} if getattr(u, "take", None) else {})}
     if u.pair is not None:
         a, b = CAP_DEFAULT
         if u.cap:
@@ -113,7 +114,8 @@ def spec_of(u) -> str:
             + (f"@{u.direction}" if u.direction else "") + (f"#{u.key}" if u.key else "") + (f"&{u.key2}" if u.key2 else "")
             + (f"!s{f['s']:g}" if u.s is not None else "") + (f"!cap{u.cap}" if u.cap else "")
             + (f"!k{u.kscale}" if getattr(u, "kscale", None) else "")
-            + ({"part": "!rm", "excess": "!rmbase"}.get(getattr(u, "remove", None) or "", "")))
+            + ({"part": "!rm", "excess": "!rmbase"}.get(getattr(u, "remove", None) or "", ""))
+            + (f"!take{u.take}" if getattr(u, "take", None) else ""))
 
 
 # 量子化の丸めへの対処(kscale)。ffn_down の入力(活性)は 32 個のブロックごとに 1 つの倍率で丸められる(Q8_0 などの量子化した
@@ -193,10 +195,19 @@ def nw_plan(weights, recipe, key_of, dir_of, stats_of=None) -> list[dict]:
             up = up_dir - (float(st["b_up"]) * ku if f["remove"] == "excess" else 0.0)
             w = -alpha * float(st["m"]) * rh
             uh = float(st["uh_q90"])
+        elif f.get("take"):
+            # 取り除く量を当てる鍵: 入力の行 = 鍵(入力の行·h ≈ その位置で取り除く量)、出力の列 = −α·r̂
+            up = _kappa(key_of, f["take"], L, n_embd, u)
+            w = -alpha * d / max(float(np.linalg.norm(d)), 1e-30)
+            if f.get("kscale") == "auto":
+                if stats_of is None:
+                    raise GneError("BAD_ARGS", f"{u.label()}: kscale auto には層の活性の大きさが要ります(Session の道具から使ってください)")
+                st = stats_of(L, up)
+                uh = float(st["uh_q90"])
         elif need:
             st = stats_of(L, None)
         kk = kscale_of(f, st, uh)
-        plain = kk == 1.0 and not f.get("remove")        # 今までのユニット: 前の版と同じ値(同じ LoRA)になるよう、同じ式で計算する
+        plain = kk == 1.0 and not f.get("remove") and not f.get("take")        # 今までのユニット: 前の版と同じ値(同じ LoRA)になるよう、同じ式で計算する
         if f["form"] == "cap":
             g = 1.0 / (s * (f["b"] - f["a"]))
             if plain:
@@ -209,7 +220,7 @@ def nw_plan(weights, recipe, key_of, dir_of, stats_of=None) -> list[dict]:
             parts = [(js[0], s * kg, ku, alpha * g * d, g)] if plain else [(js[0], s * kg, up / kk, kk * g * w, g * kk)]
         rows.append({"unit": u, "layer": L, "direction": dname, "key": kname, "key2": u.key2, **f, "alpha": alpha,
                      "kappa_gate": kg, "kappa_up": ku, "d": d, "parts": parts,
-                     "norm": float(np.linalg.norm(w)) if f.get("remove") else float(abs(alpha) * np.linalg.norm(d)),
+                     "norm": float(np.linalg.norm(w)) if (f.get("remove") or f.get("take")) else float(abs(alpha) * np.linalg.norm(d)),
                      "kscale_used": float(kk), "peak_act": peak_act(f, uh) / kk,
                      **({"layer_stats": {k: v for k, v in st.items() if not isinstance(v, np.ndarray)}} if st else {})})
     return rows
@@ -257,7 +268,8 @@ def nw_meta(rows: list[dict]) -> dict:
     return {"units": [{"layer": r["layer"], "neurons": [p[0] for p in r["parts"]], "form": r["form"], "s": r["s"],
                        **({"a": r["a"], "b": r["b"]} if r["form"] == "cap" else {}), "alpha": r["alpha"],
                        "direction": r["direction"], "key": r["key"], "key2": r["key2"], "norm": r["norm"],
-                       **({"kscale": r["kscale_used"]} if r.get("kscale") else {}), **({"remove": r["remove"]} if r.get("remove") else {})}
+                       **({"kscale": r["kscale_used"]} if r.get("kscale") else {}), **({"remove": r["remove"]} if r.get("remove") else {}),
+                       **({"take": r["take"]} if r.get("take") else {})}
                       for r in rows]}
 
 
