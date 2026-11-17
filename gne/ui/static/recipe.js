@@ -24,13 +24,36 @@ const isHead = (u) => u.kind === "head" && !isProj(u);          // ヘッドの 
 const isNeuron = (u) => (u.kind || "neuron") === "neuron" && u.mode !== "nw";
 export const isKeyed = (u) => u.mode === "keyed";                // 鍵つきの書き込み(CHANGE-07)。kind は書き込み先(ffn・attn・shared・expert)
 // 計算で作るニューロン(mode: nw、docs/fish.md)。ニューロンを計算した重みで上書きする。レシピの欄では表示・強さの変更・保存・
-// LoRA の書き出しだけ(鍵づくりや探索の画面は無い。CLI・MCP で作る)
+// LoRA の書き出しだけ(作るのは direction ビューの FiSH の画面か、CLI・MCP の gne nw …)。
+// 後ろに付ける項目(この順。gne/steer.py の _NW_RE と同じ): !s(ゲートの倍率)・!cap(上限のしきい値)・!k4 / !kauto(量子化の
+// 丸めへの倍率 kscale)・!rm / !rmbase(成分を取り除く形 remove = part / excess)・!take<鍵>(取り除く量を当てる鍵 take)。
+// 強さを変えても保存しても、これらはそのまま残す(読み込み → 書き方で同じ文字に戻る)
 export const isNw = (u) => u.mode === "nw";
+const REMOVE_TAG = { part: "!rm", excess: "!rmbase" };
 export function nwSpec(u, s = 1) {
   return `${u.layer}:N${u.neuron}${u.pair !== null && u.pair !== undefined ? `+N${u.pair}` : ""}:nw:a${+(u.alpha * s).toFixed(4)}`
     + `${u.direction ? `@${u.direction}` : ""}${u.key ? `#${u.key}${u.key2 ? `&${u.key2}` : ""}` : ""}`
-    + `${u.s !== null && u.s !== undefined ? `!s${+u.s}` : ""}${u.cap ? `!cap${u.cap}` : ""}`;
+    + `${u.s !== null && u.s !== undefined ? `!s${+u.s}` : ""}${u.cap ? `!cap${u.cap}` : ""}`
+    + `${u.kscale ? `!k${u.kscale}` : ""}${REMOVE_TAG[u.remove] || ""}${u.take ? `!take${u.take}` : ""}`;
 }
+// nw のユニットの書き方 → レシピの行(読めなければ null)。@-方向 は強さの符号に畳む(gne/steer.py の parse_unit と同じ)
+const NW_RE = new RegExp("^(\\d+):N(\\d+)(?:\\+N(\\d+))?:nw:a([+-]?[\\d.]+(?:e[+-]?\\d+)?)(?:@(-?[\\w.][\\w.\\-]*))?"
+  + "(?:#([\\w.][\\w.\\-]*(?:~\\d+)?)(?:&([\\w.][\\w.\\-]*(?:~\\d+)?))?)?"
+  + "(?:!s([\\d.]+))?(?:!cap([\\d.]+-[\\d.]+))?(?:!k(auto|[\\d.]+))?(?:!(rmbase|rm))?(?:!take([\\w.][\\w.\\-]*))?$", "i");
+export function parseNw(spec) {
+  const m = String(spec).trim().match(NW_RE);
+  if (!m) return null;
+  let dir = m[5] || null, alpha = +m[4];
+  while (dir && dir.startsWith("-")) { dir = dir.slice(1); alpha = -alpha; }
+  return { layer: +m[1], neuron: +m[2], mode: "nw", alpha, direction: dir, key: m[6] || null, key2: m[7] || null,
+           pair: m[3] === undefined ? null : +m[3], s: m[8] === undefined ? null : +m[8], cap: m[9] || null,
+           kscale: m[10] ? m[10].toLowerCase() : null, remove: m[11] ? (m[11].toLowerCase() === "rm" ? "part" : "excess") : null,
+           take: m[12] || null };
+}
+// レシピの行の形にそろえる(サーバの一覧・FiSH の行・書き方を読んだ行のどれからでも。無い項目は null)
+const nwRowOf = (u) => ({ layer: +u.layer, neuron: +u.neuron, mode: "nw", alpha: +(u.alpha ?? u.k), direction: u.direction || null,
+                          key: u.key || null, key2: u.key2 || null, pair: u.pair ?? null, s: u.s ?? null, cap: u.cap || null,
+                          kscale: u.kscale ? String(u.kscale).toLowerCase() : null, remove: u.remove || null, take: u.take || null });
 export const isMoe = (u) => !isKeyed(u) && (u.kind === "expert_neuron" || u.kind === "expert" || u.kind === "shared");
 const isGain = (u) => isHead(u) || u.mode === "gain";             // 倍率 k(1 が無介入)の行
 const isRoute = (u) => u.mode === "route";
@@ -166,8 +189,7 @@ export class Recipe {
     for (const q of rows) {
       const mine = new Set(used(q));
       this.units = this.units.filter((u) => !(isNw(u) && u.layer === +q.layer && used(u).some((j) => mine.has(j))));
-      this.units.push({ layer: +q.layer, neuron: +q.neuron, mode: "nw", alpha: +q.alpha, direction: q.direction || null, key: q.key || null,
-                        key2: q.key2 || null, pair: q.pair ?? null, s: q.s ?? null, cap: q.cap || null });
+      this.units.push(nwRowOf(q));
     }
     this._sort();
     this._save();
@@ -280,8 +302,7 @@ export class Recipe {
       || moeOk(u) || keyedOk(u) || nwOk(u));
     this.skipped = units.length - ok.length;
     this.name = name;
-    this.units = ok.map((u) => (isNw(u) ? { layer: u.layer, neuron: u.neuron, mode: "nw", alpha: +(u.alpha ?? u.k), direction: u.direction || null,
-                                            key: u.key || null, key2: u.key2 || null, pair: u.pair ?? null, s: u.s ?? null, cap: u.cap || null }
+    this.units = ok.map((u) => (isNw(u) ? nwRowOf(u)
       : isKeyed(u) ? { layer: u.layer, kind: u.kind, ...(u.kind === "expert" ? { expert: +u.expert } : {}), mode: "keyed",
                                                alpha: +(u.alpha ?? u.k), direction: (u.direction_default && dd) ? null : u.direction || null,
                                                key: (u.key_default && dk) ? null : u.key || null }
@@ -545,18 +566,26 @@ export class RecipePanel {
   // レシピの default_direction・default_key)、α のスライダー(±3、1 で観測した平均差をそのまま書く、負で打ち消す)。
   // 鍵に無い層・書き込み先の食い違い・方向や鍵が無いことは行に印を出す(サーバでも BAD_RECIPE で断る)
   // 計算で作るニューロンの行: 中身(ニューロン・方向・鍵)は表示だけで、変えられるのは強さ α と「外す」
+  // 取り除く形(!rm・!rmbase・!take<鍵>)は「取り除く」の印と、形と量の鍵の行を出す。量子化の倍率(!k4・!kauto)も同じ行に出す
   nwRow(u, i) {
     const a = +u.alpha;
     const what = `L${u.layer} N${u.neuron}${u.pair !== null && u.pair !== undefined ? `+N${u.pair}` : ""}`;
     const form = u.pair !== null && u.pair !== undefined ? t("上限つき(2 個を組)") : u.key2 ? t("鍵 2 つ") : t("鍵 1 つ");
+    const removes = !!(u.take || u.remove);
+    const how = u.take ? `<span title="${t("取り除く量を、この鍵(MLP の入力の空間)で位置ごとに当てる。入力の行 = 量の鍵、出力の列 = −α·r̂(r̂ は方向の向き)。CHiPS のヘッドの分を場面で取り除くユニット(gne nw heads)の形")}">${t("取り除く形: 量の鍵")} <span class="mono">${esc(u.take)}</span></span>`
+      : u.remove === "part" ? `<span title="${t("鍵が開いた位置で、その位置の方向の成分を α の割合だけ取り除く(!rm)")}">${t("取り除く形: その位置の成分")}</span>`
+      : u.remove === "excess" ? `<span title="${t("鍵が開いた位置で、中立の文での成分の平均(基準値)を超えた分だけを取り除く(!rmbase)")}">${t("取り除く形: 基準値を超えた分")}</span>` : "";
+    const ks = u.kscale ? `<span title="${t("量子化の丸めへの倍率 k: 入力の行を 1/k、出力の列を k 倍にする(足す量は同じで、活性だけが 1/k になる)。auto は層の活性の大きさから決める(!k4・!kauto)")}">${t("量子化の倍率")} <span class="mono">k${esc(u.kscale)}</span></span>` : "";
     return `
-      <tr data-i="${i}" class="rc-nw"><td class="id"><span class="mono">${esc(what)}</span>
-        <span class="badge keyed" title="${t("計算で作るニューロン: ニューロンを計算した重みで上書きし、鍵が反応する位置でだけ方向を書く(LoRA)")}">nw</span>
+      <tr data-i="${i}" class="rc-nw${removes ? " rc-nw-rm" : ""}"><td class="id"><span class="mono">${esc(what)}</span>
+        <span class="badge keyed" title="${removes ? t("計算で作るニューロン: ニューロンを計算した重みで上書きし、鍵が開いた位置でだけ方向の成分を取り除く(LoRA)") : t("計算で作るニューロン: ニューロンを計算した重みで上書きし、鍵が反応する位置でだけ方向を書く(LoRA)")}">nw</span>${
+        removes ? ` <span class="badge minus" title="${t("強さ α は取り除く割合の目安(1 で全部)")}">${t("取り除く")}</span>` : ""}
         <button class="small quiet rm" data-rm="${i}" title="${t("外す")}">×</button>
-        <div class="rc-kx muted mono" title="${t("方向・鍵・形は direction ビューの FiSH のタブ(か CLI・MCP の gne nw …)で決める(docs/fish.md)")}">@${esc(u.direction || "—")} #${esc(u.key || "—")}${u.key2 ? `&amp;${esc(u.key2)}` : ""} · ${esc(form)}</div></td>
-        <td class="sl"><input type="range" class="dose" data-i="${i}" min="${-KEYED.max}" max="${KEYED.max}" step="${KEYED.step}" value="${a}" style="background:${trackBG(a, KEYED.max)}"></td>
-        <td class="nm"><input type="number" class="num" data-i="${i}" step="${KEYED.step}" value="${a}"></td>
-        <td class="sg mono ${a >= 0 ? "plus" : "minus"}">${aLabel(a)}</td></tr>`;
+        <div class="rc-kx muted mono" title="${t("方向・鍵・形は direction ビューの FiSH のタブ(か CLI・MCP の gne nw …)で決める(docs/fish.md)")}">@${esc(u.direction || "—")} #${esc(u.key || "—")}${u.key2 ? `&amp;${esc(u.key2)}` : ""} · ${esc(form)}</div>${
+        how || ks ? `<div class="rc-kx rc-nwx muted">${[how, ks].filter(Boolean).join(" · ")}</div>` : ""}
+        <div class="sl"><span class="muted">−${KEYED.max}</span><input type="range" class="dose" data-i="${i}" min="${-KEYED.max}" max="${KEYED.max}" step="${KEYED.step}" value="${a}" style="background:${trackBG(a, KEYED.max)}"><span class="muted">+${KEYED.max}</span>
+          <span class="sg mono ${a >= 0 ? "plus" : "minus"}">${aLabel(a)}</span>
+          <input type="number" class="num" data-i="${i}" min="-100" max="100" step="${KEYED.step}" value="${+a.toFixed(3)}" title="${t("値を直接入れる")}"></div></td></tr>`;
   }
 
   keyedRow(u, i) {

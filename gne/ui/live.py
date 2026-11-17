@@ -369,8 +369,10 @@ class Live:
                                    "expert": u.expert,                                     # expert: MoE(CHANGE-05)
                                    # keyed(CHANGE-07): 鍵と強さ α(Unit.k、YAML の alpha)。方向の先頭の - は α の符号に畳んである
                                    **({"key": u.key, "alpha": u.k} if u.mode == "keyed" else {}),
-                                   # nw(計算で作るニューロン): 鍵 2 本・組にするニューロン・ゲートの倍率・上限のしきい値
-                                   **({"key": u.key, "alpha": u.k, "key2": u.key2, "pair": u.pair, "s": u.s, "cap": u.cap}
+                                   # nw(計算で作るニューロン): 鍵 2 本・組にするニューロン・ゲートの倍率・上限のしきい値、
+                                   # 量子化の倍率(kscale)・成分を取り除く形(remove)・取り除く量の鍵(take)
+                                   **({"key": u.key, "alpha": u.k, "key2": u.key2, "pair": u.pair, "s": u.s, "cap": u.cap,
+                                       "kscale": u.kscale, "remove": u.remove, "take": u.take}
                                       if u.mode == "nw" else {})} for u in r.units],
                         "ablate": r.ablate.to_dict() if r.ablate else None, "when": r.when, "sampling": r.sampling,
                         "this_model": r.model_id in (None, self.s.meta.model_id)})
