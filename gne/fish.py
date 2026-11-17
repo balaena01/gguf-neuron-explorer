@@ -370,11 +370,12 @@ def _iv_text(iv):
     return [str(x) for x in iv]
 
 
-def verify_step(session, specs: list[str], *, iv=None, texts=None) -> dict:
+def verify_step(session, specs: list[str], *, iv=None, texts=None, contrast=None) -> dict:
+    """contrast を渡すと、狙う場面の質問に無介入で作った返事で確かめる(鍵が開く位置での丸めのずれを見る。gne nw verify --contrast)。"""
     r = session.recipe(units=[str(x) for x in specs], name="fish")
     if isinstance(texts, str):
         texts = [x for x in texts.splitlines() if x.strip()]
-    return session.nw_verify(r, iv=iv, texts=list(texts) if texts else None)
+    return session.nw_verify(r, iv=iv, texts=list(texts) if texts else None, contrast=contrast)
 
 
 def check_step(session, specs: list[str], contrast: str, *, subset: str = "all", max_tokens: int = 96, iv=None,

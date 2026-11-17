@@ -310,10 +310,12 @@ def _fish_keys(s, contrast=None, spec: dict | None = None, with_units=None, **p)
     return {**d, "contrast_path": path, "with_units": bool(with_units)}
 
 
-def _fish_verify(s, units, iv=None, texts=None) -> dict:
-    """FiSH のユニットの LoRA が式どおりか(gne nw verify)。"""
+def _fish_verify(s, units, iv=None, texts=None, contrast=None, spec: dict | None = None) -> dict:
+    """FiSH のユニットの LoRA が式どおりか(gne nw verify)。contrast か spec(対照集合)を渡すと、鍵が開く文で確かめる。"""
     from . import fish
-    return fish.verify_step(s, list(units), iv=iv or None, texts=texts)
+    if spec is not None or contrast is not None:
+        contrast = fish.resolve(s, contrast, spec)[0]
+    return fish.verify_step(s, list(units), iv=iv or None, texts=texts, contrast=contrast)
 
 
 def _fish_check(s, units, contrast=None, spec: dict | None = None, **p) -> dict:

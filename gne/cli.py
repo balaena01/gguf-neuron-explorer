@@ -3094,16 +3094,25 @@ def nw_verify(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: O
               direction: Optional[str] = typer.Option(None, "--direction", help="@NAME を省いたユニットの方向"),
               key: Optional[str] = typer.Option(None, "--key", help="#KEY を省いたユニットの鍵"),
               text: Optional[list[str]] = typer.Option(None, "--text", help="読ませる文(既定は英語と日本語の 2 文)。複数可"),
-              iv: Optional[list[str]] = typer.Option(None, "--iv", help="この介入(レシピの名前かパス、またはユニットの書き方)を先に当てた状態で確かめる")):
+              iv: Optional[list[str]] = typer.Option(None, "--iv", help="この介入(レシピの名前かパス、またはユニットの書き方)を先に当てた状態で確かめる"),
+              contrast: Optional[Path] = typer.Option(None, "--contrast", help="対照集合。渡すと、狙う場面の質問に無介入で作った返事で確かめる(鍵が開く位置で、丸めによるずれを見る)"),
+              subset: str = typer.Option("all", "--subset", help="--contrast の質問: all(既定)/ odd / even"),
+              n_prompts: int = typer.Option(6, "--prompts", help="--contrast から使う質問の数"),
+              max_tokens: int = typer.Option(48, "--max-tokens", help="--contrast の返事の長さ")):
     """nw の LoRA が式どおりに動くか。上書きしたニューロンのゲート・入力・活性が式どおりか、ほかのニューロンが変わっていないか、
-    MLP の出力の変化が (新しい活性 × 新しい列) − (元の活性 × 元の列) になっているかを、層ごとに確かめる。"""
+    MLP の出力の変化が (新しい活性 × 新しい列) − (元の活性 × 元の列) になっているかを、層ごとに確かめる。
+    --contrast を渡すと、鍵が開く文(狙う場面の質問と返事)で確かめる。書き換えたニューロンの活性が同じブロックのほかの活性より
+    ずっと大きいと、量子化の丸めで出力が式からずれる(ユニットに !kauto を付けると、活性を小さくして避けられる)。"""
     s = holder["session"] = c.session()
     r = s.recipe(units=unit, path=recipe, default_direction=direction, default_key=key)
-    d = s.nw_verify(r, texts=text or None, iv=_iv_arg(iv))
+    d = s.nw_verify(r, texts=text or None, iv=_iv_arg(iv), contrast=None if contrast is None else str(contrast), subset=subset,
+                    n_prompts=n_prompts, max_tokens=max_tokens)
     lines = []
     for x in d["layers"]:
         lines.append(f"L{x['layer']} N{','.join(map(str, x['neurons']))}: ゲートの誤差 {x['gate_err']:.2e}、入力の誤差 {x['up_err']:.2e}、活性の誤差 {x['act_err']:.1e}、"
-                     f"ほかのニューロンの変化 {x['others_changed_max']:.1e}、出力の変化の相対誤差(中央値){x['out_rel_err_median']:.2e}  {'○' if x['ok'] else '×'}")
+                     f"ほかのニューロンの変化 {x['others_changed_max']:.1e}、出力の変化の相対誤差(中央値){x['out_rel_err_median']:.2e}、"
+                     f"活性の最大 {x['act_max']:.3g}(ブロックの最大の中央値 {x['block_max_median']:.3g})、倍率 k "
+                     + "・".join(f"{v:.3g}" for v in x["kscale"].values()) + f"  {'○' if x['ok'] else '×'}")
     lines.append(f"{'合格' if d['ok'] else '不合格'}(ゲート・入力・出力の誤差 < 5%、活性の誤差 < 0.1%、ほかのニューロンの変化 < 1e-4。"
                  "ゲート・入力には、量子化のままの掛け算と float に戻した行を引く計算のずれが 1〜2% 残る)")
     return d, "\n".join(lines), 0 if d["ok"] else 1

@@ -291,7 +291,9 @@ class Session:
             self._check_keyed(r)
         if r.nw_units:                                              # 計算で作るニューロン: 層の形・鍵・方向・ニューロンの重なり
             from .nwrite import nw_plan
-            nw_plan(self.weights, r, self._key_of, self.direction_set)
+            # 形だけを確かめる(kscale auto・remove の大きさは、ここでは測らない。当てるとき・書き出すときに測る)
+            nw_plan(self.weights, r, self._key_of, self.direction_set,
+                    lambda L, up: {"block_max_median": 1.0, "m": 1.0, "b_up": 0.0, "uh_q90": 1.0})
         if r.when != "all":                                         # レビュー P3: LoRA は位置で切り替えられない
             lora_kinds = [k for k, us in (("keyed", r.keyed_units), ("gain", r.gain_units), ("proj", r.proj_units),
                                           ("nw", r.nw_units)) if us]
@@ -572,7 +574,7 @@ class Session:
         nr = recipe.like([u for u in recipe.nw_units if u.k])
         if not nr.units:
             raise GneError("BAD_RECIPE", "nw のユニットがありません(α が 0 でないもの。例 --unit 11:N2045:nw:a1@NAME#KEY)")
-        rows = nw_plan(self.weights, nr, self._key_of, self.direction_set)
+        rows = nw_plan(self.weights, nr, self._key_of, self.direction_set, self.nw_stats)
         tens = nw_tensors(self.weights, rows)
         d = self.store.key_dir(self.meta.model_id) / "lora"
         d.mkdir(parents=True, exist_ok=True)
@@ -591,11 +593,17 @@ class Session:
         from .nwrite import export_nw_lora
         r = recipe if isinstance(recipe, Recipe) else self.recipe(path=self.recipe_path(recipe))
         others = sorted({u.mode for u in r.units if u.mode != "nw"})
-        rep = export_nw_lora(self.weights, r, out, self._key_of, self.direction_set, strip_meta=strip_meta, name=name)
+        rep = export_nw_lora(self.weights, r, out, self._key_of, self.direction_set, strip_meta=strip_meta, name=name,
+                             stats_of=self.nw_stats)
         if others or r.ablate is not None:
             self.warn(f"このファイルには nw のユニットだけが入ります(レシピのほかの介入 {'・'.join(others + (['ablate'] if r.ablate else []))} は"
                       "入りません。proj・keyed・gain と一緒に 1 つの LoRA にするなら gne headproj export を使います)")
         return {**rep, "recipe": r.name, "warnings": list(self.warnings)}
+
+    def nw_stats(self, layer: int, up_dir=None) -> dict:
+        """層の活性・残差の大きさ(中立の文で測る。kscale auto と成分を取り除く形が使う。gne/nwrite.layer_stats)。"""
+        from .nwrite import layer_stats
+        return layer_stats(self, int(layer), up_dir)
 
     def nw_neurons(self, layers, **kw) -> dict:
         """各ニューロンのふだんの働きを測り、働きの小さい順の表を返す(gne nw neurons)。"""
@@ -734,7 +742,7 @@ class Session:
             from .nwrite import nw_meta, nw_plan, nw_tensors
             if into is not None:
                 raise GneError("BAD_ARGS", "nw のユニットは --into と一緒には書き出せません(差し替える元の行・列を、当てる先のモデルから読むため)")
-            nrows = nw_plan(W, recipe.like([u for u in recipe.nw_units if u.k]), self._key_of, self.direction_set)
+            nrows = nw_plan(W, recipe.like([u for u in recipe.nw_units if u.k]), self._key_of, self.direction_set, self.nw_stats)
             clash = sorted({u.layer for u in recipe.gain_units if u.kind == "neuron"} & {r["layer"] for r in nrows})
             if clash:
                 raise GneError("BAD_RECIPE", f"層 {', '.join(map(str, clash))} に、ニューロンの gain と nw の両方があります(どちらも ffn_up を変えるので、"

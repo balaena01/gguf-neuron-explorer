@@ -96,26 +96,66 @@ def _gate_matrix(weights, L: int) -> np.ndarray:
 
 
 def form_of(u) -> dict:
-    """ユニットの形: one(鍵 1 つ)/ two(鍵 2 つ)/ cap(上限つき、2 個を組)と、s・a・b。"""
+    """ユニットの形: one(鍵 1 つ)/ two(鍵 2 つ)/ cap(上限つき、2 個を組)と、s・a・b。成分を取り除く形(remove)は cap の一種。"""
+    extra = {**({"kscale": u.kscale} if getattr(u, "kscale", None) else {}), **({"remove": u.remove} if getattr(u, "remove", None) else {})}
     if u.pair is not None:
         a, b = CAP_DEFAULT
         if u.cap:
             m = re.fullmatch(r"([\d.]+)-([\d.]+)", str(u.cap))
             a, b = float(m.group(1)), float(m.group(2))
-        return {"form": "cap", "s": float(u.s or S_CAP), "a": a, "b": b}
-    return {"form": "two" if u.key2 else "one", "s": float(u.s or S_DEFAULT)}
+        return {"form": "cap", "s": float(u.s or S_CAP), "a": a, "b": b, **extra}
+    return {"form": "two" if u.key2 else "one", "s": float(u.s or S_DEFAULT), **extra}
 
 
 def spec_of(u) -> str:
     f = form_of(u)
     return (f"{u.layer}:N{u.neuron}" + (f"+N{u.pair}" if u.pair is not None else "") + f":nw:a{u.k:g}"
             + (f"@{u.direction}" if u.direction else "") + (f"#{u.key}" if u.key else "") + (f"&{u.key2}" if u.key2 else "")
-            + (f"!s{f['s']:g}" if u.s is not None else "") + (f"!cap{u.cap}" if u.cap else ""))
+            + (f"!s{f['s']:g}" if u.s is not None else "") + (f"!cap{u.cap}" if u.cap else "")
+            + (f"!k{u.kscale}" if getattr(u, "kscale", None) else "")
+            + ({"part": "!rm", "excess": "!rmbase"}.get(getattr(u, "remove", None) or "", "")))
 
 
-def nw_plan(weights, recipe, key_of, dir_of) -> list[dict]:
+# 量子化の丸めへの対処(kscale)。ffn_down の入力(活性)は 32 個のブロックごとに 1 つの倍率で丸められる(Q8_0 などの量子化した
+# 重みとの掛け算)。書き換えたニューロンの活性が同じブロックのほかの活性よりずっと大きいと、ほかの活性が丸めで潰れ、MLP の出力が
+# 式からずれる。入力の行を 1/k、出力の列を k 倍にすると、足す量は同じで活性だけが 1/k になる。auto の k は
+# max(1, 開いたときの活性の目安 ÷ (KSCALE_M × T_L))。T_L は中立の文での「ブロックごとの活性の絶対値の最大」の中央値。
+KSCALE_M = 16.0
+BLOCK = 32
+_NORM_TENSOR = {"ffn_norm": "blk.{L}.ffn_norm.weight", "attn_post_norm": "blk.{L}.post_attention_norm.weight"}
+_PRE_NORM = {"ffn_norm": "ffn_inp", "attn_post_norm": "attn_residual"}       # MLP の入力の正規化の前の残差の捕捉名
+
+
+def norm_weight(weights, L: int) -> np.ndarray:
+    """MLP の入力の正規化(RMSNorm)の重み γ(h = γ ⊙ x / rms(x))。"""
+    from .weights import tensor_to_f32
+    name = _NORM_TENSOR[SWIGLU_ARCHS[weights.meta.arch]].format(L=int(L))
+    return tensor_to_f32(weights.tensor(name)).astype(np.float64).reshape(-1)
+
+
+def peak_act(f: dict, uh: float = 1.0) -> float:
+    """開いたとき(鍵の反応 ≈ 1)の、書き換えたニューロンの活性の大きさの目安。uh = 入力の行·h の大きさ(κ1 なら ≈ 1)。"""
+    if f["form"] == "cap":
+        return float(silu(f["s"] * (1.0 - f["a"]))) * float(uh)
+    return float(silu(f["s"])) * float(uh)
+
+
+def kscale_of(f: dict, stats: dict | None, uh: float = 1.0) -> float:
+    ks = f.get("kscale")
+    if not ks:
+        return 1.0
+    if ks != "auto":
+        return float(ks)
+    if stats is None:
+        raise GneError("BAD_ARGS", "kscale auto には層の活性の大きさ(中立の文で測る)が要ります。Session の道具(gne nw …)から使ってください")
+    return max(1.0, peak_act(f, uh) / (KSCALE_M * max(float(stats["block_max_median"]), 1e-12)))
+
+
+def nw_plan(weights, recipe, key_of, dir_of, stats_of=None) -> list[dict]:
     """レシピの nw のユニット → 行(ユニットごと)。各行に、差し替えるニューロンごとの (番号, ゲートの行, 入力の行, 出力の列) と、
-    量の換算(そのニューロンの活性に掛けると「α·d を 1 とした足す量」への寄与になる倍率)を入れる。確かめもここで行う。"""
+    量の換算(そのニューロンの活性に掛けると「α·d を 1 とした足す量」への寄与になる倍率)を入れる。確かめもここで行う。
+    stats_of(L, up_dir) は層の活性・残差の大きさ(layer_stats)を返す関数。kscale auto と成分を取り除く形(remove)だけが使う
+    (Session.nw_stats を渡す。無ければ、その 2 つはエラー)。"""
     rows, used = [], {}
     for u in recipe.nw_units:
         L = int(u.layer)
@@ -138,14 +178,40 @@ def nw_plan(weights, recipe, key_of, dir_of) -> list[dict]:
         kg = _kappa(key_of, kname, L, n_embd, u)
         ku = _kappa(key_of, u.key2, L, n_embd, u) if u.key2 else kg
         s, alpha = f["s"], float(u.k)
+        need = f.get("kscale") == "auto" or f.get("remove")
+        if need and stats_of is None:
+            raise GneError("BAD_ARGS", f"{u.label()}: kscale auto と remove には層の活性・残差の大きさが要ります(Session の道具から使ってください)")
+        up, w, uh, st = ku, alpha * d, 1.0, None
+        if f.get("remove"):
+            # 成分を読み取って取り除く形: 入力の行 = r̂ ÷ γ(h = γ ⊙ x / rms(x) なので、入力の行·h = r̂·x / rms(x))。
+            # 出力の列 = −α·m_L·r̂(m_L = 中立の文での rms(x) の中央値)。開いた場面で、その位置の r̂ 成分の α·m_L/rms(x) の割合を引く。
+            # excess は、入力の行から「中立の文での入力の行·h の平均」b × κ1 を引き、基準値を超えた分だけを取り除く
+            rh = d / max(float(np.linalg.norm(d)), 1e-30)
+            gm = norm_weight(weights, L)
+            up_dir = rh / np.where(np.abs(gm) > 1e-12, gm, 1e-12)
+            st = stats_of(L, up_dir)
+            up = up_dir - (float(st["b_up"]) * ku if f["remove"] == "excess" else 0.0)
+            w = -alpha * float(st["m"]) * rh
+            uh = float(st["uh_q90"])
+        elif need:
+            st = stats_of(L, None)
+        kk = kscale_of(f, st, uh)
+        plain = kk == 1.0 and not f.get("remove")        # 今までのユニット: 前の版と同じ値(同じ LoRA)になるよう、同じ式で計算する
         if f["form"] == "cap":
             g = 1.0 / (s * (f["b"] - f["a"]))
-            parts = [(js[0], s * (kg - f["a"] * ku), ku, alpha * g * d, g), (js[1], s * (kg - f["b"] * ku), ku, -alpha * g * d, -g)]
+            if plain:
+                parts = [(js[0], s * (kg - f["a"] * ku), ku, alpha * g * d, g), (js[1], s * (kg - f["b"] * ku), ku, -alpha * g * d, -g)]
+            else:
+                parts = [(js[0], s * (kg - f["a"] * ku), up / kk, kk * g * w, g * kk),
+                         (js[1], s * (kg - f["b"] * ku), up / kk, -kk * g * w, -g * kk)]
         else:
             g = 1.0 / float(silu(s))
-            parts = [(js[0], s * kg, ku, alpha * g * d, g)]
+            parts = [(js[0], s * kg, ku, alpha * g * d, g)] if plain else [(js[0], s * kg, up / kk, kk * g * w, g * kk)]
         rows.append({"unit": u, "layer": L, "direction": dname, "key": kname, "key2": u.key2, **f, "alpha": alpha,
-                     "kappa_gate": kg, "kappa_up": ku, "d": d, "parts": parts, "norm": float(abs(alpha) * np.linalg.norm(d))})
+                     "kappa_gate": kg, "kappa_up": ku, "d": d, "parts": parts,
+                     "norm": float(np.linalg.norm(w)) if f.get("remove") else float(abs(alpha) * np.linalg.norm(d)),
+                     "kscale_used": float(kk), "peak_act": peak_act(f, uh) / kk,
+                     **({"layer_stats": {k: v for k, v in st.items() if not isinstance(v, np.ndarray)}} if st else {})})
     return rows
 
 
@@ -190,7 +256,9 @@ def nw_tensors(weights, rows: list[dict]) -> dict[str, tuple[np.ndarray, np.ndar
 def nw_meta(rows: list[dict]) -> dict:
     return {"units": [{"layer": r["layer"], "neurons": [p[0] for p in r["parts"]], "form": r["form"], "s": r["s"],
                        **({"a": r["a"], "b": r["b"]} if r["form"] == "cap" else {}), "alpha": r["alpha"],
-                       "direction": r["direction"], "key": r["key"], "key2": r["key2"], "norm": r["norm"]} for r in rows]}
+                       "direction": r["direction"], "key": r["key"], "key2": r["key2"], "norm": r["norm"],
+                       **({"kscale": r["kscale_used"]} if r.get("kscale") else {}), **({"remove": r["remove"]} if r.get("remove") else {})}
+                      for r in rows]}
 
 
 def cache_hash(tens: dict) -> str:
@@ -206,13 +274,14 @@ def cache_hash(tens: dict) -> str:
 NEUTRAL_NAME = "adapter"                       # strip_meta で名前を指定しないときの general.name
 
 
-def export_nw_lora(weights, recipe, path: str | Path, key_of, dir_of, *, strip_meta: bool = False, name: str | None = None) -> dict:
+def export_nw_lora(weights, recipe, path: str | Path, key_of, dir_of, *, strip_meta: bool = False, name: str | None = None,
+                   stats_of=None) -> dict:
     """レシピの nw のユニットを LoRA アダプタ GGUF に書く(倍率 1 で当てる)。
     name はファイルの名前の欄(general.name)。省くと「<元のモデルの名前> nw <レシピの名前>」。
     strip_meta(人に渡す版)は、gne の記録(gne.nw)に加えて、元のモデルを特定できる値も書かない: 元のモデルの識別子
     (gne.source_model_id)を書かず、名前の欄は name(省くと "adapter")にして、元のモデルの名前・レシピの名前を入れない。"""
     from .ablate import write_lora_tensors
-    rows = nw_plan(weights, recipe, key_of, dir_of)
+    rows = nw_plan(weights, recipe, key_of, dir_of, stats_of)
     if not rows:
         raise GneError("BAD_RECIPE", "nw のユニットがありません(例 --unit 11:N2045:nw:a1@NAME#KEY)")
     tens = nw_tensors(weights, rows)
@@ -467,22 +536,74 @@ def _run_capture(session, ids, names: set[str], lora=None, vecs=None) -> dict:
     return {k: v.astype(np.float64) for k, v in got.items()}
 
 
-def verify(session, recipe, *, texts: Sequence[str] | None = None, iv=None) -> dict:
+def layer_stats(session, L: int, up_dir: np.ndarray | None = None) -> dict:
+    """層 L の大きさ(中立の文 VERIFY_TEXTS で測る。kscale auto と成分を取り除く形が使う)。
+    block_max_median: 活性(ffn_down の入力)の、32 個のブロックごとの絶対値の最大の中央値(位置とブロックについて)。
+    m: MLP の入力の正規化の前の残差 x の rms の中央値。up_dir を渡すと、b_up(中立の文での up_dir·h の平均)と
+    uh_q90(|up_dir·h| の 90 パーセンタイル)も返す。層ごとの値は Session の中で使い回す。"""
+    e = session.engine
+    cache = session.__dict__.setdefault("_nw_layer_stats", {})
+    seqs = [e.tokenize(t, add_special=True, parse_special=False) for t in VERIFY_TEXTS]
+    if L not in cache:
+        seen = e.list_names(seqs[0][:16])
+        from .capture import pick_act_name
+        act = pick_act_name(seen, L)
+        pre = f"{_PRE_NORM[SWIGLU_ARCHS[session.weights.meta.arch]]}-{L}"
+        if act is None or pre not in seen:
+            raise GneError("ARCH_UNSUPPORTED", f"層 {L} の活性か MLP の入力の残差({pre})が捕捉できません")
+        hname = mlp_in_name(seen, L)
+        bm, rms, hs = [], [], []
+        for ids in seqs:
+            g = _run_capture(session, ids, {act, pre, hname})
+            a = np.abs(g[act][1:])
+            n = a.shape[1] // BLOCK * BLOCK
+            bm.append(a[:, :n].reshape(a.shape[0], -1, BLOCK).max(axis=2).reshape(-1))
+            x = g[pre][1:]
+            rms.append(np.sqrt(np.mean(x * x, axis=1)))
+            hs.append(g[hname][1:])
+        cache[L] = {"block_max_median": float(np.median(np.concatenate(bm))), "m": float(np.median(np.concatenate(rms))),
+                    "_h": np.concatenate(hs), "n_texts": len(seqs)}
+    st = {k: v for k, v in cache[L].items() if k != "_h"}
+    if up_dir is not None:
+        v = cache[L]["_h"] @ np.asarray(up_dir, dtype=np.float64)
+        st.update(b_up=float(np.mean(v)), uh_q90=float(np.quantile(np.abs(v), 0.9)))
+    return st
+
+
+def verify(session, recipe, *, texts: Sequence[str] | None = None, iv=None, contrast=None, subset: str = "all",
+           max_tokens: int = 48, n_prompts: int = 6) -> dict:
     """nw の LoRA が式どおりに動くか。層ごとに、その層のユニットだけの LoRA を当てて短い文を読ませ、次を確かめる:
     上書きしたニューロンのゲート・入力が (新しい行)ᵀh になっているか、活性が silu(ゲート)·入力 か、ほかのニューロンの活性が
     変わっていないか、MLP の出力の変化が (新しい活性 × 新しい列) − (元の活性 × 元の列) の和になっているか。
     元の行・列は float に戻した値を引くので、量子化のままの掛け算との小さなずれ(入力の大きさの 1% ほど)は残る。
-    iv を渡すと、その介入(レシピかユニット)を先に当てた状態で確かめる(当てない側・当てる側の両方に iv が掛かる)。"""
+    iv を渡すと、その介入(レシピかユニット)を先に当てた状態で確かめる(当てない側・当てる側の両方に iv が掛かる)。
+    contrast を渡すと、短い文の代わりに、対照集合の狙う場面の質問(subset から n_prompts 個)に無介入で返事を作り(max_tokens まで)、
+    そのプロンプトと返事で確かめる(鍵が開く位置で、丸めによるずれを見るため。中立の文では鍵がほとんど開かず、活性が小さい)。
+    層ごとに、書き換えたニューロンの活性の最大(act_max)と、その層のブロックごとの活性の最大の中央値(block_max_median)、
+    使った倍率(kscale)も返す。"""
     from .ablate import write_lora_tensors
     from .keyed_build import intervention
     iv_vecs, iv_lora, iv_desc = intervention(session, iv)
     iv_lora = list(iv_lora or [])
     e, w = session.engine, session.weights
-    rows = nw_plan(w, recipe, session._key_of, session.direction_set)
+    rows = nw_plan(w, recipe, session._key_of, session.direction_set, session.nw_stats)
     if not rows:
         raise GneError("BAD_RECIPE", "nw のユニットがありません")
-    texts = list(texts or VERIFY_TEXTS)
-    seqs = [e.tokenize(t, add_special=True, parse_special=False) for t in texts]
+    if contrast is not None:
+        from .direction import _subset
+        from .evalx import _generate
+        from .keyed_build import _as_spec
+        from .reverse import _conv
+        cs = _as_spec(contrast).contrast
+        prompts = cs.prompts("B")
+        idx = _subset(len(prompts), subset)[:max(1, int(n_prompts))]
+        convs = [_conv(cs.system_b, prompts[i]) for i in idx]
+        outs = _generate(session, [(c, int(max_tokens)) for c in convs], iv_vecs, iv_lora or None, "all", lambda k: None)
+        seqs = [e.tokenize_prompt(e.render_chat(c)) + [int(t) for t in o["token_ids"] if not e.is_eog(t)] for c, o in zip(convs, outs)]
+        texts = [prompts[i] if isinstance(prompts[i], str) else str(prompts[i]) for i in idx]
+    else:
+        texts = list(texts or VERIFY_TEXTS)
+        seqs = [e.tokenize(t, add_special=True, parse_special=False) for t in texts]
     out_layers = []
     tmp_dir = K.key_dir(session) / "lora"
     tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -494,7 +615,7 @@ def verify(session, recipe, *, texts: Sequence[str] | None = None, iv=None) -> d
         nm = _capture_names(session, seqs[0], L)
         Wd = w.down_matrix(L).astype(np.float64)
         js = [p[0] for r in sub for p in r["parts"]]
-        stats = {"gate": [], "up": [], "act": [], "others": [], "out_rel": [], "out_norm": []}
+        stats = {"gate": [], "up": [], "act": [], "others": [], "out_rel": [], "out_norm": [], "act_max": [], "block": []}
         try:
             for ids in seqs:
                 b = _run_capture(session, ids, set(nm.values()), iv_lora, iv_vecs)
@@ -511,7 +632,11 @@ def verify(session, recipe, *, texts: Sequence[str] | None = None, iv=None) -> d
                         stats["up"].append(float(np.abs(g[nm["u"]][1:, j] - uj).max() / max(float(np.abs(uj).max()), floor_u)))
                         aj = silu(g[nm["g"]][1:, j]) * g[nm["u"]][1:, j]
                         stats["act"].append(float(np.abs(g[nm["a"]][1:, j] - aj).max() / max(float(np.abs(aj).max()), 1e-12)))
+                        stats["act_max"].append(float(np.abs(g[nm["a"]][1:, j]).max()))
                         pred = pred + np.outer(g[nm["a"]][1:, j], down)
+                a_all = np.abs(b[nm["a"]][1:])
+                nb = a_all.shape[1] // BLOCK * BLOCK
+                stats["block"].append(float(np.median(a_all[:, :nb].reshape(a_all.shape[0], -1, BLOCK).max(axis=2))))
                 oth = np.delete(g[nm["a"]][1:] - b[nm["a"]][1:], js, axis=1)
                 stats["others"].append(float(np.abs(oth).max()))
                 dout = g[nm["out"]][1:] - b[nm["out"]][1:]
@@ -524,12 +649,15 @@ def verify(session, recipe, *, texts: Sequence[str] | None = None, iv=None) -> d
             path.unlink(missing_ok=True)
         row = {"layer": L, "neurons": js, "gate_err": max(stats["gate"]), "up_err": max(stats["up"]), "act_err": max(stats["act"]),
                "others_changed_max": max(stats["others"]), "out_rel_err_median": float(np.median(stats["out_rel"])),
-               "out_change_max": max(stats["out_norm"])}
+               "out_change_max": max(stats["out_norm"]), "act_max": max(stats["act_max"]),
+               "block_max_median": float(np.median(stats["block"])),
+               "kscale": {r["unit"].label(): r["kscale_used"] for r in sub}}
         # ゲート・入力の誤差には、量子化のままの掛け算と float に戻した行を引く計算のずれ(1〜2% ほど)が残る
         row["ok"] = bool(row["gate_err"] < 0.05 and row["up_err"] < 0.05 and row["act_err"] < 1e-3
                          and row["others_changed_max"] < 1e-4 and row["out_rel_err_median"] < 0.05)
         out_layers.append(row)
     return {"layers": out_layers, "ok": all(r["ok"] for r in out_layers), "n_texts": len(texts), "iv": iv_desc,
+            "texts_from": "contrast" if contrast is not None else "texts",
             "thresholds": {"gate_err": 0.05, "up_err": 0.05, "act_err": 1e-3, "others_changed_max": 1e-4, "out_rel_err_median": 0.05}}
 
 
@@ -612,7 +740,7 @@ def check(session, recipe, contrast, *, subset: str = "odd", max_tokens: int = 9
         raise GneError("BAD_ARGS", f"結果の名前 {save!r} は英数字・_・-・. だけにしてください")
     t0 = time.perf_counter()
     e, w = session.engine, session.weights
-    rows = nw_plan(w, recipe, session._key_of, session.direction_set)
+    rows = nw_plan(w, recipe, session._key_of, session.direction_set, session.nw_stats)
     if not rows:
         raise GneError("BAD_RECIPE", "nw のユニットがありません")
     lora = [*iv_lora, (str(session.nw_lora(recipe)), 1.0)]

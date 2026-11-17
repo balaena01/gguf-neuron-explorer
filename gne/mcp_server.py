@@ -676,17 +676,21 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
 
     @srv.tool()
     async def nw_verify(units: list[str] | None = None, recipe: str | None = None, texts: list[str] | None = None,
-                        iv: str | list[str] | None = None) -> dict:
+                        iv: str | list[str] | None = None, contrast: str | None = None, subset: str = "all",
+                        n_prompts: int = 6, max_tokens: int = 48) -> dict:
         """nw のユニット("L:Nn:nw:aα@方向#鍵" = 鍵 1 つ、"…#場面の鍵&位置の鍵" = 鍵 2 つ、"L:Nn+Nm:nw:aα@方向#鍵&1を返す鍵" = 上限つき)の
         LoRA が式どおりに動くかを確かめる。上書きしたニューロンのゲート・入力・活性が式どおりか、ほかのニューロンが変わっていないか、
-        MLP の出力の変化が合っているか(層ごとの ok)。recipe は保存したレシピの名前、または units。"""
+        MLP の出力の変化が合っているか(層ごとの ok)。recipe は保存したレシピの名前、または units。
+        contrast(対照集合の名前かパス)を渡すと、狙う場面の質問に無介入で作った返事で確かめる(鍵が開く位置で、量子化の丸めによる
+        出力のずれを見る。層ごとに活性の最大・ブロックの最大の中央値・倍率 k も返す)。"""
         try:
             if bool(recipe) == bool(units):
                 raise GneError("BAD_ARGS", "recipe(保存したレシピの名前)か units のどちらかを渡してください")
             r = session.recipe(path=session.recipe_path(recipe)) if recipe else session.recipe(units=units)
         except Exception as e:  # noqa: BLE001
             return _err(e)
-        return await call(session.nw_verify, r, texts=texts, iv=iv)
+        return await call(session.nw_verify, r, texts=texts, iv=iv, contrast=contrast, subset=subset, n_prompts=n_prompts,
+                          max_tokens=max_tokens)
 
     @srv.tool()
     async def nw_check(contrast: str, units: list[str] | None = None, recipe: str | None = None, subset: str = "odd",
