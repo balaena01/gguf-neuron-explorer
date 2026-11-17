@@ -145,7 +145,7 @@ def test_spec_roundtrip_js(browser):
 def test_neuron_field_js(browser):
     pg, errors = _static_page(browser)
     got = pg.evaluate("""() => import('/fish.js').then((m) => [m.parseNeuronPairs('', [8, 12]), m.parseNeuronPairs(' 8 : 101 , 102  12:201,202 ', [8, 12]),
-      m.parseNeuronPairs('8:1,2', [8, 12]).error, m.parseNeuronPairs('8:1,1 12:3,4', [8, 12]).error, m.parseNeuronPairs('8:1 12:3,4', [8, 12]).error,
+      m.parseNeuronPairs('8:1,2', [8, 12]).error, m.parseNeuronPairs('8:1,01 12:3,4', [8, 12]).error, m.parseNeuronPairs('8:1 12:3,4', [8, 12]).error,
       m.parseNeuronPairs('8:1,2 12:3,4 14:5,6', [8, 12]).error])""")
     assert got[0] == {"neurons": None} and got[1] == {"neurons": {"8": [101, 102], "12": [201, 202]}}
     assert "足りない層 12" in got[2] and "違う番号" in got[3] and "層:番号,番号" in got[4] and "層 14 は" in got[5]
