@@ -3,11 +3,53 @@
     "order": 2,
     "ja": {
       "title": "2 つの性格の違いだけを取る(system を両側に)",
-      "text": "A と B の両方に system を書き、違いを入れたいところ以外(長さ・形・『短く答える』などの指示)をそろえる。演じること自体の成分が両側で打ち消し合い、性格の差だけが方向に残る。候補づくりは正の倍率(A 側の性格を弱める。s が 2 前後で反対側に寄る)。"
+      "text": "A と B の両方に system を書き、性格の差だけを方向に残す。",
+      "sections": [
+        {
+          "h": "何をするか",
+          "body": [
+            "- 演じること自体の成分が両側で打ち消し合い、性格の差だけが方向に残る。"
+          ]
+        },
+        {
+          "h": "入れるもの",
+          "body": [
+            "- A と B の両方に system を書く。",
+            "- 違いを入れたいところ以外(長さ・形・『短く答える』などの指示)をそろえる。"
+          ]
+        },
+        {
+          "h": "勧める数",
+          "body": [
+            "- 候補づくりは正の倍率(A 側の性格を弱める。s が 2 前後で反対側に寄る)。"
+          ]
+        }
+      ]
     },
     "en": {
       "title": "Only the difference between two personas (system prompts on both sides)",
-      "text": "Write a system prompt for both A and B and keep everything the same except the trait you want (length, form, instructions such as 'answer briefly'). The part that comes from playing a role cancels out, so the direction keeps only the difference between the personas. For candidates, use positive scales (they weaken the A-side persona; around s = 2 it leans to the other side)."
+      "text": "System prompts on both A and B, so that the direction keeps only the difference between the personas.",
+      "sections": [
+        {
+          "h": "What it does",
+          "body": [
+            "- The part that comes from playing a role cancels out, so the direction keeps only the difference between the personas."
+          ]
+        },
+        {
+          "h": "What to put in",
+          "body": [
+            "- Write a system prompt for both A and B.",
+            "- Keep everything the same except the trait you want (length, form, instructions such as 'answer briefly')."
+          ]
+        },
+        {
+          "h": "Recommended counts",
+          "body": [
+            "- For candidates, use positive scales (they weaken the A-side persona; around s = 2 it leans to the other side)."
+          ]
+        }
+      ]
     }
   },
   "name": "cold_vs_warm",

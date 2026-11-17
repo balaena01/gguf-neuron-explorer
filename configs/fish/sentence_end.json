@@ -3,11 +3,93 @@
     "order": 3,
     "ja": {
       "title": "文末の言い方を変える(です・ます → のだ)",
-      "text": "文を終える直前の位置でだけ書く例です。位置の区切りの欄に、返事の位置ではなく before:<正規表現>(一致する文字の直前。keyed write の positions と同じ書き方)を書きます。方向は返事全体の平均(今までの作り方)、形は鍵 1 つ、ニューロンは層 1 つに 1 個です。この形では、当てた状態での鍵の作り直しはしません(書くと「です。」が出なくなるため)。足した量は、何も当てずに作った返事で「一致の直前」と「それ以外」に分けて出ます。試した範囲: Qwen3.5-4B(Q8_0)で 1 回。層 30・強さ 4(強さ 1 では足りないことが keyed write の例で分かっています)。式どおりかは合格。足した量は一致の直前で 1.08、それ以外で 0.05、英語の質問で 0.00。作成に使っていない 8 問のうち 6 問で「〜なのだ」が出ましたが、「なのだとか」「なのだすね」のように崩れた言い方が混じり、敬体のままの文も残りました。英語の 4 問は変わりませんでした。 返事は数問〜12 問を読んだだけなので、1〜2 問の差は誤差です。ほかのモデルでは確かめていません。"
+      "text": "文を終える直前の位置でだけ書いて、文末の言い方を変える例です。",
+      "sections": [
+        {
+          "h": "何をするか",
+          "body": [
+            "- 方向は応答全体の平均(今までの作り方)、形はキー 1 つ、ニューロンは層 1 つに 1 個です。",
+            "- この形では、当てた状態でのキーの作り直しはしません(書くと「です。」が出なくなるため)。",
+            "- 係数 g は、何も当てずに作った応答で「一致の直前」と「それ以外」に分けて出ます。"
+          ]
+        },
+        {
+          "h": "入れるもの",
+          "body": [
+            "- 位置の区切りの欄: 応答の位置ではなく before:<正規表現> を書きます(一致する文字の直前。keyed write の positions と同じ書き方)。"
+          ]
+        },
+        {
+          "h": "勧める数",
+          "body": [
+            "- 強さ(倍率 α)1 では足りないことが、keyed write の例で分かっています(試したときは 4)。"
+          ]
+        },
+        {
+          "h": "確かめた範囲と数",
+          "body": [
+            "- 試した範囲: Qwen3.5-4B(Q8_0)で 1 回。層 30・強さ 4。",
+            "- 式どおりかは合格。",
+            "- 係数 g は、一致の直前で 1.08、それ以外で 0.05、英語の質問で 0.00。",
+            "- 作成に使っていない 8 問のうち 6 問で「〜なのだ」が出ましたが、「なのだとか」「なのだすね」のように崩れた言い方が混じり、敬体のままの文も残りました。",
+            "- 英語の 4 問は変わりませんでした。"
+          ]
+        },
+        {
+          "h": "注意",
+          "body": [
+            "- 応答は数問〜12 問を読んだだけなので、1〜2 問の差は誤差です。",
+            "- ほかのモデルでは確かめていません。",
+            "- 書き出す前に、gne nw verify --recipe <レシピ> --contrast <対照集合> で確かめてください。キーが開く文(対象の場面の質問と応答)で式どおりかを見るので、量子化の丸めによるずれはここで分かります。",
+            "- 量子化したモデルで不合格の層があれば、その層のユニットの後ろに !kauto を付けて、もう一度 verify を回します(docs/fish.md §6)。!kauto で別の誤差が目安(5%)を超えた層もありました(27B のモデルの 1 層)。"
+          ]
+        }
+      ]
     },
     "en": {
       "title": "Change sentence endings (desu/masu → noda)",
-      "text": "An example that writes only just before a sentence ends. In the position segments field, write before:<regex> (the position just before matching text, the same notation as positions in a keyed write) instead of reply positions. The direction is the mean over the whole reply (previous method), the form is one key, and one neuron per layer is used. In this form the keys are not rebuilt with the recipe applied (once it writes, the matching ending no longer appears). The amounts written are measured on replies generated with nothing applied, split into \"just before a match\" and \"elsewhere\". Tried on: Qwen3.5-4B (Q8_0), one run. Layer 30, strength 4 (the keyed-write example showed that strength 1 is not enough). The formula check passed. The amount written was 1.08 just before a match, 0.05 elsewhere and 0.00 on English questions. In 6 of 8 questions not used for building, the noda ending appeared, but mixed with malformed endings and with some sentences left polite. The 4 English questions did not change. Only a handful to 12 replies were read, so a difference of one or two means nothing. Not checked on other models."
+      "text": "An example that writes only just before a sentence ends, to change how sentences end.",
+      "sections": [
+        {
+          "h": "What it does",
+          "body": [
+            "- The direction is the mean over the whole response (previous method), the form is one key, and one neuron per layer is used.",
+            "- In this form the keys are not rebuilt with the recipe applied (once it writes, the matching ending no longer appears).",
+            "- The gate coefficient g is measured on responses generated with nothing applied, split into \"just before a match\" and \"elsewhere\"."
+          ]
+        },
+        {
+          "h": "What to put in",
+          "body": [
+            "- Position segments field: write before:<regex> instead of response positions (the position just before matching text, the same notation as positions in a keyed write)."
+          ]
+        },
+        {
+          "h": "Recommended counts",
+          "body": [
+            "- The keyed-write example showed that strength (scale factor α) 1 is not enough (4 was used here)."
+          ]
+        },
+        {
+          "h": "Checked range and numbers",
+          "body": [
+            "- Tried on: Qwen3.5-4B (Q8_0), one run. Layer 30, strength 4.",
+            "- The formula check passed.",
+            "- The gate coefficient g was 1.08 just before a match, 0.05 elsewhere and 0.00 on English questions.",
+            "- In 6 of 8 questions not used for building, the noda ending appeared, but mixed with malformed endings (such as なのだとか and なのだすね) and with some sentences left polite.",
+            "- The 4 English questions did not change."
+          ]
+        },
+        {
+          "h": "Cautions",
+          "body": [
+            "- Only a handful to 12 responses were read, so a difference of one or two means nothing.",
+            "- Not checked on other models.",
+            "- Before exporting, check the units with gne nw verify --recipe <recipe> --contrast <contrast set>. It checks the formula on text where the keys open (target-scene questions and their responses), so errors from quantization rounding show up here.",
+            "- If a layer fails on a quantized model, add !kauto to the end of that layer's units and run verify again (docs/fish.md §6). On one layer of a 27B model, !kauto pushed another error past the guide value (5%)."
+          ]
+        }
+      ]
     }
   },
   "name": "fish_noda_endings",

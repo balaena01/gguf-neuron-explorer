@@ -3,11 +3,55 @@
     "order": 3,
     "ja": {
       "title": "ニューロンのレシピが作った性格(A 側にレシピ)",
-      "text": "A = レシピを当てたモデル、B = 何もしないモデル(どちらも system なし)。レシピが作った性格を運ぶヘッドを探す。ユニットは Qwen3.5-4B の evil のニューロン(configs/recipes/evil.yaml)なので、別のモデルでは自分のレシピのユニットに書き換える(recipe_a はユニットのリストが確実)。ニューロンを弱めてヘッドで補うときは、候補づくりで負の倍率(B 側を採点)にし、弱めたレシピを「重ねるレシピ」に入れる。"
+      "text": "A = レシピを当てたモデル、B = 何もしないモデルで、レシピが作った性格を運ぶヘッドを探す。",
+      "sections": [
+        {
+          "h": "何をするか",
+          "body": [
+            "- A = レシピを当てたモデル、B = 何もしないモデル(どちらも system なし)。",
+            "- レシピが作った性格を運ぶヘッドを探す。"
+          ]
+        },
+        {
+          "h": "入れるもの",
+          "body": [
+            "- ユニットは Qwen3.5-4B の evil のニューロン(configs/recipes/evil.yaml)なので、別のモデルでは自分のレシピのユニットに書き換える。",
+            "- recipe_a はユニットのリストが確実。"
+          ]
+        },
+        {
+          "h": "勧める数",
+          "body": [
+            "- ニューロンを弱めてヘッドで補うときは、候補づくりで負の倍率(B 側を採点)にし、弱めたレシピを「重ねるレシピ」に入れる。"
+          ]
+        }
+      ]
     },
     "en": {
       "title": "A persona made by a neuron recipe (recipe on side A)",
-      "text": "A = the model with the recipe applied, B = the unmodified model (no system prompt on either side). Finds the heads that carry what the recipe produces. The units are the evil neurons for Qwen3.5-4B (configs/recipes/evil.yaml); for another model, put your own recipe's units here (a list of units is the safest form of recipe_a). To weaken the neurons and let the heads make up for it, use negative scales for candidates (the B-side replies are scored) and give the weakened recipe as the added recipe."
+      "text": "A = the model with the recipe applied, B = the unmodified model: finds the heads that carry what the recipe produces.",
+      "sections": [
+        {
+          "h": "What it does",
+          "body": [
+            "- A = the model with the recipe applied, B = the unmodified model (no system prompt on either side).",
+            "- Finds the heads that carry what the recipe produces."
+          ]
+        },
+        {
+          "h": "What to put in",
+          "body": [
+            "- The units are the evil neurons for Qwen3.5-4B (configs/recipes/evil.yaml); for another model, put your own recipe's units here.",
+            "- A list of units is the safest form of recipe_a."
+          ]
+        },
+        {
+          "h": "Recommended counts",
+          "body": [
+            "- To weaken the neurons and let the heads make up for it, use negative scales for candidates (the B-side responses are scored) and give the weakened recipe as the “added recipe”."
+          ]
+        }
+      ]
     }
   },
   "name": "evil_neurons_4b",

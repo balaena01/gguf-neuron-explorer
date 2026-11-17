@@ -200,6 +200,11 @@ def _put_spec(pg, spec):
                 json.dumps(spec, ensure_ascii=False, indent=2))
 
 
+def _all(a: dict) -> str:
+    """ひな形の説明(about.ja / about.en)の、要約と節の全部の文。"""
+    return " ".join([a.get("text") or ""] + [s["h"] + " " + " ".join(s["body"]) for s in a.get("sections") or []])
+
+
 # --- サーバ ----------------------------------------------------------------------------------------------
 
 def test_template_file():
@@ -207,11 +212,11 @@ def test_template_file():
     assert d["about"]["ja"]["title"] and d["about"]["en"]["title"] and d["about"]["ja"]["text"] and d["about"]["en"]["text"]
     assert len(d["user_prompts"]) >= 24 and d["system_a"]
     assert [g["name"] for g in d["dont_touch"]] == ["tasks", "ordinary", "report", "invite", "greet", "request", "partial"]   # 質問でない発言も群ごとに
-    assert d["fish"]["key_fit"] == "mean" and "key_fit" in d["about"]["ja"]["text"] and "key_fit" in d["about"]["en"]["text"]   # 既定の作り方
+    assert d["fish"]["key_fit"] == "mean" and "key_fit" in _all(d["about"]["ja"]) and "key_fit" in _all(d["about"]["en"])   # 既定の作り方
     assert d["fish"]["form"] == "cap" and d["fish"]["segments"] == "0,1-3,4-" and d["fish"]["alpha"] == [1, 1, 0.8]
     assert "layers" not in d["fish"]                                       # 層は使う人が入れる
     assert d["fish"]["stack_fast"] is False                                # 速い読み方は、書けるが既定は切
-    assert "stack_fast" in d["about"]["ja"]["text"] and "stack_fast" in d["about"]["en"]["text"] and "探索" in d["about"]["ja"]["text"]
+    assert "stack_fast" in _all(d["about"]["ja"]) and "stack_fast" in _all(d["about"]["en"]) and "探索" in _all(d["about"]["ja"])
 
 
 def test_units_and_names_without_model():
@@ -872,12 +877,12 @@ def test_all_templates_are_readable(tmp_path):
         d = json.loads((TEMPLATE.parent / name).read_text(encoding="utf-8"))
         a = d.pop("about")
         orders.append(a["order"])
-        assert a["ja"]["title"] and a["en"]["title"] and "試した範囲" in a["ja"]["text"] and "Tried on" in a["en"]["text"], name
-        assert "誤差" in a["ja"]["text"] and "Qwen3.5-4B" in a["ja"]["text"] and "Qwen3.5-4B" in a["en"]["text"], name
+        assert a["ja"]["title"] and a["en"]["title"] and "試した範囲" in _all(a["ja"]) and "Tried on" in _all(a["en"]), name
+        assert "誤差" in _all(a["ja"]) and "Qwen3.5-4B" in _all(a["ja"]) and "Qwen3.5-4B" in _all(a["en"]), name
         st = d.pop("fish")
         assert set(st) <= set(fish.SETTINGS) and "layers" not in st, name       # 層は使う人が入れる
         assert st.get("stack_fast", False) is False and ("stack_fast" in st) == bool(st.get("stack")), name    # 速い読み方: 重ねる形にだけ書いてあり、切
-        assert ("stack_fast" in a["ja"]["text"]) == ("stack_fast" in a["en"]["text"]) == bool(st.get("stack")), name
+        assert ("stack_fast" in _all(a["ja"])) == ("stack_fast" in _all(a["en"])) == bool(st.get("stack")), name
         assert st["form"] in fish.FORMS, name
         segs = fish._segments(st["segments"])
         al = fish.alphas_of(st["alpha"], len(segs))                             # 数 1 つか、区切りごと

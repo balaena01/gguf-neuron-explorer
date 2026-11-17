@@ -3,11 +3,53 @@
     "order": 1,
     "ja": {
       "title": "system で頼んだ性格(system は A 側だけ)",
-      "text": "A = 性格を頼む system あり、B = system なし(ふだんのモデル)。system で出した性格を運ぶヘッドを探し、弱める・消すのに使う。候補づくりは正の倍率(A 側の返事を採点)。system の文・質問・validate を、作りたい性格に書き換えて使う。"
+      "text": "system で出した性格を運ぶヘッドを探し、弱める・消すのに使う。",
+      "sections": [
+        {
+          "h": "何をするか",
+          "body": [
+            "- A = 性格を頼む system あり、B = system なし(ふだんのモデル)。",
+            "- system で出した性格を運ぶヘッドを探す。"
+          ]
+        },
+        {
+          "h": "入れるもの",
+          "body": [
+            "- system の文・質問・validate を、作りたい性格に書き換えて使う。"
+          ]
+        },
+        {
+          "h": "勧める数",
+          "body": [
+            "- 候補づくりは正の倍率(A 側の応答を採点)。"
+          ]
+        }
+      ]
     },
     "en": {
       "title": "A persona asked for in a system prompt (system prompt on side A only)",
-      "text": "A = with the persona's system prompt, B = no system prompt (the model as it normally answers). Finds the heads that carry the persona so that it can be weakened or removed. For candidates, use positive scales (the A-side replies are scored). Rewrite the system prompt, the questions and validate for the persona you want."
+      "text": "Finds the heads that carry a persona asked for in a system prompt, so that it can be weakened or removed.",
+      "sections": [
+        {
+          "h": "What it does",
+          "body": [
+            "- A = with the persona's system prompt, B = no system prompt (the model as it normally answers).",
+            "- Finds the heads that carry the persona."
+          ]
+        },
+        {
+          "h": "What to put in",
+          "body": [
+            "- Rewrite the system prompt, the questions and validate for the persona you want."
+          ]
+        },
+        {
+          "h": "Recommended counts",
+          "body": [
+            "- For candidates, use positive scales (the A-side responses are scored)."
+          ]
+        }
+      ]
     }
   },
   "name": "evil_sys",

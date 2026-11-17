@@ -3,11 +3,41 @@
     "order": 4,
     "ja": {
       "title": "質問の種類の違い(言語・話題・形式。側ごとに別の質問)",
-      "text": "system もレシピも使わず、何もしないモデルに 2 種類の質問を読ませ、その差を方向にする。例は日本語と英語(中身は翻訳どうし)。狙った違い以外(話題・長さ)は両側でそろえる。validate.prompts は A 側にしか使われないので、候補づくりで調整に使っていない質問は、フォームの A と B の欄に分けて入れる。"
+      "text": "system もレシピも使わず、何もしないモデルに 2 種類の質問を読ませ、その差を方向にする。",
+      "sections": [
+        {
+          "h": "何をするか",
+          "body": [
+            "- 例は日本語と英語(中身は翻訳どうし)。"
+          ]
+        },
+        {
+          "h": "入れるもの",
+          "body": [
+            "- 狙った違い以外(話題・長さ)は両側でそろえる。",
+            "- validate.prompts は A 側にしか使われないので、候補づくりで調整に使っていない質問は、フォームの A と B の欄に分けて入れる。"
+          ]
+        }
+      ]
     },
     "en": {
       "title": "Two kinds of questions (language, topic, format; separate questions per side)",
-      "text": "No system prompt and no recipe: the unmodified model reads two kinds of questions and the direction is the difference between them. The example compares Japanese and English (the questions are translations of each other). Keep everything else, such as topic and length, the same on both sides. validate.prompts is used only for side A, so for candidates put questions that were not used for tuning into the form's A and B boxes."
+      "text": "No system prompt and no recipe: the unmodified model reads two kinds of questions and the direction is the difference between them.",
+      "sections": [
+        {
+          "h": "What it does",
+          "body": [
+            "- The example compares Japanese and English (the questions are translations of each other)."
+          ]
+        },
+        {
+          "h": "What to put in",
+          "body": [
+            "- Keep everything else, such as topic and length, the same on both sides.",
+            "- validate.prompts is used only for side A, so for candidates put questions that were not used for tuning into the form's A and B boxes."
+          ]
+        }
+      ]
     }
   },
   "name": "ja_vs_en",

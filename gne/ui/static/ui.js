@@ -44,6 +44,29 @@ export function noteHTML(text, cls = "muted note") {
   return `<details class="more ${cls}"><summary>${head}</summary><p>${s}</p></details>`;
 }
 
+// ひな形の説明(JSON の about.ja / about.en)。text は 1〜2 文の要約、sections は [{h: 見出し, body: [段落 | "- 箇条書き"]}]。
+// sections があれば要約をそのまま見せ、節ごとに <details> でたたむ(見出しを開くと段落と箇条書き。閉じていてもページ内検索で
+// 見つかる)。text だけの形(自分で作ったひな形など)は noteHTML と同じ。prefix は要約の前に付ける文(esc しない。呼ぶ側で esc する)
+const escText = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+export function aboutHTML(a, prefix = "") {
+  const text = `${prefix}${escText((a && a.text) || "")}`;
+  const secs = a && Array.isArray(a.sections) ? a.sections.filter((s) => s && s.h && Array.isArray(s.body) && s.body.length) : [];
+  if (!secs.length) return noteHTML(text, "");
+  const body = (items) => {
+    const out = [];
+    let ul = [];
+    const flush = () => { if (ul.length) out.push(`<ul>${ul.map((x) => `<li>${x}</li>`).join("")}</ul>`); ul = []; };
+    for (const raw of items) {
+      const s = String(raw ?? "");
+      if (s.startsWith("- ")) ul.push(escText(s.slice(2)));
+      else { flush(); if (s.trim()) out.push(`<p>${escText(s)}</p>`); }
+    }
+    flush();
+    return out.join("");
+  };
+  return `<p class="tpl-sum">${text}</p>${secs.map((s) => `<details class="more tpl-sec"><summary>${escText(s.h)}</summary>${body(s.body)}</details>`).join("")}`;
+}
+
 // 確かめる窓(ブラウザの confirm の代わり。<dialog> を showModal で開く)。はい なら true。
 // 安全な方(やめる)に初めからフォーカスを置く。Esc や外側の操作で閉じたときは やめる と同じ
 let askDialog = null;

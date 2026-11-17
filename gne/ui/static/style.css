@@ -786,6 +786,11 @@ table.fx-behave-tab td.fx-a, table.fx-try-tab td.fx-a { max-width: 760px; white-
 details.more > summary { cursor: pointer; }
 details.more[open] > summary { color: var(--text-4); }
 details.more > p { margin: var(--sp-2) 0 var(--sp-3); }
+.tpl-sum { margin: 0 0 var(--sp-2); }                            /* ひな形の説明: 要約と、節ごとにたたんだ説明 */
+details.tpl-sec { margin: 0 0 var(--sp-1); }
+details.tpl-sec > p, details.tpl-sec > ul { margin: var(--sp-1) 0 var(--sp-2); max-width: 72ch; }
+details.tpl-sec > ul { padding-inline-start: 1.4em; }
+details.tpl-sec li + li { margin-top: 0.15em; }
 .stage details#kb-wrap > summary.kb-sum { display: none; }       /* 鍵の画面の「CHiPS の残りから作る」は作業の一覧で開く(見出しは上に出る) */
 .stage details#evx-ft-wrap > summary { display: none; }        /* 評価の画面の実地テストは作業の一覧で開く */
 #eval-view .build, #direction-view .build { min-height: calc(100% - var(--sp-6)); }

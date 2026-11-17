@@ -3,11 +3,57 @@
     "order": 1,
     "ja": {
       "title": "文末の言い方を変える(作り方 (b)、です・ます → のだ)",
-      "text": "推論時と同じ文脈(system なし)のモデル自身の返事を読み、「です。」「ます。」を書く直前の位置を書き込みたい位置、同じ返事のそれ以外の位置を書き込みたくない位置にして鍵を作る(positions: before:<正規表現>)。dont_touch の english は英語の質問の群で、英語の返事の位置には書き込まない。system_a は方向を作るためのもの(A = ずんだもんの system、B = system なしの返事の差)で、鍵には使わない。書き換えるときは、system_a を目的の言い方に、正規表現をモデルが実際に書く文末に合わせる(鍵の結果の「正規表現が一致した例」と読んだ返事の例を見る)。「+ レシピ」の α は正(方向をそのまま書く)。"
+      "text": "モデル自身の応答で「です。」「ます。」を書く直前の位置だけに方向を書き、文末の言い方を変える。",
+      "sections": [
+        {
+          "h": "何をするか",
+          "body": [
+            "- 推論時と同じ文脈(system なし)のモデル自身の応答を読む。",
+            "- 「です。」「ます。」を書く直前の位置を書き込みたい位置、同じ応答のそれ以外の位置を書き込みたくない位置にしてキーを作る(positions: before:<正規表現>)。",
+            "- system_a は方向を作るためのもの(A = ずんだもんの system、B = system なしの応答の差)で、キーには使わない。"
+          ]
+        },
+        {
+          "h": "入れるもの",
+          "body": [
+            "- dont_touch の english は英語の質問の群で、英語の応答の位置には書き込まない。",
+            "- 書き換えるときは、system_a を目的の言い方に、正規表現をモデルが実際に書く文末に合わせる(キーの結果の「正規表現が一致した例」と「読んだ応答の例」を見る)。"
+          ]
+        },
+        {
+          "h": "勧める数",
+          "body": [
+            "- 「+ レシピ」の α は正(方向をそのまま書く)。"
+          ]
+        }
+      ]
     },
     "en": {
       "title": "Change how sentences end (method (b): です/ます → のだ)",
-      "text": "Reads the model's own replies in the inference-time context (no system prompt). The position just before it writes です。 or ます。 is a position to write at, and every other position in the same replies is a position to leave alone (positions: before:<regex>). dont_touch english is a group of English questions, so nothing is written in English replies. system_a is only for building the direction (A = the Zundamon system prompt, B = replies without a system prompt) and is not used for the key. To adapt it, rewrite system_a for the ending you want and the regex for the endings the model actually writes (check the key result's matched examples and the sample replies). Use a positive α in “+ recipe” (writes the direction as is)."
+      "text": "Writes the direction only at the position just before the model writes です。 or ます。 in its own responses, to change how sentences end.",
+      "sections": [
+        {
+          "h": "What it does",
+          "body": [
+            "- Reads the model's own responses in the inference-time context (no system prompt).",
+            "- The position just before it writes です。 or ます。 is a position to write at, and every other position in the same responses is a position to leave alone (positions: before:<regex>).",
+            "- system_a is only for building the direction (A = the Zundamon system prompt, B = responses without a system prompt) and is not used for the key."
+          ]
+        },
+        {
+          "h": "What to put in",
+          "body": [
+            "- dont_touch english is a group of English questions, so nothing is written in English responses.",
+            "- To adapt it, rewrite system_a for the ending you want and the regex for the endings the model actually writes (check the matched examples in the key result and \"Sample responses read\")."
+          ]
+        },
+        {
+          "h": "Recommended counts",
+          "body": [
+            "- Use a positive α in “+ recipe” (writes the direction as is)."
+          ]
+        }
+      ]
     }
   },
   "name": "noda_endings",

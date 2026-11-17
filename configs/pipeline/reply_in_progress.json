@@ -2,12 +2,56 @@
   "about": {
     "order": 5,
     "ja": {
-      "title": "返事の途中で起きる振る舞い(考えがループするなど。書きかけの返事の対)",
-      "text": "返事の直前では測れない、書いている途中の状態の差を方向にする。例は thinking の途中で、同じ問題と同じ途中の計算のあと、A は同じ確認を繰り返し、B は先へ進む。assistant で終わる履歴は書きかけの返事で、その最後のトークンで測り、候補づくりはその続きから書く。<think> で始めると thinking の途中として読む(thinking のないモデルでは本文の途中を書く)。例は形を示すために人が書いた文なので、実際に使うときはそのモデル自身の返事から切り出したものに置き換える。 候補づくりは正の倍率で、A 側の繰り返しが減るかを読む。"
+      "title": "応答の途中で起きる振る舞い(考えがループするなど。書きかけの応答の対)",
+      "text": "応答の直前では測れない、書いている途中の状態の差を方向にする。",
+      "sections": [
+        {
+          "h": "何をするか",
+          "body": [
+            "- 例は thinking の途中で、同じ問題と同じ途中の計算のあと、A は同じ確認を繰り返し、B は先へ進む。",
+            "- assistant で終わる履歴は書きかけの応答で、その最後のトークンで測る。候補づくりはその続きから書く。"
+          ]
+        },
+        {
+          "h": "入れるもの",
+          "body": [
+            "- <think> で始めると thinking の途中として読む(thinking のないモデルでは本文の途中を書く)。",
+            "- 例は形を示すために人が書いた文なので、実際に使うときはそのモデル自身の応答から切り出したものに置き換える。"
+          ]
+        },
+        {
+          "h": "勧める数",
+          "body": [
+            "- 候補づくりは正の倍率で、A 側の繰り返しが減るかを読む。"
+          ]
+        }
+      ]
     },
     "en": {
-      "title": "Behavior that appears partway through a reply (thinking in circles, for example; pairs of unfinished replies)",
-      "text": "For differences that cannot be measured just before the reply, because they arise while it is being written. The example is partway through thinking: after the same question and the same work so far, side A repeats the same check and side B moves on. A history that ends with an assistant turn is an unfinished reply: it is measured at its last token, and candidates continue from there. Text that starts with <think> is read as thinking in progress (for a model without thinking, write the middle of the reply instead). The example text was written by hand to show the shape, so for real use replace it with passages cut from that model's own replies. For candidates, use positive factors and read whether side A's repetition goes down."
+      "title": "Behavior that appears partway through a response (thinking in circles, for example; pairs of unfinished responses)",
+      "text": "For differences that cannot be measured just before the response, because they arise while it is being written.",
+      "sections": [
+        {
+          "h": "What it does",
+          "body": [
+            "- The example is partway through thinking: after the same question and the same work so far, side A repeats the same check and side B moves on.",
+            "- A history that ends with an assistant turn is an unfinished response: it is measured at its last token, and candidates continue from there."
+          ]
+        },
+        {
+          "h": "What to put in",
+          "body": [
+            "- Text that starts with <think> is read as thinking in progress (for a model without thinking, write the middle of the response instead).",
+            "- The example text was written by hand to show the shape, so for real use replace it with passages cut from that model's own responses."
+          ]
+        },
+        {
+          "h": "Recommended counts",
+          "body": [
+            "- For candidates, use positive factors and read whether side A's repetition goes down."
+          ]
+        }
+      ]
     }
   },
   "name": "repeat_vs_progress",

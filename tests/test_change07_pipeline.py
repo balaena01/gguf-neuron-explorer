@@ -78,7 +78,7 @@ def test_keyed_templates_shape_and_content(tmp_path):
         a = d["about"]
         orders[f] = a["order"]
         for lang in ("ja", "en"):
-            assert a[lang]["title"] and len(a[lang]["text"]) > 80, (f, lang)
+            assert a[lang]["title"] and a[lang]["text"] and len(_all(a[lang])) > 80 and a[lang].get("sections"), (f, lang)
         assert not any(w in json.dumps(d, ensure_ascii=False) for w in ("/home/", "design-backup")), f
     assert sorted(orders.values()) == [1, 2, 3]
     z, ts = yaml.safe_load(ZUNDAMON.read_text(encoding="utf-8")), yaml.safe_load(TSUNDERE.read_text(encoding="utf-8"))
@@ -89,8 +89,8 @@ def test_keyed_templates_shape_and_content(tmp_path):
     assert two["positions"] == ts["positions"] and two["user_prompts"] == ts["user_prompts"] and two["dont_touch"] == ts["dont_touch"]
     dts = {g["name"]: g for g in two["dont_touch"]}
     assert set(dts) == {"tasks", "starts"} and dts["starts"]["positions"] == "last" and "positions" not in dts["tasks"]
-    assert "starts" in two["about"]["ja"]["text"] and "返事を書き始める直前の位置" in two["about"]["ja"]["text"]
-    assert "starts" in two["about"]["en"]["text"] and "just before the reply begins" in two["about"]["en"]["text"]
+    assert "starts" in _all(two["about"]["ja"]) and "応答を書き始める直前の位置" in _all(two["about"]["ja"])
+    assert "starts" in _all(two["about"]["en"]) and "just before the response begins" in _all(two["about"]["en"])
     three = _tpl("system_state.json")
     assert not three["positions"].startswith("before:") and three["system_a"] and three["system_b"]
     assert three["keyed"]["alpha"] < 0 and "(a)" in three["about"]["ja"]["title"]
@@ -406,3 +406,8 @@ def test_granite_experts_job_with_spec(tmp_path):
         assert (s.store.contrast_dir() / "noda_endings.yaml").exists()
     finally:
         s.close()
+
+
+def _all(a: dict) -> str:
+    """ひな形の説明(about.ja / about.en)の、要約と節の全部の文。"""
+    return " ".join([a.get("text") or ""] + [s["h"] + " " + " ".join(s["body"]) for s in a.get("sections") or []])

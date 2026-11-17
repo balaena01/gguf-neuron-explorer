@@ -26,7 +26,7 @@ import { KeyCausal } from "./keys_causal.js";
 import { LANG, t } from "./i18n.js";
 import { esc } from "./panels.js";
 import { Steps } from "./steps.js";
-import { noteHTML, askConfirm, layersInput } from "./ui.js";
+import { noteHTML, askConfirm, layersInput, aboutHTML } from "./ui.js";
 
 const fmt = (x, d = 2) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : (+x).toFixed(d));
 const short = (s, n = 60) => { const x = String(s ?? ""); return x.length > n ? `${x.slice(0, n - 1)}…` : x; };
@@ -345,7 +345,7 @@ export class KeyPanel {
     this.chips = new ChipsLeft(this.$("#kb-wrap"), {
       onRun: (kind, p) => this.onRun(kind, p), dirs: () => this.dirs, contrasts: () => this.contrasts,
       putSpec: async (spec, text, file) => {                 // 作った JSON を入力欄に入れ、ひな形の一覧にも出す
-        const ok = await this.putSpec(spec, `${t("自分で作ったひな形(<root>/keyed/{f})", { f: file })} ${text}`, `<root>/keyed/${file}`,
+        const ok = await this.putSpec(spec, noteHTML(esc(`${t("自分で作ったひな形(<root>/keyed/{f})", { f: file })} ${text}`), ""), `<root>/keyed/${file}`,
                                 t("入力欄の JSON を、作った JSON で置き換えます。よいですか?"));
         this.loadTemplates().then(() => { if (ok) this.$("#kx-tpl-sel").value = `root/${file}`; });
         return ok;
@@ -526,8 +526,8 @@ export class KeyPanel {
   async insertTemplate(key, ask) {
     const x = this.templates.find((y) => y.key === key);
     if (!x) return;
-    const text = (x[LANG] && x[LANG].text) || (x.ja && x.ja.text) || "";
-    const ok = await this.putSpec(x.spec, x.src === "root" ? `${t("自分で作ったひな形(<root>/keyed/{f})", { f: x.file })} ${text}` : text,
+    const a = (x[LANG] && x[LANG].text) ? x[LANG] : x.ja;
+    const ok = await this.putSpec(x.spec, aboutHTML(a, x.src === "root" ? `${esc(t("自分で作ったひな形(<root>/keyed/{f})", { f: x.file }))} ` : ""),
                             x.src === "root" ? `<root>/keyed/${x.file}` : `configs/keyed/${x.file}`,
                             ask ? t("入力欄の JSON をひな形で置き換えます。よいですか?") : null);
     if (!ok) this.$("#kx-tpl-sel").value = "";
@@ -535,13 +535,13 @@ export class KeyPanel {
 
   // 表を入力欄に入れて「JSON を書く」にする。confirm(確かめの文)を渡すと、書き換えた入力欄を消す前に確かめる(書き換えていなければ
   // 確かめない)。入れたら true
-  async putSpec(spec, aboutText, aboutTitle, confirm = null) {
+  async putSpec(spec, aboutHtml, aboutTitle, confirm = null) {
     const ta = this.$("#kx-text"), about = this.$("#kx-tpl-about");
     const cur = ta.value.trim();
     if (confirm && cur && cur !== this.tplText && !(await askConfirm(confirm))) return false;
     ta.value = JSON.stringify(spec, null, 2);
     this.tplText = ta.value.trim();
-    about.innerHTML = noteHTML(esc(aboutText), "");                 // 長い説明は最初の文だけ見せて、全文はたたむ
+    about.innerHTML = aboutHtml;                                     // 要約と、節ごとにたたんだ説明(aboutHTML か noteHTML の文)
     about.title = aboutTitle;
     if (this.src !== "json") this.setSource("json");
     else this.checkJSON();

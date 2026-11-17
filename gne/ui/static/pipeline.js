@@ -10,7 +10,7 @@ import { getJSON } from "./api.js";
 import { LANG, t } from "./i18n.js";
 import { esc } from "./panels.js";
 import { Steps } from "./steps.js";
-import { noteHTML, askConfirm } from "./ui.js";
+import { noteHTML, askConfirm, aboutHTML } from "./ui.js";
 
 const fmt = (x, d = 2) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : (+x).toFixed(d));
 const sgn = (x, d = 2) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : `${x >= 0 ? "+" : "−"}${Math.abs(x).toFixed(d)}`);
@@ -227,8 +227,7 @@ export class PipelinePanel {
     if (ask && cur && cur !== this.tplText && !(await askConfirm(t("入力欄の JSON をひな形で置き換えます。よいですか?")))) return;
     ta.value = JSON.stringify(spec, null, 2);
     this.tplText = ta.value.trim();
-    const a = x ? (x[LANG] && x[LANG].text) || (x.ja && x.ja.text) || "" : "";
-    about.innerHTML = noteHTML(esc(a), "");                         // 長い説明は最初の文だけ見せて、全文はたたむ
+    about.innerHTML = x ? aboutHTML((x[LANG] && x[LANG].text) ? x[LANG] : x.ja) : "";   // 要約と、節ごとにたたんだ説明
     about.title = x ? `configs/pipeline/${x.file}` : "";
     this.check();
   }

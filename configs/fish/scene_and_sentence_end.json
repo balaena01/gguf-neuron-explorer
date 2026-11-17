@@ -3,11 +3,85 @@
     "order": 4,
     "ja": {
       "title": "場面 かつ 文末(雑談のときだけ「のだ」)",
-      "text": "鍵 2 つの形の例です。ゲートの行に場面の鍵(雑談の質問への返事の間ずっと反応する)、入力の行に文末の直前の鍵を入れ、両方が反応する位置でだけ書きます。user_prompts に狙う場面(雑談)の質問を、dont_touch に変えたくない場面(計算・事実・説明)の質問を書きます。位置の区切りの欄は before:<正規表現> です。試した範囲: Qwen3.5-4B(Q8_0)で 1 回。層 30・強さ 4。式どおりかは合格。足した量は、雑談の返事の一致の直前で 0.66、計算・事実の返事の一致の直前で 0.07、それ以外の位置は 0.01 以下。作成に使っていない雑談 8 問のうち 5 問に「のだ」が出ましたが、返事の中の一部の文だけで、鍵 1 つの形より弱く、崩れた言い方も混じりました。計算・事実の 6 問は敬体のままでしたが、1 問は答えの中身が変わりました(掛け算を割り算として答えた)。口調の完成度は低く、流れと書き分けを見るための例です。 返事は数問〜12 問を読んだだけなので、1〜2 問の差は誤差です。ほかのモデルでは確かめていません。"
+      "text": "キー 2 つの形の例です。場面のキーと文末の直前のキーの両方が反応する位置でだけ書きます。",
+      "sections": [
+        {
+          "h": "何をするか",
+          "body": [
+            "- W_gate の行に場面のキー(雑談の質問への応答の間ずっと反応する)、W_up の行に文末の直前のキーを入れます。",
+            "- 両方が反応する位置でだけ書きます。"
+          ]
+        },
+        {
+          "h": "入れるもの",
+          "body": [
+            "- user_prompts: 対象の場面(雑談)の質問。",
+            "- dont_touch: 対象外の場面(計算・事実・説明)の質問。",
+            "- 位置の区切りの欄: before:<正規表現>。"
+          ]
+        },
+        {
+          "h": "確かめた範囲と数",
+          "body": [
+            "- 試した範囲: Qwen3.5-4B(Q8_0)で 1 回。層 30・強さ 4。",
+            "- 式どおりかは合格。",
+            "- 係数 g は、雑談の応答の一致の直前で 0.66、計算・事実の応答の一致の直前で 0.07、それ以外の位置は 0.01 以下。",
+            "- 作成に使っていない雑談 8 問のうち 5 問に「のだ」が出ましたが、応答の中の一部の文だけで、キー 1 つの形より弱く、崩れた言い方も混じりました。",
+            "- 計算・事実の 6 問は敬体のままでしたが、1 問は答えの中身が変わりました(掛け算を割り算として答えた)。"
+          ]
+        },
+        {
+          "h": "注意",
+          "body": [
+            "- 口調の完成度は低く、流れと書き分けを見るための例です。",
+            "- 応答は数問〜12 問を読んだだけなので、1〜2 問の差は誤差です。",
+            "- ほかのモデルでは確かめていません。",
+            "- 書き出す前に、gne nw verify --recipe <レシピ> --contrast <対照集合> で確かめてください。キーが開く文(対象の場面の質問と応答)で式どおりかを見るので、量子化の丸めによるずれはここで分かります。",
+            "- 量子化したモデルで不合格の層があれば、その層のユニットの後ろに !kauto を付けて、もう一度 verify を回します(docs/fish.md §6)。!kauto で別の誤差が目安(5%)を超えた層もありました(27B のモデルの 1 層)。"
+          ]
+        }
+      ]
     },
     "en": {
       "title": "A scene AND sentence ends (noda only in small talk)",
-      "text": "An example of the two-key form. The gate row gets a scene key (it responds throughout replies to small-talk questions) and the input row gets a key for the position just before a sentence ends; the neuron writes only where both respond. Put small-talk questions in user_prompts and questions of the scene to leave alone (calculations, facts, explanations) in dont_touch. The position segments field holds before:<regex>. Tried on: Qwen3.5-4B (Q8_0), one run. Layer 30, strength 4. The formula check passed. The amount written was 0.66 just before a match in small-talk replies, 0.07 just before a match in calculation and fact replies, and at most 0.01 elsewhere. In 5 of 8 small-talk questions not used for building, noda appeared, but only in some sentences of a reply, weaker than the one-key form and with malformed endings mixed in. The 6 calculation and fact questions stayed polite, but one answer changed in content (a multiplication was answered as a division). The tone is far from finished; this example is for seeing the flow and the separation. Only a handful to 12 replies were read, so a difference of one or two means nothing. Not checked on other models."
+      "text": "An example of the two-key form: the neuron writes only where both the scene key and the key for the position just before a sentence ends respond.",
+      "sections": [
+        {
+          "h": "What it does",
+          "body": [
+            "- The W_gate row gets a scene key (it responds throughout responses to small-talk questions) and the W_up row gets a key for the position just before a sentence ends.",
+            "- The neuron writes only where both respond."
+          ]
+        },
+        {
+          "h": "What to put in",
+          "body": [
+            "- user_prompts: questions of the target scene (small talk).",
+            "- dont_touch: questions of the non-target scenes (calculations, facts, explanations).",
+            "- Position segments field: before:<regex>."
+          ]
+        },
+        {
+          "h": "Checked range and numbers",
+          "body": [
+            "- Tried on: Qwen3.5-4B (Q8_0), one run. Layer 30, strength 4.",
+            "- The formula check passed.",
+            "- The gate coefficient g was 0.66 just before a match in small-talk responses, 0.07 just before a match in calculation and fact responses, and at most 0.01 elsewhere.",
+            "- In 5 of 8 small-talk questions not used for building, noda appeared, but only in some sentences of a response, weaker than the one-key form and with malformed endings mixed in.",
+            "- The 6 calculation and fact questions stayed polite, but one answer changed in content (a multiplication was answered as a division)."
+          ]
+        },
+        {
+          "h": "Cautions",
+          "body": [
+            "- The tone is far from finished; this example is for seeing the flow and the separation.",
+            "- Only a handful to 12 responses were read, so a difference of one or two means nothing.",
+            "- Not checked on other models.",
+            "- Before exporting, check the units with gne nw verify --recipe <recipe> --contrast <contrast set>. It checks the formula on text where the keys open (target-scene questions and their responses), so errors from quantization rounding show up here.",
+            "- If a layer fails on a quantized model, add !kauto to the end of that layer's units and run verify again (docs/fish.md §6). On one layer of a 27B model, !kauto pushed another error past the guide value (5%)."
+          ]
+        }
+      ]
     }
   },
   "name": "fish_noda_in_chat",

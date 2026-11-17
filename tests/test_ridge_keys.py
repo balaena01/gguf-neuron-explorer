@@ -404,7 +404,7 @@ def test_templates_list_non_question_groups(tmp_path):
         assert [g["name"] for g in d["dont_touch"]] == ["tasks", "ordinary", "report", "invite", "greet", "request", "partial"], name
         assert all(len(g["prompts"]) >= 4 for g in d["dont_touch"]) and d["fish"]["key_fit"] == "mean", name
         assert not set(d["user_prompts"]) & {q for g in d["dont_touch"] for q in g["prompts"]}, name      # 狙う場面と重ならない
-        assert "key_fit" in about["ja"]["text"] and "key_fit" in about["en"]["text"], name
+        assert "key_fit" in _all(about["ja"]) and "key_fit" in _all(about["en"]), name
         p = tmp_path / f"{name}.yaml"
         write_yaml(p, {k: v for k, v in d.items() if k != "fish"})
         ks = read_key_spec(p)
@@ -658,3 +658,8 @@ def test_key_entries_cli_jobs_and_estimates(made):
     ek = estimate(s, "direction_key", {"contrast": c, "layers": [8], "target": "mlpin", "positions": "pos:0", "key_fit": "ridge"})
     e0 = estimate(s, "direction_key", {"contrast": c, "layers": [8], "target": "mlpin", "positions": "pos:0"})
     assert ek["detail"]["key_fit_seconds"] > 0 and "key_fit_seconds" not in e0["detail"] and ek["seconds"] > e0["seconds"]
+
+
+def _all(a: dict) -> str:
+    """ひな形の説明(about.ja / about.en)の、要約と節の全部の文。"""
+    return " ".join([a.get("text") or ""] + [s["h"] + " " + " ".join(s["body"]) for s in a.get("sections") or []])

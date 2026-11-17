@@ -35,7 +35,7 @@ import { checkKeySpec, parseLayers } from "./keys.js";
 import { esc } from "./panels.js";
 import { parseNw } from "./recipe.js";
 import { Steps } from "./steps.js";
-import { noteHTML, askConfirm, layersInput } from "./ui.js";
+import { noteHTML, askConfirm, layersInput, aboutHTML } from "./ui.js";
 
 const fmt = (x, d = 2) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : (+x).toFixed(d));
 const NAME_RE = /^[\w.-]+$/;
@@ -457,7 +457,7 @@ export class FishPanel {
     ta.value = JSON.stringify(x.spec, null, 2);
     this.tplText = ta.value.trim();
     const about = this.$("#fx-tpl-about");
-    about.innerHTML = noteHTML(esc((x[LANG] && x[LANG].text) || (x.ja && x.ja.text) || ""), "");   // 長い説明は最初の文だけ見せて、全文はたたむ
+    about.innerHTML = aboutHTML((x[LANG] && x[LANG].text) ? x[LANG] : x.ja);   // 要約と、節ごとにたたんだ説明
     about.title = `configs/fish/${x.file}`;
     if (this.src !== "json") this.setSource("json");
     else this.checkJSON();

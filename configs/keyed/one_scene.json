@@ -2,12 +2,84 @@
   "about": {
     "order": 2,
     "ja": {
-      "title": "特定の場面の返事だけ変える(作り方 (b)、褒められた・お礼を言われた場面でツンデレに)",
-      "text": "褒められたりお礼を言われたりした場面で、モデルが素直に「ありがとう」「嬉しい」「楽しい」を書く直前の位置だけに、ツンデレの方向を書く。質問はその場面のものを多めに置く(素のモデルはお礼を書かないことも多く、書き込みたい位置を含む例が少ないと、鍵が状態ではなく例の本文に反応する)。dont_touch の tasks は計算・事実・手順の質問の群で、その返事の位置には書き込まない。starts が要る理由: お礼は返事の最初に書かれることが多く、そのときの書き込みたい位置は返事を書き始める直前の位置になる。この状態はどの質問でも似ているので、そのままではふつうの質問でも返事の冒頭で鍵が反応する。鍵の作成は dont_touch の各群の質問の、返事を書き始める直前の位置を自動で書き込みたくない位置に入れるが、tasks の数問だけでは足りなかった(Qwen3-0.6B の ffn の鍵で、ふつうの質問の返事の冒頭での反応の強さが 0.5 残った)。starts は positions: last で、ふつうの質問の、返事を書き始める直前の位置だけを足す群(返事は作らない)。key-check では、書き込みたくない位置と dont_touch の、返事の冒頭での反応の強さ(0.4 以上は赤)も見る。「+ レシピ」の α は正で、繰り返しに落ちるなら下げる。"
+      "title": "特定の場面の応答だけ変える(作り方 (b)、褒められた・お礼を言われた場面でツンデレに)",
+      "text": "褒められたりお礼を言われたりした場面の応答だけを、ツンデレの方向を書いて変える。",
+      "sections": [
+        {
+          "h": "何をするか",
+          "body": [
+            "- 褒められた・お礼を言われた場面で、モデルが素直に「ありがとう」「嬉しい」「楽しい」を書く直前の位置だけに、ツンデレの方向を書く。"
+          ]
+        },
+        {
+          "h": "入れるもの",
+          "body": [
+            "- 質問はその場面のものを多めに置く(素のモデルはお礼を書かないことも多く、書き込みたい位置を含む例が少ないと、キーが状態ではなく例の本文に反応する)。",
+            "- dont_touch の tasks は計算・事実・手順の質問の群で、その応答の位置には書き込まない。",
+            "- dont_touch の starts は positions: last で、ふつうの質問の、応答を書き始める直前の位置だけを足す群(応答は作らない)。",
+            "- starts が要る理由: お礼は応答の最初に書かれることが多く、そのときの書き込みたい位置は応答を書き始める直前の位置になる。この状態はどの質問でも似ているので、そのままではふつうの質問でも応答の冒頭でキーが反応する。",
+            "- キーの作成は dont_touch の各群の質問の、応答を書き始める直前の位置を自動で書き込みたくない位置に入れるが、tasks の数問だけでは足りなかった。"
+          ]
+        },
+        {
+          "h": "勧める数",
+          "body": [
+            "- 「+ レシピ」の α は正で、繰り返しに落ちるなら下げる。"
+          ]
+        },
+        {
+          "h": "確かめた範囲と数",
+          "body": [
+            "- Qwen3-0.6B の ffn のキーで、dont_touch が tasks の数問だけのときは、ふつうの質問の応答の冒頭でのキーの出力が 0.5 残った(starts の群を足してある理由)。"
+          ]
+        },
+        {
+          "h": "注意",
+          "body": [
+            "- key-check では、書き込みたくない位置と dont_touch の、応答の冒頭でのキーの出力(0.4 以上は赤)も見る。"
+          ]
+        }
+      ]
     },
     "en": {
-      "title": "Change only the replies in one kind of scene (method (b): tsundere when praised or thanked)",
-      "text": "Writes the tsundere direction only at the position just before the model plainly writes ありがとう, 嬉しい or 楽しい after being praised or thanked. Use plenty of questions from that scene (the plain model often does not thank at all, and with few examples that contain a position to write at, the key responds to the example text instead of the state). dont_touch tasks is a group of arithmetic, fact and how-to questions, and nothing is written in their replies. Why starts is needed: thanks often come first in a reply, so the position to write at is the one just before the reply begins. That state looks alike for every question, so without more, the key also responds at the start of replies to ordinary questions. Building the key automatically adds the position just before the reply begins for every dont_touch question to the positions to leave alone, but the few tasks questions were not enough (with an ffn key on Qwen3-0.6B, the response at the start of replies to ordinary questions stayed at 0.5). starts uses positions: last and adds only that position for ordinary questions (no replies are generated). In key-check, also look at how strongly the key responds at the start of replies at the positions to leave alone and in dont_touch (0.4 or more is red). Use a positive α in “+ recipe”, and lower it if replies fall into loops."
+      "title": "Change only the responses in one kind of scene (method (b): tsundere when praised or thanked)",
+      "text": "Changes only the responses to praise or thanks, by writing the tsundere direction.",
+      "sections": [
+        {
+          "h": "What it does",
+          "body": [
+            "- Writes the tsundere direction only at the position just before the model plainly writes ありがとう, 嬉しい or 楽しい after being praised or thanked."
+          ]
+        },
+        {
+          "h": "What to put in",
+          "body": [
+            "- Use plenty of questions from that scene (the plain model often does not thank at all, and with few examples that contain a position to write at, the key responds to the example text instead of the state).",
+            "- dont_touch tasks is a group of arithmetic, fact and how-to questions, and nothing is written in their responses.",
+            "- dont_touch starts uses positions: last and adds only the position just before the response begins for ordinary questions (no responses are generated).",
+            "- Why starts is needed: thanks often come first in a response, so the position to write at is the one just before the response begins. That state looks alike for every question, so without more, the key also responds at the start of responses to ordinary questions.",
+            "- Building the key automatically adds the position just before the response begins for every dont_touch question to the positions to leave alone, but the few tasks questions were not enough."
+          ]
+        },
+        {
+          "h": "Recommended counts",
+          "body": [
+            "- Use a positive α in “+ recipe”, and lower it if responses fall into loops."
+          ]
+        },
+        {
+          "h": "Checked range and numbers",
+          "body": [
+            "- With an ffn key on Qwen3-0.6B and only the few tasks questions in dont_touch, the key output at the start of responses to ordinary questions stayed at 0.5 (the reason the starts group is there)."
+          ]
+        },
+        {
+          "h": "Cautions",
+          "body": [
+            "- In key-check, also look at the key output at the start of responses at the positions to leave alone and in dont_touch (0.4 or more is red)."
+          ]
+        }
+      ]
     }
   },
   "name": "tsundere_scene",
