@@ -863,8 +863,8 @@ async function onJobFinished(j) {
     causalCache.clear();
     if (headPanel && state.headFocus) { headPanel.causalSums.clear(); headPanel.open(state.headFocus); }
   }
-  if ((j.kind === "direction" || j.kind === "direction_key_pipeline" || j.kind === "fish_direction" || j.kind === "fish_pipeline") && directionView) directionView.refresh();   // 一括も方向を作る
-  if ((j.kind === "direction_key" || j.kind === "direction_key_pipeline" || j.kind === "fish_keys" || j.kind === "fish_pipeline") && recipePanel) recipePanel.render();   // 鍵・方向の選択肢
+  if ((j.kind === "direction" || j.kind === "direction_key_pipeline" || j.kind === "fish_direction" || j.kind === "fish_pipeline" || j.kind === "fish_heads") && directionView) directionView.refresh();   // 一括も方向を作る(nw heads も方向 <名前>_dir を書く)
+  if ((j.kind === "direction_key" || j.kind === "direction_key_pipeline" || j.kind === "fish_keys" || j.kind === "fish_pipeline" || j.kind === "fish_heads") && recipePanel) recipePanel.render();   // 鍵・方向の選択肢
   if ((j.kind === "experts_contrast" || j.kind === "experts_sweep" || j.kind === "stats_act") && expertPanel && state.expertFocus) {
     expertPanel.open(state.expertFocus);                                 // 専門家の対照分析・使用統計(CHANGE-05 G): 開いている専門家を取り直す
   }

@@ -23,10 +23,17 @@
 // 位置 0 だけの数)も出す。
 // 遅れて届いた結果で、後から選んだもの・後から投げたジョブの結果を上書きしない(欄ごとに最後に投げたジョブだけを受け取る。
 // 一覧の読み込みとユニットの組み立ては通し番号で見分ける。手で選び直したニューロンは、表を取り直しても残す)。
+// 「CHiPS のヘッドの分を場面で取り除く」(fish_heads のジョブ、gne nw heads、docs/fish.md の同じ名前の節): CHiPS のレシピ
+// (proj のユニット)が弱めるヘッドの書き込みを、ヘッドの重みは変えずに、同じ層の MLP の 2 個 1 組が、場面の鍵が開いた位置でだけ
+// 取り除くユニットを作る。対照集合は 1. の欄のもの。選ぶのは CHiPS のレシピ・場面の鍵・ほぼ 1 を返す鍵(どちらも MLP の入力の空間で、
+// CHiPS のヘッドの層を全部含むもの)・名前・使う質問・返事の長さ・ニューロン(省略可)・保存先のレシピ名。共通の設定は読まない。
+// 結果は層ごとの当たり方(5 分割の R²・行の数)、CHiPS との一致(どこでも開く鍵・本物の鍵の狙う場面・dont_touch の cos と大きさの比)、
+// できたユニットとレシピの保存先。「レシピに足す」でレシピのタブに入る。
 import { getJSON, postJSON } from "./api.js";
 import { LANG, t } from "./i18n.js";
 import { checkKeySpec, parseLayers } from "./keys.js";
 import { esc } from "./panels.js";
+import { parseNw } from "./recipe.js";
 import { Steps } from "./steps.js";
 import { noteHTML, askConfirm, layersInput } from "./ui.js";
 
@@ -79,6 +86,25 @@ export function amountClass(group, seg, pos, mean) {
   return Math.abs(+mean) >= AMOUNT_HIGH ? "fx-bad" : "";
 }
 
+// 「CHiPS のヘッドの分を場面で取り除く」のニューロンの欄("8:101,102 12:201,202")→ { neurons: {層: [番号, 番号]} | null } か { error }。
+// 空なら null(働きの小さい順の上 2 個)。書くなら CHiPS のヘッドの層(layers)を全部、層ごとに違う番号を 2 個ずつ
+export function parseNeuronPairs(text, layers = []) {
+  const s = String(text || "").trim().replace(/\s*([:,])\s*/g, "$1");
+  if (!s) return { neurons: null };
+  const out = {};
+  for (const part of s.split(/[\s;]+/).filter(Boolean)) {
+    const m = part.match(/^(\d+):(\d+),(\d+)$/);
+    if (!m) return { error: t("ニューロンは 層:番号,番号 のように、層ごとに 2 個ずつ書きます(例 8:101,102 12:201,202)") };
+    if (m[2] === m[3]) return { error: t("層 {l} のニューロンは、違う番号を 2 個にしてください(上限つきの 2 個 1 組)", { l: m[1] }) };
+    out[+m[1]] = [+m[2], +m[3]];
+  }
+  const have = Object.keys(out).map(Number);
+  const miss = layers.filter((L) => !have.includes(L)), extra = have.filter((L) => !layers.includes(L));
+  if (miss.length) return { error: t("ニューロンを書くなら、CHiPS のヘッドの層 {l} を全部書いてください(足りない層 {m})", { l: layers.join(","), m: miss.join(",") }) };
+  if (extra.length) return { error: t("層 {m} は CHiPS のヘッドの層({l})ではありません", { l: layers.join(","), m: extra.join(",") }) };
+  return { neurons: out };
+}
+
 export class FishPanel {
   constructor(root, { onRun, onAddNw, nLayer } = {}) {
     this.root = root;
@@ -90,7 +116,11 @@ export class FishPanel {
     this.tplText = null;
     this.lastSet = null;                            // 最後に欄に入れた表の fish
     this.jspec = { spec: null, errors: [], warns: [], summary: null };
-    this.jobs = { all: null, dir: null, neu: null, keys: null, verify: null, check: null, behave: null, try: null };   // 欄ごとに、最後に投げたジョブの id
+    this.jobs = { all: null, dir: null, neu: null, keys: null, verify: null, check: null, behave: null, try: null, heads: null };   // 欄ごとに、最後に投げたジョブの id
+    // 「CHiPS のヘッドの分を場面で取り除く」で選べるもの: CHiPS のレシピ({ name, n: proj のユニットの数, layers })、鍵(mlpin の要約)、
+    // 保存したレシピの名前(上書きの確かめ用)。一覧の読み込みは通し番号で見分ける
+    this.hg = { recipes: [], keys: [], recipeNames: new Set() };
+    this.hgSeq = 0;
     this.handled = new Set();
     this.seq = 0;                                   // 一覧の読み込みの通し番号
     this.unitSeq = 0;                               // ユニットの組み立ての通し番号
@@ -98,7 +128,7 @@ export class FishPanel {
     // 作ったもの: name(方向・鍵の名前の元)、path(対照集合のパス)、dir・usage・keys・verify・check(各段の結果)、
     // picked({層: [番号…]})、touched(手で選び直した層)、keyBase(鍵の名前の頭)、units(書き方)、rows(レシピの行)
     this.st = { name: null, path: null, dir: null, usage: null, keys: null, verify: null, check: null, picked: {}, touched: new Set(),
-                keyBase: null, units: [], rows: [], pipe: null, behave: null, tries: [], tryShown: -1 };
+                keyBase: null, units: [], rows: [], pipe: null, behave: null, tries: [], tryShown: -1, heads: null };
     root.innerHTML = `
       <section class="kx-sec" data-step="src">
         <div class="pp-in"><span class="muted">${t("対照集合")}</span>
@@ -230,6 +260,35 @@ export class FishPanel {
           <span class="muted note" id="fx-status-behave"></span></div>
         <div id="fx-prog-behave" class="note mono"></div>
         <div id="fx-behave"></div>
+      </section>
+      <section class="kx-sec" data-step="heads">
+        ${noteHTML(t("CHiPS のレシピが弱めるヘッドの書き込みを、場面を選んで取り除くユニットを作る。ヘッドの重みは変えず、同じ層の MLP のニューロン 2 個 1 組が、場面の鍵が開いた位置でだけ、CHiPS がその位置で取り除くはずの量を MLP の入力から当てて(切片つきのリッジ回帰)取り除く。対照集合の質問が取り除きたい場面、dont_touch が残したい場面。CHiPS を常に当てたときとの比べは、2 つのレシピを並べて eval・behave で行う。"))}
+        ${noteHTML(t("分かっている限界: 場面を選んでも、取り除く場面の中では、抑えたい振る舞いと近い、残したい振る舞いまで弱まることがある。本文の主張の言い切りも増えることがある。強さを上げても解決しない。答えの質は、無介入をサンプリングで作り直した返事との読み比べで確かめる(docs/fish.md「ヘッドの分を場面で取り除く」)。"), "pp-warn note")}
+        <p class="muted note" id="fx-hg-src"></p>
+        <div class="pp-set">
+          <label class="muted" title="${t("CHiPS のレシピ: proj のユニット(L:Hh:sS@方向)を持つ保存済みのレシピ。1 つの層のヘッドは同じ方向を使うこと。ヘッドの層は、nw を入れられる dense の MLP の層(MoE の層・最終層は不可)")}">${t("CHiPS のレシピ")} <select id="fx-hg-recipe"></select></label>
+          <span class="muted note" id="fx-hg-layers"></span>
+        </div>
+        <div class="pp-set">
+          <label class="muted" title="${t("場面の鍵(MLP の入力の空間、role scene): 対照集合の質問への返事の位置で開き、dont_touch の質問への返事では開かない鍵。CHiPS のヘッドの層を全部含むもの")}">${t("場面の鍵")} <select id="fx-hg-scene"></select></label>
+          <label class="muted" title="${t("ほぼ 1 を返す鍵(MLP の入力の空間、role one): どの位置でもほぼ 1 を返す鍵。上限つきの形のしきい値と、取り除く量の切片に使う。CHiPS のヘッドの層を全部含むもの")}">${t("ほぼ 1 を返す鍵")} <select id="fx-hg-one"></select></label>
+          <button type="button" class="small" id="fx-hg-reload" title="${t("保存したレシピと鍵の一覧を取り直す")}">${t("一覧を取り直す")}</button>
+        </div>
+        <p class="muted note" id="fx-hg-keyhint"></p>
+        <div class="pp-set">
+          <label class="muted" title="${t("作るものの名前。方向 <名前>_dir(CHiPS が使う向き r̂)と、取り除く量の鍵 <名前>_amount を書く。空なら欄の薄い字の名前")}">${t("名前")} <input id="fx-hg-name" size="14" spellcheck="false" autocomplete="off" autocapitalize="none"></label>
+          <label class="muted" title="${t("取り除きたい場面(対照集合の質問)のうち、取り除く量を当てる材料に使うもの。dont_touch の質問は全部使う")}">${t("使う質問")}
+            <select id="fx-hg-subset"><option value="even">${t("偶数番目")}</option><option value="odd">${t("奇数番目")}</option><option value="all">${t("全部")}</option></select></label>
+          <label class="muted" title="${t("材料にする無介入の返事を生成する長さ")}">${t("返事の長さ")} <input class="w5" id="fx-hg-mt" type="number" min="1" max="2048" value="96"></label>
+          <label class="muted" title="${t("できたユニットを書くレシピの名前。空なら欄の薄い字の名前(<名前>_r)")}">${t("保存先のレシピ名")} <input id="fx-hg-save" size="14" spellcheck="false" autocomplete="off" autocapitalize="none"></label>
+        </div>
+        <details class="kx-adv"><summary class="muted note">${t("細かい設定(書き換えるニューロン)")}</summary><div class="pp-set">
+          <label class="muted" title="${t("書き換えるニューロン。層ごとに 2 個(上限つきの 2 個 1 組)を、層:番号,番号 で空白区切りに書く。書くなら CHiPS のヘッドの層を全部。空なら、ふだんの働きの小さい順の上 2 個(3. の表と同じ測り方)。書き換えると、そのニューロンの元の働きは無くなる")}">${t("ニューロン")} <input id="fx-hg-neurons" class="mono" size="44" spellcheck="false" autocomplete="off" placeholder="${t("例 8:101,102 12:201,202(空なら働きの小さい順)")}"></label>
+        </div></details>
+        <div class="pp-go"><button type="button" class="main" id="fx-hg-go" title="${t("無介入の返事を作り、取り除く量の鍵・方向・ユニットを作って、当たり方と CHiPS との一致を測る。できたユニットはレシピに保存する")}">${t("取り除くユニットを作る")}</button>
+          <span class="muted note" id="fx-status-heads" role="status"></span></div>
+        <div id="fx-prog-heads" class="note mono"></div>
+        <div id="fx-heads"></div>
       </section>`;
     this.$ = (s) => root.querySelector(s);
     this.$("#fx-contrast").addEventListener("change", () => this.contrastChanged());
@@ -255,6 +314,13 @@ export class FishPanel {
     this.$("#fx-verify-go").addEventListener("click", () => this.runVerify());
     this.$("#fx-check-go").addEventListener("click", () => this.runCheck());
     this.$("#fx-behave-go").addEventListener("click", () => this.runBehave());
+    this.$("#fx-hg-go").addEventListener("click", () => this.runHeads());
+    this.$("#fx-hg-reload").addEventListener("click", () => this.hgLoad());
+    this.$("#fx-hg-recipe").addEventListener("change", () => this.hgRecipeChanged());
+    this.$("#fx-hg-name").addEventListener("input", () => this.hgNames());
+    for (const ev of ["input", "change"]) {                         // 直した欄の「直すところ」の印を消す
+      this.$('section[data-step="heads"]').addEventListener(ev, (e) => { if (e.target.getAttribute("aria-invalid")) e.target.removeAttribute("aria-invalid"); });
+    }
     root.addEventListener("change", (ev) => {
       const cb = ev.target.closest("input[data-fxn]");
       if (cb) this.togglePick(+cb.dataset.fxl, +cb.dataset.fxn, cb.checked);
@@ -266,6 +332,7 @@ export class FishPanel {
       if (d) this.resetPick(+d.dataset.fxdef);
       const tr = ev.target.closest("button[data-fxtry]");
       if (tr) { this.st.tryShown = +tr.dataset.fxtry; this.renderTry(); }
+      if (ev.target.closest("#fx-hg-add")) this.addHeads();
     });
     let src = "json";
     try { src = localStorage.getItem(SRC) === "file" ? "file" : "json"; } catch { /* 既定は JSON */ }
@@ -277,11 +344,14 @@ export class FishPanel {
     const sec = (k) => () => [root.querySelector(`section[data-step="${k}"]`),
                               ...(part.form.includes(k) ? [this.$("#fx-formset")] : []), ...(part.key.includes(k) ? [this.$("#fx-keyset")] : []),
                               ...(part.fast.includes(k) ? [this.$("#fx-fastset")] : [])];
+    // 「CHiPS のヘッドの分を場面で取り除く」は別の流れ(区切りで分け、共通の設定は読まない。対照集合は 1. のもの)。開いたら一覧を取り直す
     this.steps = new Steps(root, {
       shared: this.$("#fx-shared"), store: "gne.fish.step", label: t("FiSH の手順"),
       steps: [["src", t("1. 対照集合")], ["dir", t("2. 方向を作る")], ["try", t("重みに入れる前に試す")], ["neu", t("3. 書き換えるニューロンを選ぶ")],
               ["keys", t("4. 鍵を作る")], ["units", t("5. レシピを組む")], ["check", t("6. 確かめる")], ["behave", t("7. 返事を読む")],
-              ["all", t("まとめて作る(2〜6)")]].map(([key, label]) => ({ key, label, els: sec(key), shared: true, sep: key === "all" })),
+              ["all", t("まとめて作る(2〜6)")], ["heads", t("CHiPS のヘッドの分を場面で取り除く")]]
+        .map(([key, label]) => ({ key, label, els: sec(key), shared: key !== "heads", sep: key === "all" || key === "heads" })),
+      onSelect: (k) => { if (k === "heads") { this.hgSrcLine(); this.hgLoad(); } },
     });
     this.marks();
     for (const ev of ["input", "change"]) root.addEventListener(ev, () => this.marks());   // 対照集合を選んだ・書いた
@@ -303,6 +373,8 @@ export class FishPanel {
     m("check", run("verify") || run("check") || all, !!(st.verify || st.check));
     m("behave", run("behave"), !!st.behave);
     m("all", all, !!st.pipe);
+    m("heads", run("heads"), !!st.heads);
+    if (this.steps.current === "heads") this.hgSrcLine();
   }
 
   // 強さの欄を、区切りの数だけ並べる(box = fx-alphas か fx-try-alphas)。values を渡せばその値(数 1 つ・"1,1,0.8"・並び。足りない分は
@@ -336,6 +408,7 @@ export class FishPanel {
 
   // direction ビューで「FiSH」を開いたとき: 対照集合の候補とひな形を取り直す(遅れて届いた古い読み込みは捨てる)
   async refresh() {
+    this.hgLoad();                                             // 「CHiPS のヘッドの分を場面で取り除く」のレシピと鍵の一覧(待たない)
     const seq = ++this.seq;
     const [cs, tp] = await Promise.all([getJSON("/api/contrasts").catch(() => []), getJSON("/api/fish-templates").catch(() => [])]);
     if (seq !== this.seq) return;
@@ -610,6 +683,10 @@ export class FishPanel {
       if (st.tries.length > 20) st.tries.shift();
       st.tryShown = st.tries.length - 1;
       this.renderTry();
+    } else if (which === "heads") {
+      st.heads = r;
+      this.renderHeads();
+      this.hgLoad();                                           // できた取り除く量の鍵・レシピを一覧に入れる
     } else if (which === "all") {
       st.pipe = r; st.dir = r.direction; st.name = r.name; st.path = r.contrast_path; st.usage = r.usage;
       st.keys = r.rekeyed || r.keys; st.keyBase = r.key_base; st.verify = r.verify; st.check = r.check;
@@ -766,6 +843,123 @@ export class FishPanel {
     if (L) this.$("#fx-layers").value = L;
     this.settingsChanged();
     this.status("try", t("上の欄に入れました。層を変えたら、方向を作り直してください(重ねる層が変わるため)"));
+  }
+
+  // --- CHiPS のヘッドの分を場面で取り除く(fish_heads のジョブ) ------------------------------------------------------------
+  // 保存したレシピのうち proj のユニット(強さが 0 でないもの)を持つものと、MLP の入力の空間の鍵の一覧を取り直す
+  async hgLoad() {
+    const seq = ++this.hgSeq;
+    const [rs, ks] = await Promise.all([getJSON("/api/recipes").catch(() => []), getJSON("/api/keys").catch(() => [])]);
+    if (seq !== this.hgSeq) return;                              // 後から取り直したものがある
+    const all = (Array.isArray(rs) ? rs : []).filter((x) => x.this_model);
+    this.hg.recipeNames = new Set(all.map((x) => x.name));
+    this.hg.recipes = all.map((x) => {
+      const ps = (x.units || []).filter((u) => u.mode === "proj" && Number(u.s ?? u.k));
+      return { name: x.name, n: ps.length, layers: [...new Set(ps.map((u) => +u.layer))].sort((a, b) => a - b) };
+    }).filter((x) => x.n);
+    this.hg.keys = (Array.isArray(ks) ? ks : []).filter((k) => !k.error && k.target === "mlpin");
+    this.hgFill();
+  }
+
+  hgFill() {
+    const el = this.$("#fx-hg-recipe"), cur = el.value;
+    el.innerHTML = this.hg.recipes.length
+      ? this.hg.recipes.map((x) => `<option value="${esc(x.name)}">${esc(t("{r}(proj {n} 個 · 層 {l})", { r: x.name, n: x.n, l: x.layers.join(",") }))}</option>`).join("")
+      : `<option value="">${t("(proj のユニットを持つ保存済みのレシピがありません)")}</option>`;
+    if (cur && this.hg.recipes.some((x) => x.name === cur)) el.value = cur;
+    this.hgRecipeChanged();
+  }
+
+  // 選んだ CHiPS のレシピのヘッドの層
+  hgLayers() {
+    const r = this.hg.recipes.find((x) => x.name === this.$("#fx-hg-recipe").value);
+    return r ? r.layers : [];
+  }
+
+  // CHiPS のレシピを選び直した: 鍵の候補を、その層を全部含むものに絞る(含まない鍵は、足りない層を添えて選べなくする)。
+  // 場面の鍵は作ったときの役割が scene のもの、ほぼ 1 を返す鍵は one のもの(鍵の要約の positions が role:scene / role:one)
+  hgRecipeChanged() {
+    const Ls = this.hgLayers();
+    this.$("#fx-hg-layers").textContent = Ls.length ? t("CHiPS のヘッドの層: {l}(鍵はこの層を全部含むもの)", { l: Ls.join(", ") }) : "";
+    const missing = [];
+    for (const [sel, role] of [["#fx-hg-scene", "scene"], ["#fx-hg-one", "one"]]) {
+      const el = this.$(sel), cur = el.value;
+      const ks = this.hg.keys.filter((k) => k.positions === `role:${role}`);
+      const lack = (k) => Ls.filter((L) => !(k.layers || []).map(Number).includes(L));
+      el.innerHTML = ks.length ? ks.map((k) => {
+        const m = lack(k);
+        return `<option value="${esc(k.name)}"${m.length ? " disabled" : ""}>${esc(k.name)}${m.length ? ` ${esc(t("(層 {l} が無い)", { l: m.join(",") }))}` : ""}</option>`;
+      }).join("") : `<option value="">${role === "scene" ? t("(場面の鍵がありません)") : t("(ほぼ 1 を返す鍵がありません)")}</option>`;
+      const ok = [...el.options].filter((o) => !o.disabled && o.value).map((o) => o.value);
+      el.value = ok.includes(cur) ? cur : ok.length ? ok[0] : "";
+      if (!ok.length) missing.push(role);
+    }
+    const L = Ls.length ? Ls.join(",") : t("<層>");
+    this.$("#fx-hg-keyhint").innerHTML = missing.length
+      ? `${t("使える鍵がありません。CHiPS のヘッドの層を入れて作ります: {cmd}", { cmd: missing.map((r) => `<code>gne nw key --contrast C --layers ${esc(L)} --role ${r} --name NAME_${r}</code>`).join(" ") })}`
+      : "";
+    this.hgNames();
+  }
+
+  // 名前と保存先の薄い字(空のときに使う名前): <CHiPS のレシピ>_hg と <名前>_r
+  hgNames() {
+    const rec = this.$("#fx-hg-recipe").value;
+    const nm = this.$("#fx-hg-name");
+    nm.placeholder = rec ? `${rec}_hg` : "hg";
+    this.$("#fx-hg-save").placeholder = `${nm.value.trim() || nm.placeholder}_r`;
+  }
+
+  // 使う対照集合(1. の欄)の 1 行
+  hgSrcLine() {
+    const el = this.$("#fx-hg-src");
+    let what = null;
+    if (this.src === "json") {
+      const sp = this.jspec.spec;
+      what = sp && !(this.jspec.errors || []).length ? String(sp.name || t("入力欄の JSON")) : null;
+    } else {
+      const sel = this.$("#fx-contrast");
+      what = this.$("#fx-cpath").value.trim() || (sel.value && sel.selectedOptions[0] ? sel.selectedOptions[0].textContent : null);
+    }
+    el.innerHTML = what ? `${t("対照集合")}: <b class="mono">${esc(what)}</b> ${t("(1. 対照集合で選んだもの。質問 = 取り除きたい場面、dont_touch = 残したい場面)")}`
+      : `<span class="pp-warn">${t("先に「1. 対照集合」で対照集合を選ぶか、JSON を書いてください")}</span>`;
+  }
+
+  async runHeads() {
+    const which = "heads";
+    const s = this.source(which);
+    if (!s) return;
+    const v = (q) => this.$(q).value.trim();
+    const bad = (sel, msg) => { const el = this.$(sel); el.setAttribute("aria-invalid", "true"); el.focus(); this.status(which, msg, true); };
+    const recipe = v("#fx-hg-recipe"), Ls = this.hgLayers();
+    if (!recipe) { bad("#fx-hg-recipe", t("CHiPS のレシピ(proj のユニットを持つ保存済みのレシピ)を選んでください")); return; }
+    const scene = v("#fx-hg-scene"), one = v("#fx-hg-one");
+    if (!scene) { bad("#fx-hg-scene", t("場面の鍵を選んでください(CHiPS のヘッドの層 {l} を全部含む鍵)", { l: Ls.join(",") })); return; }
+    if (!one) { bad("#fx-hg-one", t("ほぼ 1 を返す鍵を選んでください(CHiPS のヘッドの層 {l} を全部含む鍵)", { l: Ls.join(",") })); return; }
+    const name = v("#fx-hg-name") || this.$("#fx-hg-name").placeholder;
+    if (!NAME_RE.test(name)) { bad("#fx-hg-name", t("名前は英数字・_・-・. だけにしてください")); return; }
+    const save = v("#fx-hg-save") || `${name}_r`;
+    if (!NAME_RE.test(save)) { bad("#fx-hg-save", t("保存先のレシピ名は英数字・_・-・. だけにしてください")); return; }
+    const nr = parseNeuronPairs(v("#fx-hg-neurons"), Ls);
+    if (nr.error) { bad("#fx-hg-neurons", nr.error); return; }
+    // 同じ名前で前に作った方向・取り除く量の鍵・レシピは上書きされるので、確かめる
+    const over = [this.hg.keys.some((k) => k.name === `${name}_amount`) ? t("方向 {d} と取り除く量の鍵 {k}", { d: `${name}_dir`, k: `${name}_amount` }) : null,
+                  this.hg.recipeNames.has(save) ? t("レシピ {r}", { r: save }) : null].filter(Boolean);
+    if (over.length && !(await askConfirm(t("{w} を作り直します(前のものは上書きされます)。よいですか?", { w: over.join("・") }), { ok: t("作り直す") }))) {
+      this.status(which, t("やめました"));
+      return;
+    }
+    const mt = +v("#fx-hg-mt");
+    const p = { ...s, recipe, name, scene_key: scene, one_key: one, subset: v("#fx-hg-subset"), max_tokens: Number.isInteger(mt) && mt > 0 ? mt : 96, save };
+    if (nr.neurons) p.neurons = nr.neurons;
+    await this.launch(which, "fish_heads", p, t("無介入の返事を作り、取り除く量を当てています…"));
+  }
+
+  // できたユニットをレシピに足す(同じ層・同じニューロンの行は置き換える)
+  addHeads() {
+    const rows = ((this.st.heads && this.st.heads.units) || []).map(parseNw).filter(Boolean);
+    if (!rows.length) return;
+    this.onAddNw(rows);
+    this.status("heads", t("レシピに足しました({n} 個)。レシピのタブでチャット・保存・LoRA の書き出しができます", { n: rows.length }));
   }
 
   // --- ニューロンの選択 -------------------------------------------------------------------------------------
@@ -949,6 +1143,44 @@ export class FishPanel {
     el.innerHTML = `<p class="muted note">${t("system の指示は付けず、ユニットだけを当てた返事です。正規表現の一致は目安で、返事を読んで確かめてください")}${r.match ? ` · ${t("正規表現")} <span class="mono">${esc(r.match)}</span>` : ""}${
       r.own_prompts ? "" : ` · ${t("狙う場面の質問は、鍵づくりに使った質問です(甘い)")}`}</p>
       ${part("scene", t("狙う場面の質問"))}${part("others", t("書き込みたくない場面の質問"))}`;
+  }
+
+  // CHiPS のヘッドの分を場面で取り除いた結果: 層ごとの当たり方(5 分割の R²・行の数)、CHiPS との一致(どこでも開く鍵・本物の鍵の
+  // 狙う場面・dont_touch の cos と大きさの比)、できたユニットとレシピの保存先
+  renderHeads() {
+    const r = this.st.heads, el = this.$("#fx-heads");
+    if (!r) { el.innerHTML = ""; return; }
+    const m = r.match || {};
+    const fit = (r.layers || []).map((x) => `<tr><th scope="row">L${x.layer}</th><td class="l">${esc((x.heads || []).join(" "))}</td><td>${fmt(x.r2_cv, 3)}</td>
+      <td>${esc(String(x.c ?? "—"))}</td><td>${x.n_rows ?? "—"}</td></tr>`).join("");
+    const lab = { open: [t("どこでも開く鍵・狙う場面"), t("CHiPS と同じ向き・同じ量を取り除けているか。cos・比とも 1 に近いほどよい")],
+                  scene: [t("本物の鍵・狙う場面"), t("狙う場面で、CHiPS と同じだけ取り除くか。比が 1 に近いほどよい")],
+                  other: [t("本物の鍵・dont_touch"), t("残したい場面に触れていないか。比が 0 に近いほどよい")] };
+    const match = Object.entries(lab).map(([k, [name, hint]]) => {
+      const x = m[k];
+      return `<tr data-hg="${k}"><th scope="row" class="l">${name}</th><td>${x ? fmt(x.cos_median, 3) : "—"}</td><td>${x ? fmt(x.ratio_median, 3) : "—"}</td>
+        <td>${x ? x.n_positions : "—"}</td><td class="l desc">${hint}</td></tr>`;
+    }).join("");
+    const units = (r.units || []).map((u) => {
+      const x = parseNw(u);
+      return `<tr><th scope="row">${x ? `L${x.layer}` : "—"}</th><td>${x ? `N${x.neuron}${x.pair !== null ? ` + N${x.pair}` : ""}` : "—"}</td><td class="l">${esc(u)}</td></tr>`;
+    }).join("");
+    const region = (id, h, table) => `<h4 class="note" id="${id}-h">${h}</h4>
+      <div class="evx-scroll" role="region" tabindex="0" aria-labelledby="${id}-h">${table}</div>`;
+    el.innerHTML = `<p class="note">${t("CHiPS のレシピ")} <b class="mono">${esc(r.chips || "—")}</b> · ${t("方向")} <b class="mono">${esc(r.direction)}</b> · ${t("取り除く量の鍵")} <b class="mono">${esc(r.amount_key)}</b>
+        · ${t("場面の鍵")} <span class="mono">${esc(r.scene_key)}</span> · ${t("ほぼ 1 を返す鍵")} <span class="mono">${esc(r.one_key)}</span></p>
+      <p class="muted note">${t("材料: 狙う場面 {a} 問・dont_touch {b} 問への無介入の返事", { a: r.n_scene ?? "—", b: r.n_other ?? "—" })} · ${fmt(r.seconds, 1)} ${t("秒")}</p>
+      ${region("fx-hg-fit", t("取り除く量の当たり方(層ごと)"), `<table class="evx mono fx-tab" id="fx-hg-fit"><thead><tr><th>${t("層")}</th><th class="l">${t("ヘッド")}</th>
+        <th title="${t("MLP の入力から取り除く量を当てた式の決定係数。質問単位の 5 分割の交差検証で、作成に使っていない質問の位置で測る。1 に近いほどよく当たる")}">${t("R²(5 分割)")}</th>
+        <th title="${t("リッジ回帰の正則化の強さ(行列の対角の平均の何倍か)。5 分割の R² がいちばん高いものを、0.01・0.1・1・10・100 から選んだ")}">${t("正則化の強さ")}</th>
+        <th title="${t("当てるのに使った位置の数(返事の位置と、プロンプトの最後の数位置)")}">${t("行の数")}</th></tr></thead><tbody>${fit}</tbody></table>`)}
+      ${region("fx-hg-match", t("CHiPS との一致(層 {L} の出力の変化。返事の位置の中央値)", { L: m.layer ?? "—" }), `<table class="evx mono fx-tab" id="fx-hg-match"><thead><tr><th class="l">${t("当て方")}</th>
+        <th title="${t("無介入からの変化の向きが、CHiPS の変化とどれだけ同じか(cos 類似度)")}">cos</th>
+        <th title="${t("無介入からの変化の大きさを、CHiPS の変化の大きさで割ったもの")}">${t("大きさの比")}</th><th>${t("位置の数")}</th><th class="l">${t("見るところ")}</th></tr></thead><tbody>${match}</tbody></table>`)}
+      ${region("fx-hg-units", t("できたユニット"), `<table class="evx mono fx-tab" id="fx-hg-units"><thead><tr><th>${t("層")}</th><th>${t("ニューロン")}</th><th class="l">${t("ユニット")}</th></tr></thead><tbody>${units}</tbody></table>`)}
+      <p class="note" id="fx-hg-saved">${r.recipe_path ? `${t("レシピの保存先")}: <span class="mono">${esc(r.recipe_path)}</span>` : t("レシピには保存していません")}</p>
+      <div class="pp-go"><button type="button" id="fx-hg-add" title="${t("できたユニットをレシピのタブに足す(同じ層・同じニューロンの行は置き換える)")}">${t("レシピに足す")}</button></div>
+      ${noteHTML(t("CHiPS のユニット(proj)と同じレシピで当てると、同じ分を 2 回取り除きます。比べるときは、CHiPS のレシピと、できたレシピを別々に当てます(eval・behave でレシピを並べる)。"), "muted note")}`;
   }
 
   // 重みに入れる前に試した結果: 回ごとの数を並べた表と、選んだ回の返事(足した返事と、同じ質問に何も足さない返事を横に並べる)

@@ -16,7 +16,7 @@ export const KIND = { embed: tr("埋め込み"), connections: "connections", lay
                direction_key_causal_verify: tr("効く層を確かめる(生成)"), writers: tr("書き手の強さ"),
                fish_pipeline: tr("FiSH をまとめて作る"), fish_direction: tr("FiSH の方向を作る"), fish_try: tr("FiSH を重みに入れる前に試す"),
                nw_neurons: tr("FiSH のニューロンを選ぶ"), fish_keys: tr("FiSH の鍵を作る"), fish_verify: tr("FiSH が式どおりか確かめる"),
-               fish_check: tr("FiSH の漏れを確かめる"), fish_behave: tr("FiSH の返事を読む"),
+               fish_check: tr("FiSH の漏れを確かめる"), fish_behave: tr("FiSH の返事を読む"), fish_heads: tr("CHiPS のヘッドの分を場面で取り除く"),
                nw_check: tr("FiSH のユニットを確かめる(nw check)") };
 
 function eta(s) {
@@ -38,6 +38,7 @@ function what(j) {
   if (p.spec && typeof p.spec === "object" && p.spec.name) bits.push(p.spec.name);            // head_pipeline(JSON の name)
   if (j.kind === "heads_candidates" && p.alloc) bits.push(String(p.alloc).split("/").pop());
   if ((j.kind === "direction_key_check" || j.kind === "direction_key_verify") && p.key) bits.push(`#${p.key}`);   // CHANGE-07: 確かめる鍵
+  if (j.kind === "fish_heads" && p.recipe) bits.push(String(p.recipe));          // CHiPS のレシピ
   if (j.kind === "direction_key_causal_verify") bits.push(p.result || "", tr("{n} 候補", { n: [].concat(p.units || []).length + [].concat(p.combos || []).length }));   // 効く層を確かめる(組も 1 候補)
   if (j.kind === "behave") bits.push(p.name || "behave", ...(Array.isArray(p.recipes) ? p.recipes.map((r) => `+${String(r).split("/").pop()}`) : []));
   if (j.kind === "behave" && typeof p.prompts === "string") bits.push(String(p.prompts).split("/").pop());
