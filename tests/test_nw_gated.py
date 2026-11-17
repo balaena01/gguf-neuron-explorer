@@ -202,3 +202,53 @@ def test_heads_tf_screen(built):
     assert Path(d["path"]).exists() and "ヘッドごとに測った層" in "\n".join(HT.summary_lines(d))
     with pytest.raises(GneError):
         HT.screen(s, str(built["c"]), direction="gd", target=r"zzzqqq", layers="8", max_tokens=16)
+
+
+@pytest.mark.model
+def test_lora_when(built):
+    """LoRA を当てる位置を限る(生成と teacher forcing)。prompt は最初のトークンが全位置と同じ、reply は無介入と同じ。"""
+    from gne.evalx import _generate
+    from gne.heads_tf import _logprobs
+    s, n12 = built["s"], built["n12"]
+    r = s.recipe(units=[f"12:N{n12[4]}+N{n12[5]}:nw:a8@gd#g_one&g_one!cap0.1-0.2"], name="lw")
+    lora = [(str(s.nw_lora(r)), 1.0)]
+    items = [([{"role": "user", "content": q}], 12) for q in ("Tell me about the sea.", "What do you think of my drawing?",
+                                                             "How was your day?")]
+    none = _generate(s, items, None, None, "all", lambda k: None)
+    allp = _generate(s, items, None, lora, "all", lambda k: None)
+    again = _generate(s, items, None, lora, "all", lambda k: None, lora_when="all")
+    assert [x["token_ids"] for x in allp] == [x["token_ids"] for x in again]          # 既定は今までと同じ
+    assert any(a["token_ids"] != b["token_ids"] for a, b in zip(allp, none))           # この LoRA は返事を変える
+    e = s.engine
+    ctx = e.steer_ctx()                                # 最初のトークンの 1 位と 2 位の差(差が小さい質問は、バッチの組み方の違いで入れ替わりうる)
+    seqs = [e.tokenize_prompt(e.render_chat(conv)) for conv, _ in items]
+    margin = {}
+    for st, lo in (("lora", lora), ("none", None)):
+        e.set_lora(ctx, lo)
+        e.clear_memory(ctx)
+        lg = e.prefill(ctx, seqs).logits
+        e.set_lora(ctx, None)
+        top2 = np.sort(lg, axis=1)[:, -2:]
+        margin[st] = top2[:, 1] - top2[:, 0]
+    for batched in (True, False):
+        when = "all" if batched else "gen"                                             # gen は 1 本ずつの道(cvec なしでは all と同じ)
+        pr = _generate(s, items, None, lora, when, lambda k: None, lora_when="prompt")
+        rp = _generate(s, items, None, lora, when, lambda k: None, lora_when="reply")
+        for i in range(len(items)):
+            if margin["lora"][i] > 1.0:
+                assert pr[i]["token_ids"][0] == allp[i]["token_ids"][0]
+            if margin["none"][i] > 1.0:
+                assert rp[i]["token_ids"][0] == none[i]["token_ids"][0]
+    rows = []
+    for (conv, _), o in zip(items, none):
+        rid = [int(t) for t in o["token_ids"] if not e.is_eog(t)][:8]
+        rows.append({"prompt": e.tokenize_prompt(e.render_chat(conv)), "reply": rid, "target": [0, 1], "others": list(range(2, len(rid) - 1))})
+    b0 = _logprobs(s, rows)
+    la = _logprobs(s, rows, lora)
+    lp = _logprobs(s, rows, lora, lora_when="prompt")
+    lr = _logprobs(s, rows, lora, lora_when="reply")
+    for x0, xa, xp, xr in zip(b0, la, lp, lr):
+        assert xp[0] == pytest.approx(xa[0], abs=1e-4) and xr[0] == pytest.approx(x0[0], abs=1e-4)
+        assert not np.allclose(xr[1:], x0[1:], atol=1e-3)                              # 返事の位置では効いている
+    with pytest.raises(GneError):
+        _generate(s, items, None, lora, "all", lambda k: None, lora_when="middle")

@@ -373,6 +373,7 @@ gne nw verify --unit 11:N2045:nw:a1@NAME.seg1#k_scene\&k_p1   # does the LoRA do
 gne nw verify --recipe R --contrast C                  # the same, on the target questions and replies where the keys open (quantization rounding shows here; !kauto on a unit avoids it)
 gne nw heads --recipe CHIPS --contrast C --name hg --scene-key K --one-key K1 --save hg_r   # remove what CHiPS heads write, only where the scene key opens
 gne heads tf --contrast C --direction NAME --target 'ahoy|matey' --layers 1-27   # teacher-forcing screen by layer, then by head (also after the base layer that gne heads pipeline cannot see)
+gne steer --recipe R --prompt "..." --lora-when reply  # apply the LoRA (nw/proj/keyed/gain) only to generated tokens; prompt = only while reading the prompt
 gne nw check  --recipe R --contrast C                  # key responses and amounts written, by position and kind of scene, then per question
 gne nw export --recipe R -o R-nw.lora.gguf             # LoRA only (no baking); with proj/keyed units, gne headproj export puts them in one file
 gne nw pipeline --contrast C --layers 11-23 --alpha 1,1,0.8 --save R.yaml   # or all of the building steps in one go; --save writes the recipe for the commands above

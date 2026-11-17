@@ -414,20 +414,21 @@ class Session:
         return ([{"role": "system", "content": system}] if system else []) + [user]
 
     def generate(self, vectors: dict[int, np.ndarray] | None, messages: list[dict], *, max_tokens: int = 128,
-                 when: str = "all", lora: list[tuple[str, float]] | None = None, sampling=None) -> dict:
+                 when: str = "all", lora: list[tuple[str, float]] | None = None, sampling=None, lora_when: str = "all") -> dict:
         """1 本で生成する(バッチの組み方で結果が変わらないように、F2)。既定は greedy、sampling(engine.Sampling)で
-        サンプリング。when は §6.15 の位置別ステアリング、lora は gain(§6.16)の LoRA アダプタ。"""
+        サンプリング。when は §6.15 の位置別ステアリング、lora は gain(§6.16)の LoRA アダプタ。
+        lora_when は LoRA を当てる位置: all(既定)/ prompt(プロンプトを読む間だけ)/ reply(生成するトークンだけ)。"""
         from .when import generate_when
         e = self.engine
         r, info = generate_when(e, e.steer_ctx(), messages, vectors, when, max_tokens=max_tokens, lora=lora,
-                                sampling=sampling)
+                                sampling=sampling, lora_when=lora_when)
         return {"text": r.text, "finish": r.finish, "n_gen": r.n_gen, "token_ids": r.token_ids, "when": info}
 
     # --- steer ----------------------------------------------------------------------------------
 
     def steer(self, recipe: Recipe | list[str], *, prompt: str | None = None, messages: list[dict] | None = None,
               system: str | None = None, max_tokens: int = 128, compare: bool = True, when: str | None = None,
-              sampling=None, audio: list[str | Path] | None = None) -> dict:
+              sampling=None, audio: list[str | Path] | None = None, lora_when: str = "all") -> dict:
         """sampling(engine.Sampling)を渡すと、無介入と介入を同じ seed で引く(違いは介入だけになる)。
         audio: 音声ファイルをユーザーの発話にする(mmproj が要る)。"""
         recipe = self._as_recipe(recipe)
@@ -436,7 +437,8 @@ class Session:
         base = self.generate(None, msgs, max_tokens=max_tokens, sampling=sampling) if compare else None
         lora = self.lora_for(recipe)
         with self.patched(self.patches_for(recipe)):           # 専門家全体の gain・route(作業用コピーで読み直す)
-            st = self.generate(vecs, msgs, max_tokens=max_tokens, when=when or recipe.when, lora=lora, sampling=sampling)
+            st = self.generate(vecs, msgs, max_tokens=max_tokens, when=when or recipe.when, lora=lora, sampling=sampling,
+                               lora_when=lora_when)
         return {"messages": msgs, "recipe": recipe.to_dict(), "units": details, "layer_norms": self._norms(vecs),
                 "when": when or recipe.when, "sampling": None if sampling is None else sampling.to_dict(),
                 "baseline": base, "steered": st, "differs": None if base is None else base["token_ids"] != st["token_ids"]}
@@ -1425,13 +1427,14 @@ class Session:
         return q
 
     def chat(self, columns, prompts: list[str], *, system: str | None = None, max_tokens: int = 256,
-             on_text=None, on_column=None, when: str | None = None, sampling=None) -> dict:
+             on_text=None, on_column=None, when: str | None = None, sampling=None, lora_when: str = "all") -> dict:
         from .chat import ChatState, chat_turn
         state = ChatState(columns, system)
         turns = []
         for u in prompts:
             turns.append({"user": u, "replies": chat_turn(self, state, u, max_tokens=max_tokens, on_text=on_text,
-                                                          on_column=on_column, when_override=when, sampling=sampling)})
+                                                          on_column=on_column, when_override=when, sampling=sampling,
+                                                          lora_when=lora_when)})
         return {"columns": [{"label": c.label, "recipe": c.recipe.to_dict() if c.recipe else None} for c in columns],
                 "system": system, "turns": turns}
 
@@ -1633,7 +1636,7 @@ class Session:
     # --- eval(§6.14)---------------------------------------------------------------------------
 
     def eval(self, recipe: Recipe | list[str], *, doses=(0, 0.25, 0.5, 0.75, 1.0), suite: str | Path | None = None,
-             when: str | None = None, judge_model: str | Path | None = None, judge_target: str | None = None,
+             when: str | None = None, lora_when: str = "all", judge_model: str | Path | None = None, judge_target: str | None = None,
              name: str | None = None, random_controls: int = 0, reactivity: str | Path | None = None,
              head_controls: int = 0, control_pool: str = "before", direction_metrics: bool = True,
              dir_max_examples: int | None = 64, keyed_contrast: str | Path | None = None, keyed_metrics: bool = True,
@@ -1670,7 +1673,7 @@ class Session:
             keyed_contrast = self._contrast_file(keyed_contrast)
         judge = Judge(judge_model, judge_target) if judge_model else None
         try:
-            d = evaluate(self, recipe, doses=doses, suite=suite, when=when, judge=judge,
+            d = evaluate(self, recipe, doses=doses, suite=suite, when=when, judge=judge, lora_when=lora_when,
                          random_controls=random_controls, reactivity=reactivity, head_controls=head_controls,
                          control_pool=control_pool, direction_metrics=direction_metrics,
                          dir_max_examples=dir_max_examples, keyed_contrast=keyed_contrast,

@@ -131,12 +131,24 @@ def _scaled(vectors: dict[int, np.ndarray] | None, k: float) -> dict[int, np.nda
     return vectors if k == 1 else {L: (v * k).astype(np.float32) for L, v in vectors.items()}
 
 
+LORA_WHEN = ("all", "prompt", "reply")
+
+
+def check_lora_when(lora_when: str) -> None:
+    if lora_when not in LORA_WHEN:
+        raise GneError("BAD_ARGS", f"lora_when は {' / '.join(LORA_WHEN)} です({lora_when!r})",
+                       "all = 全位置、prompt = プロンプトを読む間だけ、reply = 生成するトークンだけ")
+
+
 def generate_when(e: Engine, ctx, messages: list[dict], vectors: dict[int, np.ndarray] | None, when: When | str | None,
                   *, max_tokens: int = 128, top_k: int = 5,
                   on_token: Callable[[int, int], None] | None = None,
-                  lora: list[tuple[str, float]] | None = None, sampling=None) -> tuple[Rollout, dict]:
+                  lora: list[tuple[str, float]] | None = None, sampling=None, lora_when: str = "all") -> tuple[Rollout, dict]:
     """1 本の会話を、when に従って control vector を付け替えながら greedy 生成する。
-    lora は gain(§6.16)の LoRA アダプタ [(パス, 倍率)]。全位置に当てる(when は control vector にだけ効く)。
+    lora は LoRA アダプタ [(パス, 倍率)](when は control vector にだけ効く)。lora_when で LoRA を当てる位置を限る:
+    all(既定、全位置)/ prompt(プロンプトを読む間だけ。最初の返事のトークンは LoRA を当てた読み取りから決まる)/
+    reply(生成するトークンだけ。最初の 1 トークンは素の読み取りから決まる。control vector の gen と同じ決め方)。
+    プロンプトの KV は読んだときの状態のまま生成に使う(毎回 KV を消してから読む)。
     戻り値は (Rollout, 情報)。情報は set_cvec の回数・区間・after の切替位置など(確認用)。"""
     w = when if isinstance(when, When) else parse_when(when)
     info: dict = {"when": str(w), "set_cvec": 0}
@@ -164,11 +176,14 @@ def generate_when(e: Engine, ctx, messages: list[dict], vectors: dict[int, np.nd
     if len(ids) + max_tokens > e.n_ctx:
         raise GneError("CONTEXT_FULL", f"会話が長すぎます({len(ids)} トークン、n_ctx {e.n_ctx})",
                        "会話をやり直すか、max_tokens を減らしてください")
+    check_lora_when(lora_when)
     e.clear_memory(ctx)
     schedule = None
     if lora:
-        e.set_lora(ctx, lora)
+        e.set_lora(ctx, None if lora_when == "reply" else lora)
         info["lora"] = [str(p) for p, _ in lora]
+        if lora_when != "all":
+            info["lora_when"] = lora_when
     try:
         if not vectors or w.kind == "all":
             put(vectors or None)
@@ -229,6 +244,8 @@ def generate_when(e: Engine, ctx, messages: list[dict], vectors: dict[int, np.nd
                 if v is not KEEP:
                     info["set_cvec"] += 1
                 return v
+        if lora and lora_when != "all":                  # 生成の段の前に LoRA を付け替える(prompt は外す、reply は当てる)
+            e.set_lora(ctx, None if lora_when == "prompt" else lora)
         r = e.generate_greedy(ctx, [ids], max_tokens=max_tokens, top_k=top_k, prefilled=pre,
                               on_token=on_token, schedule=schedule, sampling=sampling, ban=ban)[0]
     finally:

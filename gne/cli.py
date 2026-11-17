@@ -524,6 +524,7 @@ _BUDGET = typer.Option(None, "--budget", help="時間の予算(30m・2h・90s)�
 _DOSE_UNIT = typer.Option(None, "--dose-unit", help="rel / absmax / raw(既定はレシピの値、--unit なら rel)")
 _SCALE = typer.Option(1.0, "--scale", help="全ユニットの dose に掛ける係数")
 _ABLATE = typer.Option(None, "--ablate", help="方向の射影消去(§6.17): NAME、NAME@層、NAME:倍率(例 evil@10:0.5)。LoRA で当てる")
+_LORA_WHEN = typer.Option("all", "--lora-when", help="LoRA(gain・proj・keyed・nw など)を当てる位置: all(既定、全位置)/ prompt(プロンプトを読む間だけ)/ reply(生成するトークンだけ)")
 _WHEN = typer.Option(None, "--when", help="足す位置(§6.15): all / gen / assistant / skip-replies / after:<文字列> / ramp:<a>-<b>。既定はレシピの値(無ければ all)")
 _TEMP = typer.Option(None, "--temperature", help="サンプリングの温度。サンプリングの値をどれか付けるか、レシピに sampling があればサンプリング"
                                                  "(足りない値はレシピの sampling、無ければ llama-server の既定)。0 だけなら greedy")
@@ -580,7 +581,8 @@ def steer(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Optio
           contrast_seeds: int = typer.Option(4, "--contrast-seeds", help="--contrast-sample: 1 プロンプトあたりの本数"),
           contrast_tokens: int = typer.Option(64, "--contrast-tokens", help="--contrast: 生成する長さ"),
           contrast_prompts: Optional[Path] = typer.Option(None, "--contrast-prompts", help="--contrast: 検証プロンプトを差し替える YAML(文字列のリスト、または対照集合なら reactivity の with か user_prompts)"),
-          audio: Optional[list[Path]] = typer.Option(None, "--audio", help="音声ファイル(wav / mp3 / flac)をユーザーの発話にする。--prompt があれば音声の後に文を足す。mmproj が要る")):
+          audio: Optional[list[Path]] = typer.Option(None, "--audio", help="音声ファイル(wav / mp3 / flac)をユーザーの発話にする。--prompt があれば音声の後に文を足す。mmproj が要る"),
+          lora_when: str = _LORA_WHEN):
     """レシピまたは単発指定でプロンプトに回答する(既定は greedy、1 本ずつ)。"""
     s = holder["session"] = c.session()
     r = s.recipe(units=unit, path=recipe, dose_unit=dose_unit, scale=scale, when=when, ablate=ablate)
@@ -588,7 +590,7 @@ def steer(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Optio
     if prompt is None and contrast is None and not audio:
         raise GneError("BAD_ARGS", "--prompt か --audio か --contrast が要ります")
     if prompt is not None or audio:
-        d = s.steer(r, prompt=prompt, system=system, max_tokens=max_tokens, compare=compare, sampling=sp,
+        d = s.steer(r, prompt=prompt, system=system, max_tokens=max_tokens, compare=compare, sampling=sp, lora_when=lora_when,
                     audio=audio)
     else:                                       # --contrast だけ: 生成はせず、対照集合での効果だけを測る
         vecs, details = s.vectors(r)
@@ -785,7 +787,7 @@ def eval_cmd(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Op
              dose_unit: Optional[str] = _DOSE_UNIT,
              doses: str = typer.Option("0,0.25,0.5,0.75,1", "--doses", help="レシピ全体に掛ける倍率(0 = 無介入は必ず入る)"),
              suite: Optional[Path] = typer.Option(None, "--suite", help="タスク集 YAML(既定 configs/eval/default.yaml)"),
-             when: Optional[str] = _WHEN,
+             when: Optional[str] = _WHEN, lora_when: str = _LORA_WHEN,
              judge_model: Optional[Path] = typer.Option(None, "--judge-model", help="性格の採点に使う別の GGUF(任意)"),
              judge_target: Optional[str] = typer.Option(None, "--judge-target", help="採点させる目標の性格(例 'a yandere anime girl')"),
              name: Optional[str] = typer.Option(None, "--name", help="保存名(既定はレシピ名)"),
@@ -869,7 +871,7 @@ def eval_cmd(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Op
                       "recipe": r, "keyed_metrics": keyed, "keyed_contrast": keyed_contrast,      # keyed の選択性の分も見積もる
                       "keyed_examples": keyed_examples or None, "keyed_pseudo": keyed_pseudo, "keyed_match": keyed_match,
                       "keyed_subset": keyed_subset}, yes, None)
-    d = s.eval(r, doses=_doses(doses), suite=suite, when=when, judge_model=judge_model, judge_target=judge_target,
+    d = s.eval(r, doses=_doses(doses), suite=suite, when=when, lora_when=lora_when, judge_model=judge_model, judge_target=judge_target,
                name=name, random_controls=random_controls, reactivity=reactivity, head_controls=head_controls,
                control_pool=control_pool, direction_metrics=direction_metrics, dir_max_examples=dir_max_examples or None,
                keyed_contrast=keyed_contrast, keyed_metrics=keyed, keyed_examples=keyed_examples or None,
@@ -1279,7 +1281,7 @@ def chat(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Option
          when: Optional[str] = _WHEN, ablate: Optional[str] = _ABLATE,
          temperature: Optional[float] = _TEMP, top_k: Optional[int] = _TOP_K, top_p: Optional[float] = _TOP_P,
          min_p: Optional[float] = _MIN_P, presence_penalty: Optional[float] = _PRES,
-         sample_seed: Optional[int] = _SSEED, greedy: bool = _GREEDY):
+         sample_seed: Optional[int] = _SSEED, greedy: bool = _GREEDY, lora_when: str = _LORA_WHEN):
     """−/0/+ の 3 列比較チャット(ユーザーの発話は共有、返答は列ごと)。サンプリングなら 3 列とも同じ seed で引く。"""
     from .chat import ChatState, chat_turn, make_columns
     s = holder["session"] = c.session()
@@ -1307,7 +1309,7 @@ def chat(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Option
             turns.append({"user": user, "replies": chat_turn(s, state, user, max_tokens=max_tokens,
                                                              on_text=on_text if live else None,
                                                              on_column=on_column if live else None,
-                                                             when_override=when, sampling=sp)})
+                                                             when_override=when, sampling=sp, lora_when=lora_when)})
         d = {"columns": [{"label": col.label, "recipe": col.recipe.to_dict() if col.recipe else None} for col in cols],
              "system": system, "turns": turns, "sampling": None if sp is None else sp.to_dict()}
         if live:
@@ -1338,7 +1340,8 @@ def chat(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Option
         if not user.strip():
             continue
         replies = chat_turn(s, state, user, max_tokens=max_tokens, on_text=on_text if stream else None,
-                            on_column=on_column if stream else None, when_override=when, sampling=sp)
+                            on_column=on_column if stream else None, when_override=when, sampling=sp,
+                             lora_when=lora_when)
         if not stream:
             for col, rep in zip(cols, replies, strict=True):
                 print(f"── {col.label} ──\n{rep['text']}")
@@ -1617,14 +1620,16 @@ def heads_tf(c: Common, holder: dict,
              span: str = typer.Option("sentence", "--span", help="対象: sentence(一致を含む文)/ match(一致した文字だけ)"),
              max_tokens: int = typer.Option(256, "--max-tokens", help="返事の長さの上限(書き終えた返事だけを使う)"),
              others: int = typer.Option(64, "--others", help="返事ごとの、それ以外のトークンの数"),
-             name: Optional[str] = typer.Option(None, "--name", help="結果を <root>/heads/<model_id>/<名前>.tf.json に書く")):
+             name: Optional[str] = typer.Option(None, "--name", help="結果を <root>/heads/<model_id>/<名前>.tf.json に書く"),
+             lora_when: str = _LORA_WHEN):
     """teacher forcing の目安で、層ごと → ヘッドごとに、方向成分を弱めたときの (a) 対象の文のトークンの対数確率の下がり方
     (それ以外のトークンの変化を引いたもの)、(b) それ以外のトークンの変化の絶対値、返事の終わりのトークンの変化を測る。
     gne heads pipeline の因果の確かめは基準層での射影で測るので、基準層より後ろのヘッドはこちらで確かめる。返事は生成しない。"""
     from .heads_tf import screen, summary_lines
     sess = holder["session"] = c.session()
     d = screen(sess, str(contrast), direction=direction, target=target, layers=layers, layers_heads=layers_heads, s=s,
-               direction_layer=direction_layer, side=side, subset=subset, span=span, max_tokens=max_tokens, others=others, name=name)
+               direction_layer=direction_layer, side=side, subset=subset, span=span, max_tokens=max_tokens, others=others, name=name,
+               lora_when=lora_when)
     return d, "\n".join(summary_lines(d)), 0
 
 

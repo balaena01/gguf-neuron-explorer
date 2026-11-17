@@ -852,6 +852,22 @@ gne nw verify --recipe hg_r --contrast C
   判断が分かれることがあった。読み比べで悪いとされたときは、何が悪いのか(事実の誤り・言い切り・本題の勧めの有無・乱れ)を
   1 本ずつ数え直す(少ない組の理由の分類だけで決めない)。
 
+### LoRA を当てる位置を限る(`--lora-when`)
+
+nw・proj・keyed・gain の介入は LoRA として当たる。`gne steer` / `gne chat` / `gne eval` / `gne heads tf` の `--lora-when` と、
+Python の `Session.generate` / `steer` / `chat` / `eval` の `lora_when` で、LoRA を当てる位置を選べる。
+
+- `all`(既定): 全位置。今までと同じ。
+- `prompt`: プロンプトを読む間だけ当て、生成の段の前に外す。最初の返事のトークンは、LoRA を当てた読み取りから決まる。
+- `reply`: プロンプトを読む間は外し、生成するトークンにだけ当てる。最初の 1 トークンは素の読み取りから決まる(control vector の
+  `--when gen` と同じ決め方)。
+
+- プロンプトの KV は、読んだときの状態のまま生成に使う。前の状態は使い回さず、毎回読み直す。
+- teacher forcing の測り方(`gne heads tf`)も同じ決め方で、プロンプトのトークンと返事のトークンで LoRA を付け替える。
+- `gne eval` の ppl は全位置のまま。
+- 介入がどこで効いているかの切り分けに使える。注意書きの確かめでは、入力の位置だけに当てるとほとんど効かず、返事の位置だけで
+  全位置の約 6 割、全位置がいちばん強かった。そのため、場面の鍵は返事の全部の位置で開くようにした。
+
 ## 7. 書き出しと制限
 
 - **実行時の LoRA だけ**(`gne nw export`、llama.cpp の `--lora`)。ニューロン 1 個につき、ffn_gate・ffn_up・ffn_down の 3 つの

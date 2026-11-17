@@ -175,12 +175,14 @@ def _msgs(p: str | list[dict]) -> list[dict]:
 
 
 def _generate(session, items: list[tuple[str | list[dict], int]], vecs, lora, when: str,
-              tick: Callable[[int], None], sampling=None, thinking: bool = False) -> list[dict]:
+              tick: Callable[[int], None], sampling=None, thinking: bool = False, lora_when: str = "all") -> list[dict]:
     """items: [(プロンプトか会話, max_tokens)]。when = all ならまとめて(n_seq_max 本ずつ、n_ctx に収まる分)、それ以外は 1 本ずつ。
     sampling(engine.Sampling)を渡すとサンプリングで生成する。乱数は「seed + まとまりの番号」と、まとまりの中の位置で決まるので、
-    同じ items を同じ順に渡せば(押し方を変えても)同じ乱数で引く。既定は greedy。"""
+    同じ items を同じ順に渡せば(押し方を変えても)同じ乱数で引く。既定は greedy。
+    lora_when(all / prompt / reply)で LoRA を当てる位置を限る(when.generate_when と同じ決め方。all は今までと同じ)。"""
     import dataclasses
-    from .when import generate_when
+    from .when import check_lora_when, generate_when
+    check_lora_when(lora_when)
     e = session.engine
     ctx = e.steer_ctx()
     outs: list[dict | None] = [None] * len(items)
@@ -190,11 +192,12 @@ def _generate(session, items: list[tuple[str | list[dict], int]], vecs, lora, wh
     if when != "all":
         for i, (prompt, mt) in enumerate(items):
             sp = None if sampling is None else dataclasses.replace(sampling, seed=sampling.seed + 7919 * i)
-            r, _ = generate_when(e, ctx, _msgs(prompt), vecs, when, max_tokens=mt, lora=lora, sampling=sp)
+            r, _ = generate_when(e, ctx, _msgs(prompt), vecs, when, max_tokens=mt, lora=lora, sampling=sp, lora_when=lora_when)
             outs[i] = keep(r)
             tick(1)
         return outs
-    e.set_lora(ctx, lora)
+    switch = bool(lora) and lora_when != "all"
+    e.set_lora(ctx, (None if lora_when == "reply" else lora) if switch else lora)
     try:
         e.set_cvec(ctx, vecs or None)
         seqs = [e.tokenize_prompt(e.render_chat(_msgs(p), enable_thinking=thinking)) for p, _ in items]
@@ -216,7 +219,15 @@ def _generate(session, items: list[tuple[str | list[dict], int]], vecs, lora, wh
                     raise GneError("CONTEXT_FULL", f"タスク {part[0]} が n_ctx={e.n_ctx} に入りません")
                 sp = None if sampling is None else dataclasses.replace(sampling, seed=sampling.seed + 7919 * n_batch)
                 n_batch += 1
-                for i, r in zip(part, e.generate_greedy(ctx, [seqs[i] for i in part], max_tokens=mt, sampling=sp), strict=True):
+                if switch:                     # プロンプトを読んでから LoRA を付け替えて生成する(KV は読んだときの状態のまま)
+                    e.set_lora(ctx, None if lora_when == "reply" else lora)
+                    e.clear_memory(ctx)
+                    pre = e.prefill(ctx, [seqs[i] for i in part])
+                    e.set_lora(ctx, None if lora_when == "prompt" else lora)
+                    gen = e.generate_greedy(ctx, [seqs[i] for i in part], max_tokens=mt, sampling=sp, prefilled=pre)
+                else:
+                    gen = e.generate_greedy(ctx, [seqs[i] for i in part], max_tokens=mt, sampling=sp)
+                for i, r in zip(part, gen, strict=True):
                     outs[i] = keep(r)
                 tick(len(part))
     finally:
@@ -451,7 +462,7 @@ def evaluate(session, recipe: Recipe, *, doses=(0, 0.25, 0.5, 0.75, 1.0), suite:
              control_pool: str = "before", direction_metrics: bool = True, baseline: dict | None = None,
              dir_max_examples: int | None = 64, keyed_contrast: str | Path | None = None, keyed_metrics: bool = True,
              keyed_examples: int | None = 8, keyed_match: bool = True, keyed_pseudo: int = 8,
-             keyed_subset: str | None = None, progress: Callable[[int, int, str], None] | None = None) -> dict:
+             keyed_subset: str | None = None, progress: Callable[[int, int, str], None] | None = None, lora_when: str = "all") -> dict:
     """dose(レシピ全体の倍率)ごとに全タスクを流し、指標の表を返す。0 が無ければ足す(ベースライン、最初に測る)。
     倍率 0 も同じ when の経路で生成する(バッチの組み方で数値が変わるので、比べる行どうしで経路をそろえる)。
     負の倍率(反対向き)も測れる。表は倍率の小さい順。
@@ -547,7 +558,8 @@ def evaluate(session, recipe: Recipe, *, doses=(0, 0.25, 0.5, 0.75, 1.0), suite:
     def measure(r: Recipe | None, d: float):
         vecs = session.vectors(r)[0] if r is not None else None
         lora = session.lora_for(r) if r is not None else None
-        outs = _generate(session, [(t["prompt"], mt) for _, t, mt in items], vecs, lora, w, lambda n, d=d: tick(n, d))
+        outs = _generate(session, [(t["prompt"], mt) for _, t, mt in items], vecs, lora, w, lambda n, d=d: tick(n, d),
+                         lora_when=lora_when if r is not None else "all")
         ppl = _ppl(session, st.ppl, vecs, lora, lambda n, d=d: tick(n, d)) if st.ppl else {}
         by = {"exact": [], "format": [], "mix": [], "persona": []}
         for (cat, t, _), o in zip(items, outs, strict=True):

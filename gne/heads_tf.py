@@ -94,49 +94,50 @@ def build_rows(session, contrast, *, target: str, side: str = "a", subset: str =
     return {"rows": rows, "n_prompts": len(convs), "n_unfinished": n_unfinished, "n_with_target": sum(bool(r["target"]) for r in rows)}
 
 
-def _logprobs(session, rows: list[dict], lora=None, batch: int = 4) -> list[np.ndarray]:
-    """行ごとに、選んだ位置(対象・ほか・終わり)の、返事のトークンの対数確率。LoRA は全位置に当てる。"""
+def _logprobs(session, rows: list[dict], lora=None, batch: int = 4, lora_when: str = "all") -> list[np.ndarray]:
+    """行ごとに、選んだ位置(対象・ほか・終わり)の、返事のトークンの対数確率。lora_when で LoRA を当てる位置を限る
+    (all = 全位置、prompt = プロンプトのトークンだけ、reply = 返事のトークンだけ。生成の lora_when と同じ決め方で、
+    返事の最初のトークンはプロンプトの最後の位置の読み取りから決まる)。"""
+    from .when import check_lora_when
+    check_lora_when(lora_when)
     e = session.engine
     ctx = e.steer_ctx()
     out = []
+    state_a = (None if lora_when == "reply" else lora) if lora else None       # プロンプトを読む間
+    state_b = (None if lora_when == "prompt" else lora) if lora else None      # 返事のトークンを読む間
     try:
         for b0 in range(0, len(rows), batch):
             part = rows[b0:b0 + batch]
             e.clear_memory(ctx)
             e.set_cvec(ctx, None)
-            e.set_lora(ctx, lora or None)
-            items, want = [], []
+            phases, want = ([], []), []
             for k, r in enumerate(part):
                 p, rep = r["prompt"], r["reply"]
                 sel = set(r["target"]) | set(r["others"]) | {len(rep) - 1}
-                seq = p + rep[:-1]
-                for pos, t in enumerate(seq):
+                for pos, t in enumerate(p + rep[:-1]):
                     j = pos - (len(p) - 1)                       # この位置の出力が予測する返事のトークンの番号
-                    w = 0 <= j < len(rep) and j in sel
-                    items.append((t, pos, k, w))
-                    if w:
-                        want.append((k, j, rep[j]))
+                    phases[0 if pos < len(p) else 1].append((t, pos, k, 0 <= j < len(rep) and j in sel, (k, j, rep[j] if 0 <= j < len(rep) else -1)))
             res = [dict() for _ in part]
-            q, cur, n_out = 0, [], 0
 
-            def run(cur, q):
-                e._decode(ctx, cur)
+            def run(cur):
+                e._decode(ctx, [it[:4] for it in cur])
                 for jj, it in enumerate(cur):
                     if it[3]:
                         lo = e._logits(ctx, jj).astype(np.float64)
-                        k, j, tok = want[q]
+                        k, j, tok = it[4]
                         m = lo.max()
                         res[k][j] = float(lo[tok] - (m + np.log(np.exp(lo - m).sum())))
-                        q += 1
-                return q
-            for it in items:
-                if cur and (len(cur) >= ctx.n_batch or (it[3] and n_out >= 128)):
-                    q = run(cur, q)
-                    cur, n_out = [], 0
-                cur.append(it)
-                n_out += int(it[3])
-            if cur:
-                q = run(cur, q)
+            for ph, st in zip(phases, (state_a, state_b), strict=True):
+                e.set_lora(ctx, st or None)
+                cur, n_out = [], 0
+                for it in ph:
+                    if cur and (len(cur) >= ctx.n_batch or (it[3] and n_out >= 128)):
+                        run(cur)
+                        cur, n_out = [], 0
+                    cur.append(it)
+                    n_out += int(it[3])
+                if cur:
+                    run(cur)
             for k, r in enumerate(part):
                 order = r["target"] + r["others"] + [len(r["reply"]) - 1]
                 out.append(np.array([res[k][j] for j in order]))
@@ -160,7 +161,7 @@ def metrics(lp: list[np.ndarray], base: list[np.ndarray], rows: list[dict]) -> d
 
 def screen(session, contrast, *, direction: str, target: str, layers=None, layers_heads=None, s: float = 10.0,
            direction_layer: str = "own", side: str = "a", subset: str = "all", span: str = "sentence", max_tokens: int = 256,
-           others: int = 64, seed: int = 0, name: str | None = None, progress=None) -> dict:
+           others: int = 64, seed: int = 0, name: str | None = None, progress=None, lora_when: str = "all") -> dict:
     """層ごと → ヘッドごとの (a)・(b)・終わりのトークンの変化。layers は層の並びか "1-29"(省くと 1〜最終層の 1 つ前)。"""
     from .jobs import _layers as parse_layers
     t0 = time.perf_counter()
@@ -181,7 +182,7 @@ def screen(session, contrast, *, direction: str, target: str, layers=None, layer
 
     def measure(units, tag):
         r = session.recipe(units=units, direction_layer=direction_layer, name=f"tf_{tag}")
-        return metrics(_logprobs(session, rows, session.lora_for(r)), base, rows)
+        return metrics(_logprobs(session, rows, session.lora_for(r), lora_when=lora_when), base, rows)
     by_layer = []
     for i, L in enumerate(Ls):
         nh = w.arch.layers[L].n_head
@@ -202,7 +203,7 @@ def screen(session, contrast, *, direction: str, target: str, layers=None, layer
         by_head.append({"layer": L, "head": h, **measure([f"{L}:H{h}:s{s:g}@{direction}"], f"L{L}H{h}")})
         tick("heads", i + 1, len(todo))
     ranked = sorted([x for x in by_head if x["a"] is not None], key=lambda x: -x["a"])
-    out = {"direction": direction, "direction_layer": direction_layer, "s": s, "target": target, "span": span, "side": side,
+    out = {"direction": direction, "direction_layer": direction_layer, "s": s, "lora_when": lora_when, "target": target, "span": span, "side": side,
            "n_prompts": data["n_prompts"], "n_finished": len(rows), "n_unfinished": data["n_unfinished"],
            "n_with_target": data["n_with_target"], "layers": by_layer, "heads_layers": HL, "heads_rule": rule, "heads": by_head,
            "top": ranked[:20], "seconds": round(time.perf_counter() - t0, 1)}
