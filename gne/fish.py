@@ -653,14 +653,14 @@ def pipeline(session, contrast: str, *, name: str, layers=None, segments=None, f
     t = time.perf_counter()
     chk = check_step(session, specs, contrast, max_tokens=max_tokens, iv=iv, segments=segs, save=name)
     lap("check", t)
-    for lab, k in (("1 段目の鍵", keys), ("当てた状態で作り直した鍵", keys2)):
+    for lab, k in (("1 段目の鍵", keys), ("当てた状態で作り直したキー", keys2)):
         for n in (k or {}).get("notes") or []:                     # 最小二乗の鍵の注のうち、気づく必要があるもの
             if "候補の端" in n and f"{lab}: {n}" not in notes:
                 notes.append(f"{lab}: {n}")
             elif n.startswith("変えたくない場面(dont_touch)") and n not in notes:
                 notes.append(n)
     ridge = None
-    if kf == "ridge":                           # 段ごとの記録(1 段目 = 無介入の返事で作った鍵、2 段目 = 当てた状態で作り直した鍵)
+    if kf == "ridge":                           # 段ごとの記録(1 段目 = 無介入の返事で作った鍵、2 段目 = 当てた状態で作り直したキー)
         ridge = {"build": keys.get("ridge"), "rekey": keys2.get("ridge") if keys2 else None}
     res = {"name": name, "contrast_path": contrast, "layers": Ls, "segments": segs, "form": form, "alpha": alpha_out(al), "alphas": al,
            "cap": cap_out(caps), "caps": caps, "direction_name": dname, "direction_reused": bool(d.get("reused")),
@@ -716,15 +716,15 @@ def _ridge_short(r: dict | None) -> dict | None:
 def key_fit_text(key_fit: str | None, ridge: dict | None) -> str:
     """鍵の作り方の 1 行(要約・画面用)。ridge は _ridge_short の形(段ごと)。"""
     if (key_fit or "mean") != "ridge":
-        return "鍵の作り方: mean(いまの作り方。書き込みたい位置の状態の平均から、書き込みたくない位置にも現れる成分を取り除く)"
+        return "キーの作り方: mean(いまの作り方。書き込みたい位置の状態の平均から、書き込みたくない位置にも現れる成分を取り除く)"
     parts = []
-    for stage, lab in (("build", "1 段目"), ("rekey", "当てた状態で作り直した鍵")):
+    for stage, lab in (("build", "1 段目"), ("rekey", "当てた状態で作り直したキー")):
         x = (ridge or {}).get(stage)
         if x:
             how = (f"質問単位の {x['folds']} 分割で決めた。候補 {', '.join(f'{c:g}' for c in x['cs'])}" + ("。候補の端" if x.get("edge") else "")
                    if x.get("cv") else "渡した値")
-            parts.append(f"{lab} c = {x['c']:g}({how}。行 {x['rows']}、ますの数 {x['cells']})")
-    return "鍵の作り方: ridge(最小二乗の鍵、ますごとの重み)" + ("。正則化の強さ: " + "、".join(parts) if parts else "")
+            parts.append(f"{lab} c = {x['c']:g}({how}。行 {x['rows']}、セルの数 {x['cells']})")
+    return "キーの作り方: ridge(最小二乗のキー、セルごとの重み)" + ("。正則化の強さ: " + "、".join(parts) if parts else "")
 
 
 def summary(d: dict) -> dict:

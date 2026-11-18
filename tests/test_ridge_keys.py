@@ -328,7 +328,7 @@ def test_leak_table_counts_per_group():
         bq = NW._question_summary(groups[g]["questions"], ["0", "1-"], False, 0.4, 1.2, 0.2)
         assert {sg: c["leak"] for sg, c in bq.items()} == {sg: row["segments"][sg]["leak"] for sg in ("0", "1-")}
     text = "\n".join(NW.leak_lines({"leaks": lk}))
-    assert "変えたくない場面の群ごとの漏れ(狙った量の 0.2 以上を書いた質問の数 / 質問の数" in text and "位置 0 だけ" in text
+    assert "対象外の場面の群ごとの誤検出(狙った量の 0.2 以上を書いた質問の数 / 質問の数" in text and "位置 0 だけ" in text
     assert "report" in text and "2/3" in text and "1/3(+0.13)" in text and "(全部)" in text
     assert NW.leak_lines({"leaks": None}) == [] and NW.leak_lines({}) == []
     one = NW.leak_table({"scene": groups["scene"], "dont_touch:tasks": groups["dont_touch:tasks"]}, ["0", "1-"], 0.2)
@@ -337,10 +337,10 @@ def test_leak_table_counts_per_group():
     # 質問ごとの値の要約の最後に、群ごとの漏れの表が付く
     qs = {"low": 0.4, "over": 1.2, "leak": 0.2, "segments": ["0", "1-"], "cap": [], "n_low": 0, "worst": []}
     lines = NW.question_lines({"question_summary": qs, "groups": {g: {**x, "by_question": {}} for g, x in groups.items()}, "leaks": lk})
-    assert lines[-1].startswith("  群ごとに見ます") and any("変えたくない場面の群ごとの漏れ" in x for x in lines)
+    assert lines[-1].startswith("  群ごとに見ます") and any("対象外の場面の群ごとの誤検出" in x for x in lines)
     # 鍵の作り方の 1 行(gne nw check)
-    assert NW.key_fit_line(None) == NW.key_fit_line({"fit": "mean"}) == "鍵の作り方: mean(いまの作り方)"
-    assert NW.key_fit_line({"fit": "ridge", "c": {"a_p0": 1.0, "a_p1": 1.0}}) == "鍵の作り方: ridge(最小二乗の鍵、ますごとの重み。正則化の強さ c = 1)"
+    assert NW.key_fit_line(None) == NW.key_fit_line({"fit": "mean"}) == "キーの作り方: mean(いまの作り方)"
+    assert NW.key_fit_line({"fit": "ridge", "c": {"a_p0": 1.0, "a_p1": 1.0}}) == "キーの作り方: ridge(最小二乗のキー、セルごとの重み。正則化の強さ c = 1)"
     assert NW.key_fit_line({"fit": "ridge", "c": {"a": 0.1, "b": 10.0}}).endswith("c = 0.1・10)")
     assert "混ざって" in NW.key_fit_line({"fit": "mixed", "keys": {"a": "mean", "b": "ridge"}})
 
@@ -358,15 +358,15 @@ def test_summary_shows_key_fit_and_leaks():
     assert sm["key_fit"] == "ridge" and sm["leaks"] == lk and sm["ridge"]["build"]["c"] == 1.0 and sm["ridge"]["rekey"]["cells"] == [35, 35, 35]
     assert "seconds" not in sm["ridge"]["rekey"] and "score" in sm["ridge"]["rekey"]
     text = fish.summary_text(d)
-    assert "鍵の作り方: ridge(最小二乗の鍵、ますごとの重み)。正則化の強さ: 1 段目 c = 1(質問単位の 5 分割で決めた。" in text
-    assert "当てた状態で作り直した鍵 c = 0.1(" in text and "候補の端" not in text and fish.summary_text(sm) == text
+    assert "キーの作り方: ridge(最小二乗のキー、セルごとの重み)。正則化の強さ: 1 段目 c = 1(質問単位の 5 分割で決めた。" in text
+    assert "当てた状態で作り直したキー c = 0.1(" in text and "候補の端" not in text and fish.summary_text(sm) == text
     edge = fish.summary_text({**d, "ridge": {"build": {**rec, "c": 100.0, "edge": True}, "rekey": None}})
     assert "c = 100(質問単位の 5 分割で決めた。候補 0.01, 0.1, 1, 10, 100。候補の端" in edge
     given = fish.summary_text({**d, "ridge": {"build": {**rec, "cv": False, "cs": None, "folds": None, "c": 2.0}, "rekey": None}})
     assert "1 段目 c = 2(渡した値" in given
     old = fish.summary({**d, "key_fit": None, "ridge": None, "check": {"groups": {}}})        # 前の形の結果(作り方の記録なし)= いまの作り方
     assert old["key_fit"] == "mean" and old["ridge"] is None and old["leaks"] is None
-    assert "鍵の作り方: mean(いまの作り方。" in fish.summary_text(old)
+    assert "キーの作り方: mean(いまの作り方。" in fish.summary_text(old)
     assert fish.DEFAULTS["key_fit"] == "mean" and {"key_fit", "key_c"} <= set(fish.SETTINGS) and "key_c" not in fish.DEFAULTS
 
 
@@ -575,13 +575,13 @@ def test_pipeline_two_stages_and_check(made):
     sm = p["summary"]
     assert sm["key_fit"] == "ridge" and sm["leaks"] == chk["leaks"] and set(sm["ridge"]) == {"build", "rekey"}
     text = fish.summary_text(p)
-    assert "鍵の作り方: ridge(最小二乗の鍵、ますごとの重み)。正則化の強さ: 1 段目 c = " in text and "当てた状態で作り直した鍵 c = " in text
-    assert "変えたくない場面の群ごとの漏れ" in text
+    assert "キーの作り方: ridge(最小二乗のキー、セルごとの重み)。正則化の強さ: 1 段目 c = " in text and "当てた状態で作り直したキー c = " in text
+    assert "対象外の場面の群ごとの誤検出" in text
     common = ["-m", str(MODEL), "--root", str(root), "--n-gpu-layers", str(NGL)]
     rp = str(s.recipe_path("rp_nw"))
     r = CliRunner().invoke(app, ["nw", "check", "--recipe", rp, "--contrast", c, "--subset", "all", "--max-tokens", "8", *common])
-    assert r.exit_code == 0 and "鍵の作り方: ridge(最小二乗の鍵、ますごとの重み。正則化の強さ c = " in r.output, r.output
-    assert "変えたくない場面の群ごとの漏れ" in r.output and "  report " in r.output and "位置 0 だけ" in r.output
+    assert r.exit_code == 0 and "キーの作り方: ridge(最小二乗のキー、セルごとの重み。正則化の強さ c = " in r.output, r.output
+    assert "対象外の場面の群ごとの誤検出" in r.output and "  report " in r.output and "位置 0 だけ" in r.output
     r = CliRunner().invoke(app, ["nw", "check", "--recipe", rp, "--contrast", c, "--subset", "all", "--max-tokens", "8", "--leak", "0.05",
                                  *common, "--json"])
     d = json.loads(r.output.strip().splitlines()[-1])

@@ -936,10 +936,10 @@ def key_fit_line(kf: dict | None) -> str:
     fit = kf.get("fit") or "mean"
     if fit == "ridge":
         cs = sorted({format(float(v), "g") for v in (kf.get("c") or {}).values() if v is not None}, key=float)
-        return "鍵の作り方: ridge(最小二乗の鍵、ますごとの重み" + (f"。正則化の強さ c = {'・'.join(cs)}" if cs else "") + ")"
+        return "キーの作り方: ridge(最小二乗のキー、セルごとの重み" + (f"。正則化の強さ c = {'・'.join(cs)}" if cs else "") + ")"
     if fit == "mixed":
-        return "鍵の作り方: mean と ridge が混ざっています(" + "、".join(f"{k} {v}" for k, v in (kf.get("keys") or {}).items()) + ")"
-    return "鍵の作り方: mean(いまの作り方)"
+        return "キーの作り方: mean と ridge が混ざっています(" + "、".join(f"{k} {v}" for k, v in (kf.get("keys") or {}).items()) + ")"
+    return "キーの作り方: mean(いまの作り方)"
 
 
 def leak_table(groups: dict, segs: list[str], leak: float) -> dict:
@@ -968,7 +968,7 @@ def leak_lines(d: dict) -> list[str]:
     if not lk or not lk.get("groups"):
         return []
     f = lambda c: "—" if not c["n"] else f"{c['leak']}/{c['n']}({c['total_mean']:+.2f})"
-    lines = [f"変えたくない場面の群ごとの漏れ(狙った量の {lk['leak']:g} 以上を書いた質問の数 / 質問の数。かっこ内は書いた量の平均)",
+    lines = [f"対象外の場面の群ごとの誤検出(狙った量の {lk['leak']:g} 以上を書いた質問の数 / 質問の数。かっこ内は書いた量の平均)",
              f"  {'群':<12} {'どれかの区間':>10}  " + "  ".join(f"区間 {sg}" for sg in lk["segments"]) + "  位置 0 だけ"]
     for r in lk["groups"] + ([{**lk["all"], "group": "(全部)"}] if lk.get("all") and len(lk["groups"]) > 1 else []):
         lines.append(f"  {r['group']:<12} {str(r['any']) + '/' + str(r['n']):>10}  " + "  ".join(f(r["segments"][sg]) for sg in lk["segments"])
