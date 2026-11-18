@@ -11,7 +11,7 @@ the same). Pick one; the full setup is in [docs/sensenova_loop.md](../../docs/se
 | Decode speed, Q4_K_M (RTX 3080, llama-completion, context 8,192, 256 tokens) | 11.4 tok/s (11.5 with both patches) | 56.5 tok/s |
 | Prompt speed (20 tokens) | 45 tok/s (41 with both patches) | 294 tok/s |
 | GPU memory (above the display) | 6.6 GB (7.0 GB with both patches) | 6.1 GB |
-| `gne heads pipeline`, question_kinds, this arch's defaults (144 heads stopped; both forks with their 0001 + 0002) | about 52 min (causal screening 35 min) | about 5 min (causal screening 4 min) |
+| `gne heads pipeline --rank causal`, question_kinds, the selection used up to v0.7.0 (144 heads stopped; both forks with their 0001 + 0002) | about 52 min (causal screening 35 min) | about 5 min (causal screening 4 min) |
 | Control vectors inside the two residual streams (steps 4-26, 28-50) | reach the next layer as published | need `guideboardlabs/0001` |
 | Residuals inside the streams (directions over all layers, base-layer search, FiSH there, router values) | need `official/0001` | readable as published (gne rebuilds them from the merge outputs) |
 | Edit one run only (`per_visit`, `gne heads visits`, `gne heads loop-pipeline`) | need `official/0001` + `official/0002` | need `guideboardlabs/0002` (after `guideboardlabs/0001`) |

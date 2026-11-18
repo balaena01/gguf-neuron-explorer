@@ -11,7 +11,7 @@ SenseNova-Loop-9B は、同じ層を 2 回続けて実行する(ループさせ�
 | llama.cpp | モデルの開発元の [OpenSenseNova/llama.cpp](https://github.com/OpenSenseNova/llama.cpp) のコミット `24ea7bb`(llama.cpp 1.0 が元) | 第三者の [GuideboardLabs/llama.cpp-sensenova-loop](https://github.com/GuideboardLabs/llama.cpp-sensenova-loop) のコミット `a7f77a7`(llama.cpp 0.8 が元) |
 | 読める GGUF | 公式の [sensenova/SenseNova-Loop-9B-GGUF](https://huggingface.co/sensenova/SenseNova-Loop-9B-GGUF)(BF16・Q8_0・Q5_K_M・Q4_K_M) | [guideboardlabs/SenseNova-Loop-9B-GGUF](https://huggingface.co/guideboardlabs/SenseNova-Loop-9B-GGUF)(Q8_0・Q4_K_M ほか) |
 | 生成の速さ(Q4_K_M、RTX 3080、文脈 8,192) | 約 11 tok/s | 約 56 tok/s |
-| `gne heads pipeline`(question_kinds、この arch の既定。どちらもパッチ 0001 + 0002) | 約 52 分(因果スクリーニング 35 分) | 約 5 分(因果スクリーニング 4 分) |
+| `gne heads pipeline --rank causal`(question_kinds、v0.7.0 までの選び方。どちらもパッチ 0001 + 0002) | 約 52 分(因果スクリーニング 35 分) | 約 5 分(因果スクリーニング 4 分) |
 | GPU のメモリ(画面の分を除く) | 約 6.6 GB(パッチ 2 本で 7.0 GB) | 約 6.1 GB |
 | 2 本の流れの中の層の control vector | 最初から届く | パッチ 0001 が要る |
 | 2 本の流れの中の層の残差 | パッチ 0001 が要る | 最初から読める |
