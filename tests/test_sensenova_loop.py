@@ -112,6 +112,22 @@ def test_projection_per_visit_names_kept_apart():
     assert sorted(tens) == ["blk.31.attn_output.weight", "blk.7.attn_output.weight"]
 
 
+def test_ablation_per_layer_composed_for_twins():
+    from gne.ablate import _twin_projections
+    rng = np.random.default_rng(3)
+    W = rng.standard_normal((6, 5))
+    r1, r2 = rng.standard_normal(6), rng.standard_normal(6)
+    r1, r2 = r1 / np.linalg.norm(r1), r2 / np.linalg.norm(r2)
+    rs = {"blk.7.attn_output.weight": r1, "blk.31.attn_output.weight": r2, "blk.2.ffn_down.weight": r1}
+    rows = {"blk.7.attn_output.weight": r1 @ W, "blk.31.attn_output.weight": r2 @ W, "blk.2.ffn_down.weight": r1 @ W}
+    rs2, rows2, twin = _twin_projections(_w(), rs, rows, 1.0)
+    assert set(twin) == {"blk.7.attn_output.weight"} and set(rows2) == {"blk.2.ffn_down.weight"}
+    A, B = twin["blk.7.attn_output.weight"]
+    I = np.eye(6)
+    np.testing.assert_allclose(W + B @ A, (I - np.outer(r2, r2)) @ (I - np.outer(r1, r1)) @ W, atol=1e-5)
+    assert _twin_projections(_w(per_visit=True), rs, rows, 1.0)[2] == {}
+
+
 def test_capture_names_and_shapes():
     from gne.capture import Capture
     c = Capture(lambda n: n in {"l_out-30", "attn_residual-30", "mhc_ffn_gates-30", "l_out_streams-30"})
@@ -222,3 +238,38 @@ def test_real_cvec_guard(engine):
     else:
         e.set_cvec(ctx, {30: v})
     e.set_cvec(ctx, None)
+
+
+def _act(e, ids, names, loras):
+    from gne.capture import Capture
+    cap = Capture(lambda n: n in names)
+    ctx = e.probe_ctx(cap, need=len(ids))
+    e.set_lora(ctx, loras)
+    e.clear_memory(ctx)
+    e.prefill(ctx, [ids])
+    e.set_lora(ctx, None)
+    return cap.take()
+
+
+@real
+def test_real_gain_lora_runs(engine, tmp_path):
+    """層 10 のニューロンを ×0 にする LoRA(1 回目の番号でも 2 回目の番号 34 でも)は、既定(両方の回)では両方の回で消す。"""
+    from gne.capture import pick_act_name
+    from gne.gain import export_gain_lora
+    from gne.steer import Recipe, parse_unit
+    from gne.weights import Weights
+    e = engine
+    if e.loop_edits != "shared":
+        pytest.skip("GNE_LOOP_EDITS=per_visit のときは別のテスト")
+    w = Weights(MODEL)
+    ids = e.tokenize_prompt(e.render_chat([{"role": "user", "content": "Tell me about the ocean."}]))
+    seen = e.list_names(ids[:16])
+    a10, a34 = pick_act_name(seen, 10), pick_act_name(seen, 34)
+    base = _act(e, ids, {a10, a34}, None)
+    for L in (10, 34):
+        p = tmp_path / f"g{L}.lora.gguf"
+        export_gain_lora(w, Recipe([parse_unit(f"{L}:100:x0")]), p)
+        got = _act(e, ids, {a10, a34}, [(str(p), 1.0)])
+        for nm in (a10, a34):                       # 量子化した重みと F16 の LoRA の差で、0 にはならず数 % 残る
+            assert np.abs(got[nm][:, 100]).max() < 0.1 * np.abs(base[nm][:, 100]).max(), (L, nm)
+        e.drop_lora(p)

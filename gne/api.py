@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
 import time
 from collections.abc import Callable
@@ -54,6 +55,13 @@ class Session:
             raise GneError("MODEL_NOT_FOUND", f"{self.path} がありません")
         self.weights = Weights(self.path)
         self.meta = self.weights.meta
+        # 同じ層を 2 回実行するモデル(sensenova_loop、docs/sensenova_loop.md): 書き換えを両方の回に当てるか(既定)、
+        # ユニットの層の回だけに当てるか(GNE_LOOP_EDITS=per_visit。2 回目の層に別の名前を持つ llama.cpp が要る)
+        mode = os.environ.get("GNE_LOOP_EDITS", "shared").strip() or "shared"
+        if mode not in ("shared", "per_visit"):
+            raise GneError("BAD_ARGS", f"GNE_LOOP_EDITS は shared か per_visit です({mode!r})")
+        if self.weights.loop is not None:
+            self.weights.per_visit_names = mode == "per_visit"
         self.store = Store(root)
         self.store.save_meta(self.meta)
         self.seed = seed
@@ -75,6 +83,13 @@ class Session:
 
     def _make_engine(self, path) -> Engine:
         e = Engine(path, **self._engine_kw)
+        if e.loop is not None:
+            e.loop_edits = "per_visit" if self.weights.per_visit_names else "shared"
+            if self.weights.per_visit_names and not e.loop_runtime_names():
+                e.close()
+                raise GneError("ARCH_UNSUPPORTED", "GNE_LOOP_EDITS=per_visit には、2 回目の層に別のテンソル名がある llama.cpp が要ります"
+                               "(この llama.cpp は 2 回目の層が 1 回目と同じ名前なので、片方の回だけに LoRA を当てられません)",
+                               "GNE_LOOP_EDITS を外すと、書き換えは両方の回に効きます(docs/sensenova_loop.md)")
         tpl = template_override(self.meta.model_id, self.meta.arch)
         if tpl is not None:
             e.chat_template = tpl[1]
@@ -117,6 +132,9 @@ class Session:
             try:
                 e = self.engine
                 llama = {"ok": True, "n_layer": e.n_layer, "n_embd": e.n_embd, "n_vocab": e.n_vocab}
+                if e.loop is not None:                 # 同じ層を 2 回実行するモデル: この llama.cpp で何ができるか
+                    llama["loop"] = {"cvec_inner": e.loop_cvec_reaches(), "per_visit_names": e.loop_runtime_names(),
+                                     "edits": e.loop_edits}
                 if e.n_layer != m.n_layer:
                     self.warn(f"llama.cpp の n_layer {e.n_layer} と block_count {m.n_layer} が違います(MTP 層など)")
             except Exception as ex:  # noqa: BLE001
@@ -946,6 +964,12 @@ class Session:
             self.warn(f"{', '.join(rest)}: gain と route は control vector に入りません"
                       "(ニューロン・ヘッド・専門家のニューロンの gain は LoRA、専門家全体の gain と route はスケールパッチ)")
         vecs, details = self.vectors(recipe)
+        lp = self.weights.loop
+        if fmt == "cvec" and lp is not None and any(lp.inner(L) for L in vecs):
+            inner = sorted(L for L in vecs if lp.inner(L))
+            self.warn(f"層 {', '.join(map(str, inner[:8]))} は残差が 2 本の流れの中の層です。元の llama.cpp(llama-server・llama-cli など)は"
+                      "そこに足した control vector を次の層に渡さないので、2 本の流れの両方に足すように直した llama.cpp で使ってください"
+                      "(docs/sensenova_loop.md)")
         if fmt == "cvec" and 0 in vecs:
             raise GneError("BAD_RECIPE", "ブロック 0 は control vector に書けません(llama.cpp の仕様)",
                            "--format npz/json/safetensors か gne bake を使ってください")

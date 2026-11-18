@@ -210,12 +210,38 @@ def write_lora_tensors(weights, tensors: dict[str, tuple[np.ndarray, np.ndarray]
             "rank": {n: int(np.asarray(B).shape[-1]) for n, (_, B) in tensors.items()}}   # 専門家の 3 次元 (E, out, r) も最後の軸
 
 
+def _twin_projections(weights, rs: dict[str, np.ndarray], rows: dict[str, np.ndarray], scale: float):
+    """同じ層を 2 回実行するモデルで 2 回の重みが共有されているとき、1 回目と 2 回目のテンソル名で別々の方向を消す射影
+    (--per-layer)を、2 つの射影を続けて掛けた 1 つの LoRA にする: W' = (I − s r₂r₂ᵀ)(I − s r₁r₁ᵀ) W
+    = W − s r₁(r₁ᵀW) − s r₂(r₂ᵀW − s (r₂·r₁) r₁ᵀW)。→ (残りの rs, 残りの rows, 合成したテンソル)。"""
+    plan = getattr(weights, "loop", None)
+    if plan is None or getattr(weights, "per_visit_names", False):
+        return rs, rows, {}
+    rs, rows = dict(rs), dict(rows)
+    out = {}
+    for name in [n for n in rows if plan.stored_name(n) != n]:
+        first = plan.stored_name(name)
+        if first not in rows:
+            rows[first], rs[first] = rows.pop(name), rs.pop(name)
+            continue
+        r1, r2 = np.asarray(rs.pop(first), np.float64), np.asarray(rs.pop(name), np.float64)
+        a1, a2 = np.asarray(rows.pop(first), np.float64), np.asarray(rows.pop(name), np.float64)
+        if np.array_equal(r1, r2):                     # 同じ方向なら 1 回(射影は 2 回掛けても同じ)
+            rows[first], rs[first] = a1, r1
+            continue
+        A = np.stack([a1, a2 - scale * float(r2 @ r1) * a1]).astype(np.float32)
+        B = np.stack([-scale * r1, -scale * r2], axis=1).astype(np.float32)
+        out[first] = (A, B)
+    return rs, rows, out
+
+
 def write_ablation_lora(weights, rs: dict[str, np.ndarray], rows: dict[str, np.ndarray], path: str | Path, *,
                         meta: dict | None = None, scale: float = 1.0, embed: tuple[np.ndarray, np.ndarray] | None = None) -> dict:
     """rows[テンソル名] = rᵀW(in,)、rs[テンソル名] = そのテンソルで消す単位ベクトル r を LoRA GGUF に書く。
     embed = (E r (n_vocab,), r) なら token_embd の LoRA も入れる(tied でないモデルだけ)。"""
     m = weights.meta
-    tensors: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    rs, rows, twin = _twin_projections(weights, rs, rows, scale)
+    tensors: dict[str, tuple[np.ndarray, np.ndarray]] = dict(twin)
     if embed is not None:
         if not embed_in_lora(weights):
             raise GneError("BAD_ARGS", "出力層が埋め込みと共有(tied)のモデルでは、LoRA に埋め込みを入れられません")

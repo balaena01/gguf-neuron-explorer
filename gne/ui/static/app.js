@@ -76,7 +76,8 @@ function describeLayer(L) {
   const ffn = li.ffn === "dense" ? `MLP ${li.n_ff}` : li.ffn.startsWith("moe")
     ? `MoE ${li.n_expert}×${li.n_ff} (${t("使用 {n}", { n: li.n_expert_used })})${li.n_ff_shexp ? ` + shared ${li.n_ff_shexp}` : ""}` : t("FFN なし");
   const heads = li.n_head ? ` ${li.n_head}h${li.n_head_kv && li.n_head_kv !== li.n_head ? `/${li.n_head_kv}kv` : ""}` : "";
-  const extra = (li.sparse_top_k ? ` · ${t("疎 top {k}", { k: li.sparse_top_k })}` : "") + (li.has_ple ? ` · ${t("n-gram 埋め込み")}` : "");
+  const extra = (li.sparse_top_k ? ` · ${t("疎 top {k}", { k: li.sparse_top_k })}` : "") + (li.has_ple ? ` · ${t("n-gram 埋め込み")}` : "")
+    + (li.visit ? ` · ${t("層 {s} の {v} 回目", { s: li.stored, v: li.visit })}` : "");      // 同じ層を 2 回実行するモデル
   return `L${L} ${mixerLabel(li)}${heads}${extra} · ${ffn}`;
 }
 
@@ -279,8 +280,11 @@ function legend() {
   const dt = state.map && state.map._detail;
   const back = dt ? `<div class="detail-row">${t("L{L} E{e} のニューロンを表示中", { L: dt.layer, e: dt.expert })} <button class="small" id="detail-back">${t("専門家の格子に戻す")}</button></div>` : "";
   const streams = state.arch.hc_streams ? `<div class="note st">${t("残差は {n} 本の流れで、読むときはその平均を使います", { n: state.arch.hc_streams })}</div>` : "";
+  const lp = state.arch.loop;                       // 同じ層を 2 回実行するモデル(sensenova_loop)
+  const loop = lp ? `<div class="note st">${t("層 {a}〜{b} を 2 回続けて実行します。層 {c}〜{d} はその 2 回目で、重みは同じです(書き換えは両方の回に効きます)。各回の中の残差は 2 本の流れで、読むときはその平均を使います",
+    { a: lp.lo1, b: lp.lo2 - 1, c: lp.lo2, d: lp.hi2 - 1 })}</div>` : "";
   $("#legend").innerHTML = `<div>${color}</div>${fh}${frame}<div>${parts.join("")}</div>${marks.length ? `<div>${marks.join("")}</div>` : ""}${links}` +
-    back + big + streams + `<div class="note st">${st}</div>` +
+    back + big + streams + loop + `<div class="note st">${st}</div>` +
     `<div class="note">${lay}</div>`;
 }
 

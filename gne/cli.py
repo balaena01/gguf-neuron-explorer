@@ -337,6 +337,12 @@ def info(c: Common, holder: dict,
     if lc is not None:
         rows.append(("llama.cpp", f"読み込み可(n_layer {lc['n_layer']}, n_embd {lc['n_embd']}, n_vocab {lc['n_vocab']})"
                      if lc["ok"] else f"読み込めません: {lc['error']}(新しい llama.cpp でのビルドが必要かもしれません、R6)"))
+        lp = lc.get("loop") if lc["ok"] else None
+        if lp:                                       # 同じ層を 2 回実行するモデル(docs/sensenova_loop.md)
+            rows.append(("2 回実行する層", ("2 本の流れの中の層の control vector: 届く" if lp["cvec_inner"]
+                                           else "2 本の流れの中の層の control vector: 届かない(層 0〜3・出口の層・繰り返しの後の層だけ)")
+                         + "、2 回目の層の名前: " + ("ある" if lp["per_visit_names"] else "無い")
+                         + "、書き換え: " + ("ユニットの回だけ" if lp["edits"] == "per_visit" else "両方の回")))
     sp = d.get("speed")
     if sp:
         rows.append(("GPU / CPU の層", f"GPU {sp['gpu_layers']} / CPU {sp['cpu_layers']}、推定の生成 {sp['decode_tok_s']:.0f} tok/s(1 本)"
@@ -418,6 +424,13 @@ def verify(c: Common, holder: dict,
     why = {}
     if not s.engine.cvec_supported:
         why |= dict.fromkeys(("V3", "V4", "V12"), f"{s.meta.arch} のグラフは control vector を読みません")
+    lp = s.engine.loop                               # 同じ層を 2 回実行するモデル: 2 本の流れの中の層の control vector が届くか
+    if lp is not None and not s.engine.loop_cvec_reaches():
+        hint = "(--layer に繰り返しの外の層か出口の層を渡すか、2 本の流れの両方に足すように直した llama.cpp を使ってください)"
+        if lp.inner(v.L):
+            why |= dict.fromkeys(("V4", "V12"), f"層 {v.L} は残差が 2 本の流れの中の層で、この llama.cpp では control vector が次の層に届きません{hint}")
+        if any(lp.inner(x) for x in (v.L, v.L + 1, v.L + 2) if x < lp.n_layer):
+            why["V3"] = f"層 {v.L}〜{v.L + 2} に 2 本の流れの中の層があり、この llama.cpp では control vector が次の層に届きません{hint}"
     if s.meta.n_expert:
         why |= dict.fromkeys(("V2", "V11", "V13", "V14"), "全層 MoE です。この検査は dense の ffn_down が前提です(MoE は V24 と gne experts で確かめます)")
     steps = [(vid, (lambda vid=vid, fn=fn: VResult(vid, "省略", "skip", why[vid]) if vid in why else fn())) for vid, fn in steps]
