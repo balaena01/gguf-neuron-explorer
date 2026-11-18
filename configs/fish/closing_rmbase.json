@@ -1,0 +1,139 @@
+{
+  "about": {
+    "order": 10,
+    "ja": {
+      "title": "計算の質問でだけ、締めの一言の成分を取り除く(!rmbase)",
+      "text": "「ほかにも分からないことがあれば聞いてくださいね」のような締めの一言の方向を作り、計算の質問の応答でだけ、その成分のうち中立の文での基準値を超えた分を取り除く例です。",
+      "sections": [
+        {
+          "h": "何をするか",
+          "body": [
+            "- 方向は、締めの一言を添えるよう指示したとき(system_a)と、指示しないときの応答の差から作ります。",
+            "- ユニットは、足す形ではなく成分を取り除く形 !rmbase です(fish.remove)。キーが開いた場面でだけ、その位置の方向の成分のうち、中立の文での平均(基準値)を超えた分を引きます。もともとどの文にもある成分は残ります。",
+            "- !kauto も付けます(fish.kscale。量子化の丸めを避ける倍率)。"
+          ]
+        },
+        {
+          "h": "入れるもの",
+          "body": [
+            "- system_a: 締めの一言を必ず添えるよう指示する文。user_prompts: 締めの一言を減らしたい場面(計算の質問)。dont_touch: 締めの一言を残す場面(ふつうの質問)。",
+            "- 層(fish の layers)は空にしてあります。続いた層(Qwen3.5-4B では 11-23 など)を入れてください。"
+          ]
+        },
+        {
+          "h": "勧める数",
+          "body": [
+            "- このひな形の数(計算 12・ほか 8)は流れを確かめる量です。両方とも数十問以上を勧めます。",
+            "- 強さ(倍率 α)は取り除く割合の目安で、1 で基準値を超えた分を全部取り除きます。"
+          ]
+        },
+        {
+          "h": "確かめた範囲と数",
+          "body": [
+            "- このひな形の流れは、まだ確かめていません。"
+          ]
+        },
+        {
+          "h": "注意",
+          "body": [
+            "- 取り除く量は位置ごとの成分で決まるので、成分が小さい位置ではほとんど何もしません。モデルが自分で締めの一言を添えない場面では、変化は小さくなります。",
+            "- 締めの一言を減らした応答を読んで確かめてください(このひな形の題材では、効き目を測っていません)。",
+            "- 確かめた数は少ないので、1〜2 問の差は誤差です。",
+            "- 書き出す前に gne nw verify --recipe <レシピ> --contrast <対照集合> で確かめてください。量子化したモデルで不合格の層があれば、その層のユニットの後ろに !kauto を付けて、もう一度確かめます(docs/fish.md §6)。"
+          ]
+        }
+      ]
+    },
+    "en": {
+      "title": "Remove the closing-remark component only for calculation questions (!rmbase)",
+      "text": "An example that builds the direction of a closing remark such as \"feel free to ask if anything else is unclear\" and, only in responses to calculation questions, removes the part of that component above its baseline on neutral text.",
+      "sections": [
+        {
+          "h": "What it does",
+          "body": [
+            "- The direction comes from the difference between responses with an instruction to add a closing remark (system_a) and responses without it.",
+            "- The units do not add; they use the removing form !rmbase (fish.remove). Only where the key opens, they subtract the part of the direction's component at that position that is above its mean on neutral text (the baseline). The component that every text already has stays.",
+            "- !kauto is added too (fish.kscale; a scale that avoids quantization rounding)."
+          ]
+        },
+        {
+          "h": "What to put in",
+          "body": [
+            "- system_a: an instruction to always add a closing remark. user_prompts: the scene where the remark should drop (calculation questions). dont_touch: the scene where it stays (ordinary questions).",
+            "- The layers (fish layers) are left empty. Enter consecutive layers (for example 11-23 on Qwen3.5-4B)."
+          ]
+        },
+        {
+          "h": "Recommended counts",
+          "body": [
+            "- The counts here (12 calculation, 8 others) are enough to check the flow. Dozens or more of each are recommended.",
+            "- Strength (scale factor α) is a guide to the share removed; 1 removes everything above the baseline."
+          ]
+        },
+        {
+          "h": "Checked range and numbers",
+          "body": [
+            "- This template's flow has not been checked yet."
+          ]
+        },
+        {
+          "h": "Cautions",
+          "body": [
+            "- The amount removed follows the component at each position, so where the component is small almost nothing happens. In scenes where the model does not add a closing remark by itself, the change is small.",
+            "- Read the responses to check the remark really drops (the effect has not been measured on this subject).",
+            "- The checks used few inputs, so a difference of one or two means nothing.",
+            "- Before exporting, check with gne nw verify --recipe <recipe> --contrast <contrast set>. If a layer fails on a quantized model, add !kauto to that layer's units and check again (docs/fish.md §6)."
+          ]
+        }
+      ]
+    }
+  },
+  "name": "fish_closing_by_scene",
+  "system_a": "あなたは丁寧なアシスタントです。答えの最後に、必ず「ほかにも分からないことがあれば、気軽に聞いてくださいね。」のような締めの一言を添えてください。",
+  "user_prompts": [
+    "17 × 23 はいくつ?",
+    "1 から 10 までの和は?",
+    "時速 60 km で 2 時間半走ると何 km?",
+    "3000 円の 15% 引きはいくら?",
+    "12 と 18 の最小公倍数は?",
+    "2 の 10 乗は?",
+    "半径 3 cm の円の面積は(π = 3.14)?",
+    "1 日は何秒?",
+    "456 ÷ 12 は?",
+    "0.25 を分数にすると?",
+    "時給 1200 円で 7 時間働くといくら?",
+    "三角形の内角の和は何度?"
+  ],
+  "dont_touch": [
+    {
+      "name": "questions",
+      "prompts": [
+        "おすすめの本を教えて。",
+        "週末の過ごし方のアイデアは?",
+        "カレーの隠し味は?",
+        "部屋の湿気を減らす方法は?",
+        "旅行の荷造りのコツは?",
+        "朝早く起きるコツは?",
+        "観葉植物の選び方は?",
+        "手紙の書き出しの例を教えて。"
+      ]
+    }
+  ],
+  "validate": {
+    "match": "気軽に|お気軽に|聞いてください|質問があれば|いつでも",
+    "target": "a closing remark inviting further questions"
+  },
+  "fish": {
+    "segments": "0,1-3,4-",
+    "form": "cap",
+    "alpha": 1,
+    "same_reply": true,
+    "stack": true,
+    "stack_fast": false,
+    "pseudo": 4,
+    "key_fit": "mean",
+    "max_tokens": 96,
+    "remove": "rmbase",
+    "kscale": "auto"
+  }
+}

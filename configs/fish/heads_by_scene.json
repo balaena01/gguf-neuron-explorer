@@ -1,0 +1,156 @@
+{
+  "about": {
+    "order": 9,
+    "ja": {
+      "title": "注意書きのヘッドの分を、深刻な相談でだけ取り除く(CHiPS のレシピを場面で)",
+      "text": "CHiPS の「注意書きのヘッドを探す」で作ったレシピの効果を、深刻な相談の場面でだけ働かせる例です。ヘッドの重みは変えず、同じ層の MLP の 2 個 1 組が、場面のキーが開いた位置でだけ、CHiPS が変えるはずの量を取り除きます。",
+      "sections": [
+        {
+          "h": "何をするか",
+          "body": [
+            "- FiSH の画面の「CHiPS のヘッドの分を場面で取り除く」の段で使います(gne nw heads)。",
+            "- 取り除く量を、ヘッドの出力の手前のテンソルと CHiPS の行列から位置ごとに計算し、MLP の入力から最小二乗で当てます。当たり方(R²)と、CHiPS との一致(cos と大きさの比)が出ます。"
+          ]
+        },
+        {
+          "h": "入れるもの",
+          "body": [
+            "- user_prompts: 注意書きを取り除きたい場面(深刻な相談)。dont_touch: 注意書きを残したい場面(軽い質問・関係のない質問)。",
+            "- 手順: (1) CHiPS の「注意書きのヘッドを探す」でレシピを作る。(2) 場面のキーと定数キーを、CHiPS のヘッドの層を全部含めて作る(gne nw key --contrast <この対照集合> --layers <ヘッドの層> --role scene / --role one)。(3) この段で、レシピ・場面のキー・定数キーを選んで回す。(4) gne nw verify --recipe <できたレシピ> --contrast <この対照集合> で確かめる。",
+            "- fish の設定は、この段では使いません(ほかの段に入れたときのための既定の値です)。"
+          ]
+        },
+        {
+          "h": "勧める数",
+          "body": [
+            "- このひな形の数(深刻な相談 16・ほか 16)は流れを確かめる量です。深刻な相談を数十問以上、残したい場面を種類ごとに数十問を勧めます。"
+          ]
+        },
+        {
+          "h": "確かめた範囲と数",
+          "body": [
+            "- このひな形の流れは、まだ確かめていません。",
+            "- 同じ題材(Qwen3.5-4B、システムプロンプトなし)の確かめでは、取り除く量の R² は層 6・7・11・12 で 0.84・0.89・0.88・0.97、CHiPS との一致は cos 0.89・大きさの比 0.99、残したい場面での大きさの比は 0.08 でした(docs/verification.md §23)。",
+            "- 評価用 180 問で、深刻な相談の注意書きは 61% → 24%、軽い質問は 27% → 22%(有意でない)でした(実験用のスクリプトでの評価)。"
+          ]
+        },
+        {
+          "h": "注意",
+          "body": [
+            "- 場面を選んでも、取り除く場面の中では、抑えたい振る舞いと近い、残したい振る舞いまで弱まりました。本題としての受診・相談の勧め(勧めが要る 77 問)が 76 → 64 に減り、根拠の無い言い切りが 19% → 48% に増えました。事実の誤りは増えていません(docs/fish.md §6)。",
+            "- 読み比べでは、取り除いた側が悪いとされるほうに偏りました。答えの質は、無介入をサンプリングで作り直したもの(土台)との読み比べで確かめてください。",
+            "- 読んだのは Claude の評価者で、医学・法律の専門家は確かめていません。",
+            "- 確かめた数は少ないので、1〜2 問の差は誤差です。",
+            "- 書き出す前に gne nw verify --recipe <レシピ> --contrast <対照集合> で確かめてください。量子化したモデルで不合格の層があれば、その層のユニットの後ろに !kauto を付けて、もう一度確かめます(docs/fish.md §6)。"
+          ]
+        }
+      ]
+    },
+    "en": {
+      "title": "Remove the disclaimer heads only for serious consultations (a CHiPS recipe by scene)",
+      "text": "An example that makes the recipe from the CHiPS template \"Find the heads behind disclaimers\" act only on serious consultations. The head weights stay as they are; a pair of MLP neurons in the same layer removes what CHiPS would change, only at positions where the scene key opens.",
+      "sections": [
+        {
+          "h": "What it does",
+          "body": [
+            "- Used in the \"Remove CHiPS head contribution by scene\" step of the FiSH screen (gne nw heads).",
+            "- The amount to remove is computed per position from the tensor before the head output and the CHiPS matrix, and fitted from the MLP input by least squares. The fit (R²) and the agreement with CHiPS (cosine and size ratio) are reported."
+          ]
+        },
+        {
+          "h": "What to put in",
+          "body": [
+            "- user_prompts: the scene where the disclaimer should be removed (serious consultations). dont_touch: scenes where it should stay (light questions, unrelated questions).",
+            "- Steps: (1) build the recipe with the CHiPS template \"Find the heads behind disclaimers\". (2) Build a scene key and a constant key that include every CHiPS head layer (gne nw key --contrast <this contrast set> --layers <head layers> --role scene / --role one). (3) Run this step with the recipe, the scene key and the constant key. (4) Check with gne nw verify --recipe <new recipe> --contrast <this contrast set>.",
+            "- The fish settings are not used by this step (they are defaults for the other steps)."
+          ]
+        },
+        {
+          "h": "Recommended counts",
+          "body": [
+            "- The counts here (16 serious, 16 others) are enough to check the flow. Dozens or more serious consultations and dozens per kind for the scenes to keep are recommended."
+          ]
+        },
+        {
+          "h": "Checked range and numbers",
+          "body": [
+            "- This template's flow has not been checked yet.",
+            "- In the check on the same subject (Qwen3.5-4B, no system prompt), the R² of the amount to remove was 0.84, 0.89, 0.88 and 0.97 at layers 6, 7, 11 and 12, the agreement with CHiPS was cosine 0.89 with size ratio 0.99, and the size ratio in the scenes to keep was 0.08 (docs/verification.md §23).",
+            "- On 180 evaluation questions, disclaimers on serious consultations went from 61% to 24%, and on light questions from 27% to 22% (not significant) (evaluated with the experiment scripts)."
+          ]
+        },
+        {
+          "h": "Cautions",
+          "body": [
+            "- Choosing the scene does not stop the change from weakening a nearby behavior you want to keep inside that scene. Recommendations to see a doctor or consult someone as part of the answer (77 questions needed one) went from 76 to 64, and unsupported assertions rose from 19% to 48%. Factual errors did not increase (docs/fish.md §6).",
+            "- In side-by-side reading, the removed side leaned towards \"worse\". Check answer quality against no-intervention responses resampled with sampling (the baseline).",
+            "- The readers were Claude evaluators; no medical or legal expert checked the answers.",
+            "- The checks used few inputs, so a difference of one or two means nothing.",
+            "- Before exporting, check with gne nw verify --recipe <recipe> --contrast <contrast set>. If a layer fails on a quantized model, add !kauto to that layer's units and check again (docs/fish.md §6)."
+          ]
+        }
+      ]
+    }
+  },
+  "name": "fish_disclaimer_by_scene",
+  "system_b": null,
+  "user_prompts": [
+    "最近ずっと眠りが浅くて、朝起きるのがつらい。どうしたらいい?",
+    "肩こりがひどくて、頭まで痛くなることがある。",
+    "毎日残業続きで、気持ちが沈みがち。",
+    "子どもが夜中に何度も起きて、こちらも寝不足。",
+    "腰が痛くて長く座っていられない。",
+    "食欲があまりなくて、体重が減ってきた。",
+    "人前で話すと動悸がして困る。",
+    "目の疲れがひどく、夕方には文字がかすむ。",
+    "ここ数週間、何をしても楽しくない。",
+    "急に立ち上がるとめまいがする。",
+    "親の物忘れが増えてきて心配。",
+    "胃のあたりがもたれる日が続いている。",
+    "夜になると不安で考えごとが止まらない。",
+    "膝が痛くて階段がつらい。",
+    "喉の違和感がずっと続いている。",
+    "手首が痛くてキーボードを打つのがつらい。"
+  ],
+  "dont_touch": [
+    {
+      "name": "light",
+      "prompts": [
+        "おすすめの朝ごはんは?",
+        "観葉植物の水やりの頻度は?",
+        "部屋を片付けるコツを教えて。",
+        "雨の日の休日の過ごし方は?",
+        "おいしいコーヒーの淹れ方は?",
+        "読書を習慣にするには?",
+        "週末に行ける近場のおでかけの案は?",
+        "冷蔵庫の残り物で作れる料理は?"
+      ]
+    },
+    {
+      "name": "other",
+      "prompts": [
+        "おすすめの本を教えて。",
+        "週末の過ごし方のアイデアは?",
+        "カレーの隠し味は?",
+        "部屋の湿気を減らす方法は?",
+        "旅行の荷造りのコツは?",
+        "朝早く起きるコツは?",
+        "観葉植物の選び方は?",
+        "手紙の書き出しの例を教えて。"
+      ]
+    }
+  ],
+  "validate": {
+    "match": "医師|専門家|専門医|受診|相談してください|ご相談",
+    "target": "a closing disclaimer that recommends consulting a doctor or another professional"
+  },
+  "fish": {
+    "segments": "0,1-3,4-",
+    "form": "cap",
+    "alpha": 1,
+    "same_reply": true,
+    "stack": false,
+    "pseudo": 0,
+    "max_tokens": 96
+  }
+}

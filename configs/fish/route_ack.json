@@ -1,0 +1,502 @@
+{
+  "about": {
+    "order": 8,
+    "ja": {
+      "title": "入力の振り分け: お礼・挨拶には相づちで応える(マーカー)",
+      "text": "お礼・褒め言葉・近況の報告・挨拶の入力でだけ、応答の最初にマーカー ◇ を出させる例です。方向は出力層の行列の ◇ の行から作り、位置 0 のキーで開閉します。",
+      "sections": [
+        {
+          "h": "何をするか",
+          "body": [
+            "- 方向は、出力層の重み行列のマーカー ◇ の行から作ります(fish.token・fish.token_delta)。",
+            "- キーは位置 0 だけで開くように最小二乗で作ります。マーカーで始まった応答を、使う側で相づちとして扱います(マーカーを消して表示する、短く切る、など)。",
+            "- 入力の振り分けの 2 本目です。1 本目の「入力の振り分け: 応答しない」のレシピを先に当てた状態で作ります(fish.iv)。"
+          ]
+        },
+        {
+          "h": "入れるもの",
+          "body": [
+            "- user_prompts: 相づちで応えてほしい入力(お礼・褒め言葉・近況の報告・挨拶)。",
+            "- 1 ターンの文字列のほか、前のやり取りのある会話(前のアシスタントの応答は content: null のまま。キーを作る前に無介入のモデルが埋めます)と、その問だけのシステムプロンプトつきの会話を混ぜてあります。",
+            "- dont_touch: 応答してほしい入力(質問・頼みごと・相談・誘い)と、応答しない入力(言いかけ・独り言)の群。",
+            "- fish.iv は空にしてあります。1 本目で保存したレシピの名前を、画面の「先に当てておくレシピ(iv)」に入れてください。1 本目とは別の層にします(同じ層だと、同じニューロンを選ぶことがあります)。",
+            "- 層(fish の layers)は空にしてあります。FiSH の画面の「層を走査する」(gne direction token-scan)で、トークンが位置 0 で 1 位になる Δ を層ごとに見てから、1 層を入れ、fish.token_delta をその Δ にしてください。"
+          ]
+        },
+        {
+          "h": "勧める数",
+          "body": [
+            "- このひな形の数(対象 24・ほかの群 32)は、流れを確かめる量です。使うなら、対象を種類ごとに数十問以上にして、会話の形を混ぜることを勧めます。",
+            "- 強さは 1。Δ は走査で選びます。Qwen3.5-4B の ◇ は、層 25 で Δ 32(β 17.7)でした(開発用の 1 ターン目のお礼・挨拶 120 入力で走査)。"
+          ]
+        },
+        {
+          "h": "確かめた範囲と数",
+          "body": [
+            "- 試した範囲: Qwen3.5-4B(Q8_0)で 1 回。1 本目(層 22)のレシピを当てた状態で、層 25・Δ 32 で作りました。式どおりかは合格です。",
+            "- 作成に使っていない開発用の 1 ターン目 300 入力で、お礼・褒め言葉・近況の報告・挨拶 120 のうち 82 が ◇ で始まり、応答すべき 150 では ◇ で始まったものは 0、空は 1、言いかけ・独り言 30 のうち 2 が ◇ で始まりました。",
+            "- 大きい構築用データ(1 ターン目 1,000 入力)で作った記事のキーは、同じ 120 のうち 109 でした。このひな形の数は流れを確かめる量です。"
+          ]
+        },
+        {
+          "h": "注意",
+          "body": [
+            "- マーカー ◇ のあとの出力が乱れることがあります。モデルが ◇ を箇条書き・引用の記号として扱うためで、何も足さずに応答の最初に ◇ を置いただけでも、乱れの 4 分の 3 ほどが出ました(Qwen3.5-4B。docs/fish.md §5)。",
+            "- ◇ が 1 トークンにならないモデルでは使えません(別の 1 トークンの記号にしてください)。",
+            "- 1 ターン目・システムプロンプトなしの入力だけで作ったキーは、2 ターン目以降やシステムプロンプトのある会話で開きにくくなります(Qwen3.5-4B の開発用データで 69〜78%)。会話の形を混ぜて作り直すと上がりましたが、複数ターンで応答しないはずの入力は 80 中 46 でした(docs/fish.md §3)。",
+            "- 確かめた数は少ないので、1〜2 問の差は誤差です。",
+            "- 書き出す前に gne nw verify --recipe <レシピ> --contrast <対照集合> で確かめてください。量子化したモデルで不合格の層があれば、その層のユニットの後ろに !kauto を付けて、もう一度確かめます(docs/fish.md §6)。"
+          ]
+        }
+      ]
+    },
+    "en": {
+      "title": "Input routing: backchannel to thanks and greetings (marker)",
+      "text": "An example that makes the model start the response with the marker ◇ only for thanks, praise, news and greetings. The direction comes from the row of ◇ in the output matrix, and a position-0 key opens and closes it.",
+      "sections": [
+        {
+          "h": "What it does",
+          "body": [
+            "- The direction comes from the row of the marker ◇ in the output weight matrix (fish.token, fish.token_delta).",
+            "- The key is built by least squares to open only at position 0. Whatever uses the model treats a response that starts with the marker as a backchannel (for example, hides the marker or cuts the response short).",
+            "- This is the second half of input routing. Build it with the recipe from the first half, \"Input routing: no response\", applied first (fish.iv)."
+          ]
+        },
+        {
+          "h": "What to put in",
+          "body": [
+            "- user_prompts: inputs that should get a backchannel (thanks, praise, news, greetings).",
+            "- Besides single-turn strings, it mixes in conversations with earlier turns (the earlier assistant replies are content: null; the model fills them without intervention before the keys are built) and conversations with their own system prompt.",
+            "- dont_touch: groups of inputs that should get a response (questions, requests, consultations, invitations) and inputs that should get no response (unfinished remarks, talking to oneself).",
+            "- fish.iv is left empty. Enter the name of the recipe saved from the first half in \"Recipe applied first (iv)\" on the screen. Use a different layer from the first half (on the same layer the same neurons may be picked).",
+            "- The layers (fish layers) are left empty. Run \"Scan layers\" on the FiSH screen (gne direction token-scan) to see, per layer, the Δ at which the token becomes rank 1 at position 0; then enter one layer and set fish.token_delta to that Δ."
+          ]
+        },
+        {
+          "h": "Recommended counts",
+          "body": [
+            "- The counts here (24 targets, 32 others) are enough to check the flow. For real use, dozens or more per kind of target are recommended, with the conversation forms mixed.",
+            "- Strength 1. Choose Δ with the scan. For ◇ on Qwen3.5-4B, layer 25 needed Δ 32 (β 17.7), scanned on 120 first-turn thanks and greetings from a development set."
+          ]
+        },
+        {
+          "h": "Checked range and numbers",
+          "body": [
+            "- Tried on: Qwen3.5-4B (Q8_0), one run, built with the first half's recipe (layer 22) applied, at layer 25 and Δ 32. The formula check passed.",
+            "- On 300 first-turn development inputs not used for building, 82 of the 120 thanks, praise, news and greetings started with ◇; of the 150 that should get a response, none started with ◇ and 1 was empty; 2 of the 30 unfinished remarks started with ◇.",
+            "- The published keys, built from 1,000 first-turn inputs, got 109 of the same 120. The counts in this template are for checking the flow."
+          ]
+        },
+        {
+          "h": "Cautions",
+          "body": [
+            "- The output after the marker ◇ can fall apart. The model treats ◇ as a bullet or quotation mark: placing ◇ at the start of the response with nothing added already produced about three quarters of the breakdowns (Qwen3.5-4B, docs/fish.md §5).",
+            "- It does not work on models where ◇ is not one token (use another one-token symbol).",
+            "- Keys built only from first turns without a system prompt open less on later turns and with a system prompt (69–78% on the Qwen3.5-4B development set). Rebuilding them from mixed forms raised this, but multi-turn inputs that should get no response were right only 46 of 80 times (docs/fish.md §3).",
+            "- The checks used few inputs, so a difference of one or two means nothing.",
+            "- Before exporting, check with gne nw verify --recipe <recipe> --contrast <contrast set>. If a layer fails on a quantized model, add !kauto to that layer's units and check again (docs/fish.md §6)."
+          ]
+        }
+      ]
+    }
+  },
+  "name": "fish_route_ack",
+  "system_b": null,
+  "user_prompts": [
+    "ありがとう、助かったよ!",
+    "教えてくれてありがとう。",
+    "すごく分かりやすかった、さすがだね。",
+    "今日、ようやく資格の試験に合格したよ。",
+    "おはよう!",
+    "こんばんは、今日もお疲れさま。",
+    "おかげで料理がうまくできた、ありがとう。",
+    "説明が丁寧で感心したよ。",
+    "昨日から新しい仕事が始まったんだ。",
+    "久しぶり、元気だった?",
+    "助言どおりにやったら、うまくいったよ。",
+    "やっと引っ越しが終わったよ。",
+    [
+      {
+        "role": "user",
+        "content": "おすすめの本ある?"
+      },
+      {
+        "role": "assistant",
+        "content": null
+      },
+      {
+        "role": "user",
+        "content": "読んでみたよ、面白かった!ありがとう"
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "カレーの作り方を教えて"
+      },
+      {
+        "role": "assistant",
+        "content": null
+      },
+      {
+        "role": "user",
+        "content": "作ってみたら家族に好評だったよ。"
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "明日の天気はどう?"
+      },
+      {
+        "role": "assistant",
+        "content": null
+      },
+      {
+        "role": "user",
+        "content": "教えてくれてありがとう、傘を持っていくね。"
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "こんにちは"
+      },
+      {
+        "role": "assistant",
+        "content": null
+      },
+      {
+        "role": "user",
+        "content": "今日はいい天気だね、また話そう。"
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "ストレッチのやり方を教えて"
+      },
+      {
+        "role": "assistant",
+        "content": null
+      },
+      {
+        "role": "user",
+        "content": "続けたら肩こりが楽になったよ。"
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "英単語の覚え方は?"
+      },
+      {
+        "role": "assistant",
+        "content": null
+      },
+      {
+        "role": "user",
+        "content": "おかげで小テストで満点だった!"
+      }
+    ],
+    [
+      {
+        "role": "system",
+        "content": "あなたは料理の相談に乗るアシスタントです。"
+      },
+      {
+        "role": "user",
+        "content": "教わったレシピ、すごくおいしくできました!"
+      }
+    ],
+    [
+      {
+        "role": "system",
+        "content": "あなたは料理の相談に乗るアシスタントです。"
+      },
+      {
+        "role": "user",
+        "content": "こんにちは、今日もよろしくお願いします。"
+      }
+    ],
+    [
+      {
+        "role": "system",
+        "content": "あなたは社内の IT ヘルプデスクの担当者です。問い合わせに丁寧に対応してください。"
+      },
+      {
+        "role": "user",
+        "content": "直りました、ありがとうございます!"
+      }
+    ],
+    [
+      {
+        "role": "system",
+        "content": "あなたは社内の IT ヘルプデスクの担当者です。問い合わせに丁寧に対応してください。"
+      },
+      {
+        "role": "user",
+        "content": "おはようございます。"
+      }
+    ],
+    [
+      {
+        "role": "system",
+        "content": "あなたは旅行会社のアシスタントです。行き先や旅程の相談に答えてください。"
+      },
+      {
+        "role": "user",
+        "content": "旅行、とても楽しかったです。ありがとう。"
+      }
+    ],
+    [
+      {
+        "role": "system",
+        "content": "あなたは旅行会社のアシスタントです。行き先や旅程の相談に答えてください。"
+      },
+      {
+        "role": "user",
+        "content": "無事に帰ってきました!"
+      }
+    ]
+  ],
+  "dont_touch": [
+    {
+      "name": "questions",
+      "prompts": [
+        "水の沸点は何度?",
+        "Python でリストを逆順にする方法は?",
+        "1 キロメートルは何メートル?",
+        "光合成の仕組みを説明して。",
+        [
+          {
+            "role": "user",
+            "content": "こんにちは"
+          },
+          {
+            "role": "assistant",
+            "content": null
+          },
+          {
+            "role": "user",
+            "content": "おすすめの本を教えて"
+          }
+        ],
+        [
+          {
+            "role": "user",
+            "content": "最近寒いね"
+          },
+          {
+            "role": "assistant",
+            "content": null
+          },
+          {
+            "role": "user",
+            "content": "風邪を引かない方法は?"
+          }
+        ],
+        [
+          {
+            "role": "system",
+            "content": "あなたは料理の相談に乗るアシスタントです。"
+          },
+          {
+            "role": "user",
+            "content": "カレーの隠し味は?"
+          }
+        ],
+        [
+          {
+            "role": "system",
+            "content": "あなたは社内の IT ヘルプデスクの担当者です。問い合わせに丁寧に対応してください。"
+          },
+          {
+            "role": "user",
+            "content": "パスワードを忘れました。どうすればいいですか?"
+          }
+        ]
+      ]
+    },
+    {
+      "name": "requests",
+      "prompts": [
+        "この文を英語に訳して: 今日は雨です。",
+        "週末の予定を立てるのを手伝って。",
+        "買い物リストを作って。卵、牛乳、パン。",
+        [
+          {
+            "role": "user",
+            "content": "今日は忙しかった"
+          },
+          {
+            "role": "assistant",
+            "content": null
+          },
+          {
+            "role": "user",
+            "content": "明日の朝のアラームの時間を決めるのを手伝って。"
+          }
+        ],
+        [
+          {
+            "role": "system",
+            "content": "あなたは旅行会社のアシスタントです。行き先や旅程の相談に答えてください。"
+          },
+          {
+            "role": "user",
+            "content": "京都の 2 日間の旅程を作ってください。"
+          }
+        ],
+        [
+          {
+            "role": "system",
+            "content": "あなたは料理の相談に乗るアシスタントです。"
+          },
+          {
+            "role": "user",
+            "content": "鶏むね肉を使った献立を考えて。"
+          }
+        ]
+      ]
+    },
+    {
+      "name": "consult",
+      "prompts": [
+        "最近よく眠れないんだけど、どうしたらいい?",
+        "職場の人と話すのが苦手で困ってる。",
+        "貯金がなかなか続かない。",
+        [
+          {
+            "role": "user",
+            "content": "やあ"
+          },
+          {
+            "role": "assistant",
+            "content": null
+          },
+          {
+            "role": "user",
+            "content": "運動を習慣にしたいけど続かないんだ。"
+          }
+        ],
+        [
+          {
+            "role": "system",
+            "content": "あなたは社内の IT ヘルプデスクの担当者です。問い合わせに丁寧に対応してください。"
+          },
+          {
+            "role": "user",
+            "content": "パソコンの動作が遅くて仕事になりません。"
+          }
+        ],
+        [
+          {
+            "role": "system",
+            "content": "あなたは料理の相談に乗るアシスタントです。"
+          },
+          {
+            "role": "user",
+            "content": "料理が苦手で、何から始めればいいですか?"
+          }
+        ]
+      ]
+    },
+    {
+      "name": "invite",
+      "prompts": [
+        "今度一緒にご飯行かない?",
+        "週末、映画でもどう?",
+        "来月のバーベキュー、来られる?",
+        [
+          {
+            "role": "user",
+            "content": "元気?"
+          },
+          {
+            "role": "assistant",
+            "content": null
+          },
+          {
+            "role": "user",
+            "content": "今度の休み、ハイキングに行かない?"
+          }
+        ]
+      ]
+    },
+    {
+      "name": "partial",
+      "prompts": [
+        "えっと、明日の会議なんだけど",
+        "そういえばさ、あの件",
+        "うーん、どうしようかな",
+        "あ、ちょっと待って",
+        [
+          {
+            "role": "user",
+            "content": "今日は晴れてるね"
+          },
+          {
+            "role": "assistant",
+            "content": null
+          },
+          {
+            "role": "user",
+            "content": "それでね、えーと"
+          }
+        ],
+        [
+          {
+            "role": "user",
+            "content": "最近忙しい?"
+          },
+          {
+            "role": "assistant",
+            "content": null
+          },
+          {
+            "role": "user",
+            "content": "あ、そうそう、それで"
+          }
+        ],
+        [
+          {
+            "role": "system",
+            "content": "あなたは料理の相談に乗るアシスタントです。"
+          },
+          {
+            "role": "user",
+            "content": "あのー、ちょっと"
+          }
+        ],
+        [
+          {
+            "role": "system",
+            "content": "あなたは料理の相談に乗るアシスタントです。"
+          },
+          {
+            "role": "user",
+            "content": "えっと、冷蔵庫に"
+          }
+        ]
+      ]
+    }
+  ],
+  "validate": {
+    "match": "^\\s*◇",
+    "target": "a response that starts with the marker ◇ to thanks, praise, news or a greeting"
+  },
+  "fish": {
+    "segments": "0",
+    "form": "cap",
+    "alpha": 1,
+    "same_reply": true,
+    "stack": false,
+    "pseudo": 0,
+    "key_fit": "ridge",
+    "max_tokens": 48,
+    "token": "◇",
+    "token_delta": 32,
+    "iv": ""
+  }
+}

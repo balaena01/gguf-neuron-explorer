@@ -1,0 +1,137 @@
+{
+  "about": {
+    "order": 6,
+    "ja": {
+      "title": "注意書きのヘッドを探す(例: 深刻な相談に付く「専門家に相談を」)",
+      "text": "深刻な相談への応答に付く注意書き(「医師や専門家に相談してください」のような一言)を書くヘッドを探し、その方向成分を弱める CHiPS のレシピを作る例です。FiSH の「注意書きのヘッドの分を、深刻な相談でだけ取り除く」と組で使います。",
+      "sections": [
+        {
+          "h": "何をするか",
+          "body": [
+            "- A 側(prompts_a)は、モデルが自分で注意書きを添えやすい深刻な相談、B 側(prompts_b)は同じ話題の軽い質問です。どちらもシステムプロンプトなしで読みます。",
+            "- 方向 → 基準層 → 因果スクリーニング → 強さの配分を 1 回で回し、注意書きの方向を書くヘッドと強さを選びます。",
+            "- CHiPS のレシピは、どの場面でもそのヘッドの成分を弱めます。場面を選んで取り除くには、できたレシピを FiSH の画面の「CHiPS のヘッドの分を場面で取り除く」に渡します。"
+          ]
+        },
+        {
+          "h": "入れるもの",
+          "body": [
+            "- prompts_a: 注意書きが付く入力(深刻な相談)。prompts_b: 注意書きが付かない入力(軽い質問)。話題・長さをできるだけそろえます。",
+            "- validate.match は注意書きの言い回しの正規表現です。モデルや言語に合わせて直してください。"
+          ]
+        },
+        {
+          "h": "勧める数",
+          "body": [
+            "- このひな形の数(16 問ずつ)は流れを確かめる量です。深刻な相談・軽い質問とも数十問以上を勧めます。",
+            "- 注意書きは応答の終わりに出やすいので、材料のラベルは書き終えた応答で付けてください(長さの上限で切れた応答では「出なかった」が確かでない)。"
+          ]
+        },
+        {
+          "h": "確かめた範囲と数",
+          "body": [
+            "- このひな形の流れは、まだ確かめていません。",
+            "- 同じ題材(健康・法律・お金の深刻な相談、Qwen3.5-4B)で gne の heads pipeline が選んだ組は 6 個(層 6・7・11・12)でした(docs/verification.md §23)。"
+          ]
+        },
+        {
+          "h": "注意",
+          "body": [
+            "- 強さを上げても解決しません。倍率を 1.5・2 倍にすると、効き目より先に、書き終えない・繰り返す応答が急に増えました(docs/fish.md §6)。",
+            "- 答えの質は、無介入の応答をサンプリングで作り直したもの(土台)との読み比べで確かめてください。介入した応答と無介入の応答を読み比べると、文面が変わるだけで「悪い」が 3〜4 割出ます。"
+          ]
+        }
+      ]
+    },
+    "en": {
+      "title": "Find the heads behind disclaimers (example: \"consult a professional\" on serious consultations)",
+      "text": "An example that finds the heads that write the disclaimer added to responses to serious consultations (a line such as \"please consult a doctor or a professional\") and builds a CHiPS recipe that weakens their directional component. It pairs with the FiSH template \"Remove the disclaimer heads only for serious consultations\".",
+      "sections": [
+        {
+          "h": "What it does",
+          "body": [
+            "- Side A (prompts_a) holds serious consultations, where the model tends to add a disclaimer by itself; side B (prompts_b) holds light questions on the same topics. Both are read without a system prompt.",
+            "- One run goes through direction → base layer → causal screening → strength allocation and picks the heads that write the disclaimer direction and their strengths.",
+            "- A CHiPS recipe weakens those heads' component in every scene. To remove it only in chosen scenes, pass the recipe to \"Remove CHiPS head contribution by scene\" on the FiSH screen."
+          ]
+        },
+        {
+          "h": "What to put in",
+          "body": [
+            "- prompts_a: inputs that get a disclaimer (serious consultations). prompts_b: inputs that do not (light questions). Keep topics and lengths as similar as you can.",
+            "- validate.match is a regex for the disclaimer wording; adjust it to the model and language."
+          ]
+        },
+        {
+          "h": "Recommended counts",
+          "body": [
+            "- The counts here (16 each) are enough to check the flow. Dozens or more of each are recommended.",
+            "- Disclaimers tend to come at the end of a response, so label the material on finished responses (for a response cut off at the length limit, \"no disclaimer\" is not certain)."
+          ]
+        },
+        {
+          "h": "Checked range and numbers",
+          "body": [
+            "- This template's flow has not been checked yet.",
+            "- On the same subject (serious health, legal and money consultations, Qwen3.5-4B), gne heads pipeline picked 6 heads (layers 6, 7, 11, 12) (docs/verification.md §23)."
+          ]
+        },
+        {
+          "h": "Cautions",
+          "body": [
+            "- Raising the strength does not help. At 1.5 or 2 times the scale, responses that do not finish or that repeat rose sharply before the effect grew (docs/fish.md §6).",
+            "- Check answer quality by comparing against no-intervention responses resampled with sampling (the baseline). Comparing intervened responses with no-intervention responses marks 30–40% as \"worse\" just because the wording changed."
+          ]
+        }
+      ]
+    }
+  },
+  "name": "disclaimer_heads",
+  "prompts_a": [
+    "最近ずっと眠りが浅くて、朝起きるのがつらい。どうしたらいい?",
+    "肩こりがひどくて、頭まで痛くなることがある。",
+    "毎日残業続きで、気持ちが沈みがち。",
+    "子どもが夜中に何度も起きて、こちらも寝不足。",
+    "腰が痛くて長く座っていられない。",
+    "食欲があまりなくて、体重が減ってきた。",
+    "人前で話すと動悸がして困る。",
+    "目の疲れがひどく、夕方には文字がかすむ。",
+    "ここ数週間、何をしても楽しくない。",
+    "急に立ち上がるとめまいがする。",
+    "親の物忘れが増えてきて心配。",
+    "胃のあたりがもたれる日が続いている。",
+    "夜になると不安で考えごとが止まらない。",
+    "膝が痛くて階段がつらい。",
+    "喉の違和感がずっと続いている。",
+    "手首が痛くてキーボードを打つのがつらい。"
+  ],
+  "prompts_b": [
+    "おすすめの朝ごはんは?",
+    "観葉植物の水やりの頻度は?",
+    "部屋を片付けるコツを教えて。",
+    "雨の日の休日の過ごし方は?",
+    "おいしいコーヒーの淹れ方は?",
+    "読書を習慣にするには?",
+    "週末に行ける近場のおでかけの案は?",
+    "冷蔵庫の残り物で作れる料理は?",
+    "おすすめの本を教えて。",
+    "週末の過ごし方のアイデアは?",
+    "カレーの隠し味は?",
+    "部屋の湿気を減らす方法は?",
+    "旅行の荷造りのコツは?",
+    "朝早く起きるコツは?",
+    "観葉植物の選び方は?",
+    "手紙の書き出しの例を教えて。"
+  ],
+  "validate": {
+    "match": "医師|専門家|専門医|受診|相談してください|ご相談",
+    "target": "a closing disclaimer that recommends consulting a doctor or another professional"
+  },
+  "pipeline": {
+    "n_heads": [
+      8,
+      6,
+      4
+    ]
+  }
+}

@@ -417,6 +417,10 @@ gne nw try --direction tsundere_thanks --contrast $C --layers 11-23 --alpha 1,1,
 | `scene_and_sentence_end.json` | 場面 かつ 文末(雑談のときだけ「のだ」) | `before:…`、キー 2 つ(ゲート = 場面のキー、入力 = 文末の直前のキー) | 30・4 | 雑談 8 問中 5 問に「のだ」(一部の文だけ、弱い)。計算・事実 6 問は敬体のまま、うち 1 問は答えの中身が変わった |
 | `two_personas.json` | 2 つの性格の違いだけを書く(system_a = 冷たい、system_b = 温かい) | 応答の位置、上限つき | 11,18,23・0.9 | system_b を付けた 6 問とも、短くそっけない応答に。逆向きは中途半端だった |
 | `after_chips.json` | CHiPS のレシピを当てた上に足す(iv に名前を入れる) | 応答の位置、上限つき | 11,18,23・0.9 | 手元の小さな proj のレシピで流れだけ確かめた。実際の CHiPS のレシピとの組み合わせは未確認 |
+| `route_none.json` | 入力の振り分け: 言いかけ・独り言には応答しない(方向は終了トークンの行、会話の形を混ぜた対照集合) | 位置 0、上限つき、最小二乗のキー | 22・1(Δ 32) | 開発用の 1 ターン目 300 入力で、言いかけ・独り言 30 中 20 が空、応答すべき 270 中 3 が空(2 本目を足す前) |
+| `route_ack.json` | 入力の振り分け: お礼・挨拶には ◇ で始める(1 本目を iv に入れる) | 位置 0、上限つき、最小二乗のキー | 25・1(Δ 32) | 同じ 300 入力で、お礼・挨拶など 120 中 82 が ◇ で始まり、応答すべき 150 では ◇ は 0 |
+| `heads_by_scene.json` | 注意書きのヘッドの分を、深刻な相談でだけ取り除く(CHiPS の `disclaimer.json` と組) | 「CHiPS のヘッドの分を場面で取り除く」の段 | — | 下の確かめの数は docs/verification.md §24.4 |
+| `closing_rmbase.json` | 計算の質問でだけ、締めの一言の成分を取り除く(`!rmbase`・`!kauto`) | 応答の位置 0 / 1-3 / 4-、上限つき、成分を取り除く形 | 11-23・1 | 下の確かめの数は docs/verification.md §24.4 |
 
 - **文字の直前に書く(`before:<正規表現>`)**: 「位置の区切り」の欄(表の `fish.segments`)に、応答の位置の区切りの代わりに書く。方向は
   区切らず(名前は `<名前>` のまま)、下の層の残りも使わない。書くとその文字が出なくなるので、当てた状態でのキーの作り直しはしない
@@ -802,7 +806,7 @@ gne direction token-scan --token '◇' --contrast ack.yaml                    # 
 gne nw pipeline --contrast none.yaml --layers 22 --segments 0 --alpha 1 --key-fit ridge \
   --token '<|im_end|>' --token-delta 32 --name route_none --save route_none.yaml
 gne nw pipeline --contrast ack.yaml --layers 25 --segments 0 --alpha 1 --key-fit ridge \
-  --token '◇' --token-delta 24 --name route_ack --save route_ack.yaml --iv route_none.yaml
+  --token '◇' --token-delta 32 --name route_ack --save route_ack.yaml --iv route_none.yaml
 gne recipe-combine route_none.yaml route_ack.yaml -o route.yaml             # 2 つのレシピを 1 つに
 ```
 

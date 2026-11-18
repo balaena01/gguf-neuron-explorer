@@ -862,7 +862,9 @@ def test_fish_tab_in_english(served, browser, piped):
 # --- ひな形(configs/fish/)と、文字の直前に書く形 -----------------------------------------------------------------
 
 TEMPLATES = ["tone_in_scene.json", "always_persona.json", "sentence_end.json", "scene_and_sentence_end.json", "two_personas.json",
-             "after_chips.json"]                                              # about.order の順
+             "after_chips.json", "route_none.json", "route_ack.json", "heads_by_scene.json", "closing_rmbase.json"]   # about.order の順
+ROUTE = {"route_none.json": "<|im_end|>", "route_ack.json": "◇"}             # 入力の振り分け(トークンの行の方向・位置 0 のキー)
+OTHER = {"heads_by_scene.json", "closing_rmbase.json"}                       # CHiPS のヘッドの分を場面で取り除く・成分を取り除く形
 
 
 def test_all_templates_are_readable(tmp_path):
@@ -877,6 +879,11 @@ def test_all_templates_are_readable(tmp_path):
         d = json.loads((TEMPLATE.parent / name).read_text(encoding="utf-8"))
         a = d.pop("about")
         orders.append(a["order"])
+        for lang in ("ja", "en"):                                               # 要約と、5 つの見出しの節
+            assert [x["h"] for x in a[lang]["sections"]][:2] == (["何をするか", "入れるもの"] if lang == "ja" else ["What it does", "What to put in"]), name
+        if name in ROUTE or name in OTHER:
+            _check_new_template(name, d, a, tmp_path)
+            continue
         assert a["ja"]["title"] and a["en"]["title"] and "試した範囲" in _all(a["ja"]) and "Tried on" in _all(a["en"]), name
         assert "誤差" in _all(a["ja"]) and "Qwen3.5-4B" in _all(a["ja"]) and "Qwen3.5-4B" in _all(a["en"]), name
         st = d.pop("fish")
@@ -902,6 +909,30 @@ def test_all_templates_are_readable(tmp_path):
     two = json.loads((TEMPLATE.parent / "two_personas.json").read_text(encoding="utf-8"))
     assert two["system_b"] and two["system_a"] != two["system_b"]
     assert json.loads((TEMPLATE.parent / "after_chips.json").read_text(encoding="utf-8"))["fish"]["iv"] == ""
+
+
+def _check_new_template(name, d, a, tmp_path):
+    """入力の振り分け・ヘッドの分を場面で取り除く・成分を取り除く形のひな形: 説明に確かめた範囲と注意(!kauto)があり、設定が決まりどおりで、
+    対照集合として読める。"""
+    from gne import fish
+    from gne.keyed_build import read_key_spec
+    from gne.prior import spec_has_null
+    from gne.yamlio import write_yaml
+    assert "確かめた範囲と数" in [x["h"] for x in a["ja"]["sections"]] and "!kauto" in _all(a["ja"]) and "!kauto" in _all(a["en"]), name
+    assert "誤差" in _all(a["ja"]) and "Qwen3.5-4B" in _all(a["ja"]) and "Qwen3.5-4B" in _all(a["en"]), name
+    st = d.pop("fish")
+    assert set(st) <= set(fish.SETTINGS) and "layers" not in st and st["form"] == "cap", name
+    if name in ROUTE:
+        assert st["token"] == ROUTE[name] and st["token_delta"] > 0 and st["segments"] == "0" and st["key_fit"] == "ridge" and st["alpha"] == 1, name
+        assert spec_has_null(d), name                                           # 前のやり取りの応答は content: null(無介入のモデルが埋める)
+        assert any(isinstance(q, list) and q[0]["role"] == "system" for q in d["user_prompts"]), name   # システムプロンプトつきの会話も
+    if name == "closing_rmbase.json":
+        assert st["remove"] == "rmbase" and st["kscale"] == "auto" and d["system_a"], name
+    assert d["name"].startswith("fish_") and d["validate"]["match"], name
+    p = tmp_path / f"{d['name']}.yaml"
+    write_yaml(p, d)
+    ks = read_key_spec(p)
+    assert ks.contrast.name == d["name"] and ks.dont_touch, name
 
 
 def test_before_mode_without_model():

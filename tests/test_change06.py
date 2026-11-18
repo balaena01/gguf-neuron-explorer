@@ -662,7 +662,7 @@ def test_pipeline_templates_are_valid(tmp_path):
     from gne.api import Session
     from gne.direction import load_contrast
     files = sorted((ROOT / "configs" / "pipeline").glob("*.json"))
-    assert len(files) == 5
+    assert len(files) == 6
     for f in files:
         d = json.loads(f.read_text(encoding="utf-8"))
         about = d.pop("about")
