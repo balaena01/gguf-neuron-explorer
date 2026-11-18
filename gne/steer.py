@@ -330,10 +330,11 @@ class Recipe:
                 continue
             if u.kind in ("ffn", "attn"):
                 raise GneError("BAD_RECIPE", f"{u}: kind {u.kind} は keyed だけです(例 {u.layer}:{u.kind}:keyed:a1@NAME#KEY)")
-            if u.mode == "proj":                                          # CHANGE-06
-                if u.kind != "head" or u.head is None or u.k is None:
-                    raise GneError("BAD_RECIPE", f"{u}: proj はヘッドだけで、head と s が要ります"
-                                                 "(例 {layer: 33, kind: head, head: 16, mode: proj, direction: NAME, s: 6})")
+            if u.mode == "proj":                                          # CHANGE-06(ニューロンは v0.8.0)
+                if not ((u.kind == "head" and u.head is not None) or (u.kind == "neuron" and u.neuron is not None)) or u.k is None:
+                    raise GneError("BAD_RECIPE", f"{u}: proj はヘッド(head)かニューロン(neuron)で、番号と s が要ります"
+                                                 "(例 {layer: 33, kind: head, head: 16, mode: proj, direction: NAME, s: 6}、"
+                                                 "{layer: 20, neuron: 4096, mode: proj, direction: NAME, s: 1})")
                 if not (u.direction or self.default_direction):
                     raise GneError("BAD_RECIPE", f"{u.label()}: proj には方向が要ります(ユニットの direction かレシピの default_direction)")
                 if u.direction is not None and not re.fullmatch(r"[\w.\-]+", u.direction):
@@ -452,6 +453,7 @@ _UNIT_RE = re.compile(r"^(\d+):(?:(\d+)|random:(\d+)|dir:([\w.\-@]+)|[Hh](\d+)):
 
 
 _PROJ_RE = re.compile(r"^(\d+):[Hh](\d+):s([+-]?[\d.]+(?:e[+-]?\d+)?)(?:@([\w.\-]+))?$", re.I)
+_PROJN_RE = re.compile(r"^(\d+):N(\d+):s([+-]?[\d.]+(?:e[+-]?\d+)?)(?:@([\w.\-]+))?$", re.I)   # ニューロンの射影(v0.8.0)
 
 
 _MOE_RE = re.compile(r"^(\d+):(?:E(\d+)|(S)):(?:N(\d+):(x?)|(x)|(route):)([+-]?[\d.]+(?:e[+-]?\d+)?)$", re.I)
@@ -487,6 +489,7 @@ def parse_unit(spec: str) -> Unit:
     MoE(CHANGE-05): 専門家のニューロンは "L:Ee:Nn:dose" / "L:Ee:Nn:xk"、専門家全体は "L:Ee:xk"(x0 で消す)、
     ルーターバイアスは "L:Ee:route:delta"、shared expert のニューロンは "L:S:Nn:dose" / "L:S:Nn:xk"。
     ヘッドの方向成分の射影(CHANGE-06)は "L:Hh:sS@NAME"(例 33:H16:s15.4@tsundere_r)。@NAME を省くとレシピの default_direction。
+    ニューロンの方向成分の射影(ffn_down の列から方向成分を引く)は "L:Nn:sS@NAME"(例 20:N4096:s1@evil)。
     鍵つきの書き込み(CHANGE-07)は "L:ffn:keyed:aα@DIR#KEY"(例 19:ffn:keyed:a1.25@zundamon_r#zundamon_k)。
     書き込み先は ffn(ffn_down)・attn(attn_output)・S(shared expert)・Ee(専門家 e)。@DIR / #KEY を省くとレシピの
     default_direction / default_key。@-DIR は α の符号に畳む(打ち消し)。KEY は比較用の鍵 NAME~j も可。"""
@@ -518,6 +521,10 @@ def parse_unit(spec: str) -> Unit:
     if mp:
         L, h, sv, dname = mp.groups()
         return Unit(int(L), None, 0.0, "head", mode="proj", k=float(sv), direction=dname, head=int(h))
+    mpn = _PROJN_RE.match(spec.strip())
+    if mpn:
+        L, n, sv, dname = mpn.groups()
+        return Unit(int(L), int(n), 0.0, "neuron", mode="proj", k=float(sv), direction=dname)
     mm = _MOE_RE.match(spec.strip())
     if mm:
         L, e, shared, n, ngain, egain, route, val = mm.groups()
@@ -537,6 +544,7 @@ def parse_unit(spec: str) -> Unit:
         raise GneError("BAD_UNIT", f"ユニット指定 {spec!r} を読めません",
                        "L:N:dose(例 14:8949:+1.0)、L:random:SEED:dose、gain は L:N:x2(倍率)、方向は L:dir:NAME:dose、"
                        "ヘッドは L:Hh:xk(例 21:H7:x0)・方向成分の射影 L:Hh:sS@NAME(例 33:H16:s6@NAME)、"
+                       "ニューロンの方向成分の射影 L:Nn:sS@NAME(例 20:N4096:s1@NAME)、"
                        "MoE は L:Ee:Nn:dose・L:Ee:xk・L:Ee:route:delta・L:S:Nn:dose、"
                        "鍵つきの書き込みは L:ffn:keyed:aα@方向#鍵(attn・S・Ee も)")
     L, n, seed, dname, head, gain, val = m.groups()

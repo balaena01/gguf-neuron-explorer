@@ -469,3 +469,38 @@ def test_real_recipe_mode_per_file(tmp_path):
         assert s.lora_for(pv)[0][0] != s.lora_for(sh)[0][0]          # 同じ中身でも当て方が違えば別のファイル
     assert not s.weights.per_visit_names                              # セッションの当て方は元に戻る
     s.close()
+
+
+@real
+def test_real_writes_ranking_mhc(tmp_path):
+    """v0.8.0 の書き込みの順位づけ: 2 本の流れの中の層でも、部品から組み立てた層の更新(c·副層の出力、c = (post0 + post1)/2)が、
+    捕まえた残差の差 l_out-L − l_out-(L−1) と合う。部品は重みを持つ層の番号で表し(2 回目の層は候補にしない)、
+    2 回の書き込みを足す。ニューロンの射影は両方の回に効き、式どおりに MLP の出力を変える。"""
+    import json as _json
+    from gne.api import Session
+    from gne.steer import GneError
+    cfg = Path(__file__).resolve().parent.parent / "configs" / "pipeline" / "question_kinds.json"
+    d = _json.loads(cfg.read_text(encoding="utf-8"))
+    import yaml as _yaml
+    c = tmp_path / "qk.yaml"
+    c.write_text(_yaml.safe_dump({"name": "qk", "prompts_a": d["prompts_a"][:6], "prompts_b": d["prompts_b"][:6]},
+                                 allow_unicode=True), encoding="utf-8")
+    try:
+        s = Session(MODEL, root=tmp_path / "root", n_ctx=1024, n_seq_max=1)
+        s.engine
+    except (RuntimeError, GneError) as ex:
+        pytest.skip(f"この llama.cpp では読めません: {ex}")
+    try:
+        s.direction(contrast=c, name="qk", positions="last")
+        out = s.heads_writes("qk", verify_top=2, verify_sample=0, verify_examples=4)
+        ck = out["check"]
+        assert ck["layer_rel_median"] < 0.05 and ck["attn_rel_max"] < 0.1 and ck["mlp_rel_max"] < 0.1, ck
+        z = np.load(out["npz"])
+        assert set(z["layer_visit"].tolist()) == {0, 1, 2} and int(z["select_layer"]) == 54
+        lp = s.weights.loop
+        assert not any(lp.second(int(L)) for L in z["head_layer"])           # 2 回目の層は候補にしない(同じ重み)
+        assert out["n_units"]["neuron"] == 30 * s.meta.n_ff                    # 層 0〜27 と 52・53
+        m = s.check_neuron_proj(10, 7, "qk", ss=(1.0,))
+        assert m["v24"], m["rows"]
+    finally:
+        s.close()

@@ -465,18 +465,40 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
             return _err(e)
 
     @srv.tool()
+    async def heads_writes(name: str, contrast: str | None = None, select_layer: int | None = None, unit_kinds: str = "all",
+                           verify_top: int = 64, verify_mode: str = "proj", max_examples: int | None = None) -> dict:
+        """全部の部品(注意ヘッド・線形注意のヘッド・MLP のニューロン)を、方向 name への書き込みの量で順位づけするジョブを投げる
+        (job_status で結果。生成なし)。質問 1 問につき 1 回流し、点数 = 選ぶ層(既定は最後に測れる層)での「s=1 の射影で直接に
+        縮まる A と B の差」。上位 verify_top 個を 1 個ずつ s=1 で射影して(verify_mode="ablate" なら止めて)確かめ、点数との順位相関を
+        返す。直接の書き込みしか見ないので、後ろの書き手を動かしているだけの部品は見落とす。層ごとの更新のベクトルは .writes.npz。"""
+        try:
+            p = {"direction": name, "select_layer": select_layer, "kinds": unit_kinds, "verify_top": verify_top,
+                 "verify_mode": verify_mode, "max_examples": max_examples,
+                 "contrast": None if contrast is None else str(_contrast_path(session, contrast, None, None, None, None))}
+            return jobs.start("heads_writes", {k: v for k, v in p.items() if v is not None}).view()
+        except Exception as e:  # noqa: BLE001
+            return _err(e)
+
+    @srv.tool()
     async def heads_pipeline(spec: dict[str, Any] | str, target: float | str | None = None, n_heads: list[int] | None = None,
-                             max_examples: int | None = None, resume: bool = True) -> dict:
+                             max_examples: int | None = None, resume: bool = True, rank: str | None = None,
+                             unit_kinds: str | None = None, n_units: list[int] | None = None,
+                             check_replies: int | None = None) -> dict:
         """対照集合(name・user_prompts か側ごとの質問 prompts_a / prompts_b・system_a / system_b か recipe_a / recipe_b、
         任意で pipeline の設定。表か JSON / YAML の
         パス)から、方向づくり → 基準層 → 因果スクリーニング → 強さの配分(効き目に比例した最初の組 → 効率で配り直す →
         ヘッド数の比較)をジョブで 1 回で回す(job_status で結果)。質問は何百個でもよく、止めて測る段階は max_examples 個
         (既定 64)に間引く。target は数か "B"(B 側の平均まで消す)か "mid"(省いたときの既定、A と B の真ん中)。
         真ん中では振る舞いが半分ほどしか消えないことが多いので、消し切りたいときは "B"。結果の recommended が推す組のレシピ。resume(既定 True)なら、
-        同じ対照集合・同じ設定で作り済みの方向と因果の結果を使い回す(止めて流し直したとき、配分からやり直せる)。"""
+        同じ対照集合・同じ設定で作り済みの方向と因果の結果を使い回す(止めて流し直したとき、配分からやり直せる)。
+        rank="writes" は 3 段目から別の流れ: 全部の部品(注意ヘッド・線形注意のヘッド・MLP のニューロン。unit_kinds="heads" で
+        ヘッドだけ)を方向への書き込みの量で順位づけ → 上位を 1 個ずつ s=1 で射影して確かめる → 効き目の大きい順に s=1 で組に足し、
+        足りなければ全体の強さを上げる(n_units が組の部品の数の上限、既定 [24, 12, 6])→ 選んだ組で応答を書かせて validate.match を
+        数える(check_replies 問、既定 16、0 で切る)。既定は rank="causal"(今までの流れ)。"""
         try:
             p = {"spec": spec, "target": target, "n_heads": n_heads, "max_examples": max_examples,
-                 "resume": None if resume else False}
+                 "resume": None if resume else False, "rank": rank, "unit_kinds": unit_kinds, "n_units": n_units,
+                 "check_replies": check_replies}
             return jobs.start("head_pipeline", {k: v for k, v in p.items() if v is not None}).view()
         except Exception as e:  # noqa: BLE001
             return _err(e)
@@ -501,13 +523,16 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
             return _err(e)
 
     @srv.tool()
-    async def heads_refine(name: str, n_heads: int | None = None, new_heads: list[int] | None = None, resume: bool = True) -> dict:
+    async def heads_refine(name: str, n_heads: int | None = None, new_heads: list[int] | None = None, resume: bool = True,
+                           rank: str | None = None, unit_kinds: str | None = None) -> dict:
         """組を当てても目標まで下がらない A 側の質問(残り)だけで、追加のヘッドを探すジョブを投げる(job_status で結果)。
         name は一括(heads_pipeline)か heads_allocate の名前、n_heads は残りを測る組(既定は推す組)。残りの質問と B 側の質問で、
         組を当てたまま方向を作り直し(方向 <name>_rK)、基準層 → 因果 → 配分で足すヘッドと強さ(new_heads、既定 [3, 2, 1])を決め、
-        元の組と合わせたレシピ(combined.recipe)を作って、元の方向で残りの数(remain_before → remain_after)と B 側のずれを測り直す。"""
+        元の組と合わせたレシピ(combined.recipe)を作って、元の方向で残りの数(remain_before → remain_after)と B 側のずれを測り直す。
+        rank="writes"(元の一括が writes なら既定でも)は、足す部品にニューロンも選べる(unit_kinds、new_heads は部品の数の上限)。"""
         try:
-            p = {"name": name, "n_heads": n_heads, "new_heads": new_heads, "resume": None if resume else False}
+            p = {"name": name, "n_heads": n_heads, "new_heads": new_heads, "resume": None if resume else False,
+                 "rank": rank, "unit_kinds": unit_kinds}
             return jobs.start("heads_refine", {k: v for k, v in p.items() if v is not None}).view()
         except Exception as e:  # noqa: BLE001
             return _err(e)
@@ -1274,7 +1299,7 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
 
     @srv.tool()
     async def job_start(kind: str, params: dict[str, Any] | None = None, workers: str | None = None) -> dict:
-        """長時間の処理を投げる。kind: stats_resid / stats_act / lens_logit / lens_steer / sweep / rank / reverse / eval / direction / ablate / heads_contrast / heads_causal / heads_allocate / head_pipeline / heads_candidates / heads_refine / headproj_export / fieldtest / direction_key / direction_key_check / direction_key_experts / direction_key_pipeline / direction_key_verify / direction_key_causal / direction_key_causal_verify / behave。
+        """長時間の処理を投げる。kind: stats_resid / stats_act / lens_logit / lens_steer / sweep / rank / reverse / eval / direction / ablate / heads_contrast / heads_causal / heads_allocate / heads_writes / head_pipeline / heads_candidates / heads_refine / headproj_export / fieldtest / direction_key / direction_key_check / direction_key_experts / direction_key_pipeline / direction_key_verify / direction_key_causal / direction_key_causal_verify / behave。
         params は gne.api の同名メソッドの引数(例 sweep: {"layer": 22, "neurons": "random:64", "design": "quick"})。
         見積もりが 30 分を超えるジョブは走らせずに NEEDS_CONFIRM と見積もりを返す。params に budget("30m" など)を入れると
         予算に収まるように絞る(lens_steer は方向に近いニューロンの上位、sweep は quick 設計で steer lens の上位、reverse は

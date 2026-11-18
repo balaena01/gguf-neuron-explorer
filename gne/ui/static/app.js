@@ -107,7 +107,7 @@ function headTooltipHTML(h) {
   }
   const r = state.recipe && state.recipe.hasHead(L, h.head);
   if (r) lines.push(`<span class="t-k">recipe</span><span class="t-v t-c">×${fmt(r.k, 2)}</span>`);
-  for (const u of state.recipe ? state.recipe.projs().filter((x) => x.layer === L && x.head === h.head) : []) {
+  for (const u of state.recipe ? state.recipe.projHeads().filter((x) => x.layer === L && x.head === h.head) : []) {
     lines.push(`<span class="t-k">recipe</span><span class="t-v t-c">s${fmt(u.s, 2)} @${esc(u.direction || "")}</span>`);
   }
   if (state.model) lines.push(`<span class="t-wait">${t("クリックでくわしく見る")}</span>`);
@@ -253,7 +253,7 @@ function legend() {
     ? [it(ring("#f2d24b"), t("レシピ +")), it(ring("#c94fa7"), t("レシピ −(大きさ = |dose|)"))] : [])
     .concat(state.focus ? [it(ring("#ffffff"), t("開いているニューロン"))] : [])
     .concat(state.recipe && state.recipe.heads().length ? [it(hbox("#f2d24b"), hbox("#c94fa7"), t("レシピのヘッド(黄 = 強める ×k > 1、赤紫 = 弱める・消す ×k < 1)"))] : [])
-    .concat(state.recipe && state.recipe.projs().length ? [it(hbox("#c94fa7"), t("レシピのヘッドの射影(s > 0 = 方向成分を引く、黄 = s < 0 で強める)"))] : [])
+    .concat(state.recipe && state.recipe.projHeads().length ? [it(hbox("#c94fa7"), t("レシピのヘッドの射影(s > 0 = 方向成分を引く、黄 = s < 0 で強める)"))] : [])
     .concat(state.headFocus ? [it(hbox("#ffffff"), t("開いているヘッド"))] : [])
     .concat(rx.some((u) => u.kind === "expert") ? [it(tile("#f2d24b"), tile("#c94fa7"), t("レシピの専門家(黄 = 強める・選ばれやすく、赤紫 = 弱める・消す・選ばれにくく)"))] : [])
     .concat(state.expertFocus ? [it(tile("#ffffff"), t("開いている専門家"))] : [])
@@ -889,7 +889,7 @@ function recipeChanged(r) {
     label: `L${u.layer} E${u.expert} N${u.neuron} ${u.mode === "gain" ? `×${+(+u.k).toFixed(2)}` : `${u.dose >= 0 ? "+" : "−"}${+Math.abs(u.dose).toFixed(2)}`}` }));
   state.map.setMarks([...r.neurons().map((u) => ({ layer: u.layer, neuron: u.neuron, dose: u.dose })), ...moeN]);   // 方向のユニットは印なし
   state.map.setHeadMarks([...r.heads().map((u) => ({ layer: u.layer, head: u.head, k: u.k })),          // ヘッドは板の上辺の刻みに
-    ...r.projs().map((u) => ({ layer: u.layer, head: u.head, k: 1, cls: u.s > 0 ? "minus" : u.s < 0 ? "plus" : "zero",   // 射影(CHANGE-06)
+    ...r.projHeads().map((u) => ({ layer: u.layer, head: u.head, k: 1, cls: u.s > 0 ? "minus" : u.s < 0 ? "plus" : "zero",   // 射影(CHANGE-06)
                                label: `L${u.layer} H${u.head} s${+(+u.s).toFixed(2)}${u.direction ? ` @${u.direction}` : ""}` }))]);
   updateTileFrames();                                                                                 // 専門家全体はタイルの枠に
   const n = r.units.length + (r.ablate ? 1 : 0);

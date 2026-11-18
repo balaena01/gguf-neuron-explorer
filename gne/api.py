@@ -342,6 +342,9 @@ class Session:
                 self.weights.head_block(u.layer, u.head)            # 層にヘッドが無い・範囲外ならここで返す
             if u.mode == "proj":                                    # CHANGE-06: 方向が無ければここで返す
                 self.direction_set(u.direction or r.default_direction)
+                if u.kind == "neuron":                              # ニューロンの射影: dense の MLP の層だけ
+                    from .headproj import neuron_layer_ok
+                    neuron_layer_ok(self.weights, u.layer)
             if u.layer <= 2:
                 self.warn(f"層 {u.layer}: 層 0〜2 は残差が小さく rel dose がそのまま通用しないことがあります(R9)")
         if r.keyed_units:
@@ -2243,6 +2246,10 @@ class Session:
                          "top_layers": 4, "max_examples": 64, "s_max": 30.0, "direction_layer": "own", "resume": True,
                          "include_score_layers": False, "same_reply": False, "score_layers": None, "select_layer": None,
                          "candidate_layers": None, "always_layers": None}
+    # rank: causal(今まで: 層 → ヘッドを止めて測る因果スクリーニング → 効率で配り直す)/ writes(v0.8.0: 全部の部品を
+    # 書き込みの量で順位づけ → 上位を s=1 で確かめる → s=1 から組を作る)。writes のときだけ使う設定(causal の結果の設定には載せない)
+    PIPELINE_WRITES = {"rank": "causal", "unit_kinds": "all", "verify_top": 64, "verify_sample": 16, "verify_mode": "proj",
+                       "n_units": [24, 12, 6], "check_replies": None, "check_tokens": 512}
 
     def _loop_pipeline_defaults(self, pipe: dict) -> dict | None:
         """同じ層を 2 回実行するモデル(sensenova_loop)の一括の既定。測る層を指定しなければ loop(段 27・51・54)・選ぶ層 54 にし、
@@ -2318,11 +2325,24 @@ class Session:
             raise GneError("BAD_ARGS", "spec は対照集合の表(name・user_prompts・system_a / system_b か recipe_a / recipe_b)です")
         spec = dict(spec)
         spec.pop("about", None)                    # テンプレート(configs/pipeline/)の説明。対照集合には入れない
-        pipe = {**self.PIPELINE_DEFAULTS, **(spec.pop("pipeline", None) or {}),
+        pipe = {**self.PIPELINE_DEFAULTS, **self.PIPELINE_WRITES, **(spec.pop("pipeline", None) or {}),
                 **{k: v for k, v in over.items() if v is not None}}
-        unknown = sorted(set(pipe) - set(self.PIPELINE_DEFAULTS) - {"name"})
+        unknown = sorted(set(pipe) - set(self.PIPELINE_DEFAULTS) - set(self.PIPELINE_WRITES) - {"name"})
         if unknown:
-            raise GneError("BAD_ARGS", f"pipeline に {', '.join(unknown)} は使えません({', '.join(self.PIPELINE_DEFAULTS)})")
+            raise GneError("BAD_ARGS", f"pipeline に {', '.join(unknown)} は使えません"
+                                       f"({', '.join(list(self.PIPELINE_DEFAULTS) + list(self.PIPELINE_WRITES))})")
+        if pipe["rank"] not in ("causal", "writes"):
+            raise GneError("BAD_ARGS", f"rank は causal(層 → ヘッドを止めて測る、今までの既定)か writes(全部の部品を書き込みの量で"
+                                       f"順位づけ)です({pipe['rank']!r})")
+        writes = pipe["rank"] == "writes"
+        if writes:
+            from .unitwrites import parse_kinds
+            parse_kinds(pipe["unit_kinds"])                             # 書き方の誤りは流す前に返す
+            if pipe["verify_mode"] not in ("proj", "ablate"):
+                raise GneError("BAD_ARGS", "verify_mode は proj(s=1 で射影)か ablate(出力を 0)です")
+        else:                                       # 今までの流れ: writes の設定は使わない(結果の settings も今までと同じ)
+            for k in self.PIPELINE_WRITES:
+                pipe.pop(k, None)
         self._pipeline_target(pipe["target"], {"A": 0.0, "B": 0.0})          # 目標の書き方の誤りは、流す前に返す
         name = str(pipe.pop("name", None) or spec.get("name") or "")
         if not re.fullmatch(r"[\w.\-]+", name):
@@ -2336,7 +2356,7 @@ class Session:
         write_yaml(path, spec)                     # 読み戻して同じ文字になるか確かめてから書く(U+0085 なども)
         from .direction import load_contrast
         try:
-            cs, _ = load_contrast(path)
+            cs, val = load_contrast(path)
             if min(len(cs.prompts("A")), len(cs.prompts("B"))) < 4:
                 raise GneError("BAD_CONTRAST", "質問は両側とも 4 個以上にしてください(A と B の分かれ方と効き目を測るため)")
         except GneError:
@@ -2375,6 +2395,8 @@ class Session:
         out["score"] = {"base_layer": sc["base_layer"], "best_layer": sc["best_layer"], "n": sc["n"],
                         "layers": [{k: r[k] for k in ("layer", "cohen_d", "cos_base")} | {"A": r["A"]["mean"], "B": r["B"]["mean"]}
                                    for r in sc["layers"]], "seconds": time.perf_counter() - ts}
+        if writes:                                                 # 3〜5. 書き込みの順位づけ → 確かめ → s=1 から組を作る
+            return self._pipeline_writes(out, name, path, cs, val, pipe, sp, mx, sls, sel, reused, t0)
         ts = time.perf_counter()                                   # 3. 因果(層ごと → 効く層のヘッドを 1 個ずつ止める)
         c = self._pipeline_causal_reuse(name, cs, sp, mx, pipe) if pipe["resume"] and "direction" in reused else None
         if c is not None:
@@ -2409,8 +2431,145 @@ class Session:
         out["path"] = str(p)
         return out
 
+    def _pipeline_writes(self, out: dict, name: str, path: Path, cs, val, pipe: dict, sp: str, mx: int | None,
+                         sls: list[int] | None, sel: int | None, reused: list[str], t0: float) -> dict:
+        """一括の rank writes の 3〜5 段(heads_pipeline から)。gne/unitwrites.py。"""
+        from .causal import prepare
+        from .direction import score_layers_default
+        from .unitwrites import allocate_units, measure_writes, parse_kinds, save_writes, verify_rows, verify_units
+        S = int(sel) if sel is not None else self.meta.n_layer - 2        # 既定: 最後に測れる層
+        kinds = parse_kinds(pipe["unit_kinds"])
+        ds = self.direction_set(name)
+        ts = time.perf_counter()                                   # 3. 書き込みの順位づけ(質問は全部)
+        summ, arrays = measure_writes(self, ds, cs, select_layer=S, positions=sp, kinds=kinds,
+                                      direction_layer=pipe["direction_layer"], progress=self.progress)
+        out["writes"] = {k: summ[k] for k in ("select_layer", "kinds", "n", "skipped_long", "gap", "base", "n_units",
+                                               "totals", "totals_share", "check")}
+        out["writes"]["seconds"] = time.perf_counter() - ts
+        ts = time.perf_counter()                                   # 4. 上位を 1 個ずつ s=1 で確かめる(因果スクリーニングと同じ物差し)
+        from .direction import base_layer_of
+        b = base_layer_of(self.direction_set(name))
+        Ls = sorted(set(sls or score_layers_default(self, ds, b)) | {S})
+        Ls = [L for L in Ls if L <= S] or [S]
+        st = prepare(self, ds, cs, score_layers=Ls, primary=S, positions=sp, direction_layer=pipe["direction_layer"],
+                     max_examples=mx)
+        top = verify_rows(summ["rows"], int(pipe["verify_top"]), int(pipe["verify_sample"]))
+        ver = verify_units(self, st, top, mode=pipe["verify_mode"], progress=self.progress)
+        pz, pjw = save_writes(self, name, summ, arrays, ver)
+        out["writes"].update(path=str(pjw), npz=str(pz))
+        out["verify"] = {"mode": ver["mode"], "n": len(ver["rows"]), "spearman": ver["spearman"],
+                         "kinds": {k: sum(1 for r in ver["rows"] if r["kind"] == k) for k in ("attn", "linear", "neuron")},
+                         "excluded": [r["label"] for r in ver["rows"] if r.get("excluded")],
+                         "top": ver["rows"][:20], "seconds": time.perf_counter() - ts}
+        bs = {"A": float(st.base["A"][S].mean()), "B": float(st.base["B"][S].mean())}
+        tgt, tgt_from = self._pipeline_target(pipe["target"], bs)
+        out["causal"] = {"score_layers": st.score_layers, "primary": S, "n_a": st.scorer.n("A"), "n_b": len(st.b_idx),
+                         "base_scores": {str(L): {"A": float(st.base["A"][L].mean()), "B": float(st.base["B"][L].mean())}
+                                         for L in st.score_layers}}
+        a = allocate_units(self, st, ver["rows"], target=float(tgt), n_units=[int(x) for x in pipe["n_units"]],
+                           s_max=float(pipe["s_max"]), name=name, direction_layer=pipe["direction_layer"],
+                           remain_threshold=float(tgt), max_examples=mx, progress=self.progress)
+        out["allocate"] = a
+        out["reused"] = reused
+        out["target"], out["target_from"] = float(tgt), tgt_from
+        rec = next((r for r in a["table"] if r.get("recommended")), None)
+        out["recommended"] = None if rec is None else {"n_heads": rec["n_heads"], "units": rec["units"], "recipe": rec["recipe"]}
+        n_check = pipe["check_replies"]
+        n_check = 16 if n_check is None else int(n_check)
+        ok_rows = [r for r in a["table"] if not r.get("skipped")]
+        chk = rec or (min(ok_rows, key=lambda r: (r["remain"], r["b_drift_orth"])) if ok_rows else None)
+        if n_check > 0 and chk is not None:                        # 5. 応答での確かめ(書き終えた応答の validate.match の一致数)
+            out["check"] = self.reply_check(cs, val, chk["recipe"], n=n_check, max_tokens=int(pipe["check_tokens"]))
+            out["check"].update(n_heads=chk["n_heads"], recommended=rec is not None)
+        out["seconds"] = time.perf_counter() - t0
+        out["updated"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        p = self.store.heads_dir(self.meta.model_id) / f"{name}.pipeline.json"
+        p.write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
+        out["path"] = str(p)
+        return out
+
+    def reply_check(self, cs, val, recipe: str | Path | Recipe | None, *, n: int = 16, max_tokens: int = 512,
+                    prompts: dict | None = None) -> dict:
+        """組を当てたときと無介入で、対照集合の両側の質問(validate.prompts があれば A 側はそれ。prompts={"A": [...], "B": [...]}
+        で差し替え)に greedy で応答を書かせ、書き終えた応答のうち validate.match に一致した数・空・繰り返し・上限で切れた数を並べる。
+        側の作り方(system・レシピ)はそのまま当てる。射影の値が目標に届いても応答が変わらないことがあるので、その確かめに使う。"""
+        from .behave import loop_like
+        from .evalx import _generate
+        from .reverse import combine, side_interventions
+        t0 = time.perf_counter()
+        r = recipe if isinstance(recipe, Recipe) or recipe is None else Recipe.load(self.recipe_path(recipe))
+        val_both = val.explicit and not cs.separate_prompts
+        pa = (prompts or {}).get("A") or (val.prompts if val.explicit else cs.prompts("A"))
+        pb = (prompts or {}).get("B") or (val.prompts if val_both else cs.prompts("B"))
+
+        def thin(v):
+            if len(v) <= n:
+                return list(v)
+            return [v[int(i)] for i in sorted({int(x) for x in np.linspace(0, len(v) - 1, n).round()})]
+        pa, pb = thin(pa), thin(pb)
+        ivs = side_interventions(self, cs) if cs.has_recipes else {"A": (None, None), "B": (None, None)}
+        rx = re.compile(val.match) if val.match else None
+        conv = {"A": cs.convs("A", pa), "B": cs.convs("B", pb)}
+        out = {"n": {"A": len(pa), "B": len(pb)}, "max_tokens": max_tokens, "match": val.match,
+               "held_out": {"A": bool((prompts or {}).get("A")) or val.explicit, "B": bool((prompts or {}).get("B")) or val_both},
+               "rows": {}}
+        for key, rr in (("none", None), ("recipe", r)):
+            vecs = self.vectors(rr)[0] if rr is not None and rr.add_units else None
+            lora = self.lora_for(rr) if rr is not None else None
+            row = {}
+            for side in "AB":
+                outs = _generate(self, [(m, max_tokens) for m in conv[side]], *combine(ivs[side], vecs, lora), "all", lambda k: None)
+                fin = [o for o in outs if o["finish"] in ("eog", "stop", "eos")]
+                row[side] = {"n": len(outs), "finished": len(fin),
+                             "match_finished": sum(bool(rx.search(o["text"] or "")) for o in fin) if rx else None,
+                             "empty": sum(not (o["text"] or "").strip() for o in outs),
+                             "loop": sum(loop_like(o["token_ids"]) for o in outs),
+                             "at_limit": len(outs) - len(fin)}
+            out["rows"][key] = row
+        if rx is not None:                            # A 側(振る舞いが出ている側)の一致がほとんど減らないときの知らせ
+            a0, a1 = out["rows"]["none"]["A"], out["rows"]["recipe"]["A"]
+            out["a_changed"] = (a0["match_finished"] or 0) - (a1["match_finished"] or 0)
+            out["note"] = None if out["a_changed"] >= max(1, len(pa) // 6) else \
+                "射影の値は目標に届いても、A 側の応答の一致はほとんど減っていません(振る舞いが変わっていない可能性)"
+        out["seconds"] = time.perf_counter() - t0
+        return out
+
+    def heads_writes(self, direction: str, *, contrast: str | Path | None = None, select_layer: int | None = None,
+                     kinds="all", positions: str = "last", subset: str = "all", max_examples: int | None = None,
+                     verify_top: int = 64, verify_sample: int = 16, verify_mode: str = "proj", verify_examples: int | None = 64,
+                     score_layers: list[int] | None = None, direction_layer: str = "own", name: str | None = None,
+                     top_q: int = 256) -> dict:
+        """全部の部品(注意ヘッド・線形注意のヘッド・MLP のニューロン)を、方向への書き込みの量で順位づけし、上位を 1 個ずつ
+        s=1 で射影して(verify_mode ablate なら止めて)確かめる(gne/unitwrites.py)。結果は <root>/heads/<model_id>/<name>.writes.json
+        と .writes.npz(層ごとの更新のベクトル・部品ごとの書き込み)。verify_top 0 で確かめを飛ばす。"""
+        from .causal import prepare
+        from .direction import base_layer_of, score_layers_default
+        from .unitwrites import measure_writes, parse_kinds, save_writes, verify_rows, verify_units
+        t0 = time.perf_counter()
+        ds, cs, _ = self._direction_contrast(direction, contrast)
+        name = name or ds.name
+        if not re.fullmatch(r"[\w.\-]+", name):
+            raise GneError("BAD_ARGS", f"名前 {name!r} は英数字・_・-・. だけにしてください")
+        self.engine.free_steer()
+        S = int(select_layer) if select_layer is not None else self.meta.n_layer - 2
+        summ, arrays = measure_writes(self, ds, cs, select_layer=S, positions=positions, subset=subset,
+                                      max_examples=max_examples, kinds=parse_kinds(kinds), direction_layer=direction_layer,
+                                      top_q=top_q, progress=self.progress)
+        ver = None
+        if verify_top and verify_top > 0:
+            b = base_layer_of(ds)
+            Ls = sorted(set(score_layers or (score_layers_default(self, ds, b) if b is not None else [])) | {S})
+            Ls = [L for L in Ls if L <= S] or [S]
+            st = prepare(self, ds, cs, score_layers=Ls, primary=S, positions=positions, subset=subset,
+                         direction_layer=direction_layer, max_examples=verify_examples)
+            ver = verify_units(self, st, verify_rows(summ["rows"], int(verify_top), int(verify_sample)), mode=verify_mode,
+                               progress=self.progress)
+        pz, pj = save_writes(self, name, summ, arrays, ver)
+        return {**{k: v for k, v in summ.items() if k != "rows"}, "rows": summ["rows"][:200], "verify": ver, "name": name,
+                "path": str(pj), "npz": str(pz), "seconds": time.perf_counter() - t0}
+
     def heads_refine(self, name: str, *, n_heads: int | None = None, new_heads=(3, 2, 1), out_name: str | None = None,
-                     min_questions: int = 4, resume: bool = True) -> dict:
+                     min_questions: int = 4, resume: bool = True, rank: str | None = None, unit_kinds: str | None = None) -> dict:
         """配分の組を当てても目標まで下がらない A 側の質問(「残り」)だけで、追加のヘッドを探す。
         1. 組を当てて A 側の全部の質問を測り、射影の値を測る層での射影の値が閾値(配分の remain_threshold)を超える質問を残りとする。
         2. 新しい対照集合を作る: A = 残りの質問、B = 元の B 側の質問。両側に元の側の作り方(system・レシピ)と組を当てる
@@ -2419,7 +2578,9 @@ class Session:
         4. 比較表のどの組も、元の組と合わせたレシピ(<name>_rK.combined-n<N>.yaml)を作り、元の方向で残りと B 側のずれを
            測り直す(追加の組は元の組を当てた状態で探したので、単独では使わない)。代表(推す組、無ければ合わせた残りが
            最も少ない組)は <name>_rK.combined.yaml にも置く。
-        残りが min_questions 個より少なければ、射影の値の高い順に min_questions 個まで足して方向を作る(残りの数はそのまま報告)。"""
+        残りが min_questions 個より少なければ、射影の値の高い順に min_questions 個まで足して方向を作る(残りの数はそのまま報告)。
+        rank・unit_kinds は追加の部品の探し方(省くと元の一括の設定: 元が rank writes なら同じ流れで、ニューロンも足せる。
+        rank writes では new_heads は組の部品の数の上限 n_units になる)。元の組にニューロンがあっても、そのまま合わせる。"""
         import dataclasses
 
         import yaml
@@ -2491,6 +2652,15 @@ class Session:
         if isinstance(st.get("target"), str):                           # B / mid は、残りの一括でも同じ意味
             pipe["target"] = st["target"]
         pipe.update(n_heads=[int(x) for x in new_heads], hard=max(1, min(int(st.get("hard") or 16), len(qa))))
+        rk = rank or st.get("rank") or "causal"
+        if rk == "writes":                                              # 新しい選び方で足す部品を探す(ニューロンも選べる)
+            pipe.update(rank="writes", unit_kinds=unit_kinds or st.get("unit_kinds") or "all",
+                        n_units=[int(x) for x in new_heads], check_replies=0,
+                        **{k_: st[k_] for k_ in ("verify_top", "verify_sample", "verify_mode", "select_layer") if st.get(k_) is not None})
+        elif rk != "causal":
+            raise GneError("BAD_ARGS", f"rank は causal か writes です({rk!r})")
+        elif unit_kinds not in (None, "heads"):
+            raise GneError("BAD_ARGS", "ニューロンも足すには rank writes にしてください(rank causal はヘッドだけ)")
         spec = {"name": out_name, **({"system_a": cs.system_a} if cs.system_a is not None else {}),
                 **({"system_b": cs.system_b} if cs.system_b is not None else {}),
                 "recipe_a": side_recipe("A"), "recipe_b": side_recipe("B"), "prompts_a": qa, "prompts_b": cs.prompts("B"),
@@ -3111,6 +3281,11 @@ round_01.scores.txt に「番号 P C」を 1 行ずつ書く(例: 17 3 4)。全�
         """V24・V25(射影の正しさ・直交成分が変わらないこと)。"""
         from .headproj import check_head_proj
         return check_head_proj(self, L, h, direction, ss=ss)
+
+    def check_neuron_proj(self, L: int, n: int, direction: str, *, ss=(1.0, 2.0, 6.0)) -> dict:
+        """ニューロンの射影の V24・V25(MLP の出力の差が式どおりか・直交成分が変わらないこと)。"""
+        from .headproj import check_neuron_proj
+        return check_neuron_proj(self, L, n, direction, ss=ss)
 
     def check_proj_bake(self, recipe: Recipe, baked: Path, *, contrast: str | Path | None = None,
                         suite: str | Path | None = None) -> dict:

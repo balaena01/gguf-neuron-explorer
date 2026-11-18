@@ -19,9 +19,10 @@ import { wireTabs, noteHTML, askConfirm, layersInput, useContrastList } from "./
 const fmt = (x, d = 2) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : (+x).toFixed(d));
 const signed = (x, d = 2) => `${x >= 0 ? "+" : "−"}${fmt(Math.abs(x), d)}`;
 const isDir = (u) => u.kind === "direction";
-const isProj = (u) => u.kind === "head" && u.mode === "proj";   // ヘッドの方向成分の射影(CHANGE-06)
+const isProj = (u) => (u.kind === "head" || (u.kind || "neuron") === "neuron") && u.mode === "proj";   // 方向成分の射影(ヘッド CHANGE-06、ニューロン v0.8.0)
+const isProjN = (u) => isProj(u) && u.kind !== "head";            // ニューロンの方向成分の射影(ffn_down の列)
 const isHead = (u) => u.kind === "head" && !isProj(u);          // ヘッドの gain
-const isNeuron = (u) => (u.kind || "neuron") === "neuron" && u.mode !== "nw";
+const isNeuron = (u) => (u.kind || "neuron") === "neuron" && u.mode !== "nw" && u.mode !== "proj";
 export const isKeyed = (u) => u.mode === "keyed";                // 鍵つきの書き込み(CHANGE-07)。kind は書き込み先(ffn・attn・shared・expert)
 // 計算で作るニューロン(mode: nw、docs/fish.md)。ニューロンを計算した重みで上書きする。レシピの欄では表示・強さの変更・保存・
 // LoRA の書き出しだけ(作るのは direction ビューの FiSH の画面か、CLI・MCP の gne nw …)。
@@ -102,11 +103,14 @@ function projBG(v) {
 }
 const sLabel = (s) => `s${+(+s).toFixed(2)}`;
 const aLabel = (a) => `a${a >= 0 ? "+" : "−"}${fmt(Math.abs(a), 2)}`;
-// 射影のユニットの文字列(L:Hh:sS@NAME)→ { layer, head, s, direction }。読めなければ null
-const PROJ_RE = /^(\d+):[Hh](\d+):s([+-]?[\d.]+(?:e[+-]?\d+)?)(?:@([\w.\-]+))?$/i;
+// 射影のユニットの文字列(ヘッド L:Hh:sS@NAME、ニューロン L:Nn:sS@NAME)→ ユニット。読めなければ null
+const PROJ_RE = /^(\d+):([HhNn])(\d+):s([+-]?[\d.]+(?:e[+-]?\d+)?)(?:@([\w.\-]+))?$/i;
 export function parseProj(spec, defaultDirection = null) {
   const m = String(spec).trim().match(PROJ_RE);
-  return m ? { layer: +m[1], kind: "head", mode: "proj", head: +m[2], s: +m[3], direction: m[4] || defaultDirection } : null;
+  if (!m) return null;
+  return m[2].toUpperCase() === "N"
+    ? { layer: +m[1], kind: "neuron", mode: "proj", neuron: +m[3], s: +m[4], direction: m[5] || defaultDirection }
+    : { layer: +m[1], kind: "head", mode: "proj", head: +m[3], s: +m[4], direction: m[5] || defaultDirection };
 }
 // 全体に掛ける倍率 s でのヘッドの倍率(1 が無介入。s = −1 なら 1 の反対側: ×0 → ×2)
 const gainAt = (k, s) => +(1 + (k - 1) * s).toFixed(4);
@@ -122,7 +126,7 @@ export function keyedSpec(u, s = 1, defaults = {}) {
 export function unitSpec(u, s = 1) {
   if (isNw(u)) return nwSpec(u, s);
   if (isKeyed(u)) return keyedSpec(u, s);
-  if (isProj(u)) return `${u.layer}:H${u.head}:s${+(u.s * s).toFixed(4)}${u.direction ? `@${u.direction}` : ""}`;
+  if (isProj(u)) return `${u.layer}:${isProjN(u) ? `N${u.neuron}` : `H${u.head}`}:s${+(u.s * s).toFixed(4)}${u.direction ? `@${u.direction}` : ""}`;
   const who = isHead(u) ? `H${u.head}` : isDir(u) ? `dir:${u.direction}` : u.kind === "expert_neuron" ? `E${u.expert}:N${u.neuron}`
     : u.kind === "shared" ? `S:N${u.neuron}` : u.kind === "expert" ? `E${u.expert}${isRoute(u) ? ":route" : ""}` : `${u.neuron}`;
   if (isGain(u)) return `${u.layer}:${who}:x${gainAt(u.k, s)}`;
@@ -231,7 +235,8 @@ export class Recipe {
   heads() { return this.units.filter(isHead); }
   // ヘッドの方向成分の射影(CHANGE-06)。同じヘッドでも方向が違えば別の行
   projs() { return this.units.filter(isProj); }
-  hasProj(L, h, dir = undefined) { return this.units.find((u) => isProj(u) && u.layer === L && u.head === h && (dir === undefined || u.direction === dir)); }
+  projHeads() { return this.units.filter((u) => isProj(u) && !isProjN(u)); }     // ヘッドの射影だけ(マップのヘッドの印)
+  hasProj(L, h, dir = undefined) { return this.units.find((u) => isProj(u) && !isProjN(u) && u.layer === L && u.head === h && (dir === undefined || u.direction === dir)); }
   addProj(L, h, s, direction) {
     const u = this.hasProj(L, h, direction);
     if (u) u.s = s; else this.units.push({ layer: L, kind: "head", mode: "proj", head: h, s, direction });
@@ -242,7 +247,7 @@ export class Recipe {
   setProjDir(i, dir) { if (isProj(this.units[i])) { this.units[i].direction = dir; this._save(); } }
   setDirectionLayer(v) { this.directionLayer = v === "base" ? "base" : "own"; this._save(); }
   // 層ごとの射影の方向の数(1 なら LoRA は階数 1 に畳める)
-  projRank(L) { return new Set(this.projs().filter((u) => u.layer === L).map((u) => u.direction || "")).size; }
+  projRank(L, neuron = false) { return new Set(this.projs().filter((u) => u.layer === L && isProjN(u) === neuron).map((u) => u.direction || "")).size; }
   // 射影のユニットの組(gne heads allocate の組など、"L:Hh:sS@NAME" の並び)でレシピを置き換える。読めないものは外して数える
   loadProj(name, specs, defaultDirection = null) {
     const us = specs.map((x) => parseProj(x, defaultDirection));
@@ -301,6 +306,7 @@ export class Recipe {
     const ok = units.filter((u) => (((u.kind || "neuron") === "neuron" || u.kind === "direction") && (u.mode || "add") === "add")
       || (u.kind === "head" && u.mode === "gain" && u.head !== null && u.head !== undefined && Number.isFinite(+u.k))
       || (u.kind === "head" && u.mode === "proj" && u.head !== null && u.head !== undefined && Number.isFinite(+(u.s ?? u.k)) && !!u.direction)
+      || (isProjN(u) && u.neuron !== null && u.neuron !== undefined && Number.isFinite(+(u.s ?? u.k)) && !!u.direction)
       || moeOk(u) || keyedOk(u) || nwOk(u));
     this.skipped = units.length - ok.length;
     this.name = name;
@@ -309,6 +315,7 @@ export class Recipe {
                                                alpha: +(u.alpha ?? u.k), direction: (u.direction_default && dd) ? null : u.direction || null,
                                                key: (u.key_default && dk) ? null : u.key || null }
       : isDir(u) ? { layer: u.layer, kind: "direction", direction: u.direction, dose: u.dose }
+      : isProjN(u) ? { layer: u.layer, kind: "neuron", mode: "proj", neuron: u.neuron, s: +(u.s ?? u.k), direction: u.direction }
       : isProj(u) ? { layer: u.layer, kind: "head", mode: "proj", head: u.head, s: +(u.s ?? u.k), direction: u.direction }
       : isHead(u) ? { layer: u.layer, kind: "head", head: u.head, k: +u.k }
       : isMoe(u) ? { layer: u.layer, kind: u.kind, ...(u.kind !== "shared" ? { expert: +u.expert } : {}), ...(u.kind !== "expert" ? { neuron: u.neuron } : {}),
@@ -541,14 +548,14 @@ export class RecipePanel {
   // 射影の行(CHANGE-06、L33 H16 s15.4 @evil)。スライダーは強さ s(0〜30、1 で方向成分を消す、2 で反転)、方向の選択、
   // その層の射影が LoRA の階数 1 に畳めるか(層の中の方向が 1 種類なら rank 1、k 種類なら rank k)
   projRow(u, i) {
-    const dirs = this.projDirections(), rank = this.r.projRank(u.layer);
+    const dirs = this.projDirections(), rank = this.r.projRank(u.layer, isProjN(u));
     const opts = [...dirs, ...(u.direction && !dirs.includes(u.direction) ? [u.direction] : [])]
       .map((d) => `<option${d === u.direction ? " selected" : ""}>${esc(d)}</option>`).join("");
     const rk = rank === 1
       ? `<span class="badge rank1" title="${t("L{L} の射影のヘッドはどれも同じ方向なので、LoRA は階数 1 に畳める", { L: u.layer })}">rank 1</span>`
       : `<span class="badge rankk" title="${t("L{L} の射影のヘッドの方向が {n} 種類あるので、LoRA の階数は {n}(同じ方向なら 1 に畳める)", { L: u.layer, n: rank })}">rank ${rank}</span>`;
     return `
-      <tr data-i="${i}" class="rc-proj"><td class="id"><a href="#" data-open="${i}" title="${t("くわしく見るで開く")}">L${u.layer} H${u.head}</a>
+      <tr data-i="${i}" class="rc-proj"><td class="id"><a href="#" data-open="${i}" title="${t("くわしく見るで開く")}">L${u.layer} ${isProjN(u) ? `N${u.neuron}` : `H${u.head}`}</a>
         <span class="sg mono minus">${sLabel(u.s)}</span> <span class="mono">@</span><select class="rc-pdir" data-pdir="${i}" title="${t("射影する方向(gne direction の方向セット)")}">${opts}</select>
         ${rk}<button class="small quiet rm" data-rm="${i}" title="${t("外す")}">×</button>
         <div class="sl"><span class="muted">${PROJ.min}</span><input type="range" class="dose" min="${PROJ.min}" max="${PROJ.max}" step="${PROJ.step}" value="${u.s}" data-i="${i}" style="background:${projBG(u.s)}"><span class="muted">${PROJ.max}</span>

@@ -513,6 +513,7 @@ def standard_kinds() -> dict[str, Callable[..., dict]]:
         "ablate": lambda s, direction, out, **p: s.ablate(direction, out, **p),
         "heads_causal": lambda s, direction, **p: s.heads_causal(direction, **p),        # CHANGE-06 C
         "heads_allocate": lambda s, direction, **p: s.heads_allocate(direction, **p),    # CHANGE-06 D
+        "heads_writes": lambda s, direction, **p: s.heads_writes(direction, **p),        # 全部の部品を書き込みの量で順位づけ
         "head_pipeline": lambda s, spec, **p: s.heads_pipeline(spec, **p),             # 方向 → 基準層 → 因果 → 配分
         "heads_candidates": lambda s, alloc, **p: s.heads_candidates(alloc, **p),       # 組 × 倍率で生成 → 採点のファイル
         "heads_refine": lambda s, name, **p: s.heads_refine(name, **p),                 # 残りの質問で追加のヘッドを探す

@@ -8,7 +8,7 @@ import { askConfirm } from "./ui.js";
 export const KIND = { embed: tr("埋め込み"), connections: "connections", layout: tr("配置"), lens_logit: "logit lens", lens_steer: "steer lens", sweep_rank: "sweep", sweep: "sweep", rank: "rank",
                stats_resid: tr("残差の統計"), stats_act: tr("活性の統計"), reverse: tr("逆引き"), eval: "eval",
                heads_contrast: tr("ヘッドの対照分析"), experts_contrast: tr("専門家の対照分析"), experts_sweep: tr("専門家の sweep"),
-               heads_causal: tr("因果スクリーニング"), heads_allocate: tr("強さの配分"), head_pipeline: tr("方向とヘッドの一括"), direction: tr("方向"),
+               heads_causal: tr("因果スクリーニング"), heads_allocate: tr("強さの配分"), heads_writes: tr("書き込みの順位づけ"), head_pipeline: tr("方向とヘッドの一括"), direction: tr("方向"),
                heads_candidates: tr("強さの候補"), heads_refine: tr("残りから追加"), headproj_export: tr("LoRA・マージ"), fieldtest: tr("実地テスト"),
                direction_key: tr("キーの作成"), direction_key_check: tr("キーの確認"), direction_key_experts: tr("専門家の選ばれ方"),
                direction_key_verify: tr("LoRA の確かめ(key-verify)"), direction_key_pipeline: tr("方向から key-check まで"),

@@ -355,6 +355,7 @@ class GainOut(Envelope):                        # §6.16 gne gain
     ops: list[dict[str, Any]] | None = None
     proj_rank: dict[str, int] | None = None                # CHANGE-06: 方向成分の射影の層ごとの階数
     proj_layers: dict[str, dict[str, Any]] | None = None   # CHANGE-06: 層 → {heads, rank, directions, folded}
+    proj_neuron_layers: dict[str, dict[str, Any]] | None = None   # ニューロンの射影: 層 → {neurons, rank, directions, folded}(ffn_down)
     sidecar: str | None = None                             # CHANGE-06 bake: <out>.headproj.json
     requant: str | None = None                             # CHANGE-06 bake --via-f16、CHANGE-07 keyed の既定 auto
     llama_quantize: str | None = None
@@ -1109,6 +1110,24 @@ class HeadsPipelineOut(Envelope):               # gne heads pipeline(方向 → 
     updated: str | None = None
     reused: list[str] | None = None              # 使い回した段(direction・causal、resume)
     arch_defaults: dict[str, Any] | None = None  # この arch だけの既定を使ったとき、その中身(sensenova_loop の測る層など)
+    writes: dict[str, Any] | None = None         # rank writes: 書き込みの順位づけのまとめ(選ぶ層・A−B の差・種類ごとの数と和・保存先)
+    verify: dict[str, Any] | None = None         # rank writes: 上位を 1 個ずつ確かめた結果(順位相関・上位の行)
+    check: dict[str, Any] | None = None          # rank writes: 応答での確かめ(無介入と組の、書き終えた応答の一致数など)
+
+
+class HeadsWritesOut(Envelope):                 # gne heads writes(全部の部品を、方向への書き込みの量で順位づけ)
+    model_config = ConfigDict(extra="allow")
+    name: str
+    path: str
+    npz: str
+    direction: str
+    select_layer: int
+    gap: float
+    n: dict[str, int]
+    n_units: dict[str, int]
+    rows: list[dict[str, Any]]                  # 点数(選ぶ層で s=1 の射影で直接に縮まる A−B の差)の大きい順の上位
+    verify: dict[str, Any] | None               # 上位を 1 個ずつ流し直した結果と、点数との順位相関(確かめないときは None)
+    seconds: float
 
 
 class HeadsLoopOut(Envelope):                   # gne heads visits / loop-pipeline / loop-merge / measure(同じ層を 2 回実行するモデル)
@@ -1190,14 +1209,20 @@ class HeadsCandidatesOut(Envelope):             # gne heads candidates(強さの
     seconds: float
 
 
-class HeadprojCheckOut(Envelope):               # CHANGE-06 V24・V25(gne headproj check)
+class HeadprojCheckOut(Envelope):               # CHANGE-06 V24・V25(gne headproj check。--neuron はニューロンの射影)
     layer: int
-    head: int
-    block: list[int]
+    head: int | None = None
+    block: list[int] | None = None
+    neuron: int | None = None                   # ニューロンの射影を確かめたとき(ffn_down の列)
+    kind: str | None = None                     # "neuron"(ヘッドのときは無し)
+    act_tensor: str | None = None               # ニューロン: 活性(ffn_down の入力)のテンソル名
+    n_active: int | None = None                 # ニューロン: 活性があって比べた位置の数
+    n_tokens: int | None = None
     out_tensor: str
     direction: str
     direction_from: int
-    dir_cos_head: float | None
+    dir_cos_head: float | None = None
+    dir_cos_neuron: float | None = None         # ニューロンの書く向き(ffn_down の列)と方向の |cos|
     rows: list[dict[str, Any]]
     gain: dict[str, Any]
     v24: bool
@@ -1497,7 +1522,7 @@ COMMAND_SCHEMAS: dict[str, type[Envelope]] = {
     "heads query": HeadsQueryOut,
     "connections": ConnectionsOut, "worker": WorkerOut, "writers": WritersOut, "writers-export": WritersExportOut,
     "direction score": DirectionScoreOut, "heads causal": HeadsCausalOut, "heads writers": HeadsWritersOut, "behave": BehaveOut, "heads allocate": HeadsAllocateOut,
-    "headproj export": GainOut, "headproj check": HeadprojCheckOut, "heads pipeline": HeadsPipelineOut,
+    "headproj export": GainOut, "headproj check": HeadprojCheckOut, "heads pipeline": HeadsPipelineOut, "heads writes": HeadsWritesOut,
     "heads candidates": HeadsCandidatesOut,
     "heads refine": HeadsRefineOut, "fieldtest": FieldtestOut,
     "heads visits": HeadsLoopOut, "heads loop-pipeline": HeadsLoopOut, "heads loop-merge": HeadsLoopOut, "heads measure": HeadsLoopOut,

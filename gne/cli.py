@@ -283,7 +283,7 @@ def _units_text(units: list[dict]) -> str:
             continue
         who = {"neuron": f"N{u['neuron']}", "random": f"random{u['seed']}", "head": f"H{u.get('head')}"}.get(
             u["kind"], f"dir:{u.get('direction')}")
-        if u.get("mode") == "proj":                          # CHANGE-06
+        if u.get("mode") == "proj":                          # CHANGE-06(ニューロンは ffn_down の列)
             rows.append(f"  L{u['layer']} {who} s{u['k']:g} @{u.get('direction')}"
                         f"(書き込みの方向成分を {u['k']:g} 倍ぶん引く、LoRA で当てる)")
             continue
@@ -747,6 +747,9 @@ def gain(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Option
                 + [f"  L{L}: " + ", ".join(f"H{int(h)} s{sv:g}@{dn}" for h, sv, dn in x["heads"])
                    + f"(方向成分の射影、階数 {x['rank']}{'' if x['folded'] else '、方向が混ざっているので 1 に畳めない'})"
                    for L, x in (d.get("proj_layers") or {}).items()]
+                + [f"  L{L}: " + ", ".join(f"N{int(n)} s{sv:g}@{dn}" for n, sv, dn in x["neurons"])
+                   + f"(ニューロンの方向成分の射影、ffn_down の階数 {x['rank']}{'' if x['folded'] else '、方向が混ざっているので 1 に畳めない'})"
+                   for L, x in (d.get("proj_neuron_layers") or {}).items()]
                 + _keyed_export_lines(d)
                 + [f"  クエリ操作: {p}" for p in (d.get("query_loras") or [])])
         text = (f"{d['path']}({d['bytes'] / 1e6:.2f} MB、LoRA)" + "".join("\n" + r for r in rows)
@@ -2872,6 +2875,9 @@ def headproj_export(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, u
     for L, x in (d.get("proj_layers") or {}).items():
         lines.append(f"  L{L}: " + ", ".join(f"H{int(h)} s{sv:g}@{dn}" for h, sv, dn in x["heads"])
                      + f"(階数 {x['rank']}" + ("" if x["folded"] else "、方向が混ざっていて 1 に畳めない") + ")")
+    for L, x in (d.get("proj_neuron_layers") or {}).items():
+        lines.append(f"  L{L}: " + ", ".join(f"N{int(n)} s{sv:g}@{dn}" for n, sv, dn in x["neurons"])
+                     + f"(ニューロン、ffn_down の階数 {x['rank']}" + ("" if x["folded"] else "、方向が混ざっていて 1 に畳めない") + ")")
     lines += _keyed_export_lines(d, requant_line=not (bake and d.get("parts")))
     if bake and d.get("parts"):                 # 分割 GGUF: 同じ型で書き戻した
         how = {"keep": "元と同じ型で書き戻し", "auto": "auto で書き戻し(Q8_0 は元の型のまま、それ以外は F16"
@@ -2906,14 +2912,26 @@ def headproj_export(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, u
 
 
 @gne_command(headproj_app, "check", "headproj check")
-def headproj_check(c: Common, holder: dict, layer: int = typer.Option(..., "--layer"), head: int = typer.Option(..., "--head"),
+def headproj_check(c: Common, holder: dict, layer: int = typer.Option(..., "--layer"),
+                   head: Optional[int] = typer.Option(None, "--head", help="確かめるヘッド(--neuron と、どちらか一方)"),
+                   neuron: Optional[int] = typer.Option(None, "--neuron", help="確かめるニューロン(ffn_down の列。--head と、どちらか一方)"),
                    direction: str = typer.Option(..., "--direction", help="方向の名前"),
                    ss: str = typer.Option("1,2,6", "--s", help="確かめる s")):
-    """V24・V25: proj の LoRA で、ヘッドが残差に書き込む重み行列の出力の差が numpy の計算(方向成分を s 倍ぶん引く)と合い、直交成分が変わらないか。"""
+    """V24・V25: proj の LoRA で、残差に書き込む重み行列の出力の差が numpy の計算(方向成分を s 倍ぶん引く)と合い、直交成分が変わらないか。
+    --head はヘッド(attn_output / ssm_out の列ブロック)、--neuron は MLP のニューロン(ffn_down の 1 列。MLP の出力 ffn_out の差で見る)。"""
+    if (head is None) == (neuron is None):
+        raise GneError("BAD_ARGS", "--head か --neuron のどちらか一方を指定してください")
     s = holder["session"] = c.session()
-    d = s.check_head_proj(layer, head, direction, ss=[float(x) for x in ss.split(",")])
-    lines = [f"L{layer} H{head}({d['out_tensor']}、方向 {direction} の L{d['direction_from']}、ヘッドの書き込みと方向の |cos| の中央値 "
-             f"{_f(d['dir_cos_head'], '.3f')})"]
+    sl = [float(x) for x in ss.split(",")]
+    if neuron is not None:
+        d = s.check_neuron_proj(layer, neuron, direction, ss=sl)
+        who = f"L{layer} N{neuron}"
+        lines = [f"{who}({d['out_tensor']}、活性 {d['act_tensor']}、方向 {direction} の L{d['direction_from']}、"
+                 f"書く向きと方向の |cos| {_f(d['dir_cos_neuron'], '.3f')}、活性のある位置 {d['n_active']}/{d['n_tokens']})"]
+    else:
+        d = s.check_head_proj(layer, head, direction, ss=sl)
+        lines = [f"L{layer} H{head}({d['out_tensor']}、方向 {direction} の L{d['direction_from']}、ヘッドの書き込みと方向の |cos| の中央値 "
+                 f"{_f(d['dir_cos_head'], '.3f')})"]
     for r in d["rows"]:
         lines.append(f"  s {r['s']:g}: 相対誤差の中央値 {r['rel_err_median']:.2e}、方向成分 {r['par_after_over_before']:+.3f} 倍"
                      f"(期待 {1 - r['s']:+g})、直交成分の変化 {r['orth_change_rel_median']:.2e}  {'○' if r['ok'] else '×'}")
@@ -2936,16 +2954,30 @@ def heads_pipeline(c: Common, holder: dict,
                    candidate_layers: Optional[str] = typer.Option(None, "--candidate-layers", help="候補のヘッドを探す層(例 28-53)。同じ層を 2 回実行するモデルで、1 回目だけ・2 回目だけから選ぶとき(GNE_LOOP_EDITS=per_visit と一緒に)"),
                    always_layers: Optional[str] = typer.Option(None, "--always-layers", help="層を止めた下がり方の順位に関係なく、いつもヘッド単位で測る層(例 52,53)。none で足さない。sensenova_loop の既定はループの外の段 52・53"),
                    fresh: bool = typer.Option(False, "--fresh", help="作り済みの方向と因果の結果を使い回さず、最初から作り直す"),
+                   rank: Optional[str] = typer.Option(None, "--rank", help="候補の探し方: causal(既定。層ごとに止める → 上位の層のヘッドを 1 個ずつ止める → 効率で配り直す)/ writes(全部の部品を、方向への書き込みの量で一度に順位づけ → 上位を s=1 で確かめる → s=1 から組を作る)"),
+                   unit_kinds: Optional[str] = typer.Option(None, "--unit-kinds", help="--rank writes の部品の種類: all(既定。注意ヘッド・線形注意のヘッド・MLP のニューロン)/ heads(ヘッドだけ)/ neurons"),
+                   verify_top: Optional[int] = typer.Option(None, "--verify-top", help="--rank writes: 1 個ずつ流し直して確かめる上位の数(既定 64)"),
+                   verify_sample: Optional[int] = typer.Option(None, "--verify-sample", help="--rank writes: 上位より下から等間隔に足して確かめる数(既定 16。順位相関を広い範囲で測る。組の候補にもなる)"),
+                   verify_mode: Optional[str] = typer.Option(None, "--verify-mode", help="--rank writes: 確かめ方。proj(既定。s=1 で射影)/ ablate(出力を 0)"),
+                   n_units: Optional[str] = typer.Option(None, "--n-units", help="--rank writes: 比べる組の部品の数の上限(既定 24,12,6)"),
+                   check_replies: Optional[int] = typer.Option(None, "--check-replies", help="--rank writes: 選んだ組で応答を書かせて validate.match を数える質問の数(側ごと。既定 16、0 で切る)"),
+                   check_tokens: Optional[int] = typer.Option(None, "--check-tokens", help="応答での確かめの長さの上限(既定 512)"),
                    yes: bool = _YES):
     """対照集合から、方向づくり → 基準層 → 因果スクリーニング(層ごと → ヘッド 1 個ずつ止める)→ 強さの配分(効き目に比例した
-    最初の組を二分探索 → 射影の値が残りやすい質問で効率を測って 0 から配り直す → ヘッド数を変えた組の比較)を 1 回で回す。"""
+    最初の組を二分探索 → 射影の値が残りやすい質問で効率を測って 0 から配り直す → ヘッド数を変えた組の比較)を 1 回で回す。
+    --rank writes は 3 段目から: 全部の部品(注意ヘッド・線形注意のヘッド・MLP のニューロン)を方向への書き込みの量で順位づけ →
+    上位を 1 個ずつ s=1 で流し直して確かめる → 効き目の大きい順に s=1 で組に足し、足りなければ全体の強さを上げる → 応答での確かめ。"""
     s = holder["session"] = c.session()
     over = {"target": target, "n_heads": _ints(n_heads), "max_examples": max_examples, "positions": positions,
             "top_layers": top_layers, "hard": hard, "resume": False if fresh else None,
             "include_score_layers": True if include_score_layers else None, "score_layers": score_layers,
-            "select_layer": select_layer, "candidate_layers": candidate_layers, "always_layers": always_layers}
+            "select_layer": select_layer, "candidate_layers": candidate_layers, "always_layers": always_layers,
+            "rank": rank, "unit_kinds": unit_kinds, "verify_top": verify_top, "verify_sample": verify_sample, "verify_mode": verify_mode,
+            "n_units": _ints(n_units), "check_replies": check_replies, "check_tokens": check_tokens}
     _gate(s, "head_pipeline", {"spec": str(spec), **{k: v for k, v in over.items() if v is not None}}, yes, None)
     d = s.heads_pipeline(spec, **over)
+    if d.get("writes"):
+        return d, "\n".join(_pipeline_writes_lines(d)), 0
     sc, ca, al = d["score"], d["causal"], d["allocate"]
     ck = "causal" if (d.get("settings") or {}).get("select_layer") not in (None, "") else "causal_max"
     lines = [f"{d['path']}({d['n_prompts']} 問、{d['seconds']:.0f} 秒"
@@ -2982,6 +3014,104 @@ def heads_pipeline(c: Common, holder: dict,
                      + ("この llama.cpp で使える)" if s.engine.loop_runtime_names() else "この llama.cpp では使えない。third_party/sensenova-loop のパッチ 0002)"))
     if d["recommended"]:
         lines.append(f"レシピ: {d['recommended']['recipe']}。確かめる: gne eval --recipe {d['recommended']['recipe']} --random-controls 16")
+    return d, "\n".join(lines), 0
+
+
+KIND_JA = {"attn": "注意", "linear": "線形注意", "neuron": "ニューロン"}
+
+
+def _verify_corr_line(sp: dict) -> str:
+    return "、".join(f"{'全体' if k == 'all' else KIND_JA.get(k, k)} {_f(v['score_vs_gap_drop'], '+.2f')}"
+                     f"(A 側だけ {_f(v['score_vs_a_drop'], '+.2f')}、{v['n']} 個)" for k, v in sp.items())
+
+
+def _pipeline_writes_lines(d: dict) -> list[str]:
+    """heads pipeline --rank writes の表示。"""
+    wr, ve, al = d["writes"], d["verify"], d["allocate"]
+    ts = wr.get("totals_share") or {}
+    lines = [f"{d['path']}({d['n_prompts']} 問、{d['seconds']:.0f} 秒)",
+             f"1. 方向 {d['name']}({d['direction']['positions']}、{d['direction']['seconds']:.0f} 秒)",
+             f"2. 基準層 L{d['score']['base_layer']}(cohen_d 最大)",
+             f"3. 書き込みの順位づけ: 選ぶ層 L{wr['select_layer']}、A {wr['n']['A']} 問・B {wr['n']['B']} 問、A−B の差 {wr['gap']:.2f}、"
+             f"部品 " + "・".join(f"{KIND_JA[k]} {n}" for k, n in wr["n_units"].items() if n) + f"({wr['seconds']:.0f} 秒)",
+             "   直接の書き込みの和 ÷ 差: " + "・".join(f"{KIND_JA[k]} {v:+.0%}" for k, v in ts.items()
+                                                    if v is not None and wr["n_units"].get(k))
+             + "(層ごとに方向が回るので、和は 1 にならない)",
+             f"4. 上位 {ve['n']} 個を 1 個ずつ{'、s=1 で射影して' if ve['mode'] == 'proj' else '止めて'}確かめた("
+             + "・".join(f"{KIND_JA[k]} {n}" for k, n in ve["kinds"].items() if n) + f"、{ve['seconds']:.0f} 秒)。"
+             f"点数と、測った A−B の差の縮みの順位相関: " + _verify_corr_line(ve["spearman"]),
+             f"5. s=1 から組を作る(目標 {d['target']:.2f} = {d['target_from']}、候補 {al['pool']} 個):"]
+    for r in al["table"]:
+        if r.get("skipped"):
+            lines.append(f"   上限 {r['n_heads']} 個: {r['skipped']}")
+            continue
+        kk = "・".join(f"{KIND_JA[k]} {n}" for k, n in r["kinds"].items() if n)
+        lines.append(f"   上限 {r['n_heads']} 個: {r['n_used']} 個({kk})、強さ 最大 {r['s_max']:.2f}・中央値 {r['s_median']:.2f}"
+                     f"({'全部 1' if r['stop'] == 'target' else {'raised': '全体を上げた', 's_max': '上限で止まった', 'drift': 'B 側のずれで止めた'}.get(r['stop'], r['stop'])})、"
+                     f"残る {r['remain']}/{al['n_a']}、B 直交 {r['b_drift_orth']:.4f}" + ("  ← 推す" if r["recommended"] else "")
+                     + ("" if r["reached"] else "(目標に届かない)"))
+        lines.append("      " + " ".join(r["units"]))
+    ck = d.get("check")
+    if ck:
+        def cell(x):
+            return f"{x['match_finished']}/{x['finished']}" if x.get("match_finished") is not None else f"{x['finished']}/{x['n']} 書き終え"
+        for key, lab in (("none", "無介入"), ("recipe", "推す組" if ck.get("recommended") else f"上限 {ck.get('n_heads')} 個の組(推す組なし)")):
+            x = ck["rows"][key]
+            lines.append(f"6. 応答での確かめ {lab}: A {cell(x['A'])}・B {cell(x['B'])}(書き終えた応答の一致。空 A {x['A']['empty']}/B {x['B']['empty']}、"
+                         f"繰り返し A {x['A']['loop']}/B {x['B']['loop']}、上限で切れた A {x['A']['at_limit']}/B {x['B']['at_limit']})")
+        if not (ck["held_out"]["A"] and ck["held_out"]["B"]):
+            lines.append("   (選ぶのに使った質問での確かめ。調整に使っていない質問で gne behave を流して確かめる)")
+        if ck.get("note"):
+            lines.append("   注意: " + ck["note"])
+    lines.append("弱点: 順位づけは直接の書き込みだけを見る。後ろの層の書き手を動かしているだけの部品は、点数に出ない")
+    if d["recommended"]:
+        lines.append(f"レシピ: {d['recommended']['recipe']}。確かめる: gne eval --recipe {d['recommended']['recipe']} --random-controls 16")
+    return lines
+
+
+@gne_command(heads_app, "writes", "heads writes")
+def heads_writes(c: Common, holder: dict,
+                 name: str = typer.Option(..., "--name", help="方向の名前"),
+                 contrast: Optional[Path] = typer.Option(None, "--contrast", help="対照集合(既定は方向を作った対照集合)"),
+                 select_layer: Optional[int] = typer.Option(None, "--select-layer", help="点数を測る層(既定は最後に測れる層)。この層より前の部品が候補"),
+                 unit_kinds: str = typer.Option("all", "--unit-kinds", help="all(注意ヘッド・線形注意のヘッド・MLP のニューロン)/ heads / neurons / attn,linear,neuron"),
+                 positions: str = typer.Option("last", "--positions"), subset: str = typer.Option("all", "--subset"),
+                 max_examples: Optional[int] = typer.Option(None, "--max-examples", help="順位づけに使う質問の数(既定は全部)"),
+                 verify_top: int = typer.Option(64, "--verify-top", help="1 個ずつ流し直して確かめる上位の数(0 で確かめない)"),
+                 verify_sample: int = typer.Option(16, "--verify-sample", help="上位より下(上位の数の 4 倍まで)から等間隔に足して確かめる数(順位相関を広い範囲で測る)"),
+                 verify_mode: str = typer.Option("proj", "--verify-mode", help="proj(s=1 で射影)/ ablate(出力を 0)"),
+                 verify_examples: int = typer.Option(64, "--verify-examples", help="確かめで使う A 側の質問の数(等間隔に間引く)"),
+                 score_layers: Optional[str] = typer.Option(None, "--score-layers", help="確かめで射影の値を並べる層(既定は基準層と後段)"),
+                 out_name: Optional[str] = typer.Option(None, "--out-name", help="保存名(既定は方向の名前)"),
+                 show: int = typer.Option(30, "--show")):
+    """全部の部品(注意ヘッド・線形注意のヘッド・MLP のニューロン)を、方向への書き込みの量で順位づけする。質問 1 問につき 1 回流すだけで、
+    部品ごとに「その層の方向 r̂ にどれだけ書いたか」(ヘッドは出力·r̂、ニューロンは活性 ×(ffn_down の列·r̂))を読み、点数 =
+    選ぶ層での「s=1 で直接に縮まる A と B の差」で並べる。上位は 1 個ずつ s=1 で射影して流し直し、因果スクリーニングと同じ物差しで
+    確かめ、点数との順位相関を出す。直接の書き込みしか見ないので、後ろの書き手を動かしているだけの部品は見落とす。
+    層ごとの更新のベクトル(A 側の平均 − B 側の平均、種類ごと・質問を半分ずつ)は .writes.npz に残す。"""
+    s = holder["session"] = c.session()
+    d = s.heads_writes(name, contrast=contrast, select_layer=select_layer, kinds=unit_kinds, positions=positions, subset=subset,
+                       max_examples=max_examples, verify_top=verify_top, verify_sample=verify_sample, verify_mode=verify_mode,
+                       verify_examples=verify_examples, score_layers=s.score_layers_of(score_layers), name=out_name)
+    ts = d.get("totals_share") or {}
+    lines = [f"{d['path']}(選ぶ層 L{d['select_layer']}、A {d['n']['A']} 問・B {d['n']['B']} 問、A−B の差 {d['gap']:.2f}、{d['seconds']:.0f} 秒)",
+             "部品: " + "・".join(f"{KIND_JA[k]} {n}" for k, n in d["n_units"].items() if n)
+             + "。直接の書き込みの和 ÷ 差: " + "・".join(f"{KIND_JA[k]} {v:+.0%}" for k, v in ts.items()
+                                                      if v is not None and d["n_units"].get(k)),
+             f"式の確かめ(部品の和と捕まえた層の出力の差の最大): 注意 {_f((d.get('check') or {}).get('attn_rel_max'), '.2%')}・"
+             f"MLP {_f((d.get('check') or {}).get('mlp_rel_max'), '.2%')}・層の更新と残差の差(中央値 / 最大) "
+             f"{_f((d.get('check') or {}).get('layer_rel_median'), '.2%')} / {_f((d.get('check') or {}).get('layer_rel_max'), '.2%')}",
+             f"  {'部品':>10} {'種類':<8} {'点数':>8} {'割合':>7} {'その層で':>8}" + (f" {'測った縮み':>9} {'A の下がり':>9} {'B 直交':>7}" if d.get("verify") else "")]
+    vr = {r["label"]: r for r in ((d.get("verify") or {}).get("rows") or [])}
+    for r in d["rows"][:show]:
+        v = vr.get(r["label"])
+        lines.append(f"  {r['label']:>10} {KIND_JA[r['kind']]:<8} {r['score']:>+8.3f} {_f(r['share'], '+7.1%')} {r['own']:>+8.3f}"
+                     + (f" {v['gap_drop']:>+9.3f} {v['causal']:>+9.3f} {_f(v.get('drift_orth_b'), '7.4f')}" + ("  除外" if v.get("excluded") else "")
+                        if v else ""))
+    if d.get("verify"):
+        lines.append("点数と測った効き目の順位相関(Spearman、A−B の差の縮み): " + _verify_corr_line(d["verify"]["spearman"]))
+    lines.append(f"配列: {d['npz']}(層ごとの更新のベクトル・部品ごとの書き込み)")
+    lines.append("弱点: 直接の書き込みしか見ない。後ろの層の書き手を動かしているだけの部品は、点数に出ない")
     return d, "\n".join(lines), 0
 
 
@@ -3116,13 +3246,17 @@ def heads_refine(c: Common, holder: dict,
                  new_heads: str = typer.Option("3,2,1", "--new-heads", help="追加する組のヘッド数(カンマ区切り)"),
                  out_name: Optional[str] = typer.Option(None, "--out-name", help="保存名(既定 <name>_r1、別の組なら _r2 …)"),
                  fresh: bool = typer.Option(False, "--fresh", help="作り済みの方向と因果の結果を使い回さない"),
+                 rank: Optional[str] = typer.Option(None, "--rank", help="追加の部品の探し方: causal(ヘッドを止めて測る)/ writes(全部の部品を書き込みの量で順位づけ。ニューロンも足せる)。既定は元の一括の設定"),
+                 unit_kinds: Optional[str] = typer.Option(None, "--unit-kinds", help="--rank writes で足す部品の種類: all(ヘッド・線形注意・ニューロン)/ heads / neurons"),
                  yes: bool = _YES):
     """組を当てても目標まで下がらない A 側の質問(残り)だけで、追加のヘッドを探す。残りの質問と B 側の質問で、組を当てたまま
-    方向を作り直し、一括(基準層 → 因果 → 配分)で足すヘッドと強さを決め、元の組と合わせたレシピを作って残りを測り直す。"""
+    方向を作り直し、一括(基準層 → 因果 → 配分)で足すヘッドと強さを決め、元の組と合わせたレシピを作って残りを測り直す。
+    --rank writes(か元の一括が writes)なら、足す部品にニューロンも選べ、--new-heads は組の部品の数の上限になる。"""
     s = holder["session"] = c.session()
     nh = _ints(new_heads) or [3, 2, 1]
-    _gate(s, "heads_refine", {"name": name, "new_heads": nh}, yes, None)
-    d = s.heads_refine(name, n_heads=n_heads, new_heads=nh, out_name=out_name, resume=not fresh)
+    _gate(s, "heads_refine", {"name": name, "new_heads": nh, **({"rank": rank} if rank else {}),
+                              **({"unit_kinds": unit_kinds} if unit_kinds else {})}, yes, None)
+    d = s.heads_refine(name, n_heads=n_heads, new_heads=nh, out_name=out_name, resume=not fresh, rank=rank, unit_kinds=unit_kinds)
     rm, cb, pp = d["remaining"], d["combined"], d["pipeline"]
     lines = [f"{d['path']}({d['seconds']:.0f} 秒)",
              f"1. {d['n_heads']} ヘッドの組 " + " ".join(d["base_units"]) + f" で、L{d['score_layer']} の射影の値が {d['threshold']:.2f} を超える"
