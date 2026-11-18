@@ -190,17 +190,19 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
     @srv.tool()
     async def steer(units: list[str], prompt: str | None = None, messages: list[dict[str, str]] | None = None,
                     max_tokens: int = 128, compare: bool = True, dose_unit: str = "rel",
-                    system: str | None = None, when: str = "all", ablate: str | None = None, lora_when: str = "all") -> dict:
+                    system: str | None = None, when: str = "all", ablate: str | None = None, lora_when: str = "all",
+                    first_token: str | None = None) -> dict:
         """ユニット(例 ["14:8949:+1.0", "13:7956:-1.0"])で押して生成する(greedy)。compare=True なら無介入も並べる。
         lora_when は LoRA(gain・proj・keyed・nw)を当てる位置: all(既定)/ prompt(プロンプトを読む間だけ)/ reply(生成するトークンだけ)。
         "14:8949:x2" のように x を付けると gain(そのニューロンの出力を k 倍、x0 で消去。§6.16)。
         when は足す位置: all(全位置) / gen(生成中だけ、プロンプトの理解を壊さない) / assistant(assistant の発話だけ) /
         after:<文字列>(出力にその文字列が出てから) / ramp:<a>-<b>(倍率を a から b へ)。
-        ablate は direction で作った方向の射影消去("NAME"、"NAME@層"、"NAME:0.5")。units は空でもよい。"""
+        ablate は direction で作った方向の射影消去("NAME"、"NAME@層"、"NAME:0.5")。units は空でもよい。
+        first_token(文字か "#<ID>")を渡すと、無介入・介入の両方で応答の最初をそのトークンに決めて続きを書かせる(原因の切り分け用)。"""
         def fn():
             r = session.recipe(units=units or None, dose_unit=dose_unit, when=when, ablate=ablate)
             return session.steer(r, prompt=prompt, messages=messages, system=system, max_tokens=max_tokens,
-                                 compare=compare, lora_when=lora_when)
+                                 compare=compare, lora_when=lora_when, first_token=first_token)
         return await call(fn)
 
     @srv.tool()
@@ -839,7 +841,8 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
                             save: str | None = None, summary: bool = False, direction: str | None = None,
                             cap: str | list[str] | None = None, stack_fast: bool | None = None, key_fit: str | None = None,
                             key_c: float | None = None, key_conv_cells: bool | None = None, kscale: str | None = None,
-                            remove: str | None = None, prior_max_tokens: int | None = None) -> dict:
+                            remove: str | None = None, prior_max_tokens: int | None = None, token: str | list[str] | None = None,
+                            token_delta: float | None = None) -> dict:
         """FiSH を最初から最後まで 1 回のジョブで作る(job_status で結果。UI の FiSH のタブの「まとめて作る」と同じ): 方向 → ニューロンの表 →
         鍵 → ユニット → そのユニットを当てた状態で鍵を作り直す → 式どおりか → 足した量。contrast は対照集合の表(name・system_a・
         user_prompts・dont_touch と、設定の fish)か、configs/contrast/ の名前・パス、configs/fish/ のひな形の名前。
@@ -876,7 +879,9 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
         要約の leaks は、書き込みたくない場面の群ごとの漏れの表(nw_check の leaks と同じ)。
         key_conv_cells=True で、最小二乗の鍵のセルに会話の形も入れる(表の fish.key_conv_cells でも書ける)。kscale="auto" で
         ユニットに !kauto、remove="rm" / "rmbase" で成分を取り除く形にする(fish.kscale・fish.remove)。対照集合の前のやり取りの
-        応答(content: null)は、無介入のモデルで埋める(上限 prior_max_tokens、既定 256)。"""
+        応答(content: null)は、無介入のモデルで埋める(上限 prior_max_tokens、既定 256)。
+        token(例 "<|im_end|>"・"◇")と token_delta を渡すと、方向を出力層の行列のトークンの行から作る(入力の振り分け。
+        segments="0"・key_fit="ridge"・alpha=1 と一緒に使う。Δ は direction_token_scan で選ぶ。docs/fish.md §5)。"""
         from .jobs import _layers
         try:
             if not _layers(layers):
@@ -889,6 +894,7 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
                  "response_tokens": response_tokens, "iv": iv, "neurons": neurons, "top": top, "save": save,
                  "direction": direction, "cap": cap, "stack_fast": stack_fast, "key_fit": key_fit, "key_c": key_c,
                  "key_conv_cells": key_conv_cells, "kscale": kscale, "remove": remove, "prior_max_tokens": prior_max_tokens,
+                 "token": token, "token_delta": token_delta,
                  "summary": True if summary else None}
             return jobs.start("fish_pipeline", {k: v for k, v in p.items() if v is not None}).view()
         except Exception as e:  # noqa: BLE001

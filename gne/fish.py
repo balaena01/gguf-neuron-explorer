@@ -33,7 +33,8 @@ from .steer import GneError
 FORMS = ("one", "two", "cap")                 # 鍵 1 つ / 鍵 2 つ(場面 かつ 位置)/ 上限つきの 2 個組
 PER_SEGMENT = {"one": 1, "two": 1, "cap": 2}  # 区切り 1 つに要るニューロンの数
 SETTINGS = ("layers", "segments", "form", "alpha", "cap", "same_reply", "stack", "stack_fast", "pseudo", "max_tokens",
-            "response_tokens", "iv", "rekey", "key_fit", "key_c", "key_conv_cells", "prior_max_tokens", "kscale", "remove")
+            "response_tokens", "iv", "rekey", "key_fit", "key_c", "key_conv_cells", "prior_max_tokens", "kscale", "remove",
+            "token", "token_delta")
 DEFAULTS = {"segments": "0,1-3,4-", "form": "cap", "alpha": 0.9, "same_reply": True, "stack": True, "stack_fast": False, "pseudo": 4,
             "max_tokens": 96, "response_tokens": 96, "key_fit": "mean"}
 
@@ -252,6 +253,30 @@ def unit_rows(session, specs: list[str]) -> list[dict]:
              "key": u.key, "key2": u.key2, "s": u.s, "cap": u.cap} for u in us]
 
 
+def token_step(session, contrast: str, *, name: str, layers=None, segments=None, token=None, token_delta=None) -> dict:
+    """方向を、対照集合の差ではなく出力層の行列のトークンの行から作る(tokendir.token_direction。名前 <name>_tok)。r̄ は対照集合の
+    入力(狙う側と dont_touch)の位置 0 で測る。どの区切りも同じ向き(ユニットは @<name>_tok をそのまま使う)。結果は
+    direction_step と同じ形の表に、token(トークン・Δ・r̄・β)と unsegmented を足したもの。"""
+    from .tokendir import token_direction
+    t0 = time.perf_counter()
+    Ls = _layers(layers)
+    segs = _segments(segments)
+    if token_delta is None:
+        raise GneError("BAD_ARGS", "トークンの行の方向には token_delta(目標のロジットの上がり Δ)が要ります", "gne direction token-scan で選べます")
+    if before_mode(segs):
+        raise GneError("BAD_ARGS", "トークンの行の方向は、返事の位置の区切り(0 など)で使います(before:<正規表現> は不可)")
+    t = token_direction(session, token if isinstance(token, list) else [token], layers=Ls, delta=float(token_delta),
+                        name=f"{name}_tok", contrast=contrast)
+    if len(Ls) > 1:
+        session.warn(f"トークンの行の方向は層ごとに同じ長さを書きます。{len(Ls)} 層に書くと、足す量は層の数だけ重なります(ふつうは 1 層)")
+    rows = [{"layer": L, "segment": i, "positions": sg, "direction": t["name"], "norm": float(t["beta"]), "cos_old": None,
+             "norm_old": None} for L in Ls for i, sg in enumerate(segs)]
+    return {"name": t["name"], "segments": segs, "layers": Ls, "same_reply": False, "stack": False, "stack_fast": False,
+            "method": "token_row", "compare": None, "rows": rows, "notes": [], "n_prompts": None, "reused": False,
+            "unsegmented": True, "token": {k: t[k] for k in ("tokens", "token_text", "delta", "rbar", "gdot", "beta")},
+            "seconds": time.perf_counter() - t0}
+
+
 def direction_step(session, contrast: str, *, name: str, layers=None, segments=None, same_reply: bool = True, stack: bool = True,
                    response_tokens: int = 96, compare: bool = True, stack_fast: bool = False) -> dict:
     """方向を作り、層 × 区切りごとの長さと、今までの作り方(それぞれ自分の返事を読む・重ねない)との向きの近さを返す。
@@ -447,7 +472,13 @@ def reuse_direction(session, direction: str, *, layers, segments, stack: bool = 
     ds = session.direction_set(str(direction))
     have_segs = list(ds.segments)
     how = "方向を作り直す(direction を渡さない)か、作ったときと同じ区切り・層を渡してください"
-    if whole:
+    token = not have_segs and ds.meta.get("method") == "token_row"     # トークンの行の方向(gne direction token): どの区切りも同じ向き
+    if token:
+        src = [ds.raw] * len(segs)
+        if len(_layers(layers)) > 1:
+            session.warn(f"方向 {ds.name} はトークンの行の方向で、層ごとに同じ長さを書きます。{len(_layers(layers))} 層に書くと、足す量は層の数だけ"
+                         "重なります(ふつうは 1 層)")
+    elif whole:
         if have_segs:
             session.warn(f"方向 {ds.name} は区切りつき({','.join(have_segs)})ですが、書く位置が before:<正規表現> なので、区切らない方向"
                          "(返事の全部の位置の平均)を使います")
@@ -465,16 +496,17 @@ def reuse_direction(session, direction: str, *, layers, segments, stack: bool = 
         raise GneError("BAD_DIRECTION", f"方向 {ds.name} は層 {','.join(map(str, made))} に重ねて書く前提で作ってあります。いまの層"
                                         f"({','.join(map(str, Ls))})と違うので、そのままでは足す量がずれます",
                        "同じ層を渡すか、いまの層で方向を作り直してください(direction を渡さない)")
-    if not made and stack and not whole and len(Ls) > 1:
+    if not made and stack and not whole and not token and len(Ls) > 1:
         raise GneError("BAD_DIRECTION", f"方向 {ds.name} は、重ねて書く前提(--stack-layers)で作られていません。複数の層に書くと足し過ぎになります",
                        "重ねる前提で作り直す(direction を渡さない)か、そのまま使うなら stack を切ってください(--no-stack)")
-    rows = [{"layer": L, "segment": i, "positions": sg, "direction": ds.name if whole else f"{ds.name}.seg{i}",
+    rows = [{"layer": L, "segment": i, "positions": sg, "direction": ds.name if (whole or token) else f"{ds.name}.seg{i}",
              "norm": float(np.linalg.norm(src[i][L])), "cos_old": None, "norm_old": None}
             for L in Ls for i, sg in enumerate(segs)]
     fast = stack_read_fast(ds)
     return {"name": ds.name, "segments": segs, "layers": Ls, "same_reply": bool(ds.meta.get("same_reply")), "stack": bool(made),
             "stack_fast": fast, "method": ds.meta.get("method"), "compare": None, "rows": rows,
-            "notes": [f"方向 {ds.name} は" + FAST_NOTE] if fast else [], "n_prompts": None, "reused": True, "seconds": 0.0}
+            "notes": [f"方向 {ds.name} は" + FAST_NOTE] if fast else [], "n_prompts": None, "reused": True, "seconds": 0.0,
+            "unsegmented": token}
 
 
 def behave_step(session, specs: list[str], contrast: str, *, name: str, prompts=None, n: int = 12, max_tokens: int = 120,
@@ -527,7 +559,7 @@ def pipeline(session, contrast: str, *, name: str, layers=None, segments=None, f
              response_tokens: int = 96, iv=None, rekey: bool = True, neurons: dict | None = None, top: int = 20,
              save: str | Path | None = None, direction: str | None = None, cap=None, stack_fast: bool = False,
              key_fit: str | None = None, key_c=None, key_conv_cells: bool = False, kscale: str | None = None,
-             remove: str | None = None) -> dict:
+             remove: str | None = None, token=None, token_delta=None) -> dict:
     """方向 → ニューロンの表 → 鍵 → ユニット →(そのユニットを当てた状態で鍵を作り直す)→ 式どおりか → 足した量、を順に回す。
     ニューロンは既定の候補(表の上から)を使う(neurons を渡せばそれ)。層と強さは渡されたものをそのまま使う。
     alpha は数 1 つ(全部の区切りに同じ値)か、区切りごとの "1,1,0.8"・[1, 1, 0.8]。
@@ -542,6 +574,8 @@ def pipeline(session, contrast: str, *, name: str, layers=None, segments=None, f
     (段ごとの c・候補の端だったか)に残る。key_conv_cells = True で、そのセルに会話の形も入れる(key_fit ridge のときだけ)。
     kscale = "auto" でユニットに !kauto(量子化の丸めを避ける倍率)、remove = "rm" / "rmbase" でユニットを成分を取り除く形
     (!rm / !rmbase。上限つきの形だけ)にする(units_step。既定はどちらも付けない)。
+    token(トークンの指定。例 "<|im_end|>")と token_delta(目標のロジットの上がり Δ)を渡すと、方向を対照集合の差ではなく
+    出力層の行列のトークンの行から作る(token_step。入力の振り分け: 終了トークンで応答しない・マーカーで相づち)。
     save を渡すと、できたユニットをレシピのファイルに書く(save_recipe。.yaml / .yml で終わればそのパス、そうでなければ名前として
     <root>/recipes/<名前>.yaml)。結果の recipe_path が、gne nw verify --recipe などにそのまま渡せるパス。省くと書かない(今までどおり)。
     結果は大きい(ニューロンの表・鍵の表・足した量の細目)ので、短く見るなら結果の summary(summary() と同じ)か summary_text()。"""
@@ -571,7 +605,12 @@ def pipeline(session, contrast: str, *, name: str, layers=None, segments=None, f
 
     t = time.perf_counter()
     notes = []
-    if direction is not None and str(direction).strip():
+    if token not in (None, "", []):
+        if direction is not None and str(direction).strip():
+            raise GneError("BAD_ARGS", "token と direction は一緒に使えません(どちらかで方向を決めます)")
+        d = token_step(session, contrast, name=name, layers=Ls, segments=segs, token=token, token_delta=token_delta)
+        notes.append(f"方向はトークン {d['token']['token_text']} の行から作りました(Δ {d['token']['delta']:g}、β {d['token']['beta']:.2f})")
+    elif direction is not None and str(direction).strip():
         d = reuse_direction(session, str(direction).strip(), layers=Ls, segments=segs, stack=stack)
         notes.append(f"方向は作り直さず、すでにある {d['name']} を使いました")
         if stack_fast:
@@ -593,7 +632,8 @@ def pipeline(session, contrast: str, *, name: str, layers=None, segments=None, f
     keys = keys_step(session, contrast, base=name, layers=Ls, segments=segs, form=form, pseudo=pseudo, max_tokens=max_tokens, iv=iv,
                      **kfit)
     whole = before_mode(segs)
-    specs = units(Ls, len(segs), picked, form, dname, name, al, whole, caps, **uopt)
+    one_dir = whole or bool(d.get("unsegmented"))  # 区切らない方向(before:<正規表現>・トークンの行の方向)は @NAME をそのまま使う
+    specs = units(Ls, len(segs), picked, form, dname, name, al, one_dir, caps, **uopt)
     lap("keys", t)
     keys2 = None
     if whole:
@@ -605,7 +645,7 @@ def pipeline(session, contrast: str, *, name: str, layers=None, segments=None, f
         base2 = f"{name}_r"
         keys2 = keys_step(session, contrast, base=base2, layers=Ls, segments=segs, form=form, pseudo=pseudo, max_tokens=max_tokens,
                           iv=iv_units(session, iv, specs), **kfit)
-        specs = units(Ls, len(segs), picked, form, dname, base2, al, whole, caps, **uopt)
+        specs = units(Ls, len(segs), picked, form, dname, base2, al, one_dir, caps, **uopt)
         lap("rekey", t)
     t = time.perf_counter()
     ver = verify_step(session, specs, iv=iv)

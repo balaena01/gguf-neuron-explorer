@@ -13,7 +13,7 @@ down を付けると −β·û(そのトークンを出にくくする向き)。
 層の走査(token_scan): 層ごとに、狙う側の入力(対照集合の user_prompts。system_b の文脈)の位置 0 にだけ β(Δ)·û を足し、足すトークンが
 1 位になった入力の割合が need 以上になる最小の Δ(deltas の中から)を探す。その Δ の leak 倍(既定 0.2・0.5)を、dont_touch の入力の
 位置 0 に足したときの、足すトークンが 1 位になった数・位置 0 の KL(足さないときの分布から)・1 位が変わった数を出す。
-入力の最後のトークンの手前までを 1 回だけ読んでおき、候補ごとに最後のトークンだけを読み直す(位置 0 だけに足すのと同じ)。
+入力の最後のトークンの手前までを 1 回だけ読んでおき、候補ごとにその状態を複製して最後のトークンだけを読む(位置 0 だけに足すのと同じ)。
 """
 from __future__ import annotations
 
@@ -190,15 +190,19 @@ def _lsm(z: np.ndarray) -> np.ndarray:
 
 
 class _LastTokenReader:
-    """入力の最後のトークンの手前までを読んでおき、control vector を変えて最後のトークンだけを読み直す。"""
+    """入力の最後のトークンの手前までを列 0〜B−1 に読んでおき、候補ごとに列 B〜2B−1 へ複製して、control vector を変えて最後の
+    トークンだけを読む(複製は読み終えたら消す)。線形注意・SSM の層があるモデルでは、状態を途中まで消して読み直すことが
+    できないので、手前までの状態を複製して使う。B = n_seq_max ÷ 2。"""
 
     def __init__(self, session, seqs: list[list[int]]):
         from llama_cpp import llama_cpp as C
         self.C = C
         self.e = session.engine
+        if int(self.e.n_seq_max) < 2:
+            raise GneError("BAD_ARGS", "層の走査には n_seq_max 2 以上が要ります(--n-seq-max)")
         self.ctx = self.e.steer_ctx()
         self.mem = C.llama_get_memory(self.ctx.ptr)
-        self.B = max(1, int(self.e.n_seq_max))
+        self.B = int(self.e.n_seq_max) // 2
         self.seqs = seqs
 
     def batches(self):
@@ -213,16 +217,19 @@ class _LastTokenReader:
         e.prefill(self.ctx, [x[:-1] for x in bb])
 
     def last(self, bb: list[list[int]], V: dict | None) -> np.ndarray:
-        e, C = self.e, self.C
+        e, C, B = self.e, self.C, self.B
+        for j in range(len(bb)):
+            C.llama_memory_seq_rm(self.mem, B + j, -1, -1)
+            C.llama_memory_seq_cp(self.mem, j, B + j, -1, -1)
         try:
             if V:
                 e.set_cvec(self.ctx, V)
-            e._decode(self.ctx, [(x[-1], len(x) - 1, j, True) for j, x in enumerate(bb)])
+            e._decode(self.ctx, [(x[-1], len(x) - 1, B + j, True) for j, x in enumerate(bb)])
             z = np.stack([e._logits(self.ctx, j) for j in range(len(bb))]).astype(np.float64)
         finally:
             e.set_cvec(self.ctx, None)
-            for j, x in enumerate(bb):
-                C.llama_memory_seq_rm(self.mem, j, len(x) - 1, -1)
+            for j in range(len(bb)):
+                C.llama_memory_seq_rm(self.mem, B + j, -1, -1)
         return z
 
 

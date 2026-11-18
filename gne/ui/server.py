@@ -468,8 +468,13 @@ def create_app(session, *, warm: bool = True, openai: bool = False) -> FastAPI:
         remove("rm" / "rmbase")で成分を取り除く形にする(fish.unit_options。省くと付けない)。"""
         from .. import fish
         segs = fish._segments(segments)
+        try:                                       # トークンの行の方向(区切りなし)は、どの区切りも @NAME をそのまま使う
+            ds = session.direction_set(direction)
+            token = not ds.segments and ds.meta.get("method") == "token_row"
+        except GneError:
+            token = False
         specs = fish.units(layers, len(segs), {int(k): v for k, v in neurons.items()}, form, direction, base, alpha,
-                           fish.before_mode(segs), cap, kscale=kscale, remove=remove)
+                           fish.before_mode(segs) or token, cap, kscale=kscale, remove=remove)
         return {"specs": specs, "units": fish.unit_rows(session, specs), "needed": fish.needed(len(segs), form),
                 "names": fish.key_names(base, len(segs), form)}
 

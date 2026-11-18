@@ -143,13 +143,17 @@ def check_lora_when(lora_when: str) -> None:
 def generate_when(e: Engine, ctx, messages: list[dict], vectors: dict[int, np.ndarray] | None, when: When | str | None,
                   *, max_tokens: int = 128, top_k: int = 5,
                   on_token: Callable[[int, int], None] | None = None,
-                  lora: list[tuple[str, float]] | None = None, sampling=None, lora_when: str = "all") -> tuple[Rollout, dict]:
+                  lora: list[tuple[str, float]] | None = None, sampling=None, lora_when: str = "all",
+                  first_ids: list[int] | None = None) -> tuple[Rollout, dict]:
     """1 本の会話を、when に従って control vector を付け替えながら greedy 生成する。
     lora は LoRA アダプタ [(パス, 倍率)](when は control vector にだけ効く)。lora_when で LoRA を当てる位置を限る:
     all(既定、全位置)/ prompt(プロンプトを読む間だけ。最初の返事のトークンは LoRA を当てた読み取りから決まる)/
     reply(生成するトークンだけ。最初の 1 トークンは素の読み取りから決まる。control vector の gen と同じ決め方)。
     プロンプトの KV は読んだときの状態のまま生成に使う(毎回 KV を消してから読む)。
-    戻り値は (Rollout, 情報)。情報は set_cvec の回数・区間・after の切替位置など(確認用)。"""
+    戻り値は (Rollout, 情報)。情報は set_cvec の回数・区間・after の切替位置など(確認用)。
+    first_ids(トークンの列)を渡すと、応答の最初をそのトークンに決めて(プロンプトの後ろに付けて読ませて)続きを書かせる。
+    戻り値の token_ids・text は決めたトークンを含む(logprob は決めた分を nan、top_ids・top_lps は空)。読ませる分は
+    プロンプトと同じ扱い(lora_when の prompt / reply の境目は、決めたトークンの後ろ)。"""
     w = when if isinstance(when, When) else parse_when(when)
     info: dict = {"when": str(w), "set_cvec": 0}
     state = {"cur": object()}
@@ -168,6 +172,13 @@ def generate_when(e: Engine, ctx, messages: list[dict], vectors: dict[int, np.nd
     else:
         ids = e.chat_ids(messages)
         segs = None
+    fx = [int(t) for t in (first_ids or [])]
+    if fx:
+        ids = list(ids) + fx
+        if segs:
+            a, b, st = segs[-1]
+            segs = [*segs[:-1], (a, b + len(fx), st)]
+        info["first_ids"] = fx
     from .media import has_audio
     ban = None
     if has_audio(messages):
@@ -252,5 +263,11 @@ def generate_when(e: Engine, ctx, messages: list[dict], vectors: dict[int, np.nd
         e.set_cvec(ctx, None)
         if lora:
             e.set_lora(ctx, None)
-    info["n_prompt"] = len(ids)
+    info["n_prompt"] = len(ids) - len(fx)
+    if fx:
+        r.token_ids = fx + list(r.token_ids)
+        r.logprob = [float("nan")] * len(fx) + list(r.logprob)
+        r.top_ids = [[] for _ in fx] + list(r.top_ids)
+        r.top_lps = [[] for _ in fx] + list(r.top_lps)
+        r.text = e.detokenize([t for t in r.token_ids if not e.is_eog(t)])
     return r, info

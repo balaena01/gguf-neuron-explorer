@@ -289,11 +289,18 @@ def _fish_args(s, contrast, spec, p: dict, keys) -> tuple[str, dict, str]:
 
 def _fish_direction(s, contrast=None, spec: dict | None = None, **p) -> dict:
     """FiSH の方向(docs/fish.md): 返事の位置で分けた方向を作り、層 × 区切りごとの長さと、今までの作り方との向きの近さを返す。
+    token(と token_delta)を渡すと(表の fish.token でも書ける)、出力層の行列のトークンの行から方向を作る(fish.token_step)。
     stack_fast=True で、層を重ねる読み直しを速い読み方にする(既定は切。方向が既定の読み方とわずかに違う。結果の stack_fast に残る)。"""
     from . import fish
-    path, q, cname = _fish_args(s, contrast, spec, p, ("layers", "segments", "same_reply", "stack", "stack_fast", "response_tokens"))
+    path, q, cname = _fish_args(s, contrast, spec, p, ("layers", "segments", "same_reply", "stack", "stack_fast", "response_tokens",
+                                                       "token", "token_delta"))
     q.pop("iv", None)
-    d = fish.direction_step(s, path, name=q.pop("name", None) or cname, **q)
+    tok, delta = q.pop("token", None), q.pop("token_delta", None)
+    if tok not in (None, "", []):                      # トークンの行の方向(入力の振り分け)
+        d = fish.token_step(s, path, name=q.pop("name", None) or cname, layers=q.get("layers"), segments=q.get("segments"),
+                            token=tok, token_delta=delta)
+    else:
+        d = fish.direction_step(s, path, name=q.pop("name", None) or cname, **q)
     return {**d, "contrast_path": path}
 
 

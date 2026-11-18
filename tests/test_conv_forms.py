@@ -289,3 +289,26 @@ def test_cli_entries(sess):
     assert r.exit_code == 0 and "β 8 ÷" not in r.output and "β" in r.output, r.output
     r = run(app, ["nw", "key", "--contrast", str(sess["contrast"]), "--layers", "8", "--role", "one", "--key-conv-cells", *common])
     assert r.exit_code != 0                                             # 形のセルは位置のキーだけ
+
+
+def test_first_token(sess):
+    s = sess["s"]
+    ids = s.first_ids("<|im_end|>")
+    assert len(ids) == 1
+    d = s.steer(s.recipe(units=["5:7:+0.0"]), prompt="こんにちは", max_tokens=6, first_token="はい")
+    want = s.first_ids("はい")
+    for side in ("baseline", "steered"):
+        assert d[side]["token_ids"][:len(want)] == want and d[side]["text"].startswith("はい")
+        assert d[side]["when"]["first_ids"] == want
+    assert s.first_ids(None) is None and s.first_ids("") is None
+
+
+def test_pipeline_token_direction(sess):
+    from gne import fish
+    s, c = sess["s"], sess["contrast"]
+    p = fish.pipeline(s, str(c), name="cf_rt", layers=[10], segments="0", alpha=1, token="<|im_end|>", token_delta=8,
+                      key_fit="ridge", pseudo=0, max_tokens=8, response_tokens=8, rekey=False, compare=False, kscale="auto")
+    assert all("@cf_rt_tok#" in u and u.endswith("!kauto") for u in p["units"])
+    assert p["direction"]["unsegmented"] and p["direction"]["token"]["tokens"]
+    with pytest.raises(GneError):
+        fish.pipeline(s, str(c), name="cf_rt2", layers=[10], segments="0", token="<|im_end|>")     # Δ が要る

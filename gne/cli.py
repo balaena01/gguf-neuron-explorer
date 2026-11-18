@@ -582,7 +582,8 @@ def steer(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Optio
           contrast_tokens: int = typer.Option(64, "--contrast-tokens", help="--contrast: 生成する長さ"),
           contrast_prompts: Optional[Path] = typer.Option(None, "--contrast-prompts", help="--contrast: 検証プロンプトを差し替える YAML(文字列のリスト、または対照集合なら reactivity の with か user_prompts)"),
           audio: Optional[list[Path]] = typer.Option(None, "--audio", help="音声ファイル(wav / mp3 / flac)をユーザーの発話にする。--prompt があれば音声の後に文を足す。mmproj が要る"),
-          lora_when: str = _LORA_WHEN):
+          lora_when: str = _LORA_WHEN,
+          first_token: Optional[str] = typer.Option(None, "--first-token", help="応答の最初をこのトークンに決めて続きを書かせる(文字か #<ID>。無介入・レシピの両方。例 '◇'。原因の切り分け用。出力は決めたトークンを含む)")):
     """レシピまたは単発指定でプロンプトに回答する(既定は greedy、1 本ずつ)。"""
     s = holder["session"] = c.session()
     r = s.recipe(units=unit, path=recipe, dose_unit=dose_unit, scale=scale, when=when, ablate=ablate)
@@ -591,7 +592,7 @@ def steer(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Optio
         raise GneError("BAD_ARGS", "--prompt か --audio か --contrast が要ります")
     if prompt is not None or audio:
         d = s.steer(r, prompt=prompt, system=system, max_tokens=max_tokens, compare=compare, sampling=sp, lora_when=lora_when,
-                    audio=audio)
+                    audio=audio, first_token=first_token)
     else:                                       # --contrast だけ: 生成はせず、対照集合での効果だけを測る
         vecs, details = s.vectors(r)
         d = {"messages": [], "recipe": r.to_dict(), "units": details, "layer_norms": s._norms(vecs), "when": r.when,
@@ -3425,6 +3426,8 @@ def nw_pipeline(c: Common, holder: dict,
                 kscale: Optional[str] = typer.Option(None, "--kscale", help="auto でユニットに !kauto を付ける(量子化の丸めを避ける倍率。docs/fish.md §6)。既定は付けない"),
                 remove: Optional[str] = typer.Option(None, "--remove", help="rm / rmbase でユニットを成分を取り除く形(!rm / !rmbase。上限つきの形だけ)にする。既定は足す形"),
                 prior_max_tokens: Optional[int] = typer.Option(None, "--prior-max-tokens", help=_PRIOR_MT),
+                token: Optional[list[str]] = typer.Option(None, "--token", help="方向を、対照集合の差ではなく出力層の行列のこのトークンの行から作る(例 '<|im_end|>' = 終了トークンで応答しない、'◇' = マーカー。--token-delta と一緒に。docs/fish.md §5)"),
+                token_delta: Optional[float] = typer.Option(None, "--token-delta", help="--token の目標のロジットの上がり Δ(gne direction token-scan で選ぶ)"),
                 pseudo: Optional[int] = typer.Option(None, "--pseudo", help="比較用の鍵の本数(既定 4)"),
                 max_tokens: Optional[int] = typer.Option(None, "--max-tokens", help="鍵と足した量で返事を生成する長さ(既定 96)"),
                 response_tokens: Optional[int] = typer.Option(None, "--response-tokens", help="方向で返事を生成する長さ(既定 96)"),
@@ -3450,7 +3453,8 @@ def nw_pipeline(c: Common, holder: dict,
          "form": form, "name": name, "save": save,
          "same_reply": same_reply, "stack": stack, "stack_fast": stack_fast, "rekey": rekey, "pseudo": pseudo,
          "max_tokens": max_tokens, "response_tokens": response_tokens, "top": top, "iv": _iv_arg(iv), "key_fit": key_fit, "key_c": key_c,
-         "key_conv_cells": key_conv_cells, "kscale": kscale, "remove": remove, "prior_max_tokens": prior_max_tokens}
+         "key_conv_cells": key_conv_cells, "kscale": kscale, "remove": remove, "prior_max_tokens": prior_max_tokens,
+         "token": token or None, "token_delta": token_delta}
     p = {k: v for k, v in p.items() if v is not None}
     if save is not None:
         fish.recipe_file(s, save)                    # 保存先が読めなければ、見積もりの前に止める
