@@ -273,3 +273,31 @@ def test_real_gain_lora_runs(engine, tmp_path):
         for nm in (a10, a34):                       # 量子化した重みと F16 の LoRA の差で、0 にはならず数 % 残る
             assert np.abs(got[nm][:, 100]).max() < 0.1 * np.abs(base[nm][:, 100]).max(), (L, nm)
         e.drop_lora(p)
+
+
+@real
+@pytest.mark.skipif(os.environ.get("GNE_LOOP_EDITS") != "per_visit", reason="GNE_LOOP_EDITS=per_visit のときだけ")
+def test_real_per_visit_lora(tmp_path):
+    """回ごとの名前がある llama.cpp で GNE_LOOP_EDITS=per_visit: 層 10 の LoRA は 1 回目だけ、層 34 の LoRA は 2 回目だけに効く。"""
+    from gne.api import Session
+    from gne.capture import pick_act_name
+    from gne.gain import export_gain_lora
+    from gne.steer import GneError, Recipe, parse_unit
+    try:
+        s = Session(MODEL, root=tmp_path, n_ctx=1024, n_seq_max=1)
+        e = s.engine
+    except (RuntimeError, GneError) as ex:
+        pytest.skip(f"回ごとの名前がある llama.cpp ではありません: {ex}")
+    assert s.weights.per_visit_names and e.loop_edits == "per_visit"
+    ids = e.tokenize_prompt(e.render_chat([{"role": "user", "content": "Tell me about the ocean."}]))
+    seen = e.list_names(ids[:16])
+    a10, a34 = pick_act_name(seen, 10), pick_act_name(seen, 34)
+    base = _act(e, ids, {a10, a34}, None)
+    for L, off, on in ((10, a34, a10), (34, a10, a34)):
+        p = tmp_path / f"g{L}.lora.gguf"
+        export_gain_lora(s.weights, Recipe([parse_unit(f"{L}:100:x0")]), p)
+        got = _act(e, ids, {a10, a34}, [(str(p), 1.0)])
+        assert np.abs(got[on][:, 100]).max() < 0.1 * np.abs(base[on][:, 100]).max()
+        assert np.abs(got[off][:, 100]).max() > 0.5 * np.abs(base[off][:, 100]).max()
+        e.drop_lora(p)
+    s.close()

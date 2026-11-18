@@ -78,6 +78,7 @@ class LoadInfo(_Strict):
     n_layer: int | None = None
     n_embd: int | None = None
     n_vocab: int | None = None
+    loop: dict | None = None        # 同じ層を 2 回実行するモデル: cvec_inner・per_visit_names・edits(docs/sensenova_loop.md)
     error: str | None = None
 
 

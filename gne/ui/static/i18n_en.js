@@ -1158,6 +1158,7 @@ export const EN = {
   "MoE の専門家のニューロン。×k は、この専門家が選ばれたときだけ効く gain です": "An MoE expert neuron. ×k is a gain that applies only when this expert is selected",
   "残差は {n} 本の流れで、読むときはその平均を使います": "The residual has {n} streams. Readings use their mean",
   "層 {s} の {v} 回目": "run {v} of layer {s}",
+  "{v} 回目": "run {v}",
   "層 {a}〜{b} を 2 回続けて実行します。層 {c}〜{d} はその 2 回目で、重みは同じです(書き換えは両方の回に効きます)。各回の中の残差は 2 本の流れで、読むときはその平均を使います":
     "Layers {a}–{b} run twice in a row. Layers {c}–{d} are the second run and use the same weights (edits apply to both runs). Inside each run the residual has two streams; readings use their mean",
   "このモデルのグラフは control vector を読みません。gain を使ってください": "This model's graph ignores control vectors. Use gain instead",

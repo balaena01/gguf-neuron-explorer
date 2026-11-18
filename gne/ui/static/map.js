@@ -572,7 +572,8 @@ export class LayerMap {
       const w0 = ctx.measureText(`L${L}`).width;
       ctx.fillStyle = COLORS.label;
       ctx.fillText(`L${L}`, 250, 44);
-      const tag = { attention: "attention", linear_attention: t("線形注意"), recurrent: t("回帰"), none: "" }[li.mixer];
+      const tag = { attention: "attention", linear_attention: t("線形注意"), recurrent: t("回帰"), none: "" }[li.mixer]
+        + (li.visit ? ` · ${t("{v} 回目", { v: li.visit })}` : "");             // 同じ層を 2 回実行するモデル
       ctx.font = `22px ${MONO}`;
       ctx.fillStyle = li.mixer === "attention" ? "#9fb3cf" : "#5d6b7e";
       ctx.fillText(tag, 250 - w0 - 12, 44);
