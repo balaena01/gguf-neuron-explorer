@@ -22,8 +22,17 @@ const PIPE_KEYS = ["positions", "score_positions", "target", "n_heads", "hard", 
 const DRAFT = "gne.pipeline.draft";               // 入力欄の下書き(このブラウザだけ)
 // 設定の欄 → ジョブの引数(spec の pipeline に値があれば、読み込んだときに欄に入れる)
 const FIELDS = [["target", "#pp-target"], ["n_heads", "#pp-nheads"], ["max_examples", "#pp-mx"], ["positions", "#pp-pos"],
-                ["top_layers", "#pp-tl"], ["hard", "#pp-hard"], ["rank", "#pp-rank"], ["unit_kinds", "#pp-kinds"]];
-const DEFAULTS = { target: "", n_heads: "6,5,4", max_examples: 64, positions: "last", top_layers: 4, hard: 16, rank: "writes", unit_kinds: "heads" };
+                ["top_layers", "#pp-tl"], ["hard", "#pp-hard"], ["rank", "#pp-rank"], ["unit_kinds", "#pp-kinds"],
+                ["n_units", "#pp-nunits"], ["verify_top", "#pp-vtop"], ["check_replies", "#pp-ckn"], ["check_tokens", "#pp-ckt"],
+                ["holdout", "#pp-holdout"], ["loop_direction", "#pp-loopdir"]];
+const DEFAULTS = { target: "", n_heads: "6,5,4", max_examples: 64, positions: "last", top_layers: 4, hard: 16, rank: "writes", unit_kinds: "heads",
+                   n_units: "24,12,6", verify_top: 64, check_replies: 16, check_tokens: 512, holdout: false, loop_direction: "first" };
+// 欄に値を入れる(チェックボックスは checked、並びはカンマ区切り。null・undefined は既定)
+function setField(el, v, def) {
+  const x = v === undefined || v === null || v === "" ? def : v;
+  if (el.type === "checkbox") el.checked = !!x;
+  else el.value = Array.isArray(x) ? x.join(",") : String(x ?? "");
+}
 const ETA_SHOWN = 12;                             // η の表で最初に出す行の数(残りはボタンで)
 
 // 「ひな形」で入れる小さな例(system で A / B を作る。レシピで作るときは recipe_a: ["14:8949:+1.0"] など)
@@ -123,7 +132,8 @@ function dChart(layers, base, best) {
 }
 
 export class PipelinePanel {
-  constructor(root, { onRun, onShowDirection, onOpenHead, onLoadProj, onEval, onOverlay, onOpenCandidates } = {}) {
+  constructor(root, { onRun, onShowDirection, onOpenHead, onLoadProj, onEval, onOverlay, onOpenCandidates, isLoop } = {}) {
+    this.isLoop = isLoop || (() => false);       // 同じ層を 2 回実行するモデル(ループの中の部品の方向の欄を出す)
     this.root = root;
     this.onRun = onRun;                          // (kind, params) → Promise<ジョブ | null>(jobs.js の start。見積もりの確認つき)
     this.onShowDirection = onShowDirection || (() => {});   // (名前) → 上の「方向を見る」でその方向を開く
@@ -156,14 +166,27 @@ export class PipelinePanel {
       <div id="pp-shared"><p class="stage-shared-h">${t("共通の設定(方向とヘッドを作る が使う)")}</p>
       <div class="pp-set">
         <label class="muted" title="${t("配分で A 側の射影の値をここまで下げる(射影の値を測る最後の層)。数か、B(B 側の平均まで = 消し切る)。空なら A と B の平均の真ん中(半分ほど消す)")}">${t("射影の目標")} <input id="pp-target" size="7" placeholder="${t("真ん中")}" spellcheck="false"></label>
-        <label class="muted" title="${t("比べる組のヘッドの数(カンマ区切り)。少ない組ほど 1 ヘッドの強さが大きくなる")}">${t("ヘッド数")} <input id="pp-nheads" size="8" value="${DEFAULTS.n_heads}" spellcheck="false"></label>
         <label class="muted" title="${t("射影の値を測る段(基準層・因果・配分)で使う質問の数(等間隔に間引く)。方向づくりには全部使う")}">${t("測る質問の数")} <input id="pp-mx" type="number" min="4" max="4096" value="${DEFAULTS.max_examples}"></label>
         <label class="muted" title="${t("方向を作る位置。last = 質問の最後のトークン、response = 応答を書かせてその位置(遅い)")}">${t("方向を作る位置")} <select id="pp-pos"><option value="last">${t("質問の最後")}</option><option value="response">${t("応答(遅い)")}</option></select></label>
+        <label class="muted" title="${t("候補の探し方。書き込みの量で全部から(既定) = 全部の層の注意ヘッド・線形注意のヘッド(部品で選べばニューロンも)を方向への書き込みの量で並べ、上位を s=1 で確かめてから、s=1 で組に足す(足りないときだけ全体の強さを上げる)。止めて選ぶ = v0.7.0 までの選び方(層ごとに止めた効き目の上位の層のヘッドを 1 個ずつ止め、効率で配り直す)。応答が変わらないときは、もう一方も試す")}">${t("候補の探し方")} <select id="pp-rank"><option value="writes">${t("書き込みの量で全部から(既定)")}</option><option value="causal">${t("止めて選ぶ(v0.7.0 まで)")}</option></select></label>
+        <label class="muted" title="${t("同じ JSON・同じ設定で作り済みの方向と因果の結果があっても使い回さず、最初から作り直す(止めて流し直すときは外したままにすると配分からやり直せる)")}"><input type="checkbox" id="pp-fresh"> ${t("最初から作り直す")}</label></div>
+      <fieldset class="pp-set fx-part" id="pp-fs-writes" aria-describedby="pp-fs-writes-off"><legend class="muted note fx-part-h">${t("書き込みの量で全部から選ぶときの設定")} <span class="pp-fs-off" id="pp-fs-writes-off" hidden>${t("(「止めて選ぶ」では使いません)")}</span></legend>
+        <label class="muted" title="${t("書き込みの量で全部から選ぶときの部品の種類")}">${t("部品")} <select id="pp-kinds"><option value="heads">${t("ヘッドだけ(既定)")}</option><option value="all">${t("ヘッド・線形注意・ニューロン")}</option><option value="heads,layers">${t("ヘッドと層全体")}</option><option value="all,layers">${t("ヘッド・ニューロン・層全体")}</option></select></label>
+        <label class="muted" title="${t("比べる組の部品の数の上限(カンマ区切り、既定 24,12,6)。上限ごとに組を作り、表で比べる")}">${t("組の大きさの上限")} <input id="pp-nunits" size="8" value="${DEFAULTS.n_units}" spellcheck="false"></label>
+        <details class="more" id="pp-more"><summary class="muted">${t("細かい設定")}</summary><div class="pp-set">
+          <label class="muted" title="${t("点数の上位から、1 個ずつ s=1 で射影して流し直し、効き目を確かめる部品の数(既定 64)。多いほど時間がかかる")}">${t("確かめる部品の数")} <input id="pp-vtop" type="number" min="1" max="1024" value="${DEFAULTS.verify_top}"></label>
+          <label class="muted" title="${t("選んだ組と無介入で応答を書かせ、validate.match に一致した数を数える質問の数(側ごと、既定 16)。0 で行わない")}">${t("応答での確かめの質問の数")} <input id="pp-ckn" type="number" min="0" max="256" value="${DEFAULTS.check_replies}"></label>
+          <label class="muted" title="${t("応答での確かめで書かせる長さの上限(トークン、既定 512)")}">${t("上限のトークン数")} <input id="pp-ckt" type="number" min="16" max="4096" value="${DEFAULTS.check_tokens}"></label>
+          <label class="muted" title="${t("質問を半分に分け、偶数番目で選び、奇数番目(選ぶのに使っていない質問)で表の数と応答の確かめを測る。各側 16 問以上が要る")}"><input type="checkbox" id="pp-holdout"> ${t("選ぶ質問と測る質問を分ける(各側 16 問以上)")}</label>
+          <label class="muted" title="${t("同じ層を 2 回実行するモデル(sensenova_loop)で書き換えを両方の回に当てるとき、ループの中の部品を、1 回目の段(既定)と 2 回目の段のどちらの方向で測って射影するか")}">${t("ループの中の部品の方向")} <select id="pp-loopdir" aria-describedby="pp-loopdir-off"><option value="first">${t("1 回目の段(既定)")}</option><option value="second">${t("2 回目の段")}</option></select>
+            <span class="muted note" id="pp-loopdir-off" hidden>${t("同じ層を 2 回実行するモデルだけ")}</span></label></div></details>
+      </fieldset>
+      <fieldset class="pp-set fx-part" id="pp-fs-causal" aria-describedby="pp-fs-causal-off"><legend class="muted note fx-part-h">${t("止めて選ぶ(v0.7.0 まで)ときの設定")} <span class="pp-fs-off" id="pp-fs-causal-off" hidden>${t("(「書き込みの量で全部から」では使いません)")}</span></legend>
+        <label class="muted" title="${t("比べる組のヘッドの数(カンマ区切り)。少ない組ほど 1 ヘッドの強さが大きくなる")}">${t("ヘッド数")} <input id="pp-nheads" size="8" value="${DEFAULTS.n_heads}" spellcheck="false"></label>
         <label class="muted" title="${t("層ごとのスクリーニングのあと、ヘッドを 1 個ずつ止めて測る層の数")}">${t("ヘッドを測る層の数")} <input id="pp-tl" type="number" min="1" max="64" value="${DEFAULTS.top_layers}"></label>
         <label class="muted" title="${t("効率を測るときの、射影の値が残りやすい質問の数")}">${t("残りやすい質問の数")} <input id="pp-hard" type="number" min="1" max="1024" value="${DEFAULTS.hard}"></label>
-        <label class="muted" title="${t("候補の探し方。書き込みの量で全部から(既定) = 全部の層の注意ヘッド・線形注意のヘッド(部品で選べばニューロンも)を方向への書き込みの量で並べ、上位を s=1 で確かめてから、s=1 で組に足す(足りないときだけ全体の強さを上げる)。止めて選ぶ = v0.7.0 までの選び方(層ごとに止めた効き目の上位の層のヘッドを 1 個ずつ止め、効率で配り直す)。応答が変わらないときは、もう一方も試す")}">${t("候補の探し方")} <select id="pp-rank"><option value="writes">${t("書き込みの量で全部から(既定)")}</option><option value="causal">${t("止めて選ぶ(v0.7.0 まで)")}</option></select></label>
-        <label class="muted" title="${t("書き込みの量で全部から選ぶときの部品の種類")}">${t("部品")} <select id="pp-kinds"><option value="heads">${t("ヘッドだけ(既定)")}</option><option value="all">${t("ヘッド・線形注意・ニューロン")}</option><option value="heads,layers">${t("ヘッドと層全体")}</option><option value="all,layers">${t("ヘッド・ニューロン・層全体")}</option></select></label>
-        <label class="muted" title="${t("同じ JSON・同じ設定で作り済みの方向と因果の結果があっても使い回さず、最初から作り直す(止めて流し直すときは外したままにすると配分からやり直せる)")}"><input type="checkbox" id="pp-fresh"> ${t("最初から作り直す")}</label></div>
+      </fieldset>
+      <p class="muted note" id="pp-prio">${t("欄の値が使われます。JSON の pipeline に同じ項目があれば、読み込んだときにその値が欄に入ります(欄を書き換えれば欄の値が優先)。")}</p>
       </div>
       <div class="pp-go" id="pp-run"><button class="main" id="pp-go" disabled>${t("方向とヘッドを作る")}</button> <span class="muted note" id="pp-status"></span></div>
       <div id="pp-past-wrap"><div id="pp-past"><p class="muted note">${t("読み込み中…")}</p></div></div>
@@ -194,6 +217,8 @@ export class PipelinePanel {
       }
     }).catch(() => { /* テンプレートが無くても小さな例は使える */ });
     this.$("#pp-go").addEventListener("click", () => this.run());
+    this.$("#pp-rank").addEventListener("change", () => this.rankFields());
+    this.rankFields();
     // 左に手順、右に選んだ手順。結果は 1 回のジョブ(方向とヘッドを作る)の段ごとに分けて見せる
     const res = (sel) => () => (this.data ? [this.$("#pp-result .pp-res-head"), ...this.$$(`#pp-result ${sel}`)] : [this.$("#pp-nores")]);
     this.steps = new Steps(root, {
@@ -260,27 +285,51 @@ export class PipelinePanel {
     const key = JSON.stringify(pipe || {});
     if (c.spec && key !== this.lastPipe) {
       this.lastPipe = key;
-      for (const [k, sel] of FIELDS) {
-        const v = pipe && pipe[k] !== undefined && pipe[k] !== null ? pipe[k] : DEFAULTS[k];
-        this.$(sel).value = Array.isArray(v) ? v.join(",") : String(v);
-      }
+      for (const [k, sel] of FIELDS) setField(this.$(sel), pipe ? pipe[k] : undefined, DEFAULTS[k]);
+      this.rankFields();
     }
     this.$("#pp-go").disabled = !c.spec || c.errors.length > 0;
   }
 
-  // ジョブの引数。欄の値が読めなければ null(理由を出す)
+  // 候補の探し方に合わせて、使わない設定のまとまりを無効にする(値は残すが、ジョブには渡さない)。ループの中の部品の方向は、
+  // 同じ層を 2 回実行するモデルのときだけ選べる
+  rankFields() {
+    const writes = this.$("#pp-rank").value === "writes";
+    this.$("#pp-fs-writes").disabled = !writes;
+    this.$("#pp-fs-causal").disabled = writes;
+    this.$("#pp-fs-writes-off").hidden = writes;
+    this.$("#pp-fs-causal-off").hidden = !writes;
+    const loop = !!this.isLoop();
+    this.$("#pp-loopdir").disabled = !loop;
+    this.$("#pp-loopdir-off").hidden = loop;
+  }
+
+  // ジョブの引数。欄の値が読めなければ null(理由を出す)。候補の探し方で使う欄の値だけを渡す
   params() {
     const c = this.checked;
     if (!c || !c.spec || c.errors.length) return null;
-    const nh = this.$("#pp-nheads").value.split(/[\s,]+/).filter(Boolean).map(Number);
-    if (!nh.length || !nh.every((x) => Number.isInteger(x) && x >= 1)) { this.status(t("ヘッド数は 1 以上の整数をカンマ区切りで(例 6,5,4)"), true); return null; }
+    const ints = (sel) => this.$(sel).value.split(/[\s,]+/).filter(Boolean).map(Number);
     const num = (sel, lo) => { const v = Number(this.$(sel).value); return Number.isInteger(v) && v >= lo ? v : null; };
-    const mx = num("#pp-mx", 4), tl = num("#pp-tl", 1), hard = num("#pp-hard", 1);
-    if (mx === null || tl === null || hard === null) { this.status(t("max_examples・top_layers・hard は整数で(max_examples は 4 以上)"), true); return null; }
-    const p = { spec: c.spec, n_heads: nh, max_examples: mx, positions: this.$("#pp-pos").value, top_layers: tl, hard };
+    const mx = num("#pp-mx", 4);
+    if (mx === null) { this.status(t("測る質問の数は 4 以上の整数で"), true); return null; }
+    const p = { spec: c.spec, max_examples: mx, positions: this.$("#pp-pos").value };
     if (this.$("#pp-fresh").checked) p.resume = false;
     p.rank = this.$("#pp-rank").value;                                   // writes(既定)/ causal(v0.7.0 まで)
-    if (p.rank === "writes") p.unit_kinds = this.$("#pp-kinds").value;
+    if (p.rank === "writes") {
+      const nu = ints("#pp-nunits");
+      if (!nu.length || !nu.every((x) => Number.isInteger(x) && x >= 1)) { this.status(t("組の大きさの上限は 1 以上の整数をカンマ区切りで(例 24,12,6)"), true); return null; }
+      const vt = num("#pp-vtop", 1), ck = num("#pp-ckn", 0), ct = num("#pp-ckt", 16);
+      if (vt === null || ck === null || ct === null) { this.status(t("確かめる部品の数は 1 以上、応答での確かめの質問の数は 0 以上、上限のトークン数は 16 以上の整数で"), true); return null; }
+      Object.assign(p, { unit_kinds: this.$("#pp-kinds").value, n_units: nu, verify_top: vt, check_replies: ck, check_tokens: ct,
+                         holdout: this.$("#pp-holdout").checked });
+      if (this.isLoop()) p.loop_direction = this.$("#pp-loopdir").value;
+    } else {
+      const nh = ints("#pp-nheads");
+      if (!nh.length || !nh.every((x) => Number.isInteger(x) && x >= 1)) { this.status(t("ヘッド数は 1 以上の整数をカンマ区切りで(例 6,5,4)"), true); return null; }
+      const tl = num("#pp-tl", 1), hard = num("#pp-hard", 1);
+      if (tl === null || hard === null) { this.status(t("ヘッドを測る層の数と残りやすい質問の数は 1 以上の整数で"), true); return null; }
+      Object.assign(p, { n_heads: nh, top_layers: tl, hard });
+    }
     const tg = this.$("#pp-target").value.trim();
     if (tg) {
       if (/^b$/i.test(tg)) p.target = "B";
@@ -415,10 +464,9 @@ export class PipelinePanel {
         this.$("#pp-text").value = JSON.stringify({ ...d.spec, pipeline: undefined }, null, 2);
         this.check();
         const st = d.settings || {};
-        for (const [k, sel] of FIELDS) {                                // rank・unit_kinds は、今までの流れの結果には無い(既定に戻す)
-          const v = st[k] !== undefined ? st[k] : (k === "rank" || k === "unit_kinds" ? DEFAULTS[k] : undefined);
-          if (v !== undefined) this.$(sel).value = v === null ? "" : Array.isArray(v) ? v.join(",") : String(v);
-        }
+        // その実行の設定を欄に入れる(rank causal の結果には writes の設定が無いので、それらの欄は既定に戻す)
+        for (const [k, sel] of FIELDS) setField(this.$(sel), st[k] === undefined && k === "rank" ? "causal" : st[k], DEFAULTS[k]);
+        this.rankFields();
         this.$("#pp-text").scrollIntoView({ block: "center" });
       });
     }

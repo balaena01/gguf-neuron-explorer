@@ -956,6 +956,7 @@ async function setView(v) {
           onLoadProj: (name, specs, dir) => replaceRecipe(name, () => state.recipe.loadProj(name, specs, dir)),
           onEval: (params, label) => sendToEval(params, label),           // 評価へ送る(評価の画面で確かめてから始める)
           onOverlay: (field) => { setView("map"); applyOverlay(field); },
+          isLoop: () => !!(state.arch && state.arch.loop),               // 同じ層を 2 回実行するモデル(ループの中の部品の方向の欄)
         },
         candidates: {                                                     // 強さの候補(heads_candidates)の候補を使う
           onLoadCandidate: (c) => loadCandidate(c),

@@ -813,6 +813,11 @@ input.layers { width: 10em; }
 /* 選ぶ欄をまとめた fieldset(方向のもと): 見た目はほかの欄のまとまりと同じ。legend は float にして、1 行目の見出しにする */
 fieldset.fx-part { border-width: 0 0 0 2px; border-style: solid; border-color: var(--line-mid); min-inline-size: 0; padding-block: 0; padding-inline-end: 0; }
 fieldset.fx-part > legend { float: left; padding: 0; }
+/* CHiPS の設定: 候補の探し方で使わないまとまりは無効にして薄く出す(見出しに使わない理由を添える) */
+fieldset.fx-part:disabled { opacity: 0.55; }
+fieldset.fx-part:disabled .pp-fs-off { color: var(--text-hi); }
+#pp-more { flex-basis: 100%; }
+#pp-more > .pp-set { margin-block: var(--sp-2) 0; }
 /* 層の走査の表: 押せる行(その層と Δ を欄に入れる)と、倍率ごとの列のまとまり */
 table.fx-tab tr.fx-pick { cursor: pointer; }
 table.fx-tab tr.fx-pick:hover :is(td, th) { background: var(--hover); }
