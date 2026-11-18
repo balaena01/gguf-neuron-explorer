@@ -21,7 +21,7 @@ KINDS = [0] * 4 + [1] + [4] * 22 + [2] + [1] + [4] * 22 + [2] + [0] * 4
 
 def test_plan_from_kinds():
     p = plan_from_kinds(KINDS)
-    assert (p.lo1, p.lo2, p.shift, p.hi2, p.n_layer) == (4, 28, 24, 52, 56)
+    assert (p.lo1, p.hi1, p.lo2, p.shift, p.hi2, p.n_layer) == (4, 27, 28, 24, 52, 56)
     assert [p.visit(L) for L in (3, 4, 27, 28, 51, 52)] == [0, 1, 1, 2, 2, 0]
     assert p.stored(30) == 6 and p.stored(6) == 6 and p.stored(53) == 53
     assert p.twin(6) == 30 and p.twin(30) == 6 and p.twin(2) is None and p.twin(54) is None
@@ -182,6 +182,125 @@ def test_default_neurons_no_overlap():
 
 # --- 実物 -------------------------------------------------------------------------------------------------------
 
+def _proj(L, h, k, d=None):
+    from gne.steer import Unit
+    return Unit(L, None, 0.0, "head", mode="proj", k=float(k), head=h, direction=d)
+
+
+def test_recipe_loop_edits_record(tmp_path):
+    """当て方の記録: shared と記録なしは書かない(今までと同じ文字・同じハッシュ)、per_visit だけ書く。古いレシピは shared で読む。
+    メモリの上だけのレシピ(記録なし)は、保存するときのセッションの当て方を記録する。"""
+    import yaml
+
+    from gne.loop import session_mode, set_session_mode
+    from gne.steer import Recipe
+    prev = session_mode()
+    try:
+        set_session_mode(None)
+        r = Recipe([_proj(8, 3, 2.0, "d")], "m", name="r")
+        r.save(tmp_path / "a.yaml")
+        assert "loop_edits" not in yaml.safe_load((tmp_path / "a.yaml").read_text())
+        assert Recipe.load(tmp_path / "a.yaml").loop_edits == "shared"
+        assert "loop_edits" not in r.to_dict()
+        set_session_mode("per_visit")
+        r.save(tmp_path / "b.yaml")
+        assert yaml.safe_load((tmp_path / "b.yaml").read_text())["loop_edits"] == "per_visit"
+        b = Recipe.load(tmp_path / "b.yaml")
+        assert b.loop_edits == "per_visit" and b.to_dict()["loop_edits"] == "per_visit"
+        assert b.like(b.units).loop_edits == "per_visit"
+        Recipe.load(tmp_path / "a.yaml").save(tmp_path / "c.yaml")      # 記録が shared のレシピは、per_visit のセッションでも shared
+        assert "loop_edits" not in yaml.safe_load((tmp_path / "c.yaml").read_text())
+        v = Recipe([_proj(8, 3, 2.0, "d")], "m", name="v", loop_edits="shared", loop_visits={"8:H3": [1]})
+        v.save(tmp_path / "v.yaml")
+        assert Recipe.load(tmp_path / "v.yaml").loop_visits == {"8:H3": [1]}
+    finally:
+        set_session_mode(prev)
+
+
+def test_lora_file_records_per_visit(tmp_path):
+    from gne.ablate import write_lora_tensors
+    from gne.loop import lora_loop_edits
+    meta = SimpleNamespace(arch="sensenova_loop", model_id="m", name="m")
+    A, B = np.ones((1, 8), np.float32), np.ones((4, 1), np.float32)
+    for pv, want in ((False, None), (True, "per_visit")):
+        w = SimpleNamespace(meta=meta, loop=plan_from_kinds(KINDS), per_visit_names=pv)
+        p = tmp_path / f"x{pv}.lora.gguf"
+        write_lora_tensors(w, {"blk.31.ffn_up.weight": (A, B)}, p, name="t")
+        assert lora_loop_edits(p) == want
+
+
+def test_twin_effect_matches_matrices():
+    """同じヘッドの 2 つの射影を続けて掛けたときの実効の強さ(式)が、行列で掛けた値と合う。"""
+    from gne.loop import twin_effect
+    rng = np.random.default_rng(0)
+    r1 = rng.normal(size=6)
+    r1 /= np.linalg.norm(r1)
+    r2 = r1 + 0.7 * rng.normal(size=6)
+    r2 /= np.linalg.norm(r2)
+    s1, s2 = 3.0, 1.5
+    T = (np.eye(6) - s2 * np.outer(r2, r2)) @ (np.eye(6) - s1 * np.outer(r1, r1))
+    e1, e2 = twin_effect(s1, s2, float(r1 @ r2))
+    assert abs((1 - r1 @ T @ r1) - e1) < 1e-9 and abs((1 - r2 @ T @ r2) - e2) < 1e-9
+    assert abs(twin_effect(3.0, 2.0, 1.0)[0] - (3 + 2 - 6)) < 1e-12        # 同じ方向: s1 + s2 − s1·s2(反転 2 回で強め合う)
+
+
+def test_contrast_side_stack(tmp_path):
+    from gne.reverse import ContrastSet, side_interventions
+    from gne.steer import GneError, Recipe
+    for n in ("r1", "r2"):
+        Recipe([_proj(8, 3, 2.0, "d")], "m", name=n).save(tmp_path / f"{n}.yaml")
+    (tmp_path / "c.yaml").write_text(
+        "name: c\nuser_prompts: [a, b, c, d]\nrecipe_a: {stack: [" + str(tmp_path / "r1.yaml") + ", " + str(tmp_path / "r2.yaml")
+        + "]}\n", encoding="utf-8")
+    cs = ContrastSet.load(tmp_path / "c.yaml")
+    sess = SimpleNamespace(recipe=lambda path=None, **k: Recipe.load(path), recipe_path=lambda x: Path(x),
+                           patches_for=lambda r: None, vectors=lambda r: ({}, None),
+                           lora_for=lambda r: [(r.name, 1.0)])
+    assert [r.name for r in cs.recipes(sess, "A")] == ["r1", "r2"] and cs.recipes(sess, "B") == []
+    with pytest.raises(GneError):
+        cs.recipe(sess, "A")
+    iv = side_interventions(sess, cs)
+    assert iv["A"] == (None, [("r1", 1.0), ("r2", 1.0)]) and iv["B"] == (None, None)
+
+
+def test_loop_merge_units():
+    """回ごとに選んだレシピ → 両方の回に当てるレシピ: 同じヘッド(層 21 と段 45)は compose なら 2 つとも、max なら強いほうだけ。"""
+    from gne.loopsearch import merge_units
+    from gne.steer import Recipe
+    rng = np.random.default_rng(1)
+    raw = {L: rng.normal(size=8) for L in range(56)}
+    ds = SimpleNamespace(raw=raw, unit=lambda L: raw[L] / np.linalg.norm(raw[L]), meta={})
+    warns = []
+    sess = SimpleNamespace(weights=SimpleNamespace(loop=plan_from_kinds(KINDS)), direction_set=lambda n: ds, warn=warns.append)
+    r = Recipe([_proj(21, 20, 2.0), _proj(45, 20, -3.0), _proj(8, 1, 1.0)], "m", name="x", default_direction="d",
+               loop_edits="per_visit")
+    comp, tw = merge_units(sess, r, "compose")
+    assert comp.loop_edits == "shared" and len(comp.proj_units) == 3 and len(tw) == 1
+    assert tw[0]["head"] == "21:H20" and tw[0]["layers"] == [21, 45] and tw[0]["max_s"] == -3.0
+    c = float(ds.unit(21) @ ds.unit(45))
+    assert abs(tw[0]["cos"] - c) < 1e-9
+    mx, _ = merge_units(sess, r, "max")
+    assert sorted((u.layer, u.k) for u in mx.proj_units) == [(8, 1.0), (45, -3.0)]
+    assert mx.loop_visits["21:H20"] == [1, 2] and mx.loop_visits["8:H1"] == [1] and mx.loop_visits["_merge"] == "max"
+
+
+def test_score_layers_and_candidate_ranges():
+    """--score-layers loop = 1 回目の出口・2 回目の出口・最後の層の 1 つ前。候補の範囲の書き方。"""
+    from gne.api import Session
+    from gne.loopsearch import visit_ranges
+    from gne.steer import GneError
+    fake = SimpleNamespace(weights=SimpleNamespace(loop=plan_from_kinds(KINDS)), meta=SimpleNamespace(n_layer=56))
+    assert Session.score_layers_of(fake, "loop") == [27, 51, 54]
+    assert Session.score_layers_of(fake, "27,51,54") == [27, 51, 54] and Session.score_layers_of(fake, None) is None
+    with pytest.raises(GneError):
+        Session.score_layers_of(fake, "55")                      # 最後の層は測れない
+    with pytest.raises(GneError):
+        Session.score_layers_of(SimpleNamespace(weights=SimpleNamespace(loop=None), meta=fake.meta), "loop")
+    assert Session._layers_of("28-30") == [28, 29, 30] and Session._layers_of([3, 1]) == [1, 3]
+    rng = visit_ranges(fake)
+    assert rng["first"] == list(range(0, 28)) and rng["second"] == list(range(28, 55))
+
+
 MODEL = os.environ.get("GNE_TEST_SENSENOVA")
 real = pytest.mark.skipif(not MODEL or not Path(MODEL).exists(), reason="GNE_TEST_SENSENOVA に SenseNova-Loop の GGUF がありません")
 
@@ -300,4 +419,39 @@ def test_real_per_visit_lora(tmp_path):
         assert np.abs(got[on][:, 100]).max() < 0.1 * np.abs(base[on][:, 100]).max()
         assert np.abs(got[off][:, 100]).max() > 0.5 * np.abs(base[off][:, 100]).max()
         e.drop_lora(p)
+    s.close()
+
+
+@real
+def test_real_recipe_mode_per_file(tmp_path):
+    """当て方はレシピとファイルの記録に従う(セッションは既定の shared のまま): per_visit のレシピの層 10 の ×0 は、回ごとの名前が
+    ある llama.cpp では 1 回目だけに効く。名前の無い llama.cpp では、理由と直し方を書いて止まる。記録の無いレシピは両方の回。"""
+    from gne.api import Session
+    from gne.capture import pick_act_name
+    from gne.steer import GneError, Recipe, parse_unit
+    if os.environ.get("GNE_LOOP_EDITS") == "per_visit":
+        pytest.skip("既定の当て方(shared)のセッションで確かめる")
+    try:
+        s = Session(MODEL, root=tmp_path, n_ctx=1024, n_seq_max=1)
+        e = s.engine
+    except (RuntimeError, GneError) as ex:
+        pytest.skip(f"この llama.cpp では読めません: {ex}")
+    pv = Recipe([parse_unit("10:100:x0")], s.meta.model_id, name="pv", loop_edits="per_visit")
+    sh = Recipe([parse_unit("10:100:x0")], s.meta.model_id, name="sh")
+    ids = e.tokenize_prompt(e.render_chat([{"role": "user", "content": "Tell me about the ocean."}]))
+    seen = e.list_names(ids[:16])
+    a10, a34 = pick_act_name(seen, 10), pick_act_name(seen, 34)
+    base = _act(e, ids, {a10, a34}, None)
+    small = lambda got, nm: np.abs(got[nm][:, 100]).max() < 0.1 * np.abs(base[nm][:, 100]).max()
+    got = _act(e, ids, {a10, a34}, s.lora_for(sh))
+    assert small(got, a10) and small(got, a34)
+    if not e.loop_runtime_names():
+        with pytest.raises(GneError) as ex:
+            s.lora_for(pv)
+        assert "loop-merge" in (ex.value.hint or "")
+    else:
+        got = _act(e, ids, {a10, a34}, s.lora_for(pv))
+        assert small(got, a10) and not small(got, a34)
+        assert s.lora_for(pv)[0][0] != s.lora_for(sh)[0][0]          # 同じ中身でも当て方が違えば別のファイル
+    assert not s.weights.per_visit_names                              # セッションの当て方は元に戻る
     s.close()

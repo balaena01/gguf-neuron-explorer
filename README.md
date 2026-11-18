@@ -57,6 +57,7 @@ Tested on:
 - Models: Qwen3-0.6B, Qwen3.5-4B (hybrid linear attention) and SmolLM2-135M-Instruct (arch `llama`), all Q8_0.
 - Metal has not been tested.
 - MoE models: granite-3.1-1b-a400m and LFM2-8B-A1B. See [Mixture of Experts](#mixture-of-experts).
+- SenseNova-Loop-9B (arch `sensenova_loop`, layers 4-27 run twice), Q4_K_M and Q8_0. The official llama.cpp cannot load it yet: it needs a dedicated environment with a third-party llama.cpp fork and a two-line fix to llama-cpp-python. See [docs/sensenova_loop.md](docs/sensenova_loop.md) and the optional fork patches in [third_party/sensenova-loop/](third_party/sensenova-loop/README.md).
 - On a model you have not used before, run `gne verify` first.
 
 ## Install
@@ -584,6 +585,7 @@ The documentation is in Japanese:
 - [CHiPS: a few heads between knowing and answering](https://balaena01.github.io/chips-steering/): the write-up, with measurements and data.
 - [FiSH: rewriting a few idle neurons so a model changes its tone in one scene only](https://balaena01.github.io/fish-steering/): the write-up, with measurements and data.
 - [docs/qwen4exp.md](docs/qwen4exp.md): Qwen3.8-Flash-Next (`qwen4exp`): split GGUF files, four residual streams, and what works without control vectors.
+- [docs/sensenova_loop.md](docs/sensenova_loop.md): SenseNova-Loop-9B (`sensenova_loop`): building the environment, layer numbering when layers run twice, edits on both runs or one run, and CHiPS per run.
 - [docs/head-component-steering.md](docs/head-component-steering.md): CHiPS, which changes only the component of a few causally chosen attention heads along a direction (`mode: proj`, `gne direction score`, `gne heads causal`, `gne heads allocate`, `gne eval --compare-methods`), and how it relates to full ablation.
 - [docs/keyed-write.md](docs/keyed-write.md): keyed write, a rank-1 write that acts only when the key, built from a contrast set, responds to the input of a weight matrix that writes to the residual stream (`mode: keyed`, `gne direction key`, `gne direction key-check`), with worked examples on sentence endings, how it relates to CHiPS, and how to find where a key works (`gne direction key-causal`).
 - [docs/persona_workflow.md](docs/persona_workflow.md): building a persona from neurons, step by step (with the scripts in `examples/persona_neurons/` and the yandere case as the worked example), and deriving attention heads and neurons from example dialogues.

@@ -1,5 +1,7 @@
 # SenseNova-Loop(sensenova_loop)で gne を使う
 
+**公式の llama.cpp は、このモデル(arch `sensenova_loop`)をまだ読めない。** 使うには、第三者の改造版の llama.cpp をビルドし、それを読む llama-cpp-python を入れた、このモデル専用の仮想環境が要る(下の「環境を作る」)。ふだんの gne の環境とは分けておく。
+
 SenseNova-Loop-9B は、同じ層を 2 回続けて実行する(ループさせる)言語モデル。保存されている層は 32 で、そのうち 4〜27 を 2 回通るので、1 回の計算で 56 層分を実行する。
 
 ## 構造
@@ -13,7 +15,57 @@ SenseNova-Loop-9B は、同じ層を 2 回続けて実行する(ループさせ�
 | ヘッド | 4 層ごとに full attention(16 ヘッド、幅 256)、ほかは線形注意(32 ヘッド、幅 128) |
 | MLP | 12,288 ニューロン(SwiGLU) |
 
-公式の llama.cpp はこの arch を読めない。読める llama.cpp でビルドした llama-cpp-python を、gne とは別の仮想環境に入れて使う(構造体の直し方は `.claude/skills/gne/references/new_model.md` の「llama.cpp が arch に対応していないとき」と同じ)。12 GB の GPU では Q4_K_M を勧める(下の「目安」)。
+## 環境を作る
+
+確かめた環境は Linux(WSL2)、CUDA 12.4、Python 3.12、RTX 3080 12 GB。改造版の llama.cpp は [GuideboardLabs/llama.cpp-sensenova-loop](https://github.com/GuideboardLabs/llama.cpp-sensenova-loop) のコミット `a7f77a788893ef2cb17c82b9ac0cb1279bcd0918`(公式の llama.cpp の `aa588a3` が元)。gne のリポジトリの [third_party/sensenova-loop/](../third_party/sensenova-loop/README.md) に、この改造版に当てる任意のパッチ 2 本と、llama-cpp-python に当てる必須のパッチ 1 本がある。
+
+1. 改造版の llama.cpp を取ってきて、ビルドする(共有ライブラリで)。パッチ 0001・0002 は任意(どの機能に要るかは下の表)。
+
+   ```bash
+   git clone https://github.com/GuideboardLabs/llama.cpp-sensenova-loop
+   cd llama.cpp-sensenova-loop
+   git checkout a7f77a788893ef2cb17c82b9ac0cb1279bcd0918
+   git apply <gne>/third_party/sensenova-loop/0001-sensenova-loop-control-vector-on-both-mHC-streams.patch   # 任意
+   git apply <gne>/third_party/sensenova-loop/0002-sensenova-loop-per-visit-weight-names.patch               # 任意(0001 の後)
+   cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON -DBUILD_SHARED_LIBS=ON
+   cmake --build build -j 8 --target llama ggml mtmd llama-server llama-completion
+   ```
+
+2. 専用の仮想環境を作り、gne が使うパッケージを入れる。llama-cpp-python は pip で入れない(公式の llama.cpp を中でビルドしてしまうため)。
+
+   ```bash
+   uv venv --python 3.12 ~/sensenova-venv
+   uv pip install --python ~/sensenova-venv/bin/python gguf numpy typer pyyaml jinja2 pydantic safetensors fastapi uvicorn pytest
+   uv pip install --python ~/sensenova-venv/bin/python --no-deps -e <gne>
+   ```
+
+3. llama-cpp-python 0.3.36 の Python のパッケージ(`llama_cpp/` のフォルダ)だけを取り出し、構造体の直しを当てて、仮想環境に置く。改造版の `include/llama.h` は、公式の 0.3.36 が前提にしている形と 2 か所違う(`llama_context_params` に `moe_cache_size`、`llama_perf_context_data` に `n_reallocs_same`・`n_reallocs_diff` が増えた)。直さないと、モデルを読み込むときの設定が全部ずれて読まれる。
+
+   ```bash
+   git clone --depth 1 --branch v0.3.36 https://github.com/abetlen/llama-cpp-python
+   cd llama-cpp-python
+   git apply <gne>/third_party/sensenova-loop/llama-cpp-python-0.3.36-structs.patch
+   SP=$(~/sensenova-venv/bin/python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
+   cp -r llama_cpp "$SP/llama_cpp"
+   ```
+
+4. 改造版のライブラリを指して gne を動かす。llama-cpp-python は `LLAMA_CPP_LIB_PATH` のフォルダから `libllama.so` を読む。
+
+   ```bash
+   export LLAMA_CPP_LIB_PATH=<llama.cpp-sensenova-loop>/build/bin LD_LIBRARY_PATH=<llama.cpp-sensenova-loop>/build/bin
+   ~/sensenova-venv/bin/gne info -m SenseNova-Loop-9B-Q4_K_M.gguf
+   ```
+
+   `gne info` の表に「2 回実行する層」の行が出て、この llama.cpp で何ができるか(2 本の流れの中の層に control vector が届くか、2 回目の層に別の名前があるか)が出る。
+
+GGUF は [guideboardlabs/SenseNova-Loop-9B-GGUF](https://huggingface.co/guideboardlabs/SenseNova-Loop-9B-GGUF) の Q4_K_M と Q8_0 で確かめた。12 GB の GPU では Q4_K_M を勧める(下の「目安」)。
+
+| 機能 | 改造版のまま | + 0001 | + 0002 |
+|---|---|---|---|
+| 捕捉・方向・CHiPS の一括の流れ・FiSH・`gne nw verify` / `check`・LoRA の書き出し(書き換えは両方の回に効く) | できる | できる | できる |
+| 回ごとに測る(`--score-layers loop`・`--select-layer`)、`gne heads loop-merge`・`gne heads measure` | できる | できる | できる |
+| 2 本の流れの中の段(4〜26・28〜50)への control vector、そこでの `gne verify` の V3・V4・V12、FiSH の方向の段の層を重ねる読み直し(無ければ `--no-stack`) | できない(理由を出して止める) | できる | できる |
+| 片方の回だけを書き換える(`GNE_LOOP_EDITS=per_visit`、`gne heads causal --visits first / second`、`gne heads visits`、`gne heads loop-pipeline`、`per_visit` と記録したレシピ・LoRA) | できない(理由と直し方を出して止める) | できない | できる |
 
 ## 層の番号
 
@@ -42,8 +94,45 @@ gne の層の番号は実行順(0〜55)で、llama.cpp のテンソルの捕捉�
 
 片方の回だけを書き換えるには、2 回目の層に別のテンソル名(1 回目と同じデータを指す別名)を付けた llama.cpp が要る。gne はモデルを読み込むときに、その名前で LoRA を読めるかで確かめる。
 
-- 既定(環境変数 `GNE_LOOP_EDITS` を付けない): 書き換えは両方の回。2 回目の名前がある llama.cpp でも、LoRA の 1 回目の層のテンソルを 2 回目の名前にも写して当てる(書き出す LoRA のファイルは、重みを持つ層の名前だけで書く。元の llama.cpp でも読める)。
-- `GNE_LOOP_EDITS=per_visit`: ユニットの層の番号どおり、その回だけを書き換える(`10:N100:x0` は 1 回目だけ、`34:N100:x0` は 2 回目だけ)。CHiPS の候補には 2 回目の層のヘッドも入り、FiSH のもう一方の回の分は出ない(書かないので)。2 回目の名前が無い llama.cpp では、読み込むときに止める。書き出した LoRA は 2 回目の名前を含むので、同じ llama.cpp でしか読めない。焼き込み(重みの書き換え)は、どちらでも両方の回に効く。
+当て方は、レシピ(`loop_edits`)と LoRA のファイル(`gne.loop_edits`)に記録する。
+
+- `shared`(両方の回に当てる。記録の無い古いレシピ・LoRA もこれ): 2 回目の名前がある llama.cpp でも、LoRA の 1 回目の層のテンソルを 2 回目の名前にも写して当てる(書き出す LoRA のファイルは、重みを持つ層の名前だけで書く。元の llama.cpp でも読める)。
+- `per_visit`(回ごとに当てる): ユニットの層の番号どおり、その回だけを書き換える(`10:N100:x0` は 1 回目だけ、`34:N100:x0` は 2 回目だけ)。CHiPS の候補には 2 回目の層のヘッドも入り、FiSH のもう一方の回の分は出ない(書かないので)。2 回目の名前が無い llama.cpp でこの形のレシピや LoRA を読むと、黙って両方の回に当てずに、理由と直し方(下の `gne heads loop-merge`)を書いて止める。焼き込み(重みの書き換え)は、どちらでも両方の回に効く。
+- 環境変数 `GNE_LOOP_EDITS=per_visit` は、記録の無いもの(その場で作るユニットや、探す途中の一時的な LoRA)の既定を変えるだけ。そのとき保存したレシピには `loop_edits: per_visit` が付く。
+
+## 1 回目と 2 回目を別々に扱う CHiPS
+
+1 回目と 2 回目を、ある意味で別のモデルとして扱う。探す段階だけ 2 回目の名前がある llama.cpp を使い、できたレシピは元の llama.cpp で動く形(両方の回に当てる形)に直す。
+
+| 段階 | コマンド | 元の llama.cpp |
+|---|---|---|
+| 回ごとに測る | `gne heads pipeline --score-layers loop --select-layer 27`(`heads causal` も同じ指定) | できる |
+| 回ごとに探す | `gne heads causal --visits first / second / both`、`gne heads visits`、`gne heads loop-pipeline` | both 以外はできない(理由と代わりの方法を出して止める) |
+| 仕上げ | `gne heads loop-merge`、`gne heads measure` | できる(回ごとに当てた値の列だけ省く) |
+
+### 回ごとに測る
+
+- `--score-layers loop` は、射影の値(残差を方向に射影した値)を、1 回目の出口(段 27)・2 回目の出口(段 51)・最後の層の 1 つ前(段 54)で測る。最後の層(段 55)は、llama.cpp が最後のトークン以外の行を捨てるので測れない。
+- `--candidate-layers` は、候補のヘッドを探す層(例 `28-53`)。`GNE_LOOP_EDITS=per_visit` と一緒に使うと、1 回目だけ・2 回目だけから選べる。
+- `--select-layer` は、ヘッドの順位づけと配分の目標に使う層。`--select-layer 27` なら「1 回目の終わりの値で選ぶ」(段 27 での下がり方で順位をつけ、段 27 より前のヘッドを候補にし、目標は段 27 の B 側の平均)。
+- 測る層を指定すると、一括の結果に、因果スクリーニングの上位のヘッドの層ごとの下がり方と、配分した組ごとの層ごとの A 側・B 側の平均が並ぶ。1 回目の終わりでどこまで下がり、2 回目でどう変わったかを 1 つの表で読める。
+- 途中の残差に出力層をかけて読む値(logit lens)は目安にしかならない。このモデルは 1 回目の終わりの残差を出力層で読む前提で作られていないので、それを「1 回目の出力」とは読まない。
+
+### 回ごとに探す(2 回目の名前がある llama.cpp)
+
+- `gne heads causal --visits first`(または `second`): ヘッドを 1 回目だけ(または 2 回目だけ)止めて因果スクリーニングをする。`both` は両方の回で止める(既定と同じ)。
+- `gne heads visits --name <方向>`: 同じヘッドを 1 回目だけ・2 回目だけ・両方で止めた効き目を並べ、回の間の順位相関(Spearman)を出す。「両方−和」は、両方で止めた下がり方から片方ずつの和を引いたもの。
+- `gne heads loop-pipeline --spec <ひな形> --n-first 3 --n-second 3`: 2 段で選ぶ。
+  1. 段 0〜27 のヘッドから、段 27 の射影の値で選ぶ(1 回目だけに当てる)。
+  2. その組を対照集合の両側に当てた状態で、段 28〜53 のヘッドから、段 54 の射影の値で選ぶ(2 回目だけに当てる)。対照集合の側には、レシピを重ねて当てる書き方 `recipe_a: {stack: [<レシピ>, …]}` を使う。
+  3. 2 つを合わせたレシピ(`<名前>_loop.per_visit.yaml`)を、次の仕上げにかける。
+
+### 仕上げ(元の llama.cpp で動く形にする)
+
+- `gne heads loop-merge --recipe <回ごとのレシピ>`: 両方の回に当てるレシピ(`<名前>.shared.yaml`、焼き込み・配布できる形)に直す。各ヘッドをどちらの回で選んだかは `loop_visits` に記録する。
+- 直したレシピは、両方の回に当てた状態で段 27・51・54 を測り直し、回ごとに当てたときの値と並べる(探したときの値を足し合わせて済ませない)。2 回目のために選んだヘッドは、両方に当てると 1 回目でも弱まるので、その差がこの表に出る。
+- 同じヘッドを両方の回で選んだときは 2 通り: 2 つの射影を続けて掛ける(compose)か、強いほうだけを使う(max)。続けて掛けると、そのヘッドは片方の回で選んだ強さより強く弱まる(同じ向きなら実効の強さは s₁ + s₂ − s₁s₂。s が 2 を超える反転どうしだと、かえって強める)。表には、こうしたヘッドの数と、続けて掛けたときの実効の強さを出す。
+- `gne heads measure --name <方向> --recipe <レシピ> …`: どのレシピでも、測る層ごとの A 側の平均、B 側の平均を超えて残る A 側の質問の数、A と B の差を縮めた割合、B 側の直交成分のずれを並べる。`--tail 51` を付けると、段 51 から最後に測る層までの射影の値の変化を切り分ける: 段ごとの残差の大きさと cos(射影の値 ÷ 大きさ)、最後の段の残差を段 51 の方向で測った値、間の段の attention と MLP の書き込みをそれぞれの方向に射影した値(和は射影の値の変化に一致する)。
 
 ## control vector
 
@@ -69,8 +158,26 @@ gne nw check  --recipe <名前> --iv <同じレシピ> --contrast configs/fish/c
 
 - `--no-stack` は元の llama.cpp のとき(上の「control vector」)。2 本の流れの両方に足すように直した llama.cpp なら付けない。
 - 層 40〜46 は動作の確認のための選び方(2 回目の層。上書きしたニューロンが 1 回目の層 16〜22 でも動くので、その数え方を確かめられる)で、勧める層ではない。
-- この確認では、もう一方の回(層 16〜22)で書いた分が大きかった。区間 1〜3 では合計の約半分がもう一方の回の分で、狙った量(1)を超える質問が多い。位置 0 では、もう一方の回が逆向きに書いた(成分を取り除く形 !rmbase の基準値は、ユニットの層で中立の文から測った値なので、もう一方の回では合わない)。2 回目の層に書くときは、この合計で強さを決めるか、繰り返しの外の層(0〜3・52〜54)を使う。片方の回だけに書くには、2 回目の層に別の名前がある llama.cpp で、回ごとに書く(まだ gne の書き方は無い)。
+- この確認では、もう一方の回(層 16〜22)で書いた分が大きかった。区間 1〜3 では合計の約半分がもう一方の回の分で、狙った量(1)を超える質問が多い。位置 0 では、もう一方の回が逆向きに書いた(成分を取り除く形 !rmbase の基準値は、ユニットの層で中立の文から測った値なので、もう一方の回では合わない)。2 回目の層に書くときは、この合計で強さを決めるか、繰り返しの外の層(0〜3・52〜54)を使う。片方の回だけに書くには、2 回目の層に別の名前がある llama.cpp で `GNE_LOOP_EDITS=per_visit` にする(同じ確認を Q4_K_M で流すと、位置 1〜3 の書いた量の平均は 0.80〜1.05 から 0.62〜0.73 に、位置 0 の逆向きの分は −0.22 から +0.01 になった。当てた CHiPS のレシピは、それぞれの当て方で探したもので同じではない。この LoRA はその llama.cpp でしか当てられない)。
 - Q4_K_M では `gne nw verify` が、入力の行の誤差(4〜10%)で許容(5%)を超えて不合格になった。量子化の丸めによる差で、Q8_0 では全部の層で合格(2〜4%)。
+
+### 回ごとの CHiPS(確かめたもの)
+
+公開のひな形 `disclaimer.json` と `question_kinds.json`(各側 16 問)、Q4_K_M、2 本の流れの両方に足し 2 回目の層に別の名前を付けた llama.cpp で、同じヘッド数(6)の組を 5 通りの選び方で作り、段 54 で比べた。どれも目標は段 54 の B 側の平均で、同じ方向で測った。値は、段 54 の A と B の差のうち縮めた割合(1 で B 側の平均に届く)/ B 側の直交成分のずれ。「両方」は両方の回に当てた形(配れる形)。
+
+| 選び方(6 ヘッド) | disclaimer | question_kinds |
+|---|---|---|
+| (a) 両方まとめて(既定、`--score-layers loop --select-layer 54`) | 0.43 / 0.14 | 0.11 / 0.80 |
+| (b) 1 回目の段だけから(回ごと → 両方) | 0.17 → 0.18 / 0.70 | 0.12 → 0.12 / 0.36 |
+| (c) 2 回目の段と 52〜53 から(回ごと → 両方) | 1.08 → 1.11 / 0.09 | 1.01 → 1.10 / 0.17 |
+| (d) 2 段 `loop-pipeline` 3+3(回ごと → 両方) | 1.00 → 1.26 / 0.35 | 1.00 → 1.02 / 0.26 |
+| (e) 段 52〜54 だけから(測る層を含む、両方) | 1.06 / 0.03 | 1.00 / 0.02 |
+
+- 4 ヘッドでも並びは同じ。2 段の組は (a) より大きく下がったが、効いたのは主に候補に入る層だった: (c) と (e) だけでも B 側の平均に届き、2 段目はどちらのひな形でも段 52 のヘッド(52:H23)を選び、1 回目のヘッドだけ(b)では段 54 にほとんど効かない。
+- (a) で段 52〜53 のヘッドを選ばなかった理由はひな形で違う。disclaimer では、層ごとに全部のヘッドを止めた下がり方で選ぶ上位 4 層に段 52 が入らず、ヘッド単位では測っていない。question_kinds では 52:H23 は上位 2 番目で最初の組にも入ったが、効率で配り直す段で外れた。
+- (e) の disclaimer の組は、ほとんど段 54(測る層)のヘッド。測る量を直接動かすだけで振る舞いは変わりにくいことがある(docs/head-component-steering.md)。既定の候補の決め方(測る最初の層より前のヘッドだけ)では、段 52〜54 は候補に入らない。
+- 同じ組を両方の回に当てると、2 回目のために選んだヘッドが 1 回目でも働く。question_kinds の (c) では、段 27 の A 側の平均が、回ごとに当てると +15.7 のまま、両方に当てると −6.1 になった。
+- 段 51 から 54 で射影の値が上がる理由(無介入の A 側、`gne heads measure --tail 51`): disclaimer では +41.0 → +60.1 だが cos は 0.253 → 0.266 とほぼ同じで、段 54 の残差を段 51 の方向で測ると +40.9(上がらない)。段 52〜54 は段 54 の方向に +29.7 書き足していて(MLP が 21.8)、段ごとに方向が違うことで出る差。question_kinds では段 51 の方向でも +9.5 上がり、段 52 の attention が段 54 の方向に 13.2 書く。
 
 ## 目安(Q4_K_M、RTX 3080 12 GB)
 
@@ -81,5 +188,7 @@ gne nw check  --recipe <名前> --iv <同じレシピ> --contrast configs/fish/c
 | `gne heads pipeline`(各側 16 問) | 約 4 分(方向 3 秒、因果スクリーニング 3 分、配分 1 分強)、GPU 約 6 GB。Q8_0 は約 5 分(`--n-ctx 2048` で GPU 最大 11.5 GB) |
 | `gne nw pipeline`(層 7 つ、質問 12 + 8) | 約 2 分 20 秒 |
 | `gne nw verify --contrast`・`gne nw check` | それぞれ約 20 秒 |
+| `gne heads loop-pipeline`(各側 16 問、3+3) | 約 8〜9 分(一括の流れ 2 回と、仕上げの測り直し) |
+| `gne heads loop-merge`(測り直しつき)・`gne heads measure`(レシピ 9 個、`--tail 51`) | 約 10 秒・約 1 分 |
 
 止めて測る段階(射影の値・因果・配分)は、質問を最大 64 個に間引く(`max_examples`)。各側 300 問なら、方向づくりは全部の質問を読むので 1 分ほど、因果と配分は 64 問で測るので、合わせて 20 分前後の見込み。

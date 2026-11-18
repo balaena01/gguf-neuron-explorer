@@ -61,6 +61,7 @@ llama-cpp-python 経由で llama.cpp の上で動くので、手元の量子化�
 - モデル: Qwen3-0.6B、Qwen3.5-4B（線形注意との混合）、SmolLM2-135M-Instruct（arch `llama`）。どれも Q8_0。
 - Metal では試していません。
 - MoE モデル: granite-3.1-1b-a400m と LFM2-8B-A1B。[MoE(専門家を選ぶモデル)](#moe専門家を選ぶモデル)を見てください。
+- SenseNova-Loop-9B(arch `sensenova_loop`、層 4〜27 を 2 回実行する)の Q4_K_M と Q8_0。公式の llama.cpp はまだ読めないので、第三者の改造版の llama.cpp と、llama-cpp-python の 2 か所の直しを入れた専用の環境が要ります。[docs/sensenova_loop.md](docs/sensenova_loop.md) と、改造版に当てる任意のパッチ [third_party/sensenova-loop/](third_party/sensenova-loop/README.md) を見てください。
 - 初めて使うモデルでは、まず `gne verify` で確かめてください。
 
 ## インストール
@@ -604,6 +605,7 @@ python -m pytest -q
 - [CHiPS: 知っているのに答えられない、を数本のヘッドで減らす](https://balaena01.github.io/chips-steering/#ja): CHiPS の記事。実測とデータつき
 - [FiSH: ほとんど働いていないニューロンを書き換えて、決まった場面でだけ口調を変える](https://balaena01.github.io/fish-steering/#ja): FiSH の記事。実測とデータつき
 - [docs/qwen4exp.md](docs/qwen4exp.md): Qwen3.8-Flash-Next(`qwen4exp`)。分割ファイルの GGUF、4 本の残差ストリーム、control vector なしで使えるもの
+- [docs/sensenova_loop.md](docs/sensenova_loop.md): SenseNova-Loop-9B(`sensenova_loop`)。環境の作り方、2 回実行する層の番号、書き換えを両方の回か片方の回に当てる方法、回ごとの CHiPS
 - [docs/head-component-steering.md](docs/head-component-steering.md): CHiPS。因果で選んだ数個の attention ヘッドの、方向に沿った成分だけを変える手法(`mode: proj`、`gne direction score`、`gne heads causal`、`gne heads allocate`、`gne eval --compare-methods`)と、全層の射影消去との関係
 - [docs/keyed-write.md](docs/keyed-write.md): キーつきの書き込み。残差に書き込む重み行列の入力に、対照集合から作ったキーが反応するときだけ効くランク 1 の書き込み(`mode: keyed`、`gne direction key`、`gne direction key-check`)と、語尾の例、CHiPS との使い分け、効く場所の探し方(`gne direction key-causal`)
 - [docs/persona_workflow.md](docs/persona_workflow.md): 性格をニューロンで作る手順（`examples/persona_neurons/` のスクリプトと、ヤンデレでたどった道）と、お手本の会話から attention ヘッドとニューロンを導く手順

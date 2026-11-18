@@ -141,6 +141,7 @@ export class Recipe {
     this.directionLayer = "own";       // proj・keyed のユニットに当てる方向の層(CHANGE-06): own = その層の r_L、base = 基準層の r
     this.defaultDirection = null;      // 方向を省いた keyed のユニットの方向(レシピの default_direction、CHANGE-07)
     this.defaultKey = null;            // 鍵を省いた keyed のユニットの鍵(レシピの default_key)
+    this.loopEdits = null;             // 同じ層を 2 回実行するモデルで、1 回目と 2 回目に別々に当てるレシピ(loop_edits: per_visit)なら "per_visit"
     this.sampling = null;              // このレシピを試すときのサンプリング { temperature, top_k, top_p, min_p, presence_penalty } か null
     this.skipped = 0;                  // 読み込んだレシピのうち UI では扱えないユニット(ニューロンの gain、ヘッドの query など)の数。
                                        // ヘッドの query(CHANGE-04 E)は L:Hh の文字列の形が無く、送り返せないので外す
@@ -150,6 +151,7 @@ export class Recipe {
         this.name = d.name || ""; this.units = d.units; this.ablate = d.ablate || null; this.sampling = d.sampling || null;
         this.directionLayer = d.direction_layer === "base" ? "base" : "own";
         this.defaultDirection = d.default_direction || null; this.defaultKey = d.default_key || null;
+        this.loopEdits = d.loop_edits === "per_visit" ? "per_visit" : null;
       }
     } catch { /* 下書きが読めなくても空から始める */ }
   }
@@ -159,7 +161,7 @@ export class Recipe {
     try {
       localStorage.setItem(this.key, JSON.stringify({ name: this.name, units: this.units, ablate: this.ablate, sampling: this.sampling,
                                                       direction_layer: this.directionLayer, default_direction: this.defaultDirection,
-                                                      default_key: this.defaultKey }));
+                                                      default_key: this.defaultKey, loop_edits: this.loopEdits }));
     } catch { /* 置けなくても使える */ }
     if (notify) this.onChange(this);
   }
@@ -283,7 +285,7 @@ export class Recipe {
   remove(i) { this.units.splice(i, 1); this._save(); }
   clear() {
     this.units = []; this.name = ""; this.ablate = null; this.sampling = null; this.skipped = 0; this.directionLayer = "own";
-    this.defaultDirection = null; this.defaultKey = null; this._save();
+    this.defaultDirection = null; this.defaultKey = null; this.loopEdits = null; this._save();
   }
   // directionLayer: 保存したレシピの direction_layer(proj・keyed のユニットに当てる方向の層、CHANGE-06)。
   // defaults: { default_direction, default_key }(keyed の省いた方向・鍵、CHANGE-07)。/api/recipes が既定で埋めた行
@@ -317,6 +319,7 @@ export class Recipe {
     this.directionLayer = directionLayer === "base" ? "base" : "own";
     this.defaultDirection = dd;
     this.defaultKey = dk;
+    this.loopEdits = defaults && defaults.loop_edits === "per_visit" ? "per_visit" : null;
     this._save();
   }
 }
@@ -462,7 +465,8 @@ export class RecipePanel {
       const x = this.saved.find((y) => y.name === ev.target.value);
       if (!x) return;
       if (!(await askReplace(r, x.name))) { ev.target.value = ""; return; }      // いまのレシピが空でなければ確かめる(やめたら選択を戻す)
-      r.load(x.name, x.units, x.ablate, x.sampling, x.direction_layer, { default_direction: x.default_direction, default_key: x.default_key });
+      r.load(x.name, x.units, x.ablate, x.sampling, x.direction_layer, { default_direction: x.default_direction, default_key: x.default_key,
+                                                                         loop_edits: x.loop_edits });
       this.onReplaced();
     });
     for (const el of this.root.querySelectorAll("input[data-i]")) {
@@ -559,7 +563,8 @@ export class RecipePanel {
     return `<div class="rc-ablate"><span class="muted" title="${tip}">${t("方向の層")}</span>
         <select id="rc-dl"><option value="own"${r.directionLayer === "own" ? " selected" : ""}>${t("その層")}</option><option value="base"${r.directionLayer === "base" ? " selected" : ""}>${t("基準層")}</option></select></div>
       ${r.projs().length ? `${noteHTML(t("射影 s: ヘッドが残差に書くベクトルのうち方向 r̂ に沿った成分だけを (1 − s) 倍にする(1 で消す、2 で反転、直交成分はそのまま)。LoRA で当てるので cvec には入りません。3 列チャットの − 列は s が負(その方向へ強める)。"), "muted note")}` : ""}${
-        r.directionLayer === "base" ? `${noteHTML(t("方向の層「基準層」は保存したレシピのファイルにだけ入ります(3 列チャットと「今のレシピで eval」はユニットの文字列を送るので、その層の方向で当てます)。"), "muted note")}` : ""}`;
+        r.directionLayer === "base" ? `${noteHTML(t("方向の層「基準層」は保存したレシピのファイルにだけ入ります(3 列チャットと「今のレシピで eval」はユニットの文字列を送るので、その層の方向で当てます)。"), "muted note")}` : ""}${
+        r.loopEdits === "per_visit" ? `${noteHTML(t("このレシピは、1 回目と 2 回目に別々に当てる形(per_visit)です。保存したレシピのファイルには残りますが、3 列チャットと「今のレシピで eval」はユニットの文字列を送るので、両方の回に当てます。回ごとに当てた値は gne heads measure で、配れる形(両方の回に当てる形)には gne heads loop-merge で直します。"), "pp-warn note")}` : ""}`;
   }
 
   // 鍵つきの書き込みの行(CHANGE-07、L14 ffn keyed a+1.00 @方向 #鍵)。書き込み先・方向・鍵の選択(方向・鍵の「既定」は
@@ -731,7 +736,8 @@ export class RecipePanel {
       const saved = await postJSON(`/api/recipes/${encodeURIComponent(name)}`, { units: this.r.specs(1, false), ablate: this.r.ablate, sampling: this.r.sampling,
                                                                    ...((this.r.projs().length || kd) && this.r.directionLayer !== "own" ? { direction_layer: this.r.directionLayer } : {}),
                                                                    ...(kd && this.r.defaultDirection ? { default_direction: this.r.defaultDirection } : {}),
-                                                                   ...(kd && this.r.defaultKey ? { default_key: this.r.defaultKey } : {}) });
+                                                                   ...(kd && this.r.defaultKey ? { default_key: this.r.defaultKey } : {}),
+                                                                   ...(this.r.loopEdits ? { loop_edits: this.r.loopEdits } : {}) });
       await this.refreshSaved();                     // 一覧を描き直してから知らせる(描き直すと #rc-result も作り直される)
       this.root.querySelector("#rc-result").innerHTML =
         `<p class="muted note">${t("保存しました({path})", { path: esc((saved && saved.path) || `${name}.yaml`) })}</p>`;   // 保存先はサーバが返す実際のパス(--root を指定していればその下)

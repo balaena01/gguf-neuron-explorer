@@ -1,0 +1,30 @@
+From: balaena01 <261439497+balaena01@users.noreply.github.com>
+Subject: [PATCH] llama_cpp.py: struct fields of the sensenova-loop llama.cpp fork (base aa588a3)
+
+Two ctypes structures of llama-cpp-python 0.3.36 differ from the fork's include/llama.h:
+- llama_context_params gained moe_cache_size (size_t) after type_v
+- llama_perf_context_data gained n_reallocs_same and n_reallocs_diff (int32) after n_reused
+Without these fields every llama_context_params passed to the library is misread.
+
+---
+diff --git a/llama_cpp/llama_cpp.py b/llama_cpp/llama_cpp.py
+index 94e5aed..ef07e8e 100644
+--- a/llama_cpp/llama_cpp.py
++++ b/llama_cpp/llama_cpp.py
+@@ -1106,6 +1106,7 @@ class llama_context_params(ctypes.Structure):
+         ("cb_eval_user_data", ctypes.c_void_p),
+         ("type_k", ctypes.c_int),
+         ("type_v", ctypes.c_int),
++        ("moe_cache_size", ctypes.c_size_t),  # llama.cpp 2026-10 later (fork base aa588a3)
+         ("abort_callback", ggml_abort_callback),
+         ("abort_callback_data", ctypes.c_void_p),
+         ("embeddings", ctypes.c_bool),
+@@ -5248,6 +5249,8 @@ class llama_perf_context_data(ctypes.Structure):
+         ("n_p_eval", ctypes.c_int32),
+         ("n_eval", ctypes.c_int32),
+         ("n_reused", ctypes.c_int32),
++        ("n_reallocs_same", ctypes.c_int32),
++        ("n_reallocs_diff", ctypes.c_int32),
+     ]
+ 
+ 

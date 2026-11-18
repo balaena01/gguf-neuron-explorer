@@ -102,20 +102,37 @@ class ContrastSet:
                    hashlib.sha256(text.encode()).hexdigest()[:16], ra, rb, p.resolve().parent,
                    None if ua is None else list(ua), None if ub is None else list(ub))
 
+    def recipes(self, session, side: str) -> list:
+        """その側のレシピの並び(無ければ空)。{"stack": [レシピ, …]} は、並べたレシピを全部重ねて当てる(同じ層を 2 回実行する
+        モデルで、両方の回に当てるレシピと 1 回目だけに当てるレシピを一緒に当てるときなど)。"""
+        spec = self.recipe_a if side == "A" else self.recipe_b
+        if isinstance(spec, dict) and "stack" in spec:
+            items = spec["stack"]
+            if not isinstance(items, list) or not items:
+                raise GneError("BAD_CONTRAST", f"recipe_{side.lower()} の stack はレシピの並びです")
+            return [self._recipe_of(session, side, x, f"{self.name}-{side}{i}") for i, x in enumerate(items)]
+        r = self.recipe(session, side)
+        return [] if r is None else [r]
+
     def recipe(self, session, side: str):
         """その側のレシピ(Recipe)か None。"""
         spec = self.recipe_a if side == "A" else self.recipe_b
         if spec is None:
             return None
+        if isinstance(spec, dict) and "stack" in spec:
+            raise GneError("BAD_CONTRAST", f"recipe_{side.lower()} はレシピを重ねたもの(stack)なので、1 つのレシピとしては読めません")
+        return self._recipe_of(session, side, spec, f"{self.name}-{side}")
+
+    def _recipe_of(self, session, side: str, spec, name: str):
         if isinstance(spec, list):
-            return session.recipe(units=[str(x) for x in spec], name=f"{self.name}-{side}")
+            return session.recipe(units=[str(x) for x in spec], name=name)
         if isinstance(spec, dict):
             import tempfile
 
             from .yamlio import write_yaml
             with tempfile.TemporaryDirectory() as td:          # 読み戻して同じ文字になるか確かめて書く(U+0085 なども)
                 p = Path(td) / "recipe.yaml"
-                write_yaml(p, {"name": f"{self.name}-{side}", **spec}, code="BAD_RECIPE")
+                write_yaml(p, {"name": name, **spec}, code="BAD_RECIPE")
                 return session.recipe(path=p)
         q = Path(str(spec))
         for cand in ([q] if q.is_absolute() else [self.base_dir / q if self.base_dir else q, q]):
@@ -139,14 +156,15 @@ def side_interventions(session, cs: ContrastSet) -> dict[str, Intervention]:
     """A / B それぞれで当てる介入(control vector と LoRA)。レシピの無い側は (None, None)。"""
     out: dict[str, Intervention] = {}
     for side in "AB":
-        r = cs.recipe(session, side)
-        if r is None:
-            out[side] = (None, None)
-            continue
-        if session.patches_for(r) is not None:
-            raise GneError("BAD_CONTRAST", f"recipe_{side.lower()}: 専門家全体の gain・route(スケールパッチ)は対照集合の側には当てられません")
-        vecs = session.vectors(r)[0] if r.add_units else None
-        out[side] = (vecs or None, session.lora_for(r))
+        vecs, loras = None, []
+        for r in cs.recipes(session, side):              # 重ねたレシピ(stack)は、ベクトルを層ごとに足し、LoRA を並べる
+            if session.patches_for(r) is not None:
+                raise GneError("BAD_CONTRAST", f"recipe_{side.lower()}: 専門家全体の gain・route(スケールパッチ)は対照集合の側には当てられません")
+            v = session.vectors(r)[0] if r.add_units else None
+            if v:
+                vecs = combine((vecs, None), v, None)[0] if vecs else v
+            loras += session.lora_for(r) or []
+        out[side] = (vecs or None, loras or None)
     return out
 
 

@@ -1,0 +1,112 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: balaena01 <261439497+balaena01@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 01:41:19 +0000
+Subject: [PATCH 2/2] sensenova-loop: per-visit weight names (views) for the second loop visit
+
+---
+ src/llama-model.cpp           |  1 +
+ src/llama-model.h             |  2 ++
+ src/models/models.h           |  5 ++++
+ src/models/sensenova-loop.cpp | 48 +++++++++++++++++++++++++++++++++++
+ 4 files changed, 56 insertions(+)
+
+diff --git a/src/llama-model.cpp b/src/llama-model.cpp
+index 567d1ef73..f9b2b63d1 100644
+--- a/src/llama-model.cpp
++++ b/src/llama-model.cpp
+@@ -2071,6 +2071,7 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
+     }
+ 
+     load_tensors_hadamard();
++    load_tensors_post();
+ 
+     return true;
+ }
+diff --git a/src/llama-model.h b/src/llama-model.h
+index 2e04df35a..4507622ba 100644
+--- a/src/llama-model.h
++++ b/src/llama-model.h
+@@ -1010,6 +1010,8 @@ struct llama_model_base : public llama_model {
+ 
+     // helper: make the prism.hadamard rotation and sign tensors for the folded weights
+     void load_tensors_hadamard();
++    // called once the weights are loaded (architectures that alias tensors, e.g. sensenova_loop)
++    virtual void load_tensors_post() {}
+ 
+     // helper: read the SWA pattern as one flag per layer, or as a period expanded by set_swa_pattern
+     void load_swa_pattern(llama_model_loader & ml, uint32_t n_pattern, bool dense_first = false);
+diff --git a/src/models/models.h b/src/models/models.h
+index 232c91102..d259c2e22 100644
+--- a/src/models/models.h
++++ b/src/models/models.h
+@@ -2695,6 +2695,11 @@ struct llama_model_sensenova_loop : public llama_model_qwen35 {
+ 
+     void load_arch_hparams(llama_model_loader & ml) override;
+     void load_arch_tensors(llama_model_loader & ml) override;
++    void load_tensors_post() override;
++
++    // second-visit names (blk.<lo2..hi2-1>.*) for the shared matmul weights: views of the first visit's tensors,
++    // so a LoRA can name one visit; the bytes are shared, nothing is copied
++    ggml_context_ptr loop_view_ctx;
+ 
+     struct graph : public llm_build_delta_net_base {
+         graph(const llama_model & model, const llm_graph_params & params);
+diff --git a/src/models/sensenova-loop.cpp b/src/models/sensenova-loop.cpp
+index 1ddac2b91..b052e1030 100644
+--- a/src/models/sensenova-loop.cpp
++++ b/src/models/sensenova-loop.cpp
+@@ -187,6 +187,54 @@ void llama_model_sensenova_loop::load_arch_tensors(llama_model_loader & ml) {
+     }
+ }
+ 
++void llama_model_sensenova_loop::load_tensors_post() {
++    // LLAMA_SENSENOVA_SHARED_NAMES=1 keeps the published behaviour: one name per stored tensor, so a LoRA on a
++    // stored block always acts on both visits
++    const char * shared = getenv("LLAMA_SENSENOVA_SHARED_NAMES");
++    if (shared && atoi(shared) != 0) {
++        return;
++    }
++    if (hparams.mhc_loop_shift == 0) {
++        return;
++    }
++    const int lo = (int) hparams.mhc_loop_start2;
++    const int hi = lo + (int) hparams.mhc_loop_shift;
++    ggml_tensor * llama_layer::* fields[] = {
++        &llama_layer::wq, &llama_layer::wk, &llama_layer::wv, &llama_layer::wo, &llama_layer::wqkv,
++        &llama_layer::wqkv_gate, &llama_layer::ssm_out, &llama_layer::ssm_beta, &llama_layer::ssm_alpha,
++        &llama_layer::ffn_gate, &llama_layer::ffn_down, &llama_layer::ffn_up,
++    };
++    const size_t n_fields = sizeof(fields) / sizeof(fields[0]);
++    ggml_init_params ip = { (size_t) (hi - lo) * n_fields * ggml_tensor_overhead(), nullptr, true };
++    loop_view_ctx.reset(ggml_init(ip));
++    int n_views = 0;
++    for (int il = lo; il < hi; ++il) {
++        auto & layer = layers[il];
++        for (auto f : fields) {
++            ggml_tensor * src = layer.*f;
++            if (src == nullptr || src->buffer == nullptr || src->data == nullptr) {
++                continue;
++            }
++            // "blk.<n>.<rest>" -> "blk.<il>.<rest>"
++            const char * dot1 = strchr(src->name, '.');
++            const char * dot2 = dot1 ? strchr(dot1 + 1, '.') : nullptr;
++            if (dot2 == nullptr) {
++                continue;
++            }
++            ggml_tensor * v = ggml_view_tensor(loop_view_ctx.get(), src);
++            ggml_format_name(v, "blk.%d.%s", il, dot2 + 1);
++            if (ggml_backend_view_init(v) != GGML_STATUS_SUCCESS) {
++                throw std::runtime_error(format("sensenova_loop: cannot make the view %s", v->name));
++            }
++            layer.*f = v;
++            tensors_by_name.emplace_back(ggml_get_name(v), v);
++            ++n_views;
++        }
++    }
++    LLAMA_LOG_INFO("%s: sensenova_loop: %d second-visit weight names (views of blocks %d..%d)\n", __func__, n_views,
++            lo - (int) hparams.mhc_loop_shift, hi - 1 - (int) hparams.mhc_loop_shift);
++}
++
+ std::unique_ptr<llm_graph_context> llama_model_sensenova_loop::build_arch_graph(const llm_graph_params & params) const {
+     if (params.gtype == LLM_GRAPH_TYPE_DECODER_MTP) {
+         return std::make_unique<graph_mtp>(*this, params);

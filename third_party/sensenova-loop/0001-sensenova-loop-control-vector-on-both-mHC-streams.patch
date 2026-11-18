@@ -1,0 +1,39 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: balaena01 <261439497+balaena01@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 01:00:24 +0000
+Subject: [PATCH 1/2] sensenova-loop: add the control vector to both mHC streams, l_out = stream mean
+
+---
+ src/models/sensenova-loop.cpp | 14 ++++++++++----
+ 1 file changed, 10 insertions(+), 4 deletions(-)
+
+diff --git a/src/models/sensenova-loop.cpp b/src/models/sensenova-loop.cpp
+index bdc8f39ac..1ddac2b91 100644
+--- a/src/models/sensenova-loop.cpp
++++ b/src/models/sensenova-loop.cpp
+@@ -325,15 +325,21 @@ llama_model_sensenova_loop::graph::graph(const llama_model & model, const llm_gr
+             cur = ggml_scale(ctx0, ggml_add(ctx0, a1, b1), 0.5f);
+             cb(cur, "mhc_leave", il);
+             str_a = str_b = nullptr;
++            cur = build_cvec(cur, il);
++            cb(cur, "l_out", il);
+         } else {
+-            cur = a1;
++            // inside the streams: add a control vector to both streams (= to their mean) so that the next
++            // sublayer reads it; adding it to stream a only (the old l_out) was dropped by the next router
++            a1 = build_cvec(a1, il);
++            b1 = build_cvec(b1, il);
+             str_a = a1;
+             str_b = b1;
++            // l_out is the mean of the two streams (what leaves the loop), not stream a
++            cur = ggml_scale(ctx0, ggml_add(ctx0, a1, b1), 0.5f);
++            cb(cur, "l_out", il);
++            ggml_build_forward_expand(gf, cur);
+         }
+ 
+-        cur = build_cvec(cur, il);
+-        cb(cur, "l_out", il);
+-
+         inpL = cur;
+     }
+     cur = inpL;

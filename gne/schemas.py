@@ -212,6 +212,8 @@ class RecipeModel(_Strict):
     default_direction: str | None = None      # CHANGE-06: proj・keyed のユニットの方向の既定
     direction_layer: Literal["own", "base"] = "own"
     default_key: str | None = None            # CHANGE-07: keyed のユニットの鍵の既定
+    loop_edits: Literal["shared", "per_visit"] | None = None   # 同じ層を 2 回実行するモデルの当て方(per_visit のときだけ載る)
+    loop_visits: dict[str, Any] | None = None  # ヘッドごとに選んだ回(gne heads loop-merge)
 
 
 class Generation(_Strict):
@@ -1026,6 +1028,11 @@ class HeadsCausalOut(Envelope):                 # CHANGE-06 C(gne heads causal)
     base_units: list[str] | None = None
     spearman_ablate_marginal: float | None = None
     n_compared: int | None = None
+    top_layers: int | None = None
+    score_layers_given: bool | None = None       # 射影の値を測る層か選ぶ層を指定した(一括の使い回しの判定)
+    select_layer: int | None = None              # 順位づけと候補の境に使った層(--select-layer)
+    candidate_layers: list[int] | None = None    # 候補を探した層(同じ層を 2 回実行するモデルの回ごとの探索など)
+    loop_edits: Literal["shared", "per_visit"] | None = None   # 同じ層を 2 回実行するモデルの当て方
     seconds: float
 
 
@@ -1070,6 +1077,7 @@ class HeadsAllocateOut(Envelope):               # CHANGE-06 D(gne heads allocate
     n_b: int
     base_a_mean: float
     base_b_mean: float
+    base_by_layer: dict[str, dict[str, float]] | None = None   # 射影の値を測る層ごとの無介入の A・B の平均
     initial: dict[str, Any] | None
     current: list[str]
     hard: dict[str, Any]
@@ -1097,6 +1105,10 @@ class HeadsPipelineOut(Envelope):               # gne heads pipeline(方向 → 
     seconds: float
     updated: str | None = None
     reused: list[str] | None = None              # 使い回した段(direction・causal、resume)
+
+
+class HeadsLoopOut(Envelope):                   # gne heads visits / loop-pipeline / loop-merge / measure(同じ層を 2 回実行するモデル)
+    model_config = ConfigDict(extra="allow")
 
 
 class FieldtestOut(Envelope):                   # gne fieldtest(本番と同じ動かし方で、ファイルどうしを比べる)
@@ -1484,6 +1496,7 @@ COMMAND_SCHEMAS: dict[str, type[Envelope]] = {
     "headproj export": GainOut, "headproj check": HeadprojCheckOut, "heads pipeline": HeadsPipelineOut,
     "heads candidates": HeadsCandidatesOut,
     "heads refine": HeadsRefineOut, "fieldtest": FieldtestOut,
+    "heads visits": HeadsLoopOut, "heads loop-pipeline": HeadsLoopOut, "heads loop-merge": HeadsLoopOut, "heads measure": HeadsLoopOut,
     "direction key": DirectionKeyOut, "direction key-check": DirectionKeyCheckOut, "direction keys": DirectionKeysOut,
     "direction key-verify": DirectionKeyVerifyOut, "direction key-experts": DirectionKeyExpertsOut,
     "direction key-from-behave": DirectionKeyFromBehaveOut,

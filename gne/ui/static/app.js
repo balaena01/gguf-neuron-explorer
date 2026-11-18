@@ -1007,7 +1007,8 @@ async function setView(v) {
                                     onLoadRecipe: (rd) => {
                                       const us = (rd.units || []).map((u) => (u.mode === "proj" && !u.direction ? { ...u, direction: rd.default_direction } : u));
                                       return replaceRecipe(rd.name || "", () => state.recipe.load(rd.name || "", us, rd.ablate, rd.sampling, rd.direction_layer,
-                                                                                                 { default_direction: rd.default_direction, default_key: rd.default_key }));   // keyed の既定
+                                                                                                 { default_direction: rd.default_direction, default_key: rd.default_key,
+                                                                                                   loop_edits: rd.loop_edits }));   // keyed の既定・2 回実行するモデルの当て方
                                     } });
       state.evalView = evalView;                                         // 自動テスト用
     }

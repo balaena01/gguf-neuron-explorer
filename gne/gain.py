@@ -182,7 +182,9 @@ def export_gain_lora(weights, recipe: Recipe, path: str | Path, *,
             w.add_key_value("gne.headproj", json.dumps(extra_meta, ensure_ascii=False), GGUFValueType.STRING)
         for k, v in (extra_kv or {}).items():
             w.add_key_value(k, v, GGUFValueType.STRING)
-    from .loop import to_stored
+    from .loop import LORA_KEY, to_stored
+    if weights.loop is not None and weights.per_visit_names:   # 1 回目と 2 回目に別々に当てる形。修正なしの llama.cpp では読まない
+        w.add_key_value(LORA_KEY, "per_visit", GGUFValueType.STRING)
     dense = to_stored(weights, {f"blk.{L}.ffn_up.weight": ab for L, ab in tens.items()})   # 2 回目の層は重みを持つ層の名前に
     htens = to_stored(weights, htens)
     for name, (A, B) in sorted(dense.items(), key=lambda x: int(x[0].split(".")[1])):

@@ -586,7 +586,8 @@ def allocate(session, ds, cs, *, candidates, target: float, score_layer: int, ha
 
     # 3. 配る
     table = []
-    b_all0 = st.scorer.run(None, sides="B")["B"]["values"][S]
+    b_base = st.scorer.run(None, sides="B")["B"]["values"]
+    b_all0 = b_base[S]
     for n in sorted({int(x) for x in n_heads}, reverse=True):
         t0 = time.perf_counter()
         if len(elig) < n:
@@ -630,7 +631,11 @@ def allocate(session, ds, cs, *, candidates, target: float, score_layer: int, ha
                       "remain": int((va > remain_threshold).sum()), "a_max": float(va.max()), "a_mean": float(va.mean()),
                       "b_mean": float(got["B"]["values"][S].mean()),
                       "b_side_delta": float(got["B"]["values"][S].mean() - b_all0.mean()),
-                      "b_drift_par": par, "b_drift_orth": orth, "recipe": str(rpath), "seconds": time.perf_counter() - t0})
+                      "b_drift_par": par, "b_drift_orth": orth, "recipe": str(rpath), "seconds": time.perf_counter() - t0,
+                      # 射影の値を測る層ごとの、組を当てたあとの A 側・B 側の平均(同じ層を 2 回実行するモデルでは、1 回目の出口・
+                      # 2 回目の出口・最後の層で、どこまで下がったかを並べて読む)
+                      "by_layer": {str(L): {"A": float(got["A"]["values"][L].mean()), "B": float(got["B"]["values"][L].mean())}
+                                   for L in st.score_layers}})
     # 4. 推す組
     ok = [r for r in table if r.get("reached")]
     rec_n = None
@@ -649,6 +654,7 @@ def allocate(session, ds, cs, *, candidates, target: float, score_layer: int, ha
            "method": method, "proportional_to": proportional_to, "from_zero": from_zero, "delta_s": delta_s, "s_max": s_max,
            "remain_threshold": remain_threshold, "n_a": len(a_all), "n_b": len(st.b_idx),
            "base_a_mean": float(st.base["A"][S].mean()), "base_b_mean": float(st.base["B"][S].mean()),
+           "base_by_layer": {str(L): {"A": float(st.base["A"][L].mean()), "B": float(b_base[L].mean())} for L in st.score_layers},
            "initial": init, "current": [p.spec() for p in cur], "hard": {"n": len(h_idx), **({k: v for k, v in hard_rep.items() if k != "idx"} if hard_rep else {})},
            "eta": [{k: r.get(k) for k in ("layer", "head", "kind", "eta", "causal", "b_side_delta", "drift_orth_b",
                                            "excluded", "in_base")} for r in sorted(mrows, key=lambda r: -r["eta"])],

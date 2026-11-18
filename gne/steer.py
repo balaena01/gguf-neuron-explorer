@@ -188,6 +188,11 @@ class Recipe:
     default_direction: str | None = None   # CHANGE-06: direction を省いた proj のユニットが使う方向
     direction_layer: str = "own"           # CHANGE-06: proj のユニットに当てる方向の層。own = そのヘッドの層の r_L、base = 方向セットの基準層の r
     default_key: str | None = None         # CHANGE-07: key を省いた keyed のユニットが使う鍵
+    # 同じ層を 2 回実行するモデル(sensenova_loop): shared = 層の番号の重みを両方の回に当てる、per_visit = 1 回目(段 4〜27)と
+    # 2 回目(段 28〜51)を別々に当てる(2 回目の層に別の名前がある llama.cpp が要る)。None = メモリの上だけのレシピで、
+    # そのときのセッションの当て方に従う。ファイルに記録が無ければ shared
+    loop_edits: str | None = None
+    loop_visits: dict | None = None        # ヘッドごとに、どちらの回で選んだか({"21:H20": [1, 2]}、gne heads loop-merge が書く)
 
     @classmethod
     def load(cls, path: str | Path) -> Recipe:
@@ -196,7 +201,8 @@ class Recipe:
         r = cls(units, d.get("model_id"), d.get("dose_unit", "rel"), d.get("name") or Path(path).stem, d.get("when") or "all",
                 AblateSpec.from_dict(d.get("ablate")), d.get("sampling") or None, d.get("default_direction") or None,
                 str(d.get("direction_layer") or "own"),
-                None if d.get("default_key") in (None, "") else str(d["default_key"]))
+                None if d.get("default_key") in (None, "") else str(d["default_key"]),
+                str(d.get("loop_edits") or "shared"), d.get("loop_visits") or None)
         r.validate()
         return r
 
@@ -208,6 +214,7 @@ class Recipe:
              **({"default_direction": self.default_direction} if self.default_direction else {}),
              **({"direction_layer": self.direction_layer} if self.direction_layer != "own" else {}),
              **({"default_key": self.default_key} if self.default_key else {}),
+             **self._loop_fields(save=True),
              "units": [_unit_yaml(u) for u in self.units]}
         write_yaml(path, d, code="BAD_RECIPE")           # 読み戻して同じ文字になるか確かめてから書く(U+0085 なども)
 
@@ -220,13 +227,23 @@ class Recipe:
                 "sampling": self.sampling,
                 **({"default_direction": self.default_direction} if self.default_direction else {}),
                 **({"direction_layer": self.direction_layer} if self.direction_layer != "own" else {}),
-                **({"default_key": self.default_key} if self.default_key else {})}
+                **({"default_key": self.default_key} if self.default_key else {}),
+                **self._loop_fields()}
+
+    def _loop_fields(self, save: bool = False) -> dict:
+        """当て方の記録。shared(と記録なし)は書かない(今までのレシピと同じ文字・同じハッシュにする)。保存のときは、
+        記録の無いレシピに、そのときのセッションの当て方を記録する。"""
+        from .loop import session_mode
+        le = self.loop_edits or (session_mode() if save else None)
+        return {**({"loop_edits": le} if le == "per_visit" else {}),
+                **({"loop_visits": dict(self.loop_visits)} if self.loop_visits else {})}
 
     def like(self, units: list[Unit], **over) -> Recipe:
         """同じ設定(model_id・dose_unit・名前・when・ablate・sampling・方向と鍵の既定)で、ユニットだけ替えたレシピ。"""
         kw = {"model_id": self.model_id, "dose_unit": self.dose_unit, "name": self.name, "when": self.when,
               "ablate": self.ablate, "sampling": self.sampling, "default_direction": self.default_direction,
-              "direction_layer": self.direction_layer, "default_key": self.default_key}
+              "direction_layer": self.direction_layer, "default_key": self.default_key, "loop_edits": self.loop_edits,
+              "loop_visits": self.loop_visits}
         kw.update(over)
         return Recipe(list(units), **kw)
 
@@ -288,6 +305,8 @@ class Recipe:
                 raise GneError("BAD_RECIPE", f"ablate の方向の名前 {self.ablate.direction!r} が不正です")
             if not -1.5 <= self.ablate.scale <= 1.5:
                 raise GneError("BAD_RECIPE", "ablate の scale は −1.5〜1.5 です(1 で全部消す、負はその方向を強める)")
+        if self.loop_edits not in (None, "shared", "per_visit"):
+            raise GneError("BAD_RECIPE", f"loop_edits={self.loop_edits!r} は shared か per_visit です")
         from .when import parse_when
         parse_when(self.when)                      # 書き方の誤りはここで返す
         if self.sampling is not None:

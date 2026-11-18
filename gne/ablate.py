@@ -194,6 +194,9 @@ def write_lora_tensors(weights, tensors: dict[str, tuple[np.ndarray, np.ndarray]
         w.add_key_value(k, v, GGUFValueType.STRING)
     if source_id:
         w.add_key_value("gne.source_model_id", m.model_id, GGUFValueType.STRING)
+    if getattr(weights, "loop", None) is not None and getattr(weights, "per_visit_names", False):
+        from .loop import LORA_KEY                # 1 回目と 2 回目に別々に当てる形。修正なしの llama.cpp では読まない
+        w.add_key_value(LORA_KEY, "per_visit", GGUFValueType.STRING)
 
     def order(n: str):
         parts = n.split(".")

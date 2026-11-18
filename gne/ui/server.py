@@ -432,12 +432,14 @@ def create_app(session, *, warm: bool = True, openai: bool = False) -> FastAPI:
     @app.post("/api/recipes/{name}")
     def recipe_save(name: str, units: list[str] = Body(...), ablate: dict | None = Body(None),
                     sampling: dict | None = Body(None), direction_layer: str | None = Body(None),
-                    default_direction: str | None = Body(None), default_key: str | None = Body(None)):
+                    default_direction: str | None = Body(None), default_key: str | None = Body(None),
+                    loop_edits: str | None = Body(None)):
         """direction_layer は proj・keyed に当てる方向の層(CHANGE-06・07、own なら書かない)。default_direction・default_key は
-        @方向・#鍵を省いた proj・keyed のユニットの既定(CHANGE-07)。"""
+        @方向・#鍵を省いた proj・keyed のユニットの既定(CHANGE-07)。loop_edits は同じ層を 2 回実行するモデルの当て方
+        (per_visit のときだけ送られる)。"""
         return session.recipe_save(name, units, ablate=ablate, sampling=sampling, default_direction=default_direction or None,
                                    direction_layer=direction_layer if direction_layer and direction_layer != "own" else None,
-                                   default_key=default_key or None)
+                                   default_key=default_key or None, loop_edits=loop_edits or None)
 
     @app.get("/api/evals")
     def evals():

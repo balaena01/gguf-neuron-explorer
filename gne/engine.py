@@ -563,12 +563,18 @@ class Engine:
         a = self._loras.get(key)
         if a is None:
             load = key
-            if self.loop is not None and self.loop_edits == "shared" and self.loop_runtime_names():
-                # 2 回目の層に別の名前がある llama.cpp: 1 回目の層のテンソルを 2 回目の名前にも写して、両方の回に当てる
-                from .loop import lora_both_visits
-                load = key + ".both-visits.gguf"
-                lora_both_visits(key, load, self.loop)
-                self._lora_alias[key] = load
+            if self.loop is not None:
+                # 同じ層を 2 回実行する arch: ファイルに記録された当て方(記録が無ければ shared = 両方の回に当てる)で読む
+                from .loop import PER_VISIT_FIX, lora_both_visits, lora_loop_edits, per_visit_refusal
+                mode = lora_loop_edits(key) or "shared"
+                names = self.loop_runtime_names()
+                if mode == "per_visit" and not names:
+                    raise GneError("ARCH_UNSUPPORTED", per_visit_refusal(f"LoRA {Path(path).name} "), PER_VISIT_FIX)
+                if mode == "shared" and names:
+                    # 2 回目の層に別の名前がある llama.cpp: 1 回目の層のテンソルを 2 回目の名前にも写して、両方の回に当てる
+                    load = key + ".both-visits.gguf"
+                    lora_both_visits(key, load, self.loop)
+                    self._lora_alias[key] = load
             a = C.llama_adapter_lora_init(self.model, load.encode())
             if not a:
                 raise RuntimeError(f"LoRA {path} を読み込めません(arch やテンソルの形が合っているか)")

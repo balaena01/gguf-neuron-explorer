@@ -2585,8 +2585,9 @@ def heads_causal(c: Common, holder: dict,
                  mode: str = typer.Option("ablate", "--mode", help="ablate(出力を 0 にして下がり方を測る、最初の候補出し)/ marginal(いまの組から s を上げたときの効率 η、配り直し用)。両者の順位は一致しない"),
                  layers: str = typer.Option("auto", "--layers", help="auto(層単位で止めて、下がる層を --top-layers 個)/ all / 10-16 / 1,5,9-12"),
                  candidates: Optional[str] = typer.Option(None, "--candidates", help="all / contrib:N(直接の寄与の上位 N)/ L:Hh,…(明示)"),
-                 score_layers: Optional[str] = typer.Option(None, "--score-layers", help="射影の値を測る層(既定は基準層と後段 2 層)"),
+                 score_layers: Optional[str] = typer.Option(None, "--score-layers", help="射影の値を測る層(既定は基準層と後段 2 層)。loop で、同じ層を 2 回実行するモデルの 1 回目の出口・2 回目の出口・最後の層の 1 つ前"),
                  primary: Optional[int] = typer.Option(None, "--primary", help="causal / contrib / ratio を出す層(既定は基準層)"),
+                 select_layer: Optional[int] = typer.Option(None, "--select-layer", help="選ぶのに使う層(--score-layers のどれか)。この層での下がり方で層とヘッドの順位をつけ、この層より前のヘッドを候補にする"),
                  base_recipe: Optional[Path] = typer.Option(None, "--base-recipe", help="marginal: いまの組のレシピ"),
                  base_unit: Optional[list[str]] = typer.Option(None, "--base-unit", help="marginal: いまの組(L:Hh:sS@NAME、複数可)"),
                  delta_s: float = typer.Option(3.0, "--delta-s", help="marginal: s を上げる量"),
@@ -2601,17 +2602,31 @@ def heads_causal(c: Common, holder: dict,
                  sort: str = typer.Option("auto", "--sort", help="表の並び: auto(ablate は causal_max、marginal は eta)/ causal / contrib / ratio / eta"),
                  show: int = typer.Option(30, "--show"),
                  max_examples: Optional[int] = typer.Option(None, "--max-examples", help="止めて測る質問の数(等間隔に間引く。既定は全部)"),
-                 include_score_layers: bool = typer.Option(False, "--include-score-layers", help="射影の値を測る層とそれより後のヘッドも候補にする(既定は外す。測る量を直接動かすだけで、振る舞いは変わりにくい)")):
+                 include_score_layers: bool = typer.Option(False, "--include-score-layers", help="射影の値を測る層とそれより後のヘッドも候補にする(既定は外す。測る量を直接動かすだけで、振る舞いは変わりにくい)"),
+                 visits: Optional[str] = typer.Option(None, "--visits", help="同じ層を 2 回実行するモデル: ヘッドを止める回。first(1 回目だけ)/ second(2 回目だけ)/ both(両方)。first・second は 2 回目の層に別の名前がある llama.cpp が要る。3 通りを並べるのは gne heads visits")):
     """因果スクリーニング(CHANGE-06 C): ヘッドを止めた(ablate)/ 強めた(marginal)ときの、生成なしの射影の値の下がり方。
     各行に直接の寄与 contrib(r̂ᵀW[:, blk]·x の平均)と causal / contrib の比を並べる(1 より大きければ間接の経路、
     小さければ補い合い。射影の値を測る層より後ろのヘッドは contrib が 0 なので causal_max で見る)。
     ablate と marginal は順位が入れ替わる: 最初の候補出しは ablate、配り直しは marginal。"""
     s = holder["session"] = c.session()
-    d = s.heads_causal(name, contrast=contrast, mode=mode, layers=layers, candidates=candidates,
-                       score_layers=_ints(score_layers), primary=primary, base_recipe=base_recipe, base_units=base_unit,
+    if visits == "all":
+        raise GneError("BAD_ARGS", "3 通り(1 回目だけ・2 回目だけ・両方)を並べるのは gne heads visits です",
+                       f"gne heads visits --name {name}")
+    if visits is not None:
+        d = s.heads_causal_visit(name, visits, contrast=contrast, mode=mode, layers=layers, candidates=candidates,
+                                 score_layers=s.score_layers_of(score_layers), primary=primary, base_recipe=base_recipe,
+                                 base_units=base_unit, delta_s=delta_s, hard=hard, hard_subset=hard_subset, b_side_max=b_side_max,
+                                 top_layers=top_layers, positions=positions, subset=subset, b_examples=b_examples, name=out_name,
+                                 direction_layer=direction_layer, max_examples=max_examples,
+                                 include_score_layers=include_score_layers, select_layer=select_layer)
+    else:
+        d = None
+    d = d or s.heads_causal(name, contrast=contrast, mode=mode, layers=layers, candidates=candidates,
+                       score_layers=s.score_layers_of(score_layers), primary=primary, base_recipe=base_recipe, base_units=base_unit,
                        delta_s=delta_s, hard=hard, hard_subset=hard_subset, b_side_max=b_side_max, top_layers=top_layers,
                        positions=positions, subset=subset, b_examples=b_examples, name=out_name,
-                       direction_layer=direction_layer, max_examples=max_examples, include_score_layers=include_score_layers)
+                       direction_layer=direction_layer, max_examples=max_examples, include_score_layers=include_score_layers,
+                       select_layer=select_layer)
     P = d["primary"]
     lines = [f"{d['path']}({d['n_rows']} ヘッド、mode={mode}、測る層 L{','.join(map(str, d['score_layers']))}(主 L{P})、"
              f"{d['seconds']:.0f} 秒)",
@@ -2634,6 +2649,29 @@ def heads_causal(c: Common, holder: dict,
     if mode == "marginal" and d.get("spearman_ablate_marginal") is not None:
         lines.append(f"ablate と marginal の順位相関(Spearman、{d['n_compared']} ヘッド): {d['spearman_ablate_marginal']:+.2f}")
     lines.append("次: gne heads allocate --name " + d["direction"] + " --target <A 側の射影の値の目標>")
+    return d, "\n".join(lines), 0
+
+
+def _visits_out(d: dict, show: int):
+    """heads causal --visits all の表: ヘッドごとに、1 回目だけ・2 回目だけ・両方で止めたときの、選ぶ層での下がり方。"""
+    S = d["select_layer"]
+    sp = d["spearman"]
+    f = lambda x: "—" if x is None else f"{x:+.2f}"
+    lines = [f"{d['path']}({d['n_heads']} ヘッド、層 {','.join(map(str, d['layers']))}(重みを持つ層の番号)、測る層 "
+             f"L{','.join(map(str, d['score_layers']))}、選ぶ層 L{S}、{d['seconds']:.0f} 秒)",
+             "無介入の射影の値: " + "、".join(f"L{L} A {x['A']:.2f} / B {x['B']:.2f}" for L, x in d["base_scores"].items()),
+             f"回の間の順位相関(Spearman、L{S} での下がり方): 1 回目と 2 回目 {f(sp['first_second'])}、"
+             f"1 回目と両方 {f(sp['first_both'])}、2 回目と両方 {f(sp['second_both'])}",
+             f"  {'ヘッド':>8} " + " ".join(f"{'1回目 L' + str(L):>10}" for L in d["score_layers"]) + " "
+             + " ".join(f"{'2回目 L' + str(L):>10}" for L in d["score_layers"]) + " "
+             + " ".join(f"{'両方 L' + str(L):>9}" for L in d["score_layers"]) + f" {'両方−和':>8}"]
+    for r in d["rows"][:show]:
+        lines.append(f"  {r['label']:>8} " + " ".join(f"{r['first']['score_drop'][str(L)]:>+10.2f}" for L in d["score_layers"]) + " "
+                     + " ".join(f"{r['second']['score_drop'][str(L)]:>+10.2f}" for L in d["score_layers"]) + " "
+                     + " ".join(f"{r['both']['score_drop'][str(L)]:>+9.2f}" for L in d["score_layers"])
+                     + f" {r['both_minus_sum']:>+8.2f}")
+    lines.append("(両方−和: 両方で止めた下がり方 − 片方ずつの下がり方の和。正なら 2 回で強め合う(両方止めると和より大きく下がる)、"
+                 "負なら 2 回が同じ働きを重ねている(和より小さい))")
     return d, "\n".join(lines), 0
 
 
@@ -2892,6 +2930,9 @@ def heads_pipeline(c: Common, holder: dict,
                    positions: Optional[str] = typer.Option(None, "--positions", help="方向を作る位置: last(既定)/ response など"),
                    top_layers: Optional[int] = typer.Option(None, "--top-layers"), hard: Optional[int] = typer.Option(None, "--hard"),
                    include_score_layers: bool = typer.Option(False, "--include-score-layers", help="射影の値を測る層とそれより後のヘッドも候補にする(既定は外す。測る量を直接動かすだけで、振る舞いは変わりにくい)"),
+                   score_layers: Optional[str] = typer.Option(None, "--score-layers", help="射影の値を測る層(例 27,51,54。既定は基準層と後段の 2 層)。loop で、同じ層を 2 回実行するモデルの 1 回目の出口・2 回目の出口・最後の層の 1 つ前"),
+                   select_layer: Optional[int] = typer.Option(None, "--select-layer", help="ヘッドの順位づけと配分の目標に使う層(--score-layers のどれか。既定は、順位づけは基準層、目標は測る最後の層)"),
+                   candidate_layers: Optional[str] = typer.Option(None, "--candidate-layers", help="候補のヘッドを探す層(例 28-53)。同じ層を 2 回実行するモデルで、1 回目だけ・2 回目だけから選ぶとき(GNE_LOOP_EDITS=per_visit と一緒に)"),
                    fresh: bool = typer.Option(False, "--fresh", help="作り済みの方向と因果の結果を使い回さず、最初から作り直す"),
                    yes: bool = _YES):
     """対照集合から、方向づくり → 基準層 → 因果スクリーニング(層ごと → ヘッド 1 個ずつ止める)→ 強さの配分(効き目に比例した
@@ -2899,17 +2940,19 @@ def heads_pipeline(c: Common, holder: dict,
     s = holder["session"] = c.session()
     over = {"target": target, "n_heads": _ints(n_heads), "max_examples": max_examples, "positions": positions,
             "top_layers": top_layers, "hard": hard, "resume": False if fresh else None,
-            "include_score_layers": True if include_score_layers else None}
+            "include_score_layers": True if include_score_layers else None, "score_layers": score_layers,
+            "select_layer": select_layer, "candidate_layers": candidate_layers}
     _gate(s, "head_pipeline", {"spec": str(spec), **{k: v for k, v in over.items() if v is not None}}, yes, None)
     d = s.heads_pipeline(spec, **over)
     sc, ca, al = d["score"], d["causal"], d["allocate"]
+    ck = "causal" if (d.get("settings") or {}).get("select_layer") not in (None, "") else "causal_max"
     lines = [f"{d['path']}({d['n_prompts']} 問、{d['seconds']:.0f} 秒"
              + (f"、作り済みの{'・'.join({'direction': '方向', 'causal': '因果'}[x] for x in d['reused'])}を使い回した" if d.get("reused") else "")
              + ")",
              f"1. 方向 {d['name']}({d['direction']['positions']}、{d['direction']['seconds']:.0f} 秒)",
              f"2. 基準層 L{sc['base_layer']}(cohen_d 最大、止めて測る段階は {sc['n'].get('A')} 問)",
              f"3. 因果: 測る層 L{','.join(map(str, ca['score_layers']))}、{ca['n_rows']} ヘッド、上位 " +
-             " ".join(f"L{r['layer']}H{r['head']}({r['causal_max']:+.2f}{'、壊すだけなので除外' if r.get('excluded') else ''})" for r in ca["top"][:6])
+             " ".join(f"L{r['layer']}H{r['head']}({r[ck]:+.2f}{'、壊すだけなので除外' if r.get('excluded') else ''})" for r in ca["top"][:6])
              + f"({ca['seconds']:.0f} 秒)"
              + "".join(f"\n   層 L{r['layer']} は止めると中立の入力も大きく崩れる(ずれ {r['drift_orth_b']:.2f})ので選ばなかった"
                        for r in (ca.get("layers") or []) if r.get("excluded"))]
@@ -2922,9 +2965,36 @@ def heads_pipeline(c: Common, holder: dict,
             continue
         lines.append(f"   {r['n_heads']} 個: 最大 s {r['s_max']:.2f}、残る {r['remain']}/{al['n_a']}、B 直交 {r['b_drift_orth']:.4f}  "
                      + " ".join(r["units"]) + ("  ← 推す" if r["recommended"] else "") + ("" if r["reached"] else "(目標に届かない)"))
+    if (d.get("settings") or {}).get("score_layers"):        # 測る層を指定したときだけ、層ごとの値を並べる
+        lines += _causal_layer_lines(ca) + _by_layer_lines(al)
     if d["recommended"]:
         lines.append(f"レシピ: {d['recommended']['recipe']}。確かめる: gne eval --recipe {d['recommended']['recipe']} --random-controls 16")
     return d, "\n".join(lines), 0
+
+
+def _causal_layer_lines(ca: dict, n: int = 6) -> list[str]:
+    """因果スクリーニングの上位のヘッドの、射影の値を測る層ごとの下がり方。"""
+    top = [r for r in ca.get("top") or [] if r.get("score_drop")][:n]
+    if not top:
+        return []
+    return ["因果: 測る層ごとの下がり方(上位 " + str(len(top)) + "): " + "  ".join(
+        f"L{r['layer']}H{r['head']} " + "/".join(f"L{L} {v:+.2f}" for L, v in sorted(r["score_drop"].items(), key=lambda x: int(x[0])))
+        for r in top)]
+
+
+def _by_layer_lines(al: dict) -> list[str]:
+    """配分の組ごとの、射影の値を測る層ごとの A 側・B 側の平均(当てる前 → 当てた後)。測る層が 2 つ以上のときだけ。"""
+    base = al.get("base_by_layer") or {}
+    rows = [r for r in al.get("table") or [] if r.get("by_layer")]
+    if len(base) < 2 or not rows:
+        return []
+    Ls = sorted(base, key=int)
+    out = ["測る層ごとの射影の値(A 側の平均、当てる前 → 当てた後。かっこ内は B 側の平均):"]
+    out.append("   無介入: " + "  ".join(f"L{L} {base[L]['A']:+.2f}({base[L]['B']:+.2f})" for L in Ls))
+    for r in rows:
+        out.append(f"   {r['n_heads']} 個: " + "  ".join(
+            f"L{L} {base[L]['A']:+.2f}→{r['by_layer'][L]['A']:+.2f}({r['by_layer'][L]['B']:+.2f})" for L in Ls if L in r["by_layer"]))
+    return out
 
 
 
@@ -3100,6 +3170,148 @@ def _fieldtest_text(d: dict) -> str:
     lines.append(f"生成した文章: {d['replies_path']}")
     return "\n".join(lines)
 
+
+
+def _measure_lines(m: dict, keys: list[str] | None = None, label: dict | None = None) -> list[str]:
+    """measure の表: 行 = レシピ、列 = 測る層。A 側の平均(B 側の平均を超えて残る質問の数、A と B の差を縮めた割合)と B 側のずれ。"""
+    Ls = [str(L) for L in m["layers"]]
+    ks = [k for k in keys or list(m["rows"]) if k in m["rows"]]
+    w = max([16] + [len((label or {}).get(k, k)) for k in ks])
+    out = [f"  {'':>{w}} " + " ".join(f"{'L' + L + ' A(残り・縮めた割合)':>26}" for L in Ls) + f" {'B 側のずれ L' + Ls[-1]:>14}"]
+    for k in ks:
+        r = m["rows"][k]
+        name = (label or {}).get(k, k)
+        if r.get("skipped"):
+            out.append(f"  {name:>{w}} {r['skipped']}")
+            continue
+        cells = []
+        for L in Ls:
+            x = r["by_layer"][L]
+            cl = "—" if x["closure"] is None else f"{x['closure']:.2f}"
+            cells.append(f"{x['A']:>+8.2f}({x['remain']:>2}/{m['n_a']}・{cl:>5})")
+        out.append(f"  {name:>{w}} " + " ".join(f"{c:>26}" for c in cells) + f" {r['by_layer'][Ls[-1]]['b_drift_orth']:>14.4f}")
+    return out
+
+
+def _merge_lines(d: dict) -> list[str]:
+    lines = [f"レシピ(両方の回に当てる形、修正なしの llama.cpp で動く): {d['recipe']}(同じヘッドの扱い: {d['default']})"]
+    if d.get("how") == "both":
+        lines.append("  比べた形: " + "、".join(f"{k} {v}" for k, v in d["recipes"].items()))
+    tw = d.get("twins") or []
+    lines.append(f"ユニット {d['n_units']['per_visit']} 個(ヘッド {d['n_heads_distinct']} 個)。両方の回で選んだヘッド: {len(tw)} 個")
+    for t in tw:
+        e = t["compose_effective"]
+        lines.append(f"  {t['head']}: {' と '.join(t['units'])}(方向の cos {t['cos']:+.2f})。続けて掛けると実効の強さ "
+                     f"{e['along_r1']:+.2f}(1 つ目の方向)/ {e['along_r2']:+.2f}(2 つ目の方向)、強いほうだけなら s {t['max_s']:+.2f}")
+    m = d.get("measure")
+    if m:
+        lines.append(f"測り直し(方向 {m['direction']}、A {m['n_a']} 問・B {m['n_b']} 問。per_visit = 回ごとに当てた値、"
+                     "shared = 両方の回に当てた値):")
+        lines += _measure_lines(m)
+    return lines
+
+
+@gne_command(heads_app, "visits", "heads visits")
+def heads_visits(c: Common, holder: dict,
+                 name: str = typer.Option(..., "--name", help="方向の名前"),
+                 contrast: Optional[Path] = typer.Option(None, "--contrast", help="対照集合(既定は方向を作った対照集合)"),
+                 layers: Optional[str] = typer.Option(None, "--layers", help="調べる層(重みを持つ層の番号 4〜27。既定は、1 回目だけ・2 回目だけで層ごとに止めて下がり方の大きい --top-layers 層)"),
+                 top_layers: int = typer.Option(4, "--top-layers"),
+                 score_layers: Optional[str] = typer.Option(None, "--score-layers", help="射影の値を測る層(既定 loop = 27,51,54)"),
+                 select_layer: Optional[int] = typer.Option(None, "--select-layer", help="順位と相関に使う層(既定は測る最後の層)"),
+                 positions: str = typer.Option("last", "--positions"),
+                 max_examples: int = typer.Option(64, "--max-examples", help="止めて測る質問の数(等間隔に間引く)"),
+                 out_name: Optional[str] = typer.Option(None, "--out-name", help="保存名(既定は方向の名前)"),
+                 show: int = typer.Option(30, "--show")):
+    """同じ層を 2 回実行するモデルで、同じヘッドを 1 回目だけ・2 回目だけ・両方で止めた効き目を並べ、回の間の順位相関を出す
+    (2 回目の層に別の名前がある llama.cpp が要る。無ければ理由と代わりの方法を出して止める)。"""
+    s = holder["session"] = c.session()
+    return _visits_out(s.heads_visits(name, contrast=contrast, layers=parse_layers(layers) if layers else None,
+                                      top_layers=top_layers, score_layers=s.score_layers_of(score_layers),
+                                      select_layer=select_layer, positions=positions, max_examples=max_examples,
+                                      name=out_name), show)
+
+
+@gne_command(heads_app, "loop-pipeline", "heads loop-pipeline")
+def heads_loop_pipeline(c: Common, holder: dict,
+                        spec: Path = typer.Option(..., "--spec", help="対照集合の JSON / YAML(heads pipeline と同じ。例 configs/pipeline/disclaimer.json)"),
+                        n_first: int = typer.Option(3, "--n-first", help="1 回目で選ぶヘッドの数"),
+                        n_second: int = typer.Option(3, "--n-second", help="2 回目で選ぶヘッドの数"),
+                        target: str = typer.Option("B", "--target", help="各段の目標(B = B 側の平均、mid、数)。1 段目は段 27、2 段目は段 54 の値"),
+                        how: str = typer.Option("max", "--how", help="同じヘッドを両方の回で選んだときの、仕上げの代表の形: max(強いほうだけ)/ compose(続けて掛ける)"),
+                        name: Optional[str] = typer.Option(None, "--name", help="保存名(既定は spec の name)"),
+                        fresh: bool = typer.Option(False, "--fresh", help="作り済みの方向と因果の結果を使い回さない")):
+    """同じ層を 2 回実行するモデルで、1 回目と 2 回目を別々に選ぶ CHiPS(2 回目の層に別の名前がある llama.cpp が要る)。
+    1. 段 0〜27 のヘッドから、段 27(1 回目の出口)の射影の値で選ぶ(1 回目だけに当てる)。
+    2. その組を対照集合の両側に当てた状態で、段 28〜53 のヘッドから、段 54 の射影の値で選ぶ(2 回目だけに当てる)。
+    3. 2 つを合わせ、両方の回に当てるレシピ(修正なしの llama.cpp で動く形)に直して、両方に当てた状態で測り直す。"""
+    s = holder["session"] = c.session()
+    d = s.heads_loop_pipeline(spec, n_first=n_first, n_second=n_second, target=target, how=how, name=name, resume=not fresh)
+    f1, f2 = d["first"], d["second"]
+    lines = [f"{d['path']}({d['seconds']:.0f} 秒)",
+             f"1. 1 回目(段 27 で選ぶ): " + " ".join(f1["units"]) + ("" if f1["reached"] else "(目標に届かない)"),
+             f"2. 2 回目(1 回目の組を当てた状態、段 54 で選ぶ): " + " ".join(f2["units"]) + ("" if f2["reached"] else "(目標に届かない)"),
+             f"回ごとに当てるレシピ(探す段階用): {d['per_visit_recipe']}"]
+    lines += _merge_lines(d["merge"])
+    return d, "\n".join(lines), 0
+
+
+@gne_command(heads_app, "loop-merge", "heads loop-merge")
+def heads_loop_merge(c: Common, holder: dict,
+                     recipe: str = typer.Option(..., "--recipe", help="回ごとに選んだレシピ(loop_edits: per_visit)の名前かパス"),
+                     how: str = typer.Option("both", "--how", help="同じヘッドを両方の回で選んだとき: max(強いほうだけ)/ compose(続けて掛ける)/ both(両方を書き出して並べる)"),
+                     default: str = typer.Option("max", "--default", help="--how both のときに <名前>.shared.yaml にする形"),
+                     direction: Optional[str] = typer.Option(None, "--direction", help="測り直す方向(既定はレシピの default_direction)"),
+                     contrast: Optional[Path] = typer.Option(None, "--contrast", help="測り直す対照集合(既定は方向を作った対照集合)"),
+                     out_name: Optional[str] = typer.Option(None, "--out-name", help="保存名(既定はレシピの名前)"),
+                     no_measure: bool = typer.Option(False, "--no-measure", help="書き出すだけで測り直さない")):
+    """回ごとに選んだヘッドを、両方の回に当てるレシピ(焼き込み・配布できる形)に直す。各ヘッドをどちらの回で選んだかを
+    loop_visits に記録し、両方に当てた状態で段 27・51・54 の射影の値を測り直して、回ごとに当てた値と並べる。
+    回ごとに当てた値は 2 回目の層に別の名前がある llama.cpp でだけ測れる(無ければ省いて、両方に当てた値だけ出す)。"""
+    s = holder["session"] = c.session()
+    d = s.heads_loop_merge(recipe, how=how, default=default, direction=direction, contrast=contrast, out_name=out_name,
+                           measure_it=not no_measure)
+    return d, "\n".join([d["path"]] + _merge_lines(d)), 0
+
+
+@gne_command(heads_app, "measure", "heads measure")
+def heads_measure(c: Common, holder: dict,
+                  name: str = typer.Option(..., "--name", help="方向の名前"),
+                  recipe: list[str] = typer.Option(..., "--recipe", help="測るレシピ(何個でも)"),
+                  contrast: Optional[Path] = typer.Option(None, "--contrast", help="対照集合(既定は方向を作った対照集合)"),
+                  score_layers: Optional[str] = typer.Option(None, "--score-layers", help="測る層(例 27,51,54。loop で 2 回実行するモデルの 3 か所。2 回実行するモデルでは既定 loop)"),
+                  positions: str = typer.Option("last", "--positions"),
+                  max_examples: Optional[int] = typer.Option(None, "--max-examples", help="測る質問の数(既定は全部)"),
+                  tail: Optional[int] = typer.Option(None, "--tail", help="この段から測る最後の層までの変化を切り分ける(例 51: 残差の大きさ・cos、段 51 の方向で測った値、段ごとの attention と MLP の書き足し)")):
+    """レシピを当てたときの、測る層ごとの射影の値: A 側の平均、B 側の平均を超えて残る A 側の質問の数、A と B の差を縮めた割合、
+    B 側の直交成分のずれ。レシピの当て方(両方の回 / 回ごと)はレシピの記録に従う。"""
+    s = holder["session"] = c.session()
+    d = s.heads_measure(name, list(recipe), contrast=contrast, score_layers=score_layers, positions=positions,
+                        max_examples=max_examples, tail=tail)
+    lines = [f"方向 {d['direction']}、A {d['n_a']} 問・B {d['n_b']} 問"] + _measure_lines(d)
+    if d.get("tail"):
+        lines += _tail_lines(d["tail"])
+    return d, "\n".join(lines), 0
+
+
+def _tail_lines(t: dict) -> list[str]:
+    lo, hi = t["from_layer"], t["to_layer"]
+    mid = list(range(lo + 1, hi + 1))
+    out = [f"段 {lo} → {hi} の変化の切り分け(質問の平均。射影 = 残差 · その段の方向、cos = 射影 ÷ 残差の大きさ):"]
+    for key, r in t["rows"].items():
+        if r.get("skipped"):
+            out.append(f"  {key}: {r['skipped']}")
+            continue
+        for side in "AB":
+            x = r[side]
+            out.append(f"  {key} {side}: 射影 " + " ".join(f"L{L} {x[f'proj-{L}']:+.1f}" for L in range(lo, hi + 1))
+                       + " | 大きさ " + " ".join(f"{x[f'norm-{L}']:.0f}" for L in range(lo, hi + 1))
+                       + " | cos " + " ".join(f"{x[f'cos-{L}']:+.3f}" for L in range(lo, hi + 1)))
+            out.append(f"  {'':>{len(key)}}    段 {hi} の残差を段 {lo} の方向で: {x['to_on_from']:+.1f}(段 {lo} の残差を段 {hi} の方向で: "
+                       f"{x['from_on_to']:+.1f})。書き足し(段 {hi} の方向 / 段 {lo} の方向): "
+                       + " ".join(f"L{L} attn {x[f'attn-{L}-to']:+.1f}/{x[f'attn-{L}-from']:+.1f} MLP {x[f'mlp-{L}-to']:+.1f}/{x[f'mlp-{L}-from']:+.1f}"
+                                  for L in mid))
+    return out
 
 @gne_command(app, "fieldtest")
 def fieldtest_cmd(c: Common, holder: dict,

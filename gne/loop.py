@@ -32,6 +32,11 @@ class LoopPlan:
     shift: int                             # 2 回目の層 − 保存されている層(= lo2 − lo1)
 
     @property
+    def hi1(self) -> int:
+        """1 回目の最後の段(出口、27)。"""
+        return self.lo2 - 1
+
+    @property
     def hi2(self) -> int:
         return self.lo2 + self.shift
 
@@ -171,3 +176,51 @@ def lora_both_visits(src, dst, plan: LoopPlan) -> int:
     w.write_tensors_to_file()
     w.close()
     return n
+
+
+# --- 当て方の記録(shared = 両方の回に当てる / per_visit = 1 回目と 2 回目を別々に当てる) -------------------------------------
+# レシピは loop_edits、LoRA のファイルは gne.loop_edits に記録する。記録の無い古いレシピ・LoRA は shared として読む。
+# メモリの上だけで作ったレシピ(記録なし)は、そのときのセッションの当て方に従い、保存するときにそれを記録する。
+
+LOOP_EDITS = ("shared", "per_visit")
+LORA_KEY = "gne.loop_edits"
+_SESSION = {"mode": None}
+
+
+def set_session_mode(mode: str | None) -> None:
+    """いまのセッションの当て方(同じ層を 2 回実行するモデルのときだけ。ほかは None)。レシピを保存するときの記録に使う。"""
+    _SESSION["mode"] = mode
+
+
+def session_mode() -> str | None:
+    return _SESSION["mode"]
+
+
+def lora_loop_edits(path) -> str | None:
+    """LoRA のファイルに記録された当て方(無ければ None = shared として読む)。"""
+    from gguf import GGUFReader
+    try:
+        f = GGUFReader(str(path)).fields.get(LORA_KEY)
+    except Exception:
+        return None
+    if f is None or not f.data:
+        return None
+    v = bytes(f.parts[f.data[0]]).decode()
+    return v if v in LOOP_EDITS else None
+
+
+def per_visit_refusal(what: str) -> str:
+    """回ごとに当てる指定を、2 回目の層に別の名前が無い llama.cpp で断るときの文。"""
+    return (f"{what}は、1 回目と 2 回目に別々に当てる形(per_visit)ですが、この llama.cpp は 2 回目の層が 1 回目と同じテンソル名なので、"
+            "片方の回だけに当てられません。")
+
+
+PER_VISIT_FIX = ("回ごとに探した結果は gne heads loop-merge で両方の回に当てる形(shared)のレシピに直すと、修正なしの llama.cpp で"
+                 "使えます。回ごとに測る(--score-layers loop、--select-layer)のは、修正なしでもできます")
+
+
+def twin_effect(s1: float, s2: float, c: float) -> tuple[float, float]:
+    """同じヘッドの 2 つの射影 (I − s₂ r₂r₂ᵀ)(I − s₁ r₁r₁ᵀ) を続けて掛けたときの実効の強さ(r₁ 方向・r₂ 方向)。
+    c = r₁·r₂。r₁ に沿った出力は (1 − s₁)(1 − s₂c²) 倍、r₂ に沿った出力は (1 − s₂)(1 − s₁c²) 倍になるので、
+    実効の強さは 1 からそれを引いたもの(c = 1 なら どちらも s₁ + s₂ − s₁s₂)。"""
+    return 1.0 - (1.0 - s1) * (1.0 - s2 * c * c), 1.0 - (1.0 - s2) * (1.0 - s1 * c * c)
