@@ -483,7 +483,8 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
     async def heads_pipeline(spec: dict[str, Any] | str, target: float | str | None = None, n_heads: list[int] | None = None,
                              max_examples: int | None = None, resume: bool = True, rank: str | None = None,
                              unit_kinds: str | None = None, n_units: list[int] | None = None,
-                             check_replies: int | None = None) -> dict:
+                             check_replies: int | None = None, holdout: bool | None = None,
+                             loop_direction: str | None = None) -> dict:
         """対照集合(name・user_prompts か側ごとの質問 prompts_a / prompts_b・system_a / system_b か recipe_a / recipe_b、
         任意で pipeline の設定。表か JSON / YAML の
         パス)から、方向づくり → 基準層 → 候補づくり → 強さの配分 をジョブで 1 回で回す(job_status で結果)。質問は何百個でもよく、止めて測る段階は max_examples 個
@@ -496,11 +497,15 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
         A 平均・B Δ・B ⊥ は allocate.table[].raise、上げる前の組は allocate.s1)→ 選んだ組で応答を書かせて validate.match を数える(check_replies 問、
         既定 16、0 で切る)。どの組も目標に届かなければ、組の効き(A 側の下がり − B 側の動きの大きさ)がいちばん大きい組を推す
         (recommended.reached が false)。推す組が無ければ no_recommend に理由と次の手。rank="causal" は v0.7.0 までの流れ(因果スクリーニング → 効率で配り直す。n_heads はこちらだけ)。
-        応答での確かめで A 側がほとんど変わらない(check.suggest)ときは、もう一方の rank も試す。結果の rank がどちらで流したか。"""
+        応答での確かめで A 側がほとんど変わらない(check.suggest)ときは、もう一方の rank も試す。結果の rank がどちらで流したか。
+        unit_kinds は heads / all / neurons / layers(層の注意の出力全体・MLP の出力全体、ユニット "L:attn:sS@NAME"・"L:ffn:sS@NAME")と、
+        そのカンマ区切り(例 "heads,layers")。holdout=True で質問を半分に分け、偶数番目で選び、奇数番目(選ぶのに使っていない質問)で
+        表の数(allocate.table[].holdout)と応答の確かめを測る。loop_direction は重みを 2 回使うモデルでループの中の部品に使う方向の段
+        (first / second)。"""
         try:
             p = {"spec": spec, "target": target, "n_heads": n_heads, "max_examples": max_examples,
                  "resume": None if resume else False, "rank": rank, "unit_kinds": unit_kinds, "n_units": n_units,
-                 "check_replies": check_replies}
+                 "check_replies": check_replies, "holdout": holdout, "loop_direction": loop_direction}
             return jobs.start("head_pipeline", {k: v for k, v in p.items() if v is not None}).view()
         except Exception as e:  # noqa: BLE001
             return _err(e)

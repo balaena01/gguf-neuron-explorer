@@ -136,6 +136,80 @@ def test_neuron_proj_matrices_lora_and_bake(tmp_path):
     np.testing.assert_allclose(got, exp, atol=2e-2)
 
 
+def test_whole_layer_proj_notation_matrices_lora_and_bake(tmp_path):
+    """v0.8.1: 層の書き込み全体の射影 L:attn:sS@NAME・L:ffn:sS@NAME。行列全体から方向成分を引く(W ← W − s r̂ (r̂ᵀW))。
+    全部のヘッド(全部のニューロン)を同じ s で射影したのと同じ。ヘッドと同じ層に入れても、テンソルは 1 つで階数 1(足し算)。
+    LoRA・焼き込み・記録・対照が通る。"""
+    from gguf import GGUFReader
+    from gne.headproj import ProjBuilder, ProjHead, heads_to_units, parse_proj_specs, proj_control_recipes, proj_heads
+    u = parse_unit("1:attn:s1.5@d1")
+    assert (u.layer, u.kind, u.mode, u.k, u.head, u.neuron, u.direction) == (1, "attn", "proj", 1.5, None, None, "d1")
+    assert u.label() == "L1 attn s1.5 @d1" and parse_unit("2:FFN:s2").kind == "ffn"
+    r = Recipe([u, parse_unit("2:ffn:s1@d1")], name="w")
+    r.validate()
+    r.save(tmp_path / "w.yaml")
+    d = yaml.safe_load((tmp_path / "w.yaml").read_text())
+    assert d["units"][0] == {"layer": 1, "kind": "attn", "mode": "proj", "direction": "d1", "s": 1.5}
+    ps = proj_heads(Recipe.load(tmp_path / "w.yaml"))
+    assert ps == [ProjHead(1, -1, 1.5, "d1", "attn"), ProjHead(2, -1, 1.0, "d1", "ffn")]
+    assert [p.spec() for p in ps] == ["1:attn:s1.5@d1", "2:ffn:s1@d1"] and parse_proj_specs(["2:ffn:s1"], "d1")[0].kind == "ffn"
+    assert [x.kind for x in heads_to_units(ps, "d1")] == ["attn", "ffn"]
+    with pytest.raises(GneError):
+        Recipe([parse_unit("1:attn:s1")]).validate()                          # 方向が無い
+    s, mats = _store_session(tmp_path)
+    b = ProjBuilder(s.weights, s.direction_set)
+    whole = b.tensors([ProjHead(1, -1, 1.5, "d1", "attn"), ProjHead(1, -1, 2.0, "d1", "ffn")])
+    each = b.tensors([ProjHead(1, h, 1.5, "d1") for h in range(4)] + [ProjHead(1, n, 2.0, "d1", "neuron") for n in range(24)])
+    for name in ("blk.1.attn_output.weight", "blk.1.ffn_down.weight"):
+        np.testing.assert_allclose(whole[name][1] @ whole[name][0], each[name][1] @ each[name][0], atol=1e-5)
+    rv = _unit(np.load(s.direction_path("d1"))["layer_1"].astype(np.float64))
+    W = mats["blk.1.attn_output.weight"].astype(np.float64)
+    A, B = whole["blk.1.attn_output.weight"]
+    assert A.shape == (1, 12)
+    np.testing.assert_allclose(W + B @ A, W - 1.5 * np.outer(rv, rv @ W), atol=1e-5)
+    mixed = b.tensors([ProjHead(1, -1, 1.0, "d1", "attn"), ProjHead(1, 2, 1.0, "d1")])     # 同じ行列: 1 つのテンソル・階数 1
+    assert list(mixed) == ["blk.1.attn_output.weight"] and mixed["blk.1.attn_output.weight"][0].shape == (1, 12)
+    rec = s.recipe(units=["1:attn:s1@d1", "1:ffn:s2@d1", "2:H1:s1@d1"], name="wr")
+    out = s.gain(rec, tmp_path / "w.lora.gguf")
+    assert out["proj_layers"]["1"]["whole"] == [[1.0, "d1"]] and out["proj_layers"]["1"]["heads"] == []
+    assert out["proj_neuron_layers"]["1"]["whole"] == [[2.0, "d1"]]
+    rd = GGUFReader(tmp_path / "w.lora.gguf")
+    meta = json.loads(rd.fields["gne.headproj"].contents())
+    assert {(x.get("kind", "head"), x["layer"]) for x in meta["heads"]} == {("attn", 1), ("ffn", 1), ("head", 2)}
+    hb = s.gain(rec, tmp_path / "wb.gguf", bake=True, requant="f16")
+    assert sorted(m["tensor"] for m in hb["modified"]) == ["blk.1.attn_output.weight", "blk.1.ffn_down.weight",
+                                                           "blk.2.attn_output.weight"]
+    got = np.array({x.name: x for x in GGUFReader(tmp_path / "wb.gguf").tensors}["blk.1.ffn_down.weight"].data,
+                   dtype=np.float32).reshape(16, 24)
+    Wd = mats["blk.1.ffn_down.weight"].astype(np.float64)
+    np.testing.assert_allclose(got, Wd - 2.0 * np.outer(rv, rv @ Wd), atol=2e-2)
+    ctl = proj_control_recipes(s, s.recipe(units=["1:attn:s1@d1", "1:ffn:s2@d1"], name="c"), 2, score_layers=[2])
+    for c in ctl:
+        cp = proj_heads(c)
+        assert [p.kind for p in cp] == ["attn", "ffn"] and all(p.layer != 1 and p.layer <= 2 for p in cp)
+        assert [p.s for p in cp] == [1.0, 2.0]
+
+
+def test_reply_breaks():
+    """応答での確かめで、組を当てると繰り返し・空が側の質問の 1/4 以上増えたら知らせる(SenseNova の disclaimer で層全体の組が壊した例)。"""
+    from gne.api import reply_breaks
+    row = lambda loop, empty, n=30: {"n": n, "loop": loop, "empty": empty}     # noqa: E731
+    assert reply_breaks({"none": {"A": row(2, 0), "B": row(1, 0)}, "recipe": {"A": row(20, 0), "B": row(11, 0)}}) == \
+        {"A": {"loop": 20, "empty": 0, "n": 30, "loop_none": 2, "empty_none": 0}, "B": {"loop": 11, "empty": 0, "n": 30, "loop_none": 1, "empty_none": 0}}
+    assert reply_breaks({"none": {"A": row(2, 0), "B": row(1, 0)}, "recipe": {"A": row(4, 1), "B": row(1, 0)}}) == {}
+    assert set(reply_breaks({"none": {"A": row(0, 0, 4), "B": row(0, 0, 4)}, "recipe": {"A": row(0, 2, 4), "B": row(1, 0, 4)}})) == {"A"}
+
+
+def test_parse_kinds_with_layers():
+    from gne.unitwrites import parse_kinds
+    assert parse_kinds("layers") == ("layer_attn", "layer_mlp")
+    assert parse_kinds("heads,layers") == ("attn", "linear", "layer_attn", "layer_mlp")
+    assert parse_kinds("all,layers") == ("attn", "linear", "neuron", "layer_attn", "layer_mlp")
+    assert parse_kinds("attn,layer_mlp") == ("attn", "layer_mlp") and parse_kinds("all") == ("attn", "linear", "neuron")
+    with pytest.raises(GneError):
+        parse_kinds("heads,bogus")
+
+
 def test_head_only_records_unchanged(tmp_path):
     """ヘッドだけのレシピは、記録(gne.headproj)・キャッシュの鍵・層のまとめに種類の項目が増えない。"""
     from gne.headproj import ProjBuilder, ProjHead, layer_summary, proj_cache_key, proj_meta
@@ -318,6 +392,73 @@ def test_neuron_proj_check_v24_v25(session):
     from gne.schemas import SCHEMA_VERSION, HeadprojCheckOut
     HeadprojCheckOut.model_validate({"schema_version": SCHEMA_VERSION, "command": "headproj check", "model_id": "x",
                                      "llama_cpp_version": "x", "seed": 0, "generated_at": "x", **d})
+
+
+@pytest.mark.model
+def test_whole_layer_proj_check(session):
+    """層の書き込み全体の射影の LoRA: 注意の出力全体・MLP の出力全体の差が −s·r̂·(r̂·v) と合い、方向成分が (1 − s) 倍、直交成分は変わらない。"""
+    from gne.schemas import SCHEMA_VERSION, HeadprojCheckOut
+    for kind in ("attn", "ffn"):
+        d = session.check_whole_proj(12, kind, "evil", ss=(1.0, 2.0))
+        assert d["ok"] and d["v24"] and d["v25"], (kind, d["rows"])
+        assert all(abs(r["par_after_over_before"] - (1 - r["s"])) < 0.05 for r in d["rows"])
+        HeadprojCheckOut.model_validate({"schema_version": SCHEMA_VERSION, "command": "headproj check", "model_id": "x",
+                                         "llama_cpp_version": "x", "seed": 0, "generated_at": "x", **d})
+
+
+@pytest.mark.model
+def test_pipeline_whole_layer_units(session):
+    """--unit-kinds heads,layers: 層全体の部品が同じ順位表に並び(点数はその層の全部のヘッド・ニューロンの和)、組では層全体と
+    その層の同じ行列の個別の部品が重ならない。"""
+    d = yaml.safe_load(EVIL.read_text(encoding="utf-8"))
+    spec = {"name": "pwl", "system_a": d["system_a"], "system_b": d["system_b"], "user_prompts": d["user_prompts"],
+            "pipeline": {"verify_top": 8, "verify_sample": 0, "n_units": [4, 2], "max_examples": 8, "check_replies": 0,
+                         "target": "B", "unit_kinds": "heads,layers"}}
+    out = session.heads_pipeline(spec)
+    assert out["writes"]["kinds"] == ["attn", "linear", "layer_attn", "layer_mlp"]
+    js = json.loads(Path(out["writes"]["path"]).read_text(encoding="utf-8"))
+    rows = js["rows"]
+    la = [r for r in rows if r["kind"] == "layer_attn"]
+    lm = [r for r in rows if r["kind"] == "layer_mlp"]
+    assert la and lm and all(r["label"] == f"{r['layer']}:attn" for r in la) and all(r["label"] == f"{r['layer']}:ffn" for r in lm)
+    z = np.load(out["writes"]["npz"])
+    for r in la[:3]:                                   # 層の注意全体の点数 = その層の全部のヘッドの点数の和
+        m = z["head_layer"] == r["layer"]
+        assert r["score"] == pytest.approx(float((z["head_a_sel"][m] - z["head_b_sel"][m]).sum()), rel=1e-4, abs=1e-4)
+    for r in lm[:3]:
+        L = r["layer"]
+        assert r["score"] == pytest.approx(float((z[f"neuron_a_sel_{L}"] - z[f"neuron_b_sel_{L}"]).sum()), rel=1e-4, abs=1e-4)
+    for t in out["allocate"]["table"] + ([out["allocate"]["s1"]] if out["allocate"].get("s1") else []):
+        if t.get("skipped"):
+            continue
+        whole = {h["layer"] for h in t["heads"] if h["kind"] == "layer_attn"}
+        assert not any(h["layer"] in whole and h["kind"] in ("attn", "linear") for h in t["heads"])
+        rec = Recipe.load(t["recipe"])
+        assert len(rec.proj_units) == t["n_used"]
+
+
+@pytest.mark.model
+def test_pipeline_holdout(session):
+    """--holdout: 質問を半分に分け、偶数番目で選び、奇数番目で表の各行(と倍率を上げる前の組)の数と応答の確かめを測り直す。"""
+    d = yaml.safe_load(EVIL.read_text(encoding="utf-8"))
+    d["user_prompts"] = d["user_prompts"] + [q + " Answer in one sentence." for q in d["user_prompts"]]   # 半分ずつに足りる数
+    spec = {"name": "pho", "system_a": d["system_a"], "system_b": d["system_b"], "user_prompts": d["user_prompts"],
+            "validate": {k: v for k, v in d["validate"].items() if k != "prompts"},
+            "pipeline": {"verify_top": 6, "verify_sample": 0, "n_units": [3], "max_examples": 8, "check_replies": 2,
+                         "check_tokens": 8, "target": "B", "holdout": True}}
+    out = session.heads_pipeline(spec)
+    n = len(d["user_prompts"])
+    assert out["n_prompts"] == (n + 1) // 2 and out["holdout"]["n_a"] == min(8, n // 2)
+    al = out["allocate"]
+    assert al["holdout"] == out["holdout"]
+    for r in [x for x in al["table"] if not x.get("skipped")] + ([al["s1"]] if al.get("s1") else []):
+        h = r["holdout"]
+        assert set(h) >= {"a_mean", "remain", "b_side_delta", "b_drift_orth", "effect", "reached"} and 0 <= h["remain"] <= out["holdout"]["n_a"]
+    rep = yaml.safe_load(Path(out["holdout"]["contrast"]).read_text(encoding="utf-8"))
+    assert rep["user_prompts"] == d["user_prompts"][1::2]
+    assert out["check"]["n"]["A"] == 2
+    with pytest.raises(GneError):
+        session.heads_pipeline({**spec, "name": "pho2", "user_prompts": d["user_prompts"][:10]})   # 半分ずつにするには少ない
 
 
 @pytest.mark.model

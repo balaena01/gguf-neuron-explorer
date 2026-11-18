@@ -23,12 +23,16 @@ from .steer import GneError, Recipe
 
 
 def _idx(u) -> int:
-    """proj のユニットの番号(ヘッドはヘッドの番号、ニューロンはニューロンの番号)。"""
+    """proj のユニットの番号(ヘッドはヘッドの番号、ニューロンはニューロンの番号、層全体の attn・ffn は −1)。"""
+    if u.kind in ("attn", "ffn"):
+        return -1
     return int(u.neuron) if u.kind == "neuron" else int(u.head)
 
 
 def _vkey(lp, u) -> str:
-    """loop_visits の鍵: ヘッドは "21:H20"(今までと同じ)、ニューロンは "21:N4096"。"""
+    """loop_visits の鍵: ヘッドは "21:H20"(今までと同じ)、ニューロンは "21:N4096"、層全体は "21:attn" / "21:ffn"。"""
+    if u.kind in ("attn", "ffn"):
+        return f"{lp.stored(int(u.layer))}:{u.kind}"
     return f"{lp.stored(int(u.layer))}:{'N' if u.kind == 'neuron' else 'H'}{_idx(u)}"
 
 

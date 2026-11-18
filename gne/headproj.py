@@ -42,17 +42,23 @@ class ProjHead:
     head: int
     s: float
     direction: str
-    kind: str = "head"
+    kind: str = "head"           # head / neuron / attn(層の注意の出力全体)/ ffn(層の MLP の出力全体)。attn・ffn の head は -1
 
     def spec(self) -> str:
         if self.kind == "neuron":
             return f"{self.layer}:N{self.head}:s{self.s:.4g}@{self.direction}"
+        if self.kind in WHOLE:
+            return f"{self.layer}:{self.kind}:s{self.s:.4g}@{self.direction}"
         return f"{self.layer}:H{self.head}:s{self.s:.4g}@{self.direction}"
 
     @property
     def key(self) -> tuple[int, int, str]:
         """(層, 番号, 種類)。ヘッドとニューロンで番号が重なっても別のユニット。"""
         return (self.layer, self.head, self.kind)
+
+
+WHOLE = ("attn", "ffn")                          # 層の書き込み全体の射影(v0.8.1)
+TENSOR_KIND = {"head": "head", "attn": "head", "neuron": "neuron", "ffn": "neuron"}   # 書き込む行列(ヘッドと同じ / ニューロンと同じ)
 
 
 def proj_heads(recipe: Recipe) -> list[ProjHead]:
@@ -64,16 +70,22 @@ def proj_heads(recipe: Recipe) -> list[ProjHead]:
             raise GneError("BAD_RECIPE", f"{u.label()}: 方向がありません(ユニットの direction かレシピの default_direction)")
         if u.kind == "neuron":
             out.append(ProjHead(int(u.layer), int(u.neuron), float(u.k), str(d), "neuron"))
+        elif u.kind in WHOLE:
+            out.append(ProjHead(int(u.layer), -1, float(u.k), str(d), u.kind))
         else:
             out.append(ProjHead(int(u.layer), int(u.head), float(u.k), str(d)))
     return out
 
 
 def heads_to_units(heads: list[ProjHead], default_direction: str | None = None) -> list[Unit]:
-    return [Unit(p.layer, p.head, 0.0, "neuron", mode="proj", k=float(p.s),
-                 direction=None if p.direction == default_direction else p.direction) if p.kind == "neuron" else
-            Unit(p.layer, None, 0.0, "head", mode="proj", k=float(p.s), head=p.head,
-                 direction=None if p.direction == default_direction else p.direction) for p in heads]
+    def one(p):
+        d = None if p.direction == default_direction else p.direction
+        if p.kind == "neuron":
+            return Unit(p.layer, p.head, 0.0, "neuron", mode="proj", k=float(p.s), direction=d)
+        if p.kind in WHOLE:
+            return Unit(p.layer, None, 0.0, p.kind, mode="proj", k=float(p.s), direction=d)
+        return Unit(p.layer, None, 0.0, "head", mode="proj", k=float(p.s), head=p.head, direction=d)
+    return [one(p) for p in heads]
 
 
 def parse_proj_specs(specs: list[str], default_direction: str | None = None) -> list[ProjHead]:
@@ -83,12 +95,14 @@ def parse_proj_specs(specs: list[str], default_direction: str | None = None) -> 
     for sp in specs:
         u = parse_unit(sp)
         if u.mode != "proj":
-            raise GneError("BAD_UNIT", f"{sp!r} は方向成分の射影(L:Hh:sS@NAME / L:Nn:sS@NAME)ではありません")
+            raise GneError("BAD_UNIT", f"{sp!r} は方向成分の射影(L:Hh:sS@NAME / L:Nn:sS@NAME / L:attn:sS@NAME / L:ffn:sS@NAME)ではありません")
         d = u.direction or default_direction
         if not d:
             raise GneError("BAD_UNIT", f"{sp!r}: 方向がありません(@NAME か --direction)")
         if u.kind == "neuron":
             out.append(ProjHead(u.layer, int(u.neuron), float(u.k), d, "neuron"))
+        elif u.kind in WHOLE:
+            out.append(ProjHead(u.layer, -1, float(u.k), d, u.kind))
         else:
             out.append(ProjHead(u.layer, u.head, float(u.k), d))
     return out
@@ -141,6 +155,7 @@ class ProjBuilder:
 
     def W(self, L: int, kind: str = "head") -> np.ndarray:
         """層 L の、残差に書き込む重み行列 (n_embd, n_in)。head は attn_output / ssm_out、neuron は ffn_down。"""
+        kind = TENSOR_KIND.get(kind, kind)
         key = (L, kind)
         if key not in self._w:
             if len(self._w) >= self.keep_w:
@@ -153,8 +168,15 @@ class ProjBuilder:
         return self._w[key]
 
     def block(self, L: int, p_or_index, kind: str = "head") -> tuple[str, int, int]:
-        """(書き込む行列の名前, 列の範囲 [lo, hi))。ニューロンは ffn_down の 1 列。"""
+        """(書き込む行列の名前, 列の範囲 [lo, hi))。ニューロンは ffn_down の 1 列、層全体(attn・ffn)は行列の全部の列。"""
         idx = p_or_index.head if isinstance(p_or_index, ProjHead) else int(p_or_index)
+        if kind == "attn":
+            name, _, _ = self.weights.head_block(L, 0)
+            li = self.weights.arch.layers[L]
+            return name, 0, li.n_head * li.head_dim
+        if kind == "ffn":
+            neuron_layer_ok(self.weights, L)
+            return f"blk.{L}.ffn_down.weight", 0, self.weights.meta.n_ff_at(self.weights.stored(L))
         if kind == "neuron":
             n_ff = self.weights.meta.n_ff_at(self.weights.stored(L))
             if not 0 <= idx < n_ff:
@@ -168,6 +190,7 @@ class ProjBuilder:
 
     def r_rw(self, L: int, name: str, kind: str = "head") -> tuple[np.ndarray, np.ndarray, int]:
         r, src = self.r_of(L, name)
+        kind = TENSOR_KIND.get(kind, kind)
         key = (L, name, src) if kind == "head" else (L, name, src, kind)
         if key not in self._rw:
             self._rw[key] = (r, (r.astype(np.float64) @ self.W(L, kind)).astype(np.float32))
@@ -182,23 +205,27 @@ class ProjBuilder:
         plan = getattr(self.weights, "loop", None)
         shared = plan is not None and not getattr(self.weights, "per_visit_names", False)
         by_layer: dict[tuple[int, str], list[ProjHead]] = defaultdict(list)
-        for p in heads:
-            by_layer[(plan.stored(p.layer) if shared else p.layer, p.kind)].append(p)
+        for p in heads:                              # 層全体(attn・ffn)は、ヘッド・ニューロンと同じ行列にまとめる
+            by_layer[(plan.stored(p.layer) if shared else p.layer, TENSOR_KIND.get(p.kind, p.kind))].append(p)
         out = {}
         for (L, kind), ps in sorted(by_layer.items()):
             groups: dict[tuple[str, int], list] = {}
-            done: dict[int, list[tuple[int, tuple[str, int]]]] = defaultdict(list)   # ヘッド → 先に掛けた (層, 群)
+            done: list[tuple[int, tuple[str, int], int, int]] = []    # 先に掛けた (層, 群, 列の範囲)
             for p in sorted(ps, key=lambda q: q.layer):
                 r, rw, src = self.r_rw(p.layer, p.direction, kind)
-                g = groups.setdefault((p.direction, src), [r, np.zeros_like(rw)])
-                _, lo, hi = self.block(L, p.head, kind)
+                gk = (p.direction, src)
+                g = groups.setdefault(gk, [r, np.zeros_like(rw)])
+                _, lo, hi = self.block(L, p.head, p.kind if p.kind in WHOLE else kind)
                 row = np.float32(p.s) * rw[lo:hi]
-                for L0, gk in done[p.head] if shared else ():
-                    if L0 != p.layer:                # 別の回のユニットの後に掛ける: r ᵀ(W + ΔW) = rᵀW − Σ (r·r_g) a_g
-                        r_g, a_g = groups[gk]
+                seen = set()
+                for L0, gk0, lo0, hi0 in done if shared else ():
+                    # 別の回のユニットの後に掛ける(列が重なる群ごとに 1 回): r ᵀ(W + ΔW) = rᵀW − Σ (r·r_g) a_g
+                    if L0 != p.layer and gk0 not in seen and lo0 < hi and lo < hi0:
+                        seen.add(gk0)
+                        r_g, a_g = groups[gk0]
                         row = row - np.float32(p.s) * np.float32(r @ r_g) * a_g[lo:hi]
                 g[1][lo:hi] += row
-                done[p.head].append((p.layer, (p.direction, src)))
+                done.append((p.layer, gk, lo, hi))
             A = np.stack([g[1] for g in groups.values()]).astype(np.float32)
             B = np.stack([-g[0] for g in groups.values()], axis=1).astype(np.float32)
             if len(groups) > 1 and warn is not None:
@@ -255,6 +282,10 @@ def proj_meta(heads: list[ProjHead], builder: ProjBuilder) -> dict:
             rows.append({"layer": p.layer, "neuron": p.head, "kind": "neuron", "s": p.s, "direction": p.direction,
                          "direction_from": src, "vector_key": vector_key(r)})
             continue
+        if p.kind in WHOLE:                        # 層の書き込み全体
+            rows.append({"layer": p.layer, "kind": p.kind, "s": p.s, "direction": p.direction,
+                         "direction_from": src, "vector_key": vector_key(r)})
+            continue
         rows.append({"layer": p.layer, "head": p.head, "s": p.s, "direction": p.direction, "direction_from": src,
                      "vector_key": vector_key(r)})
     return {"heads": rows, "direction_layer": builder.direction_layer}
@@ -285,19 +316,21 @@ def layer_summary(weights, heads: list[ProjHead], tens: dict[str, tuple[np.ndarr
     by: dict[int, list[ProjHead]] = defaultdict(list)
     byn: dict[int, list[ProjHead]] = defaultdict(list)
     for p in heads:
-        (byn if p.kind == "neuron" else by)[p.layer].append(p)
+        (byn if TENSOR_KIND.get(p.kind) == "neuron" else by)[p.layer].append(p)
     out, outn = {}, {}
     from .loop import stored_tensor_name
     for L, ps in sorted(by.items()):
         name = stored_tensor_name(weights, weights.head_block(L, 0)[0])
         rank = int(tens[name][1].shape[1]) if name in tens else 0
-        out[str(L)] = {"heads": [[p.head, p.s, p.direction] for p in ps], "rank": rank,
-                       "directions": sorted({p.direction for p in ps}), "folded": rank == 1}
+        out[str(L)] = {"heads": [[p.head, p.s, p.direction] for p in ps if p.kind == "head"], "rank": rank,
+                       "directions": sorted({p.direction for p in ps}), "folded": rank == 1,
+                       **({"whole": [[p.s, p.direction] for p in ps if p.kind == "attn"]} if any(p.kind == "attn" for p in ps) else {})}
     for L, ps in sorted(byn.items()):
         name = stored_tensor_name(weights, f"blk.{L}.ffn_down.weight")
         rank = int(tens[name][1].shape[1]) if name in tens else 0
-        outn[str(L)] = {"neurons": [[p.head, p.s, p.direction] for p in ps], "rank": rank,
-                        "directions": sorted({p.direction for p in ps}), "folded": rank == 1}
+        outn[str(L)] = {"neurons": [[p.head, p.s, p.direction] for p in ps if p.kind == "neuron"], "rank": rank,
+                        "directions": sorted({p.direction for p in ps}), "folded": rank == 1,
+                        **({"whole": [[p.s, p.direction] for p in ps if p.kind == "ffn"]} if any(p.kind == "ffn" for p in ps) else {})}
     return {"proj_layers": out, **({"proj_neuron_layers": outn} if outn else {})}
 
 
@@ -564,6 +597,30 @@ def neuron_control_pool(weights, recipe: Recipe, *, pool: str = "before",
     return out
 
 
+def whole_control_pool(weights, recipe: Recipe, *, pool: str = "before", score_layers: list[int] | None = None) -> dict[str, list[int]]:
+    """層全体の proj(attn・ffn)の対照の母集団: 種類ごとに、レシピの層の最も後ろ(または score_layers の最大)以前でその種類を
+    当てられる層(2 回目の層は 1 回目と同じ重みなので除く)から、レシピで使った層を除いたもの。same-layers は使えない(同じ層は
+    同じ行列なので)ので before と同じに扱う。"""
+    ps = [p for p in proj_heads(recipe) if p.kind in WHOLE]
+    plan = getattr(weights, "loop", None)
+    shared = plan is not None and not getattr(weights, "per_visit_names", False)
+    top = max(score_layers) if score_layers else max(p.layer for p in ps)
+    out = {}
+    for k in WHOLE:
+        used = {weights.stored(p.layer) if shared else p.layer for p in ps if p.kind == k}
+        Ls = []
+        for li in weights.arch.layers:
+            L = li.index
+            if L > top or (shared and plan.second(L)) or L in used:
+                continue
+            if k == "attn" and li.head_dim and li.head_writer:
+                Ls.append(L)
+            if k == "ffn" and li.ffn == "dense" and not li.has_post_ffn_norm and weights.has_tensor(f"blk.{weights.stored(L)}.ffn_down.weight"):
+                Ls.append(L)
+        out[k] = Ls
+    return out
+
+
 def proj_control_recipes(session, recipe: Recipe, n: int, *, pool: str = "before",
                          score_layers: list[int] | None = None, seed_base: int | None = None) -> list[Recipe]:
     """proj のユニットを、同数のランダムなヘッドに替えた n 本(s の値と方向は元の組と同じものを並べ替えずに当てる。
@@ -573,8 +630,14 @@ def proj_control_recipes(session, recipe: Recipe, n: int, *, pool: str = "before
     allp = proj_heads(recipe)
     heads = [p for p in allp if p.kind == "head"]
     neurons = [p for p in allp if p.kind == "neuron"]
+    wholes = [p for p in allp if p.kind in WHOLE]
     if n <= 0 or not allp:
         return []
+    wcand = whole_control_pool(session.weights, recipe, pool=pool, score_layers=score_layers) if wholes else {}
+    for k in WHOLE:
+        need = sum(1 for p in wholes if p.kind == k)
+        if need > len(wcand.get(k, [])):
+            raise GneError("BAD_ARGS", f"対照の層({k})が足りません(母集団 {len(wcand.get(k, []))}、要るのは {need})")
     cand = control_pool(session.weights, recipe, pool=pool, score_layers=score_layers) if heads else []
     if len(cand) < len(heads):
         raise GneError("BAD_ARGS", f"対照のヘッドが足りません(母集団 {len(cand)}、要るのは {len(heads)})")
@@ -595,6 +658,12 @@ def proj_control_recipes(session, recipe: Recipe, n: int, *, pool: str = "before
             pick = [ncand[int(i)] for i in rng.choice(len(ncand), size=len(neurons), replace=False)]
             units += [Unit(L, nn, 0.0, "neuron", mode="proj", k=p.s, direction=p.direction)
                       for (L, nn), p in zip(pick, neurons, strict=True)]
+        for t, k in enumerate(WHOLE):                # 層全体のユニットは、同じ種類の別の層に替える(ヘッド・ニューロンとは別の乱数の列)
+            ws = [p for p in wholes if p.kind == k]
+            if ws:
+                rng = np.random.default_rng([seed_base if seed_base is not None else SEED_BASE, 10 + t, j])
+                pick = [wcand[k][int(i)] for i in rng.choice(len(wcand[k]), size=len(ws), replace=False)]
+                units += [Unit(L, None, 0.0, k, mode="proj", k=p.s, direction=p.direction) for L, p in zip(pick, ws, strict=True)]
         out.append(recipe.like(units, name=f"{recipe.name or 'recipe'}-randproj{j}"))
     return out
 
@@ -688,6 +757,77 @@ def check_neuron_proj(session, L: int, n: int, direction: str, *, ss=(1.0, 2.0, 
 
 
 # --- 検証(CHANGE-06 I: V24・V25)----------------------------------------------------------------------
+
+def check_whole_proj(session, L: int, kind: str, direction: str, *, ss=(1.0, 2.0, 6.0), text: str | None = None,
+                     direction_layer: str = "own") -> dict:
+    """層の書き込み全体の proj(kind attn = 注意の出力全体、ffn = MLP の出力全体)の V24・V25: LoRA を当てると、その出力の差が
+    −s · r̂ (r̂ · v)(v は無介入の出力。attn は全部のヘッドの出力と W_O から、ffn は MLP の出力 ffn_out)と合い(相対誤差の中央値 < 3%)、
+    方向成分が (1 − s) 倍になり、r̂ に直交する成分が変わらない(< 3%)か。"""
+    from .attn import _names, _probe, capture_attention, writer_out_name
+    if kind not in WHOLE:
+        raise GneError("BAD_ARGS", f"kind は attn(注意の出力全体)か ffn(MLP の出力全体)です({kind!r})")
+    text = text or "Tell me a short story about a lighthouse keeper and the sea. 灯台守の話をして。"
+    e, w = session.engine, session.weights
+    probe, ctx = _probe(e)
+    names = _names(e, probe, ctx, e.tokenize(text, add_special=True, parse_special=False)[:16])
+    if kind == "attn":
+        w.head_block(L, 0)
+        out_name = writer_out_name(session, names, L)
+    else:
+        neuron_layer_ok(w, L)
+        out_name = f"ffn_out-{L}" if f"ffn_out-{L}" in names else None
+    if out_name is None:
+        raise GneError("ARCH_UNSUPPORTED", f"層 {L} の{'注意' if kind == 'attn' else ' MLP'}の出力が捕捉できません")
+    ds = session.direction_set(direction)
+    r, src = head_direction(ds, L, direction_layer)
+    r = r.astype(np.float64)
+    base = capture_attention(session, [text], layers=[L], want_pattern=False, want_head_out=kind == "attn", extra=[out_name])[0]
+    if kind == "attn":                                                   # 全部のヘッドの出力 × W_O = 注意が残差に書くベクトル
+        X = base.head_out[L].astype(np.float64)
+        v = X.reshape(X.shape[0], -1) @ w.head_writer_matrix(L).astype(np.float64).T
+    else:
+        v = base.extra[out_name].astype(np.float64)
+    vr = v @ r
+    vn = np.linalg.norm(v, axis=1)
+    keep = vn > 1e-6 * max(1.0, float(vn.max()))
+    d = session.store.heads_dir(session.meta.model_id)
+    d.mkdir(parents=True, exist_ok=True)
+    rows = []
+    for s_ in ss:
+        rec = Recipe([Unit(L, None, 0.0, kind, mode="proj", k=float(s_), direction=direction)],
+                     session.meta.model_id, name=f"v24-L{L}{kind}", direction_layer=direction_layer)
+        path = d / f"v24-L{L}-{kind}-s{s_:g}.lora.gguf"
+        export_proj_lora(w, rec, path, session.direction_set)
+        got = capture_attention(session, [text], layers=[L], want_pattern=False, want_head_out=False, extra=[out_name],
+                                lora=[(str(path), 1.0)])[0]
+        e.drop_lora(path)
+        path.unlink(missing_ok=True)
+        meas = (got.extra[out_name] - base.extra[out_name]).astype(np.float64)
+        pred = -s_ * np.outer(vr, r)
+        den = np.linalg.norm(pred, axis=1)
+        k2 = keep & (den > 1e-6 * max(1.0, float(den.max())))
+        rel = np.linalg.norm(meas - pred, axis=1)[k2] / den[k2]
+        new_par = (v + meas) @ r
+        orth = meas - np.outer(meas @ r, r)
+        orth_rel = np.linalg.norm(orth, axis=1)[keep] / vn[keep]
+        row = {"s": float(s_), "rel_err_median": float(np.median(rel)) if rel.size else None,
+               "rel_err_p95": float(np.percentile(rel, 95)) if rel.size else None,
+               "par_after_over_before": float(np.median(new_par[keep] / np.where(np.abs(vr[keep]) > 0, vr[keep], 1.0)))
+               if keep.any() else None,
+               "orth_change_rel_max": float(orth_rel.max()) if orth_rel.size else None,
+               "orth_change_rel_median": float(np.median(orth_rel)) if orth_rel.size else None}
+        expect = 1.0 - s_
+        row["ok"] = bool(rel.size and np.median(rel) < 0.03 and row["orth_change_rel_median"] is not None
+                         and row["orth_change_rel_median"] < 0.03
+                         and abs(row["par_after_over_before"] - expect) < 0.05 * max(1.0, abs(expect)))
+        rows.append(row)
+    e.free_attn_probe()
+    ok = all(r_["ok"] for r_ in rows)
+    return {"layer": L, "kind": kind, "out_tensor": out_name, "direction": direction, "direction_from": src,
+            "dir_cos": float(np.median(np.abs(vr[keep]) / vn[keep])) if keep.any() else None,
+            "rows": rows, "v24": ok, "v25": all(r_["orth_change_rel_median"] is not None and r_["orth_change_rel_median"] < 0.03
+                                                 for r_ in rows), "ok": ok}
+
 
 def check_head_proj(session, L: int, h: int, direction: str, *, ss=(1.0, 2.0, 6.0), k_gain: float = 0.0,
                     text: str | None = None, direction_layer: str = "own") -> dict:

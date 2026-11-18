@@ -566,3 +566,41 @@ def test_real_writes_ranking_mhc(tmp_path):
         assert m["v24"], m["rows"]
     finally:
         s.close()
+
+
+@real
+def test_real_writes_loop_direction_and_whole_layers(tmp_path):
+    """v0.8.1: loop_direction second では、ループの中の部品を 2 回目の段の番号で表し(その段の方向で測り、射影する。重みは同じ)、
+    1 回目の段は候補にしない。層ごとの直接の書き込み(layer_scores)と層全体の部品(layer_attn・layer_mlp)が並ぶ。
+    層全体の射影(ffn・attn)の LoRA は、ループの中の層でも式どおり(重みは両方の回で同じ)。"""
+    import json as _json
+    import yaml as _yaml
+    from gne.api import Session
+    from gne.steer import GneError
+    cfg = Path(__file__).resolve().parent.parent / "configs" / "pipeline" / "question_kinds.json"
+    d = _json.loads(cfg.read_text(encoding="utf-8"))
+    c = tmp_path / "qk.yaml"
+    c.write_text(_yaml.safe_dump({"name": "qk", "prompts_a": d["prompts_a"][:6], "prompts_b": d["prompts_b"][:6]},
+                                 allow_unicode=True), encoding="utf-8")
+    try:
+        s = Session(MODEL, root=tmp_path / "root", n_ctx=1024, n_seq_max=1)
+        s.engine
+    except (RuntimeError, GneError) as ex:
+        pytest.skip(f"この llama.cpp では読めません: {ex}")
+    try:
+        s.direction(contrast=c, name="qk", positions="last")
+        out = s.heads_writes("qk", kinds="heads,layers", verify_top=0, loop_direction="second")
+        lp = s.weights.loop
+        z = np.load(out["npz"])
+        hl = {int(L) for L in z["head_layer"]}
+        assert any(lp.second(L) for L in hl) and not any(lp.visit(L) == 1 for L in hl)   # ループの中は 2 回目の段で表す
+        rows = _json.loads(Path(out["path"]).read_text(encoding="utf-8"))["rows"]
+        assert any(r["kind"] == "layer_attn" for r in rows) and any(r["kind"] == "layer_mlp" for r in rows)
+        assert not any(r["kind"] in ("layer_attn", "layer_mlp") and lp.visit(r["layer"]) == 1 for r in rows)
+        assert out["layer_scores"] and {"layer", "attn", "mlp"} <= set(out["layer_scores"][0])
+        for kind in ("ffn", "attn"):
+            m = s.check_whole_proj(10, kind, "qk", ss=(1.0,))
+            assert m["v24"] and m["v25"], (kind, m["rows"])
+    finally:
+        s.close()
+

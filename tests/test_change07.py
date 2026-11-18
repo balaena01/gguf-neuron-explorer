@@ -228,9 +228,10 @@ def test_validate_keyed_errors():
     Recipe([_keyed(key="zundamon_k~12")]).validate()
     _bad(Recipe([_keyed(key=None)], default_key="bad key"), "default_key")
     _bad(Recipe([parse_unit("14:8949:+1.0")], default_key="-k"), "default_key")
-    # kind ffn・attn は keyed だけ
-    _bad(Recipe([Unit(3, None, 0.5, "ffn")]), "keyed だけ")
-    _bad(Recipe([Unit(3, None, 0.0, "attn", mode="gain", k=2.0)]), "keyed だけ")
+    # kind ffn・attn は keyed か proj(層の書き込み全体の射影、v0.8.1)だけ
+    _bad(Recipe([Unit(3, None, 0.5, "ffn")]), "keyed か proj だけ")
+    _bad(Recipe([Unit(3, None, 0.0, "attn", mode="gain", k=2.0)]), "keyed か proj だけ")
+    Recipe([Unit(3, None, 0.0, "attn", mode="proj", k=1.0, direction="d")]).validate()
     _bad(Recipe([Unit(3, 1, 0.0, mode="nope")]), "keyed")
 
 

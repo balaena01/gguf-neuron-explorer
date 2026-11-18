@@ -7,7 +7,7 @@
 import { getJSON, postJSON } from "./api.js";
 import { t } from "./i18n.js";
 import { esc, qHTML } from "./panels.js";
-import { parseProj } from "./recipe.js";
+import { parseProj, projSpec } from "./recipe.js";
 import { composing, noteHTML } from "./ui.js";
 
 const fmt = (x, d = 2) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : (+x).toFixed(d));
@@ -26,8 +26,7 @@ function shuffled(arr, seed) {
 
 // 候補のその倍率のユニット("L:Hh:sS@NAME" の s に倍率を掛けたもの)
 export function candidateSpecs(c, direction) {
-  return (c.units || []).map((u) => parseProj(u, direction)).filter(Boolean)
-    .map((u) => `${u.layer}:H${u.head}:s${+(u.s * c.scale).toFixed(4)}@${u.direction}`);
+  return (c.units || []).map((u) => parseProj(u, direction)).filter(Boolean).map((u) => projSpec(u, c.scale));
 }
 
 export class CandidatesPanel {

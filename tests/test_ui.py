@@ -3137,6 +3137,14 @@ def _seed_pipeline_writes_081(s, name: str = "ppw81") -> dict:
                   "a_mean": 14.0, "b_side_delta": 0.2, "b_drift_orth": 0.02, "effect": 15.8, "recipe": str(hd / f"{name}.alloc-s1.yaml")})
     out["recommended"] = {"n_heads": 4, "units": al["table"][0]["units"], "recipe": al["table"][0]["recipe"], "reached": False,
                           "by": "best_effect"}
+    # 層全体の部品(L13 attn)、選ぶのに使っていない質問での数(holdout)、層ごとの直接の書き込み
+    al["table"][0]["heads"][2] = {"layer": 13, "head": -1, "kind": "layer_attn", "s": 2.0}
+    al["table"][0]["kinds"] = {**al["table"][0]["kinds"], "layer_attn": 1}
+    for r in al["table"]:
+        r["holdout"] = {"a_mean": -2.0, "remain": 2, "b_side_delta": 0.3, "b_toward": 0.01, "b_drift_orth": 0.06, "effect": 31.7, "reached": False}
+    al["holdout"] = out["holdout"] = {"contrast": "x.yaml", "n_a": 3, "n_b": 3, "target": -9.5, "base_a_mean": 29.0, "base_b_mean": -9.5}
+    out["writes"]["layer_scores"] = [{"layer": 13, "attn": 4.0, "mlp": 6.0, "attn_share": 0.1, "mlp_share": 0.15},
+                                     {"layer": 12, "attn": 2.0, "mlp": 1.0, "attn_share": 0.05, "mlp_share": 0.025}]
     (hd / f"{name}.pipeline.json").write_text(json.dumps(out, ensure_ascii=False))
     return out
 
@@ -3219,9 +3227,12 @@ def test_pipeline_writes_raise_trace_panel(pipe_writes_server, browser):
         assert pg.evaluate(f"document.querySelectorAll('{res} table.pp-cmp details').length") == 2
         txt = pg.evaluate(f"document.querySelector('{res} table.pp-cmp').innerText")
         head = pg.evaluate(f"document.querySelector('{res} .pp-res-head').innerText")
+        assert "L13 attn" in txt                                                           # 層全体の部品
         if lang == "ja":
             assert "B 側が A 側へ動くので止めた" in txt and "上げても良くならないので止めた" in txt and "倍率を上げる前" in txt
-            assert "どれも目標に届かないので" in head
+            assert "どれも目標に届かないので" in head and "選ぶのに使っていない質問" in txt
+            whole = pg.evaluate(f"document.querySelector('{res}').textContent")              # 段の表示を畳んでいても見る
+            assert "層ごとの直接の書き込み" in whole and "L13" in whole and "質問を半分に分けました" in whole
         _step(pg, "chips", "alloc")
         pg.click(f"{res} table.pp-cmp [data-load='s1']")
         assert pg.evaluate("window.gne.recipe.specs()") == ["12:H5:s1@ppw81", "14:N100:s1@ppw81", "13:N7:s1@ppw81", "12:H3:s1@ppw81"]

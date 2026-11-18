@@ -1117,6 +1117,7 @@ class HeadsPipelineOut(Envelope):               # gne heads pipeline(方向 → 
     verify: dict[str, Any] | None = None         # rank writes: 上位を 1 個ずつ確かめた結果(順位相関・上位の行)
     check: dict[str, Any] | None = None          # rank writes: 応答での確かめ(無介入と組の、書き終えた応答の一致数など)
     no_recommend: dict[str, Any] | None = None   # rank writes: 推す組が無いときの理由(reason)と次の手(next)
+    holdout: dict[str, Any] | None = None        # rank writes --holdout: 表の数を測り直した、選ぶのに使っていない質問(数・目標)
 
 
 class HeadsWritesOut(Envelope):                 # gne heads writes(全部の部品を、方向への書き込みの量で順位づけ)
@@ -1218,7 +1219,7 @@ class HeadprojCheckOut(Envelope):               # CHANGE-06 V24・V25(gne headpr
     head: int | None = None
     block: list[int] | None = None
     neuron: int | None = None                   # ニューロンの射影を確かめたとき(ffn_down の列)
-    kind: str | None = None                     # "neuron"(ヘッドのときは無し)
+    kind: str | None = None                     # "neuron"・"attn"・"ffn"(層の書き込み全体、v0.8.1)。ヘッドのときは無し
     act_tensor: str | None = None               # ニューロン: 活性(ffn_down の入力)のテンソル名
     n_active: int | None = None                 # ニューロン: 活性があって比べた位置の数
     n_tokens: int | None = None
@@ -1227,8 +1228,9 @@ class HeadprojCheckOut(Envelope):               # CHANGE-06 V24・V25(gne headpr
     direction_from: int
     dir_cos_head: float | None = None
     dir_cos_neuron: float | None = None         # ニューロンの書く向き(ffn_down の列)と方向の |cos|
+    dir_cos: float | None = None                # 層の書き込み全体: 書き込みと方向の |cos| の中央値
     rows: list[dict[str, Any]]
-    gain: dict[str, Any]
+    gain: dict[str, Any] | None = None          # 対比の gain(層の書き込み全体のときは無し)
     v24: bool
     v25: bool
     ok: bool

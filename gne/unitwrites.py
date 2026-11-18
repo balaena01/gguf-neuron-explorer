@@ -30,10 +30,14 @@ from pathlib import Path
 
 import numpy as np
 
-from .headproj import ProjBuilder, ProjHead, heads_to_units, neuron_layer_ok
+from .headproj import TENSOR_KIND, WHOLE, ProjBuilder, ProjHead, heads_to_units, neuron_layer_ok
 from .steer import GneError, Recipe
 
 KINDS = ("attn", "linear", "neuron")
+LAYER_KINDS = ("layer_attn", "layer_mlp")     # 層の書き込み全体(注意の出力全体・MLP の出力全体)を 1 つの部品にする(v0.8.1)
+ALL_KINDS = KINDS + LAYER_KINDS
+GROUPS = {"heads": ("attn", "linear"), "neurons": ("neuron",), "neuron": ("neuron",), "all": KINDS, "layers": LAYER_KINDS}
+UNIT_KIND = {"neuron": "neuron", "layer_attn": "attn", "layer_mlp": "ffn"}   # 行の種類 → ProjHead の kind(ほかは head)
 
 
 def kind_of_layer(session, L: int) -> str:
@@ -45,23 +49,30 @@ def _shared(session) -> bool:
     return getattr(w, "loop", None) is not None and not getattr(w, "per_visit_names", False)
 
 
-def unit_layers(session, up_to: int, kinds) -> tuple[list[int], list[int]]:
-    """候補の部品がある層(ヘッドの層, ニューロンの層)。重みを 2 回使うモデルで両方の回に当てるときは、1 回目の層で表す。"""
+def unit_layers(session, up_to: int, kinds, loop_direction: str = "first") -> tuple[list[int], list[int]]:
+    """候補の部品がある層(ヘッドの層, ニューロンの層)。重みを 2 回使うモデルで両方の回に当てるときは、loop_direction が
+    first なら 1 回目の段、second なら 2 回目の段で表す(部品の番号の段の方向 r̂ で測り、射影する。重みは同じ)。
+    層全体の部品(layer_attn・layer_mlp)を求めたときは、その層のヘッド・ニューロンも測る(層全体の書き込みはその和)。"""
+    if loop_direction not in ("first", "second"):
+        raise GneError("BAD_ARGS", f"loop_direction は first(1 回目の段の方向)か second(2 回目の段の方向)です({loop_direction!r})")
     w = session.weights
     plan = getattr(w, "loop", None)
     shared = _shared(session)
     hl, nl = [], []
     for li in w.arch.layers:
         L = li.index
-        if L > up_to or (shared and plan.second(L)):
+        if shared and plan.second(L):
             continue
-        if ("attn" in kinds or "linear" in kinds) and li.head_dim and li.head_writer:
-            if kind_of_layer(session, L) in kinds:
-                hl.append(L)
-        if "neuron" in kinds and li.ffn == "dense" and not li.has_post_ffn_norm \
+        rep = L + plan.shift if shared and loop_direction == "second" and plan.visit(L) == 1 else L
+        if rep > up_to:
+            continue
+        if ("attn" in kinds or "linear" in kinds or "layer_attn" in kinds) and li.head_dim and li.head_writer:
+            if kind_of_layer(session, L) in kinds or "layer_attn" in kinds:
+                hl.append(rep)
+        if ("neuron" in kinds or "layer_mlp" in kinds) and li.ffn == "dense" and not li.has_post_ffn_norm \
                 and w.has_tensor(f"blk.{w.stored(L)}.ffn_down.weight"):
-            nl.append(L)
-    return hl, nl
+            nl.append(rep)
+    return sorted(hl), sorted(nl)
 
 
 def visits_of(session, L: int) -> list[int]:
@@ -70,31 +81,35 @@ def visits_of(session, L: int) -> list[int]:
 
 
 def parse_kinds(spec) -> tuple[str, ...]:
-    """部品の種類の指定: heads(注意 + 線形注意)/ all(+ ニューロン)/ neurons / attn,linear,neuron の並び。"""
-    if spec in (None, "", "all"):
+    """部品の種類の指定: heads(注意 + 線形注意)/ all(+ ニューロン)/ neurons / layers(層の注意の出力全体・MLP の出力全体)か、
+    attn・linear・neuron・layer_attn・layer_mlp とこれらの名前のカンマ区切り(例 heads,layers)。"""
+    if spec in (None, ""):
         return KINDS
-    if isinstance(spec, str):
-        s = spec.strip().lower()
-        if s == "heads":
-            return ("attn", "linear")
-        if s in ("neurons", "neuron"):
-            return ("neuron",)
-        parts = [x.strip() for x in s.split(",") if x.strip()]
-    else:
-        parts = [str(x).strip().lower() for x in spec]
-    bad = [x for x in parts if x not in KINDS]
-    if bad or not parts:
-        raise GneError("BAD_ARGS", f"部品の種類は heads / all / neurons か、attn・linear・neuron の並びです({spec!r})")
-    return tuple(k for k in KINDS if k in parts)
+    parts = [x.strip() for x in spec.lower().split(",") if x.strip()] if isinstance(spec, str) else \
+        [str(x).strip().lower() for x in spec]
+    got = set()
+    for x in parts:
+        if x in GROUPS:
+            got |= set(GROUPS[x])
+        elif x in ALL_KINDS:
+            got.add(x)
+        else:
+            got = None
+            break
+    if not got:
+        raise GneError("BAD_ARGS", f"部品の種類は heads / all / neurons / layers か、attn・linear・neuron・layer_attn・layer_mlp の"
+                                   f"カンマ区切りです({spec!r})")
+    return tuple(k for k in ALL_KINDS if k in got)
 
 
 # --- 1. 書き込みの順位づけ ---------------------------------------------------------------------------------
 
 def measure_writes(session, ds, cs, *, select_layer: int, positions: str = "last", subset: str = "all",
                    max_examples: int | None = None, kinds=KINDS, direction_layer: str = "own", top_q: int = 256,
-                   candidate_layers: list[int] | None = None, progress=None) -> tuple[dict, dict]:
+                   candidate_layers: list[int] | None = None, loop_direction: str = "first",
+                   progress=None) -> tuple[dict, dict]:
     """部品ごとの書き込み(と層ごとの更新のベクトル)を測る。戻り値 (まとめ, 保存する配列)。candidate_layers を渡すと、
-    順位に入れる部品をその層のものに絞る(層ごとの更新のベクトルは全部の層で測る)。"""
+    順位に入れる部品をその層のものに絞る(層ごとの更新のベクトルは全部の層で測る)。loop_direction は unit_layers。"""
     from .attn import _names, _probe, head_out_names, writer_out_name
     from .capture import pick_act_name
     from .direction import Scorer
@@ -114,9 +129,11 @@ def measure_writes(session, ds, cs, *, select_layer: int, positions: str = "last
     shared = _shared(session)
     builder = ProjBuilder(w, session.direction_set, direction_layer=direction_layer, keep_w=4)
     rS = ds.unit(S).astype(np.float64)
-    hl, nl = unit_layers(session, S - 1, kinds)
-    if candidate_layers is not None:
+    hl, nl = unit_layers(session, S - 1, kinds, loop_direction)
+    if candidate_layers is not None:                  # 重みを 2 回使うモデルでは、どちらの回の段で書いても同じ重みを指す
         keep = {int(x) for x in candidate_layers}
+        if shared:
+            keep |= {plan.stored(x) for x in keep} | {plan.stored(x) + plan.shift for x in keep if plan.visit(plan.stored(x)) == 1}
         hl, nl = [L for L in hl if L in keep], [L for L in nl if L in keep]
         if not hl and not nl:
             raise GneError("BAD_ARGS", f"candidate_layers に、選ぶ層 L{S} より前の部品のある層がありません")
@@ -271,6 +288,25 @@ def measure_writes(session, ds, cs, *, select_layer: int, positions: str = "last
         if per["A"]["lo"][L] and per["A"]["lo"][L - 1] and len(per["A"]["lo"][L]) == len(per["A"]["lo"][L - 1]):
             real = (np.stack(per["A"]["lo"][L]).astype(np.float64) - np.stack(per["A"]["lo"][L - 1]).astype(np.float64)).mean(axis=0)
             chk_layer[L] = float(np.linalg.norm(upd["layer_a"][L] - real) / max(np.linalg.norm(real), 1e-12))
+    # 層ごとの直接の書き込み(注意全体・MLP 全体を s=1 で射影したときに選ぶ層で縮む A−B の差。層の更新のベクトルから。部品の種類の
+    # 指定に関係なく出す。重みを 2 回使うモデルで両方の回に当てるときは、同じ重みの 2 回分を、部品の番号の段の方向で足す)
+    lay: dict[int, list[float]] = {}
+    for L in exec_layers:
+        if L >= S or not (arch.layers[L].head_dim or arch.layers[L].ffn == "dense"):
+            continue
+        rep = L
+        if shared and plan.visit(L) != 0:
+            st_ = plan.stored(L)
+            rep = st_ + plan.shift if loop_direction == "second" else st_
+        r_, _ = builder.r_of(rep, ds.name)
+        r_ = r_.astype(np.float64)
+        c_ = float(r_ @ rS)
+        x = lay.setdefault(rep, [0.0, 0.0])
+        x[0] += float((upd["attn_diff"][L] + upd["linear_diff"][L]) @ r_) * c_
+        x[1] += float(upd["mlp_diff"][L] @ r_) * c_
+    layer_scores = sorted(({"layer": L, "attn": v[0], "mlp": v[1], "attn_share": v[0] / gap if abs(gap) > 1e-12 else None,
+                            "mlp_share": v[1] / gap if abs(gap) > 1e-12 else None} for L, v in lay.items()),
+                          key=lambda d_: -max(d_["attn"], d_["mlp"]))
     # 部品ごとの書き込み
     rows_h = []                                        # (層, 番号, 種類, a_own, b_own, a_sel, b_sel)
     hq = {"A": [], "B": []}
@@ -321,21 +357,35 @@ def measure_writes(session, ds, cs, *, select_layer: int, positions: str = "last
     # 順位
     units = []                                         # (点数, 種類, 層, 番号, a_own, b_own, a_sel, b_sel)
     for L, h, k, ao, bo, as_, bs in rows_h:
-        units.append((as_ - bs, k, L, h, ao, bo, as_, bs))
+        if k in kinds:
+            units.append((as_ - bs, k, L, h, ao, bo, as_, bs))
     big = []
-    for L, (ao, bo, as_, bs, _, _) in neu.items():
-        sc_ = as_ - bs
-        top = np.argsort(-sc_)[:max(top_q, 64)]       # 全部を行にすると重いので、層ごとに上位だけ並べる(合計は配列で)
-        big += [(float(sc_[n]), "neuron", L, int(n), float(ao[n]), float(bo[n]), float(as_[n]), float(bs[n])) for n in top]
+    if "neuron" in kinds:
+        for L, (ao, bo, as_, bs, _, _) in neu.items():
+            sc_ = as_ - bs
+            top = np.argsort(-sc_)[:max(top_q, 64)]   # 全部を行にすると重いので、層ごとに上位だけ並べる(合計は配列で)
+            big += [(float(sc_[n]), "neuron", L, int(n), float(ao[n]), float(bo[n]), float(as_[n]), float(bs[n])) for n in top]
     units += big
+    if "layer_attn" in kinds:                          # 層の注意の出力全体 = その層の全部のヘッドの和
+        for L in hl:
+            xs = [x for x in rows_h if x[0] == L]
+            units.append((sum(x[5] - x[6] for x in xs), "layer_attn", L, -1, sum(x[3] for x in xs), sum(x[4] for x in xs),
+                          sum(x[5] for x in xs), sum(x[6] for x in xs)))
+    if "layer_mlp" in kinds:                           # 層の MLP の出力全体 = その層の全部のニューロンの和
+        for L, (ao, bo, as_, bs, _, _) in neu.items():
+            units.append((float((as_ - bs).sum()), "layer_mlp", L, -1, float(ao.sum()), float(bo.sum()), float(as_.sum()), float(bs.sum())))
     units.sort(key=lambda x: -x[0])
-    totals = {k: 0.0 for k in KINDS}
+    totals = {k: 0.0 for k in ALL_KINDS}
     for x in rows_h:
         totals[x[2]] += x[5] - x[6]
+        totals["layer_attn"] += x[5] - x[6]
     for L, (_, _, as_, bs, _, _) in neu.items():
         totals["neuron"] += float((as_ - bs).sum())
+        totals["layer_mlp"] += float((as_ - bs).sum())
 
     def label(k, L, i):
+        if k in LAYER_KINDS:
+            return f"{L}:{UNIT_KIND[k]}"
         return f"{L}:{'N' if k == 'neuron' else 'H'}{i}"
     rows = [{"label": label(k, L, i), "layer": L, "index": i, "kind": k, "score": float(sc_),
              "share": float(sc_ / gap) if abs(gap) > 1e-12 else None,
@@ -346,8 +396,23 @@ def measure_writes(session, ds, cs, *, select_layer: int, positions: str = "last
     tq = {"A": np.zeros((nq["A"], len(topu)), np.float32), "B": np.zeros((nq["B"], len(topu)), np.float32)}
     hidx = {(L, h): j for j, (L, h, *_x) in enumerate(rows_h)}
     HQ = {s: (np.concatenate(hq[s], axis=1) if hq[s] else np.zeros((nq[s], 0))) for s in "AB"}
+    hcols = {}                                         # 層 → その層のヘッドの列(層の注意の出力全体の質問ごとの値)
+    for j, (L, *_x) in enumerate(rows_h):
+        hcols.setdefault(L, []).append(j)
     for j, r_ in enumerate(topu):
-        if r_["kind"] != "neuron":
+        if r_["kind"] == "layer_attn":
+            for s in "AB":
+                tq[s][:, j] = HQ[s][:, hcols[r_["layer"]]].sum(axis=1)
+        elif r_["kind"] == "layer_mlp":
+            L = r_["layer"]
+            g = neu[L][4]
+            for s in "AB":
+                v = np.zeros(nq[s])
+                for V in visits_of(session, L):
+                    if V in per[s]["ma"]:
+                        v += stack(s, "ma", V) @ g
+                tq[s][:, j] = v
+        elif r_["kind"] != "neuron":
             for s in "AB":
                 tq[s][:, j] = HQ[s][:, hidx[(r_["layer"], r_["index"])]]
         else:
@@ -380,14 +445,17 @@ def measure_writes(session, ds, cs, *, select_layer: int, positions: str = "last
         arrays[f"neuron_b_own_{L}"] = bo.astype(np.float32)
         arrays[f"neuron_a_sel_{L}"] = as_.astype(np.float32)
         arrays[f"neuron_b_sel_{L}"] = bs.astype(np.float32)
-    by_kind_n = {k: sum(1 for x in rows_h if x[2] == k) for k in ("attn", "linear")}
-    by_kind_n["neuron"] = int(sum(v[0].size for v in neu.values()))
+    by_kind_n = {k: sum(1 for x in rows_h if x[2] == k) if k in kinds else 0 for k in ("attn", "linear")}
+    by_kind_n["neuron"] = int(sum(v[0].size for v in neu.values())) if "neuron" in kinds else 0
+    by_kind_n["layer_attn"] = len(hl) if "layer_attn" in kinds else 0
+    by_kind_n["layer_mlp"] = len(neu) if "layer_mlp" in kinds else 0
     summary = {"direction": ds.name, "select_layer": S, "positions": positions, "subset": subset,
                "max_examples": max_examples, "kinds": list(kinds), "direction_layer": direction_layer,
                "n": nq, "skipped_long": skipped, "gap": gap,
                "base": {"A": float(np.mean(per["A"]["pS"])), "B": float(np.mean(per["B"]["pS"]))},
-               "n_units": by_kind_n, "head_layers": hl, "neuron_layers": nl,
+               "n_units": by_kind_n, "head_layers": hl, "neuron_layers": nl, "layer_scores": layer_scores,
                "loop_edits": ("shared" if shared else "per_visit") if plan is not None else None,
+               **({"loop_direction": loop_direction} if shared else {}),
                "totals": {k: v for k, v in totals.items()},
                "totals_share": {k: (v / gap if abs(gap) > 1e-12 else None) for k, v in totals.items()},
                "check": {"attn_rel_max": float(np.nanmax(chk_attn)) if np.isfinite(chk_attn).any() else None,
@@ -414,8 +482,7 @@ def _dense_ok(w, L: int) -> bool:
 # --- 2. 確かめ(1 個ずつ流し直す)---------------------------------------------------------------------------
 
 def unit_of(row: dict, s: float, direction: str) -> ProjHead:
-    return ProjHead(int(row["layer"]), int(row["index"]), float(s), direction,
-                    "neuron" if row["kind"] == "neuron" else "head")
+    return ProjHead(int(row["layer"]), int(row["index"]), float(s), direction, UNIT_KIND.get(row["kind"], "head"))
 
 
 def ablate_unit_tensors(st, row: dict) -> dict:
@@ -446,6 +513,8 @@ def verify_units(session, st, rows: list[dict], *, mode: str = "proj", progress=
     from .causal import _row_common, spearman
     if mode not in ("proj", "ablate"):
         raise GneError("BAD_ARGS", "確かめ方は proj(s=1 で射影)か ablate(出力を 0)です")
+    if mode == "ablate" and any(r["kind"] in LAYER_KINDS for r in rows):
+        raise GneError("BAD_ARGS", "層全体の部品(layer_attn・layer_mlp)は ablate では確かめられません(proj で確かめる)")
     out = []
     for i, r in enumerate(rows):
         t0 = time.perf_counter()
@@ -463,7 +532,7 @@ def verify_units(session, st, rows: list[dict], *, mode: str = "proj", progress=
         if progress:
             progress(i + 1, len(rows), f"heads writes: 確かめ {r['label']}")
     corr = {}
-    for k in ("all", *KINDS):
+    for k in ("all", *ALL_KINDS):
         sel = [x for x in out if k == "all" or x["kind"] == k]
         if len(sel) >= 3:
             corr[k] = {"n": len(sel), "score_vs_gap_drop": spearman([x["score"] for x in sel], [x["gap_drop"] for x in sel]),
@@ -518,13 +587,21 @@ def allocate_units(session, st, verified: list[dict], *, target: float, n_units=
         if progress:
             progress(steps[0], max(steps[0], est), msg)
 
+    def others(got, gb) -> dict:
+        """選ぶ層のほかの測る層での、A 側の平均・B 側の変化・直交成分のずれ(ループのモデルでは 1 回目の出口も見る)。"""
+        return {str(L): {"a_mean": float(got["A"]["values"][L].mean()),
+                         "b_delta": float(gb["B"]["values"][L].mean()) - float(st.base["B"][L].mean()),
+                         "b_orth": drift(st.base["B_resid"][L], gb["B"]["resid"][L], st.scorer.r[L])[1]}
+                for L in st.score_layers if L != S}
+
     def run(units: list[ProjHead], alpha: float = 1.0) -> dict:
         with st.tmp.use(st.builder.tensors([u for u in units if u.s])) as lora:
             got = st.scorer.run(lora, sides="A", which={"A": a_all})
             gb = st.scorer.run(lora, sides="B", which={"B": st.b_idx}, keep=True)
         tick("allocate")
         orth = drift(st.base["B_resid"][S], gb["B"]["resid"][S], st.scorer.r[S])[1]
-        return sc.point(alpha, float(got["A"]["values"][S].mean()), float(gb["B"]["values"][S].mean()), orth)
+        return {**sc.point(alpha, float(got["A"]["values"][S].mean()), float(gb["B"]["values"][S].mean()), orth),
+                "layers": others(got, gb)}
     pool = sorted([r for r in verified if not r.get("excluded") and (r.get("effect") or 0) > 0],
                   key=lambda r: -r["effect"])
     nmax = max(int(x) for x in n_units)
@@ -532,21 +609,36 @@ def allocate_units(session, st, verified: list[dict], *, target: float, n_units=
     # s=1 で 1 個ずつ足す(A 側の平均が下がり、組の効きが増え、上限の中のときだけ)
     chosen: list[ProjHead] = []
     trace = []
-    at1: list[dict] = []                         # 採った i+1 個の組の s=1 での点
+    at1: dict[tuple, dict] = {}                  # 組(部品の並び)→ s=1 での点
     cur = sc.point(1.0, base_a, sc.base_b, 0.0)
+    w = session.weights
+
+    def tkey(u: ProjHead) -> tuple[int, str]:  # 書き込む行列(重みを持つ層と、ヘッドの行列か MLP の行列か)
+        return (w.stored(u.layer), TENSOR_KIND[u.kind])
     for r in pool:
         if len(chosen) >= nmax or cur["a_mean"] <= target:
             break
         u = unit_of(r, 1.0, ds.name)
-        g = run(chosen + [u])
+        # 層全体の部品と、その層の同じ行列の個別の部品は二重に引くことになるので、両方は入れない: 層全体を試すときは、
+        # 組の中の同じ行列の個別の部品と入れ替えて比べる。層全体が組にあれば、その行列の個別の部品は試さない
+        if u.kind in WHOLE:
+            out_ = [c for c in chosen if c.kind not in WHOLE and tkey(c) == tkey(u)]
+        else:
+            if any(c.kind in WHOLE and tkey(c) == tkey(u) for c in chosen):
+                trace.append({"label": r["label"], "kind": r["kind"], "accepted": False, "covered": True})
+                continue
+            out_ = []
+        trial = [c for c in chosen if c not in out_] + [u]
+        g = run(trial)
         ok = g["a_mean"] < cur["a_mean"] - 1e-6 and g["effect"] > cur["effect"] and g["feasible"]
         trace.append({"label": r["label"], "kind": r["kind"], "accepted": bool(ok), "a_mean": g["a_mean"],
                       "b_delta": g["b_delta"], "b_drift_orth": g["b_orth"], "effect": g["effect"],
-                      **({"over": g["over"]} if g["over"] else {})})
+                      **({"over": g["over"]} if g["over"] else {}),
+                      **({"replaces": [c.spec().split(":s")[0] for c in out_]} if out_ else {})})
         if ok:
-            chosen.append(u)
+            chosen = trial
             cur = g
-            at1.append(g)
+            at1[tuple(c.spec() for c in chosen)] = g
 
     def finish(units: list[ProjHead], alpha: float, label: str) -> dict:
         heads = [ProjHead(u.layer, u.head, alpha, u.direction, u.kind) for u in units]
@@ -562,18 +654,19 @@ def allocate_units(session, st, verified: list[dict], *, target: float, n_units=
         ss = [p.s for p in heads]
         bm = float(got["B"]["values"][S].mean())
         pt = SetScore(base_a, float(b_base[S].mean()), drift_max, b_move_max).point(alpha, float(va.mean()), bm, orth)
+        def kind_of(p):
+            return {"neuron": "neuron", "attn": "layer_attn", "ffn": "layer_mlp"}.get(p.kind) or kind_of_layer(session, p.layer)
         return {"n_used": len(heads),
-                "heads": [{"layer": p.layer, "head": p.head, "kind": p.kind if p.kind == "neuron" else
-                           kind_of_layer(session, p.layer), "s": p.s} for p in heads],
-                "kinds": {k: sum(1 for p in heads if (p.kind == "neuron" and k == "neuron") or
-                                 (p.kind == "head" and kind_of_layer(session, p.layer) == k)) for k in KINDS},
+                "heads": [{"layer": p.layer, "head": p.head, "kind": kind_of(p), "s": p.s} for p in heads],
+                "kinds": {k: sum(1 for p in heads if kind_of(p) == k) for k in ALL_KINDS},
                 "units": [p.spec() for p in heads], "s_max": max(ss), "s_median": float(np.median(ss)), "alpha": alpha,
                 "hard_mean": float(va.mean()), "remain": int((va > thr).sum()), "a_max": float(va.max()),
                 "a_mean": float(va.mean()), "b_mean": bm, "b_side_delta": pt["b_delta"], "b_toward": pt["b_toward"],
                 "effect": pt["effect"], "feasible": pt["feasible"],
                 "closed": (base_a - float(va.mean())) / (base_a - target) if abs(base_a - target) > 1e-9 else None,
                 "b_drift_par": par, "b_drift_orth": orth, "recipe": str(rpath),
-                "by_layer": {str(L): {"A": float(got["A"]["values"][L].mean()), "B": float(got["B"]["values"][L].mean())}
+                "by_layer": {str(L): {"A": float(got["A"]["values"][L].mean()), "B": float(got["B"]["values"][L].mean()),
+                                      "b_orth": drift(st.base["B_resid"][L], gb["B"]["resid"][L], st.scorer.r[L])[1]}
                              for L in st.score_layers}}
 
     table = []
@@ -588,7 +681,7 @@ def allocate_units(session, st, verified: list[dict], *, target: float, n_units=
             table.append({"n_heads": n, "n_units": n, "skipped": f"{prev['n_heads']} 個の上限の組と同じ({len(units)} 個)",
                           "same_as": prev["n_heads"]})
             continue
-        p1 = at1[len(units) - 1]
+        p1 = at1.get(tuple(c.spec() for c in units)) or run(units)     # 入れ替えがあると、上限で切った組は測っていない
         alpha, stop, n_iter, rtrace = 1.0, "target", 0, [dict(p1, phase="s1")]
         if p1["a_mean"] > target:
             alpha, stop, rtrace = _raise(lambda a, units=units: run([ProjHead(u.layer, u.head, a, u.direction, u.kind)
@@ -605,6 +698,19 @@ def allocate_units(session, st, verified: list[dict], *, target: float, n_units=
         t0 = time.perf_counter()
         s1 = {"n_heads": len(chosen), **finish(chosen, 1.0, "s1"), "seconds": time.perf_counter() - t0}
         s1["reached"] = bool(s1["a_mean"] <= target + 1e-6)
+    notes = []                                      # 知らせ(code と、CLI・MCP 向けの文 text)
+    if s1 is not None and not s1["reached"] and s1.get("closed") is not None and s1["closed"] < 0.5:
+        notes.append({"code": "s1_low", "closed": float(s1["closed"]),
+                      "text": f"倍率を上げる前の組(取り除くだけ)は、目標までの差の {100 * s1['closed']:.0f}% しか縮めません。直接書き込む"
+                              "部品の成分を取り除くだけでは届かない題材で、強さを上げて(成分を反転させて)届かせています"})
+    plan = getattr(session.weights, "loop", None)
+    if plan is not None and _shared(session):
+        inner = sorted({plan.stored(u.layer) for u in chosen if plan.visit(u.layer) != 0})
+        if inner:
+            notes.append({"code": "loop_inner", "lo": inner[0], "hi": inner[-1], "first": [plan.lo1, plan.hi1],
+                          "text": f"組にループの中の部品(段 {inner[0]}〜{inner[-1]} の重み)が入っています。重みは 2 回とも使われるので、"
+                                  f"1 回目(段 {plan.lo1}〜{plan.hi1})にも効きます"
+                                  + (f"(表の段 {plan.hi1} の値)" if loop_exit(session, st.score_layers) else "")})
     rec_n, why, no_rec = _recommend(table, len(a_all), sc)
     for r in table:
         r["recommended"] = r.get("n_heads") == rec_n and rec_n is not None
@@ -614,14 +720,21 @@ def allocate_units(session, st, verified: list[dict], *, target: float, n_units=
            "method": "unit1", "s_max": s_max, "remain_threshold": thr, "n_a": len(a_all), "n_b": len(st.b_idx),
            "base_a_mean": base_a, "base_b_mean": float(st.base["B"][S].mean()), "gap": sc.gap,
            "base_by_layer": {str(L): {"A": float(st.base["A"][L].mean()), "B": float(b_base[L].mean())} for L in st.score_layers},
+           "loop_exit": loop_exit(session, st.score_layers),
            "initial": None, "pool": len(pool), "trace": trace, "table": table, "s1": s1, "recommended": rec_n,
-           "recommended_by": why, "no_recommend": no_rec, "seconds": time.perf_counter() - t_all}
+           "recommended_by": why, "no_recommend": no_rec, "notes": notes, "seconds": time.perf_counter() - t_all}
     if progress:
         progress(steps[0], steps[0], "allocate")
     p = session.store.heads_dir(session.meta.model_id) / f"{name}.alloc.json"
     p.write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
     out["path"] = str(p)
     return out
+
+
+def loop_exit(session, score_layers) -> int | None:
+    """同じ層を 2 回実行するモデルで、1 回目の出口の段(測る層に入っているとき)。表に、そこでの値を並べる。"""
+    plan = getattr(session.weights, "loop", None)
+    return plan.hi1 if plan is not None and plan.hi1 in score_layers else None
 
 
 def _recommend(table: list[dict], n_a: int, sc: SetScore) -> tuple[int | None, str | None, dict | None]:
@@ -689,6 +802,8 @@ def _raise(run_at, p1: dict, target: float, s_max: float, sc: SetScore, *, n_gri
         if not p["feasible"]:                       # 上限を超えた: 手前の点とのあいだで、上限の中の最大の α
             lo, hi = prev, a
             for _ in range(iters):
+                if hi - lo < 0.02 * hi:              # 2% まで詰めれば十分(目標に届く最小の α を詰めるのと同じ)
+                    break
                 mid = 0.5 * (lo + hi)
                 pm = dict(run_at(mid), phase="edge")
                 trace.append(pm)
@@ -727,7 +842,7 @@ def save_writes(session, name: str, summary: dict, arrays: dict, verify: dict | 
     rows = summary["rows"]
     keep = rows[:show]
     seen = {r["label"] for r in keep}
-    for k in KINDS:
+    for k in ALL_KINDS:
         for r in [x for x in rows if x["kind"] == k][:50]:
             if r["label"] not in seen:
                 keep.append(r)
