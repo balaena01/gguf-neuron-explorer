@@ -61,7 +61,7 @@ llama-cpp-python 経由で llama.cpp の上で動くので、手元の量子化�
 - モデル: Qwen3-0.6B、Qwen3.5-4B（線形注意との混合）、SmolLM2-135M-Instruct（arch `llama`）。どれも Q8_0。
 - Metal では試していません。
 - MoE モデル: granite-3.1-1b-a400m と LFM2-8B-A1B。[MoE(専門家を選ぶモデル)](#moe専門家を選ぶモデル)を見てください。
-- SenseNova-Loop-9B(arch `sensenova_loop`、層 4〜27 を 2 回実行する)の Q4_K_M と Q8_0。公式の llama.cpp はまだ読めないので、第三者の改造版の llama.cpp と、llama-cpp-python の 2 か所の直しを入れた専用の環境が要ります。[docs/sensenova_loop.md](docs/sensenova_loop.md) と、改造版に当てる任意のパッチ [third_party/sensenova-loop/](third_party/sensenova-loop/README.md) を見てください。
+- SenseNova-Loop-9B(arch `sensenova_loop`、層 4〜27 を 2 回実行する)の公式の GGUF(sensenova/SenseNova-Loop-9B-GGUF)。公式の llama.cpp はまだ読めないので、モデルの開発元の改造版の llama.cpp(OpenSenseNova/llama.cpp。llama.cpp 1.0 が元)と、llama-cpp-python 0.3.36 の直しを入れた専用の環境が要ります。[docs/sensenova_loop.md](docs/sensenova_loop.md) と、パッチ [third_party/sensenova-loop/](third_party/sensenova-loop/README.md) を見てください。
 - 初めて使うモデルでは、まず `gne verify` で確かめてください。
 
 ## インストール

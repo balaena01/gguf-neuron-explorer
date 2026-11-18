@@ -57,7 +57,7 @@ Tested on:
 - Models: Qwen3-0.6B, Qwen3.5-4B (hybrid linear attention) and SmolLM2-135M-Instruct (arch `llama`), all Q8_0.
 - Metal has not been tested.
 - MoE models: granite-3.1-1b-a400m and LFM2-8B-A1B. See [Mixture of Experts](#mixture-of-experts).
-- SenseNova-Loop-9B (arch `sensenova_loop`, layers 4-27 run twice), Q4_K_M and Q8_0. The official llama.cpp cannot load it yet: it needs a dedicated environment with a third-party llama.cpp fork and a two-line fix to llama-cpp-python. See [docs/sensenova_loop.md](docs/sensenova_loop.md) and the optional fork patches in [third_party/sensenova-loop/](third_party/sensenova-loop/README.md).
+- SenseNova-Loop-9B (arch `sensenova_loop`, layers 4-27 run twice), the official GGUF files from sensenova/SenseNova-Loop-9B-GGUF. The official llama.cpp cannot load it yet: it needs a dedicated environment with the model team's llama.cpp fork (OpenSenseNova/llama.cpp, based on llama.cpp 1.0) and a fix to llama-cpp-python 0.3.36. See [docs/sensenova_loop.md](docs/sensenova_loop.md) and the patches in [third_party/sensenova-loop/](third_party/sensenova-loop/README.md).
 - On a model you have not used before, run `gne verify` first.
 
 ## Install

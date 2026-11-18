@@ -1,0 +1,56 @@
+From: balaena01 <261439497+balaena01@users.noreply.github.com>
+Subject: [PATCH] llama-cpp-python 0.3.36 on llama.cpp 1.0 (OpenSenseNova/llama.cpp @ 24ea7bb)
+
+- _ctypes_extensions.py: llama.cpp 1.0 removed 36 deprecated functions (llama_load_model_from_file, llama_n_embd,
+  llama_token_* ...). Binding them raised AttributeError at import; a missing symbol now becomes a stub that raises
+  NotImplementedError when called.
+- llama_cpp.py: llama_context_params lost defrag_thold and gained moe_cache_size (size_t) and moe_cache_cpu_share (float)
+  after type_v; llama_perf_context_data gained n_reallocs_same and n_reallocs_diff (int32).
+
+---
+diff --git a/llama_cpp/_ctypes_extensions.py b/llama_cpp/_ctypes_extensions.py
+index 02cee8a..f93ca07 100644
+--- a/llama_cpp/_ctypes_extensions.py
++++ b/llama_cpp/_ctypes_extensions.py
+@@ -145,7 +145,13 @@ def ctypes_function_for_shared_library(lib: ctypes.CDLL):
+     ):
+         def decorator(f: F) -> F:
+             if enabled:
+-                func = getattr(lib, name)
++                try:
++                    func = getattr(lib, name)
++                except AttributeError:
++                    # removed from this libllama (deprecated API dropped upstream): keep the import working, fail on use
++                    def missing(*args, **kwargs):
++                        raise NotImplementedError(f"{name} is not exported by this libllama")
++                    return functools.wraps(f)(missing)
+                 func.argtypes = argtypes
+                 func.restype = restype
+                 functools.wraps(f)(func)
+diff --git a/llama_cpp/llama_cpp.py b/llama_cpp/llama_cpp.py
+index 94e5aed..5701aae 100644
+--- a/llama_cpp/llama_cpp.py
++++ b/llama_cpp/llama_cpp.py
+@@ -1101,11 +1101,12 @@ class llama_context_params(ctypes.Structure):
+         ("yarn_beta_fast", ctypes.c_float),
+         ("yarn_beta_slow", ctypes.c_float),
+         ("yarn_orig_ctx", ctypes.c_uint32),
+-        ("defrag_thold", ctypes.c_float),
+         ("cb_eval", ggml_backend_sched_eval_callback),
+         ("cb_eval_user_data", ctypes.c_void_p),
+         ("type_k", ctypes.c_int),
+         ("type_v", ctypes.c_int),
++        ("moe_cache_size", ctypes.c_size_t),
++        ("moe_cache_cpu_share", ctypes.c_float),
+         ("abort_callback", ggml_abort_callback),
+         ("abort_callback_data", ctypes.c_void_p),
+         ("embeddings", ctypes.c_bool),
+@@ -5248,6 +5249,8 @@ class llama_perf_context_data(ctypes.Structure):
+         ("n_p_eval", ctypes.c_int32),
+         ("n_eval", ctypes.c_int32),
+         ("n_reused", ctypes.c_int32),
++        ("n_reallocs_same", ctypes.c_int32),
++        ("n_reallocs_diff", ctypes.c_int32),
+     ]
+ 
+ 

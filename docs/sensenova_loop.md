@@ -1,6 +1,6 @@
 # SenseNova-Loop(sensenova_loop)で gne を使う
 
-**公式の llama.cpp は、このモデル(arch `sensenova_loop`)をまだ読めない。** 使うには、第三者の改造版の llama.cpp をビルドし、それを読む llama-cpp-python を入れた、このモデル専用の仮想環境が要る(下の「環境を作る」)。ふだんの gne の環境とは分けておく。
+**公式の llama.cpp(ggml-org)は、このモデル(arch `sensenova_loop`)をまだ読めない。** 使うには、モデルの開発元の改造版 [OpenSenseNova/llama.cpp](https://github.com/OpenSenseNova/llama.cpp) をビルドし、それを読む llama-cpp-python を入れた、このモデル専用の仮想環境が要る(下の「環境を作る」)。改造版は llama.cpp 1.0 が元なので、ふだんの gne の環境(llama-cpp-python 0.3.36 と、それに合う llama.cpp)とは分けておく。
 
 SenseNova-Loop-9B は、同じ層を 2 回続けて実行する(ループさせる)言語モデル。保存されている層は 32 で、そのうち 4〜27 を 2 回通るので、1 回の計算で 56 層分を実行する。
 
@@ -8,30 +8,30 @@ SenseNova-Loop-9B は、同じ層を 2 回続けて実行する(ループさせ�
 
 | 部分 | 中身 |
 |---|---|
-| 層 | 保存されている層 32。層 4〜27 を 2 回実行するので、実行順では 56 層(GGUF の `block_count` も 56) |
+| 層 | 保存されている層 32。層 4〜27 を 2 回実行するので、実行順では 56 層。公式の GGUF の `block_count` は 57(56 層と、先読み用の MTP の層 1 つ。gne は MTP の層を数えない) |
 | 2 回目の層 | 実行順の層 28〜51。重みは層 4〜27 と同じもの(GGUF にも 1 回分しか入っていない) |
 | 残差 | 繰り返しの各回の中では 2 本の流れ(mHC: manifold-constrained hyper-connections)。回の入口で 1 本を 2 本に複製し、出口で平均して 1 本に戻す |
-| ルーター | 各層の attention と MLP の前後にある小さな行列。2 本のどちらをどれだけ読むか、出力をどちらにどれだけ足すか、2 本をどう混ぜるかを、トークンごとに決める |
-| ヘッド | 4 層ごとに full attention(16 ヘッド、幅 256)、ほかは線形注意(32 ヘッド、幅 128) |
+| ルーター | 各層の attention と MLP の前にある小さな行列(`hc_attn_fn`・`hc_ffn_fn`、F32)。2 本のどちらをどれだけ読むか、出力をどちらにどれだけ足すか、2 本をどう混ぜるかを、トークンごとに決める |
+| ヘッド | 4 層ごとに full attention(16 ヘッド、幅 256)、ほかは線形注意(32 ヘッド、幅 128。入力の行列は `attn_qkv_gate`・`ssm_beta_alpha` にまとめて入っている) |
 | MLP | 12,288 ニューロン(SwiGLU) |
 
 ## 環境を作る
 
-確かめた環境は Linux(WSL2)、CUDA 12.4、Python 3.12、RTX 3080 12 GB。改造版の llama.cpp は [GuideboardLabs/llama.cpp-sensenova-loop](https://github.com/GuideboardLabs/llama.cpp-sensenova-loop) のコミット `a7f77a788893ef2cb17c82b9ac0cb1279bcd0918`(公式の llama.cpp の `aa588a3` が元)。gne のリポジトリの [third_party/sensenova-loop/](../third_party/sensenova-loop/README.md) に、この改造版に当てる任意のパッチ 2 本と、llama-cpp-python に当てる必須のパッチ 1 本がある。
+確かめた環境は Linux(WSL2)、CUDA 12.4、Python 3.12、RTX 3080 12 GB。改造版は [OpenSenseNova/llama.cpp](https://github.com/OpenSenseNova/llama.cpp) のコミット `24ea7bb78410e0f0f7bbb362e37c60cd9ecfc761`(モデルカードが指定するもの。ggml-org の llama.cpp の 2026-11-17 の版が元)、GGUF は [sensenova/SenseNova-Loop-9B-GGUF](https://huggingface.co/sensenova/SenseNova-Loop-9B-GGUF)。gne のリポジトリの [third_party/sensenova-loop/](../third_party/sensenova-loop/README.md) に、改造版に当てるパッチ 2 本と、llama-cpp-python に当てる必須のパッチ 1 本がある。
 
-1. 改造版の llama.cpp を取ってきて、ビルドする(共有ライブラリで)。パッチ 0001・0002 は任意(どの機能に要るかは下の表)。
+1. 改造版の llama.cpp を取ってきて、パッチを当ててビルドする(共有ライブラリで)。0001 は gne のほとんどの機能に要る(下の表)。名前を付けてグラフに残すだけで、計算の結果は変わらない。0002 は片方の回だけを書き換えるときに要る。
 
    ```bash
-   git clone https://github.com/GuideboardLabs/llama.cpp-sensenova-loop
-   cd llama.cpp-sensenova-loop
-   git checkout a7f77a788893ef2cb17c82b9ac0cb1279bcd0918
-   git apply <gne>/third_party/sensenova-loop/0001-sensenova-loop-control-vector-on-both-mHC-streams.patch   # 任意
-   git apply <gne>/third_party/sensenova-loop/0002-sensenova-loop-per-visit-weight-names.patch               # 任意(0001 の後)
-   cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON -DBUILD_SHARED_LIBS=ON
-   cmake --build build -j 8 --target llama ggml mtmd llama-server llama-completion
+   git clone https://github.com/OpenSenseNova/llama.cpp llama.cpp-sensenova
+   cd llama.cpp-sensenova
+   git checkout 24ea7bb78410e0f0f7bbb362e37c60cd9ecfc761
+   git apply <gne>/third_party/sensenova-loop/0001-sensenova-loop-graph-names-for-gne.patch
+   git apply <gne>/third_party/sensenova-loop/0002-sensenova-loop-per-visit-weight-names.patch      # 任意(0001 の後)
+   cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON -DBUILD_SHARED_LIBS=ON -DLLAMA_USE_PREBUILT_UI=OFF -DLLAMA_OPENSSL=OFF
+   cmake --build build -j 8 --target llama ggml mtmd llama-completion llama-cli
    ```
 
-2. 専用の仮想環境を作り、gne が使うパッケージを入れる。llama-cpp-python は pip で入れない(公式の llama.cpp を中でビルドしてしまうため)。
+2. 専用の仮想環境を作り、gne が使うパッケージを入れる。llama-cpp-python は pip で入れない(中で別の llama.cpp をビルドしてしまうため)。
 
    ```bash
    uv venv --python 3.12 ~/sensenova-venv
@@ -39,43 +39,48 @@ SenseNova-Loop-9B は、同じ層を 2 回続けて実行する(ループさせ�
    uv pip install --python ~/sensenova-venv/bin/python --no-deps -e <gne>
    ```
 
-3. llama-cpp-python 0.3.36 の Python のパッケージ(`llama_cpp/` のフォルダ)だけを取り出し、構造体の直しを当てて、仮想環境に置く。改造版の `include/llama.h` は、公式の 0.3.36 が前提にしている形と 2 か所違う(`llama_context_params` に `moe_cache_size`、`llama_perf_context_data` に `n_reallocs_same`・`n_reallocs_diff` が増えた)。直さないと、モデルを読み込むときの設定が全部ずれて読まれる。
+3. llama-cpp-python 0.3.36 の Python のパッケージ(`llama_cpp/` のフォルダ)だけを取り出し、llama.cpp 1.0 向けの直しを当てて、仮想環境に置く。直しは 2 つ。llama.cpp 1.0 で外された古い関数 36 個(`llama_load_model_from_file` など)があると 0.3.36 は読み込みの時点で止まるので、無い関数は呼んだときだけ止まるようにする。構造体の 2 か所(`llama_context_params`・`llama_perf_context_data`)を改造版の `include/llama.h` に合わせる。構造体を直さないと、モデルを読み込むときの設定が全部ずれて読まれる。
 
    ```bash
    git clone --depth 1 --branch v0.3.36 https://github.com/abetlen/llama-cpp-python
    cd llama-cpp-python
-   git apply <gne>/third_party/sensenova-loop/llama-cpp-python-0.3.36-structs.patch
+   git apply <gne>/third_party/sensenova-loop/llama-cpp-python-0.3.36-llama-cpp-1.0.patch
    SP=$(~/sensenova-venv/bin/python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
    cp -r llama_cpp "$SP/llama_cpp"
+   mkdir -p "$SP/llama_cpp/lib" && ln -sf <llama.cpp-sensenova>/build/bin/lib*.so* "$SP/llama_cpp/lib/"
    ```
 
-4. 改造版のライブラリを指して gne を動かす。llama-cpp-python は `LLAMA_CPP_LIB_PATH` のフォルダから `libllama.so` を読む。
+4. 改造版のライブラリを指して gne を動かす。
 
    ```bash
-   export LLAMA_CPP_LIB_PATH=<llama.cpp-sensenova-loop>/build/bin LD_LIBRARY_PATH=<llama.cpp-sensenova-loop>/build/bin
+   export LLAMA_CPP_LIB_PATH=<llama.cpp-sensenova>/build/bin LD_LIBRARY_PATH=<llama.cpp-sensenova>/build/bin
    ~/sensenova-venv/bin/gne info -m SenseNova-Loop-9B-Q4_K_M.gguf
    ```
 
-   `gne info` の表に「2 回実行する層」の行が出て、この llama.cpp で何ができるか(2 本の流れの中の層に control vector が届くか、2 回目の層に別の名前があるか)が出る。
+   `gne info` の表の「2 回実行する層」の行に、この llama.cpp で何ができるか(どちらの改造版か、2 本の流れの中の層の残差が読めるか、control vector が届くか、2 回目の層に別の名前があるか)が出る。
 
-GGUF は [guideboardlabs/SenseNova-Loop-9B-GGUF](https://huggingface.co/guideboardlabs/SenseNova-Loop-9B-GGUF) の Q4_K_M と Q8_0 で確かめた。12 GB の GPU では Q4_K_M を勧める(下の「目安」)。
+12 GB の GPU では Q4_K_M を勧める(下の「目安」)。
 
-| 機能 | 改造版のまま | + 0001 | + 0002 |
+| 機能 | 改造版のまま | + 0001 | + 0001 + 0002 |
 |---|---|---|---|
-| 捕捉・方向・CHiPS の一括の流れ・FiSH・`gne nw verify` / `check`・LoRA の書き出し(書き換えは両方の回に効く) | できる | できる | できる |
-| 回ごとに測る(`--score-layers loop`・`--select-layer`)、`gne heads loop-merge`・`gne heads measure` | できる | できる | できる |
-| 2 本の流れの中の段(4〜26・28〜50)への control vector、そこでの `gne verify` の V3・V4・V12、FiSH の方向の段の層を重ねる読み直し(無ければ `--no-stack`) | できない(理由を出して止める) | できる | できる |
+| 読み込み・会話・gne serve、control vector(改造版は 2 本の流れの両方に足すので、全部の層で効く) | できる | できる | できる |
+| 繰り返しの外の層と各回の出口(0〜3・27・51〜55)の残差: 回ごとに測る(`--score-layers loop` = 27・51・54、`--select-layer`)、その測る層での CHiPS の一括の流れ、`gne heads measure`・`gne heads loop-merge` | できる | できる | できる |
+| 2 本の流れの中の層(4〜26・28〜50)の残差: 全部の層での方向づくり・基準層の探索、そこでの `gne verify`・FiSH(`gne nw …`)、ルーターの値(`mhc_*_gates`)と 2 本を並べた値(`l_out_streams`) | できない(理由と直し方を出して止める) | できる | できる |
 | 片方の回だけを書き換える(`GNE_LOOP_EDITS=per_visit`、`gne heads causal --visits first / second`、`gne heads visits`、`gne heads loop-pipeline`、`per_visit` と記録したレシピ・LoRA) | できない(理由と直し方を出して止める) | できない | できる |
+
+以前の第三者の改造版(GuideboardLabs/llama.cpp-sensenova-loop)と、その GGUF(guideboardlabs/SenseNova-Loop-9B-GGUF)は、確認の対象外。改造版どうしで GGUF のメタデータとテンソル名が違い、互いの GGUF を読めない(重みの中身はほぼ同じ)。gne はその GGUF の段の対応(`sensenova_loop.mhc.layer_kinds`)も読めるが、試していない。0.7.0 で公開したそのためのパッチは `third_party/sensenova-loop/legacy-guideboardlabs/` にある。
 
 ## 層の番号
 
-gne の層の番号は実行順(0〜55)で、llama.cpp のテンソルの捕捉の名前(`l_out-30` など)と control vector の番号と同じ。2 回目の層は、表示で「L30 = 層 6 の 2 回目」のように、重みを持つ 1 回目の層の番号を添える。`gne info` の警告にも、どの層を 2 回実行するかが出る。
+gne の層の番号は実行順(0〜55)で、llama.cpp のテンソルの捕捉の名前(`l_out-30` など)と control vector の番号と同じ。2 回目の層は、表示で「L30 = 層 6 の 2 回目」のように、重みを持つ 1 回目の層の番号を添える。段の対応は、GGUF の `sensenova_loop.loop.start`・`loop.end`・`loop.count`・`mhc.start`・`mhc.end` から作る。`gne info` の警告にも、どの層を 2 回実行するかが出る。MTP の層(57 番目のブロック)は数えず、そこへの書き換えは断る。
 
 ## 残差の読み方
 
-- 層の出力 `l_out-L` は、2 本の流れの平均として返す。llama.cpp のグラフの `l_out` は、2 本の中の層では片方の流れ(飛び飛びに並んだ値の参照)なので、gne はその層の最後の混ぜ合わせ(`mhc_ffn_merged`)から平均を作る。
-- 2 本の平均を使うのは、回の出口で 2 本が平均されて、それが最終の出力につながるため。各層が読むのは、ルーターが 2 本を重みづけして足したもので、実測ではほとんど片方の流れ。平均から作った方向は、その層が読むものの近似になる。
-- 2 本の中の層では、ほかの名前も違う。gne は、ふつうの名前に置き換えて返す: `ffn_out`(元は `mhc_ffn_out`)、`attn_output` / `linear_attn_out`(`mhc_attn_out`)、`attn_post_norm`(`mhc_ffn_norm`、MLP の入力)、`attn_residual`(`mhc_ffn_packed` の前半、MLP の入力の正規化の前)。2 本を並べたままの値(`l_out_streams-L`)と、ルーターの値(`mhc_ffn_gates-L`・`mhc_attn_gates-L`)は、その名前を指定したときだけ返す。
+- 層の出力 `l_out-L` は、2 本の流れの平均。改造版は 2 本の中の層でもその平均を計算するが、どこからも読まれないので、手を入れないとグラフから外れる。0001 はそれをグラフに残す。
+- 2 本の平均を使うのは、回の出口で 2 本が平均されて、それが最終の出力につながるため。各層が読むのは、ルーターが 2 本を重みづけして足したもの。平均から作った方向は、その層が読むものの近似になる。
+- 0001 は MLP の入力にも名前を付ける: `attn_residual`(正規化の前。2 本の中の層ではルーターが 2 本を重みづけして足したもの)と `attn_post_norm`(正規化の後。FiSH の鍵が読む値)。attention の入力(2 本の中の層ではルーターの出力)は `attn_in` として返す。
+- 2 本を並べたままの値(`l_out_streams-L`、0001 の `mhc_stream_a`・`mhc_stream_b` を並べたもの)と、ルーターの値(`mhc_attn_gates-L`・`mhc_ffn_gates-L`。トークンごとに 8 つ: 読む重み 2 つ・書き込みの重み 2 つ・混ぜる行列の 4 つ。どれも sigmoid や Sinkhorn の前の値)は、その名前を指定したときだけ返す。
+- 0001 を当てていない llama.cpp で 2 本の中の層の残差を欲しがると、gne は理由と直し方を書いて止める。
 
 ## 重みの書き換えは両方の回に効く
 
@@ -88,23 +93,23 @@ gne の層の番号は実行順(0〜55)で、llama.cpp のテンソルの捕捉�
   - `gne nw verify` は、重みを持つ 1 回目の層で式どおりかを確かめ(その前の層はこの LoRA で変わらない)、もう一方の回で上書きしたニューロンがどれだけ開いたか(`twin_act_max`)を出す。
   - ニューロンのふだんの働き(`gne nw neurons`)は両方の回を合わせて数える。同じ重みの 2 つの層(例 12 と 36)を両方選んだときは、既定のニューロンが重ならないように選ぶ。
 - gain・ablate も同じ(LoRA は重みを持つ層の名前に書き、両方の回に効く)。層ごとの方向を消す ablate(`--per-layer`)の LoRA は、1 回目と 2 回目の方向の射影を続けて掛けた 1 つにまとめる。焼き込みは重みを持つテンソルを 1 回だけ書き換えるので、層ごとの方向は 1 回目の層の方向を使う。
-- `gne verify` の V11(gain の確かめ)は、重みを持つ 1 回目の層で確かめる。元の llama.cpp では、2 本の流れの中の層を `--layer` に渡すと、control vector を使う V3・V4・V12 は理由を書いて省く。
+- `gne verify` の V11(gain の確かめ)は、重みを持つ 1 回目の層で確かめる。0001 を当てていない llama.cpp では、2 本の流れの中の層を `--layer` に渡すと、理由と直し方を書いて止める(`--layer 0`・`51`・`52` などは確かめられる)。
 
 ### 片方の回だけを書き換える
 
-片方の回だけを書き換えるには、2 回目の層に別のテンソル名(1 回目と同じデータを指す別名)を付けた llama.cpp が要る。gne はモデルを読み込むときに、その名前で LoRA を読めるかで確かめる。
+片方の回だけを書き換えるには、2 回目の層に別のテンソル名(1 回目と同じデータを指す別名)が要る。0002 がそれを付ける。gne はモデルを読み込むときに、その名前で LoRA を読めるかで確かめる。
 
 当て方は、レシピ(`loop_edits`)と LoRA のファイル(`gne.loop_edits`)に記録する。
 
-- `shared`(両方の回に当てる。記録の無い古いレシピ・LoRA もこれ): 2 回目の名前がある llama.cpp でも、LoRA の 1 回目の層のテンソルを 2 回目の名前にも写して当てる(書き出す LoRA のファイルは、重みを持つ層の名前だけで書く。元の llama.cpp でも読める)。
+- `shared`(両方の回に当てる。記録の無い古いレシピ・LoRA もこれ): 2 回目の名前がある llama.cpp でも、LoRA の 1 回目の層のテンソルを 2 回目の名前にも写して当てる(書き出す LoRA のファイルは、重みを持つ層の名前だけで書く。0002 の無い llama.cpp でも読める)。
 - `per_visit`(回ごとに当てる): ユニットの層の番号どおり、その回だけを書き換える(`10:N100:x0` は 1 回目だけ、`34:N100:x0` は 2 回目だけ)。CHiPS の候補には 2 回目の層のヘッドも入り、FiSH のもう一方の回の分は出ない(書かないので)。2 回目の名前が無い llama.cpp でこの形のレシピや LoRA を読むと、黙って両方の回に当てずに、理由と直し方(下の `gne heads loop-merge`)を書いて止める。焼き込み(重みの書き換え)は、どちらでも両方の回に効く。
 - 環境変数 `GNE_LOOP_EDITS=per_visit` は、記録の無いもの(その場で作るユニットや、探す途中の一時的な LoRA)の既定を変えるだけ。そのとき保存したレシピには `loop_edits: per_visit` が付く。
 
 ## 1 回目と 2 回目を別々に扱う CHiPS
 
-1 回目と 2 回目を、ある意味で別のモデルとして扱う。探す段階だけ 2 回目の名前がある llama.cpp を使い、できたレシピは元の llama.cpp で動く形(両方の回に当てる形)に直す。
+1 回目と 2 回目を、ある意味で別のモデルとして扱う。探す段階だけ 0002 を当てた llama.cpp を使い、できたレシピは 0002 の無い llama.cpp で動く形(両方の回に当てる形)に直す。
 
-| 段階 | コマンド | 元の llama.cpp |
+| 段階 | コマンド | 0002 の無い llama.cpp |
 |---|---|---|
 | 回ごとに測る | `gne heads pipeline --score-layers loop --select-layer 27`(`heads causal` も同じ指定) | できる |
 | 回ごとに探す | `gne heads causal --visits first / second / both`、`gne heads visits`、`gne heads loop-pipeline` | both 以外はできない(理由と代わりの方法を出して止める) |
@@ -119,7 +124,7 @@ gne の層の番号は実行順(0〜55)で、llama.cpp のテンソルの捕捉�
 - 測る層を指定すると、一括の結果に、因果スクリーニングの上位のヘッドの層ごとの下がり方と、配分した組ごとの層ごとの A 側・B 側の平均が並ぶ。1 回目の終わりでどこまで下がり、2 回目でどう変わったかを 1 つの表で読める。
 - 途中の残差に出力層をかけて読む値(logit lens)は目安にしかならない。このモデルは 1 回目の終わりの残差を出力層で読む前提で作られていないので、それを「1 回目の出力」とは読まない。
 
-### 回ごとに探す(2 回目の名前がある llama.cpp)
+### 回ごとに探す(0002 を当てた llama.cpp)
 
 - `gne heads causal --visits first`(または `second`): ヘッドを 1 回目だけ(または 2 回目だけ)止めて因果スクリーニングをする。`both` は両方の回で止める(既定と同じ)。
 - `gne heads visits --name <方向>`: 同じヘッドを 1 回目だけ・2 回目だけ・両方で止めた効き目を並べ、回の間の順位相関(Spearman)を出す。「両方−和」は、両方で止めた下がり方から片方ずつの和を引いたもの。
@@ -128,7 +133,7 @@ gne の層の番号は実行順(0〜55)で、llama.cpp のテンソルの捕捉�
   2. その組を対照集合の両側に当てた状態で、段 28〜53 のヘッドから、段 54 の射影の値で選ぶ(2 回目だけに当てる)。対照集合の側には、レシピを重ねて当てる書き方 `recipe_a: {stack: [<レシピ>, …]}` を使う。
   3. 2 つを合わせたレシピ(`<名前>_loop.per_visit.yaml`)を、次の仕上げにかける。
 
-### 仕上げ(元の llama.cpp で動く形にする)
+### 仕上げ(0002 の無い llama.cpp で動く形にする)
 
 - `gne heads loop-merge --recipe <回ごとのレシピ>`: 両方の回に当てるレシピ(`<名前>.shared.yaml`、焼き込み・配布できる形)に直す。各ヘッドをどちらの回で選んだかは `loop_visits` に記録する。
 - 直したレシピは、両方の回に当てた状態で段 27・51・54 を測り直し、回ごとに当てたときの値と並べる(探したときの値を足し合わせて済ませない)。2 回目のために選んだヘッドは、両方に当てると 1 回目でも弱まるので、その差がこの表に出る。
@@ -137,9 +142,7 @@ gne の層の番号は実行順(0〜55)で、llama.cpp のテンソルの捕捉�
 
 ## control vector
 
-元の llama.cpp は、2 本の流れの中の層(4〜26、28〜50)に足した control vector を次の層に渡さない(足した値が片方の流れの参照にだけ入り、次の層は 2 本の流れを読むため)。gne はモデルを読み込むときに確かめて、その層に足そうとしたら止める。効くのは層 0〜3・27・51〜55。
-
-2 本の流れの両方に足すように直した llama.cpp なら、全部の層で効く(2 本の両方に足すのは、2 本の平均に足すのと同じ。2 本の差は変わらない)。FiSH の方向を作る段の「層を重ねる読み直し」も control vector を使うので、元の llama.cpp では `--no-stack` で層ごとに別々に方向を作る。
+改造版は、2 本の流れの中の層に足した control vector を 2 本の両方に足すので、全部の層で効く(2 本の両方に足すのは、2 本の平均に足すのと同じ。2 本の差は変わらない)。FiSH の方向を作る段の「層を重ねる読み直し」も control vector を使う。
 
 ## 思考(thinking)
 

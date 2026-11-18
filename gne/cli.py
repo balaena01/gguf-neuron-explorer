@@ -339,9 +339,13 @@ def info(c: Common, holder: dict,
                      if lc["ok"] else f"読み込めません: {lc['error']}(新しい llama.cpp でのビルドが必要かもしれません、R6)"))
         lp = lc.get("loop") if lc["ok"] else None
         if lp:                                       # 同じ層を 2 回実行するモデル(docs/sensenova_loop.md)
-            rows.append(("2 回実行する層", ("2 本の流れの中の層の control vector: 届く" if lp["cvec_inner"]
-                                           else "2 本の流れの中の層の control vector: 届かない(層 0〜3・出口の層・繰り返しの後の層だけ)")
-                         + "、2 回目の層の名前: " + ("ある" if lp["per_visit_names"] else "無い")
+            kind = {"official": "公式の改造版", "guideboardlabs": "GuideboardLabs 版(確認の対象外)"}.get(lp.get("flavor"), "不明な改造版")
+            rows.append(("2 回実行する層", f"{kind}。"
+                         + ("2 本の流れの中の層の残差: 読める" if lp.get("inner_resid", True)
+                            else "2 本の流れの中の層の残差: 読めない(third_party/sensenova-loop の 0001 で読める)")
+                         + "、control vector: " + ("全部の層に届く" if lp["cvec_inner"]
+                                                   else "2 本の流れの中の層には届かない(層 0〜3・出口の層・繰り返しの後の層だけ)")
+                         + "、2 回目の層の名前: " + ("ある" if lp["per_visit_names"] else "無い(0002 で付く)")
                          + "、書き換え: " + ("ユニットの回だけ" if lp["edits"] == "per_visit" else "両方の回")))
     sp = d.get("speed")
     if sp:
@@ -425,6 +429,10 @@ def verify(c: Common, holder: dict,
     if not s.engine.cvec_supported:
         why |= dict.fromkeys(("V3", "V4", "V12"), f"{s.meta.arch} のグラフは control vector を読みません")
     lp = s.engine.loop                               # 同じ層を 2 回実行するモデル: 2 本の流れの中の層の control vector が届くか
+    if lp is not None and not s.engine.loop_inner_resid() and any(lp.inner(x) for x in (v.L, v.L + 1, v.L + 2)):
+        from .loop import INNER_RESID_FIX, INNER_RESID_WHY
+        raise GneError("ARCH_UNSUPPORTED", INNER_RESID_WHY + f"(--layer {v.L} は、その後の 2 層まで残差を読みます)",
+                       INNER_RESID_FIX + "。--layer に 0、51、52 などを渡すと、手を入れない llama.cpp でも確かめられます")
     if lp is not None and not s.engine.loop_cvec_reaches():
         hint = "(--layer に繰り返しの外の層か出口の層を渡すか、2 本の流れの両方に足すように直した llama.cpp を使ってください)"
         if lp.inner(v.L):
