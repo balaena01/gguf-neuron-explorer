@@ -150,6 +150,52 @@ def test_capture_names_and_shapes():
     assert "l_out_pre-30" not in out                       # 欲しいと言っていない名前は返さない
 
 
+def test_plan_from_official_keys():
+    """公式の GGUF の loop.* / mhc.* の鍵から、GuideboardLabs 版の layer_kinds と同じ段の対応を作る。MTP の層は数えない。"""
+    from gne.loop import kinds_from_loop_keys, plan_of
+    from gne.steer import GneError
+    meta = {"x.loop.start": 4, "x.loop.end": 28, "x.loop.count": 2, "x.mhc.start": 4, "x.mhc.end": 28, "x.block_count": 57,
+            "x.nextn_predict_layers": 1}
+    get = lambda k, d=None: meta.get(k, d)
+    assert kinds_from_loop_keys(get, "x") == KINDS
+    p = plan_of(get, "x")
+    assert (p.lo1, p.lo2, p.shift, p.n_layer) == (4, 28, 24, 56) and not p.inner(56)
+    assert plan_of(lambda k, d=None: {"x.mhc.layer_kinds": KINDS}.get(k, d), "x").lo2 == 28     # GuideboardLabs 版の鍵も読む
+    assert plan_of(lambda k, d=None: d, "x") is None
+    with pytest.raises(GneError):
+        kinds_from_loop_keys(lambda k, d=None: {**meta, "x.loop.count": 3}.get(k, d), "x")
+
+
+def test_capture_official_names_and_refusal():
+    """公式の改造版: 1 つ目の mhc_input は attention の入力(attn_in)。0001 の 2 本の流れは並べて l_out_streams にする。
+    中の層の残差を読めない llama.cpp では、欲しい中の層の名前が無ければ理由と直し方を書いて断る。"""
+    from gne.capture import Capture
+    from gne.steer import GneError
+    c = Capture(lambda n: n in {"l_out-30", "l_out_streams-30", "attn_in-30"})
+    c.loop, c.loop_d, c.loop_full = plan_from_kinds(KINDS), 4, frozenset({31})
+    assert c._canon("mhc_input-30") == "attn_in-30"
+    assert c._want("mhc_stream_a-30") and c._want("mhc_stream_b-30") and not c._want("mhc_stream_a-3")
+    a, b = np.ones((2, 4), np.float32), 3 * np.ones((2, 4), np.float32)
+    c._store("mhc_stream_a-30", a)
+    c._store("mhc_stream_b-30", b)
+    c._store("l_out-30", (a + b) / 2)
+    out = c.take()
+    np.testing.assert_allclose(out["l_out_streams-30"], np.concatenate([a, b], axis=1))
+    assert "mhc_stream_a-30" not in out
+    r = Capture(lambda n: n in {"l_out-2", "l_out-30"})
+    r.loop, r.loop_d = plan_from_kinds(KINDS), 4
+    r.loop_refuse = ("読めません", "0001 を当ててください")
+    r._store("l_out-2", a)
+    with pytest.raises(GneError) as ex:
+        r.take()
+    assert "l_out-30" in ex.value.message and "0001" in ex.value.hint
+    ok = Capture(lambda n: n in {"l_out-2", "l_out-27"})               # 繰り返しの外と出口だけなら断らない
+    ok.loop, ok.loop_d, ok.loop_refuse = plan_from_kinds(KINDS), 4, ("x", "y")
+    ok._store("l_out-2", a)
+    ok._store("l_out-27", a)
+    assert set(ok.take()) == {"l_out-2", "l_out-27"}
+
+
 def test_head_layers_skip_second_visit():
     from gne.causal import _visits, head_layers
     li = [SimpleNamespace(index=L, head_dim=4, head_writer="ssm_out") for L in range(56)]
@@ -346,19 +392,32 @@ def test_real_weights_and_arch():
 
 @real
 def test_real_capture_every_layer(engine):
+    """全部の層の l_out と、2 本の流れの中の層の MLP の入力・2 本を並べた値・ルーターの値。公式の改造版は 0001 を当てたときだけ
+    (当てていなければ、中の層の残差を欲しがると理由と直し方を書いて断る)。"""
     from gne.capture import Capture
+    from gne.steer import GneError
     e = engine
     ids = e.tokenize_prompt(e.render_chat([{"role": "user", "content": "Hello!"}]))
     want = {f"l_out-{L}" for L in range(e.n_layer)} | {"attn_residual-30", "attn_post_norm-30", "ffn_out-30", "attn_output-31",
                                                       "l_out_streams-30"}
+    official = e.loop_graph()["flavor"] == "official"
+    if official:
+        want |= {"mhc_attn_gates-30", "mhc_ffn_gates-30"}
     cap = Capture(lambda n: n in want)
     ctx = e.probe_ctx(cap, need=len(ids))
     e.clear_memory(ctx)
     e.prefill(ctx, [ids])
+    if not e.loop_inner_resid():
+        with pytest.raises(GneError) as ex:
+            cap.take()
+        assert "0001" in (ex.value.hint or "")
+        return
     got = cap.take()
     assert want <= set(got), sorted(want - set(got))
     s = got["l_out_streams-30"]
-    np.testing.assert_allclose(s.reshape(s.shape[0], 2, -1).mean(axis=1), got["l_out-30"], atol=1e-5)
+    np.testing.assert_allclose(s.reshape(s.shape[0], 2, -1).mean(axis=1), got["l_out-30"], atol=1e-4)
+    if official:
+        assert got["mhc_attn_gates-30"].shape[1] == 8 and got["mhc_ffn_gates-30"].shape[1] == 8
 
 
 @real

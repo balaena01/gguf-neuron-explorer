@@ -1,0 +1,86 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: balaena01 <261439497+balaena01@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 12:04:24 +0000
+Subject: [PATCH 1/2] sensenova-loop: graph names for gne (FFN input, router
+ logits, the two streams) and l_out inside the streams
+
+---
+ src/models/models.h           |  2 +-
+ src/models/sensenova-loop.cpp | 17 ++++++++++++++---
+ 2 files changed, 15 insertions(+), 4 deletions(-)
+
+diff --git a/src/models/models.h b/src/models/models.h
+index f4ca498..a149959 100644
+--- a/src/models/models.h
++++ b/src/models/models.h
+@@ -2724,7 +2724,7 @@ struct llama_model_sensenova_loop : public llama_model_qwen35 {
+             ggml_tensor * mix[4];
+         };
+ 
+-        routing build_route(ggml_tensor * a, ggml_tensor * b, ggml_tensor * weight, ggml_tensor * bias, int il);
++        routing build_route(ggml_tensor * a, ggml_tensor * b, ggml_tensor * weight, ggml_tensor * bias, int il, const char * logits_name);
+         void build_merge(ggml_tensor * & a, ggml_tensor * & b, ggml_tensor * branch, const routing & route);
+     };
+ 
+diff --git a/src/models/sensenova-loop.cpp b/src/models/sensenova-loop.cpp
+index 5cd3391..becc45f 100644
+--- a/src/models/sensenova-loop.cpp
++++ b/src/models/sensenova-loop.cpp
+@@ -103,7 +103,7 @@ std::unique_ptr<llm_graph_context> llama_model_sensenova_loop::build_arch_graph(
+ }
+ 
+ llama_model_sensenova_loop::graph::routing llama_model_sensenova_loop::graph::build_route(
+-        ggml_tensor * a, ggml_tensor * b, ggml_tensor * weight, ggml_tensor * bias, int il) {
++        ggml_tensor * a, ggml_tensor * b, ggml_tensor * weight, ggml_tensor * bias, int il, const char * logits_name) {
+     ggml_tensor * flat = ggml_concat(ctx0, a, b, 0);
+     flat = ggml_rms_norm(ctx0, flat, 1e-6f);
+     ggml_tensor * logits = build_lora_mm(weight, flat);
+@@ -112,6 +112,7 @@ llama_model_sensenova_loop::graph::routing llama_model_sensenova_loop::graph::bu
+         ggml_prec_set_src(logits, GGML_PREC_F32, 1);
+     }
+     logits = ggml_add(ctx0, logits, bias);
++    cb(logits, logits_name, il);          // the 8 router logits per token: 2 pre, 2 post, 4 mix (before the Sinkhorn steps)
+     auto row = [&](int i) {
+         return ggml_view_2d(ctx0, logits, 1, a->ne[1], logits->nb[1], i*logits->nb[0]);
+     };
+@@ -178,7 +179,7 @@ llama_model_sensenova_loop::graph::graph(const llm_graph_params & params) : grap
+         routing attn_route{};
+         ggml_tensor * residual = cur;
+         if (mhc) {
+-            attn_route = build_route(a, b, layer.hc_attn_fn, layer.hc_attn_fn_b, il);
++            attn_route = build_route(a, b, layer.hc_attn_fn, layer.hc_attn_fn_b, il, "mhc_attn_gates");
+             cur = attn_route.input;
+         }
+         cur = build_norm(cur, layer.attn_norm, nullptr, LLM_NORM_RMS, il);
+@@ -201,20 +202,30 @@ llama_model_sensenova_loop::graph::graph(const llm_graph_params & params) : grap
+         }
+         if (mhc) {
+             build_merge(a, b, cur, attn_route);
+-            const routing ffn_route = build_route(a, b, layer.hc_ffn_fn, layer.hc_ffn_fn_b, il);
++            const routing ffn_route = build_route(a, b, layer.hc_ffn_fn, layer.hc_ffn_fn_b, il, "mhc_ffn_gates");
++            cb(ffn_route.input, "attn_residual", il);      // the FFN input before its norm (same names as qwen35)
+             cur = build_norm(ffn_route.input, layer.attn_post_norm, nullptr, LLM_NORM_RMS, il);
++            cb(cur, "attn_post_norm", il);
+             cur = build_layer_ffn(cur, il);
+             build_merge(a, b, cur, ffn_route);
+             a = build_cvec(a, il);
+             b = build_cvec(b, il);
++            cb(a, "mhc_stream_a", il);          // the two streams after the layer (their mean is l_out)
++            cb(b, "mhc_stream_b", il);
+             cur = ggml_scale(ctx0, ggml_add(ctx0, a, b), 0.5f);
+         } else {
+             residual = ggml_add(ctx0, cur, residual);
++            cb(residual, "attn_residual", il);
+             cur = build_norm(residual, layer.attn_post_norm, nullptr, LLM_NORM_RMS, il);
++            cb(cur, "attn_post_norm", il);
+             cur = ggml_add(ctx0, build_layer_ffn(cur, il), residual);
+             cur = build_cvec(cur, il);
+         }
+         cb(cur, "l_out", il);
++        if (mhc) {
++            // inside the streams the stream mean feeds nothing; keep it in the graph so it can be read like any l_out
++            ggml_build_forward_expand(gf, cur);
++        }
+     }
+     build_output(cur, inp_out_ids);
+ }

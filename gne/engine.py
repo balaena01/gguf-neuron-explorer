@@ -216,6 +216,7 @@ class Engine:
         self.loop = None
         self.loop_full: frozenset[int] = frozenset()
         self._loop_cvec: bool | None = None       # 2 本の中の層の control vector が次の層に届くグラフか(調べたら覚える)
+        self._loop_graph: dict | None = None      # どちらの改造版のグラフか・2 本の中の層の残差が読めるか(調べたら覚える)
         self._loop_names: bool | None = None      # 2 回目の層に別のテンソル名がある llama.cpp か(調べたら覚える)
         self._lora_alias: dict[str, str] = {}     # LoRA のファイル → 両方の回の名前に写したファイル(2 回目の名前がある llama.cpp)
         # 重みの書き換え(LoRA)の当て方: shared = 両方の回に当てる(既定。元の llama.cpp ではいつもこれ)。
@@ -284,6 +285,9 @@ class Engine:
             capture.hc_streams = self.hc_streams
             if self.loop is not None and capture.loop is None and not getattr(capture, "raw_names", False):
                 capture.loop, capture.loop_d, capture.loop_full = self.loop, self.n_embd, self.loop_full
+                if not self.loop_inner_resid():
+                    from .loop import INNER_RESID_FIX, INNER_RESID_WHY
+                    capture.loop_refuse = (INNER_RESID_WHY, INNER_RESID_FIX)
             capture.install(p)
         ptr = C.llama_init_from_model(self.model, p)
         if not ptr:
@@ -496,8 +500,9 @@ class Engine:
                 raise GneError("ARCH_UNSUPPORTED",
                                f"層 {', '.join(map(str, bad[:8]))}{' …' if len(bad) > 8 else ''} は残差が 2 本の流れの中の層です。この llama.cpp は"
                                "そこに足した control vector を次の層に渡さないので、足しても何も起きません(止めました)",
-                               f"効くのは層 {', '.join(map(str, ok))} です。2 本の中の層にも足すには、2 本の流れの両方に足すように直した "
-                               "llama.cpp が要ります(docs/sensenova_loop.md)")
+                               f"効くのは層 {', '.join(map(str, ok))} です。2 本の中の層にも足すには、2 本の流れの両方に足す llama.cpp が要ります"
+                               "(GuideboardLabs 版なら third_party/sensenova-loop/guideboardlabs の 0001。公式版は最初から両方に足す。"
+                               "docs/sensenova_loop.md)")
         if not vectors:
             rc = C.llama_set_adapter_cvec(ctx.ptr, None, 0, self.n_embd, -1, -1)
         else:
@@ -509,25 +514,47 @@ class Engine:
         if rc != 0:
             raise RuntimeError(f"llama_set_adapter_cvec が失敗しました (rc={rc})")
 
-    def loop_cvec_reaches(self) -> bool:
-        """同じ層を 2 回実行する arch で、2 本の流れの中の層に足した control vector が次の層に届くグラフか。グラフの l_out が
-        2 本の平均(連続したテンソル)なら、流れの両方に足すように直した llama.cpp。片方の流れの view なら、届かない元の llama.cpp。
-        小さい文脈で 1 回だけ調べて覚える。"""
+    def loop_graph(self) -> dict:
+        """同じ層を 2 回実行する arch のグラフを、小さい文脈で 1 回だけ調べて覚える。
+        flavor: official(OpenSenseNova/llama.cpp。2 本の流れの入力に mhc_input の名前)/ guideboardlabs(GuideboardLabs 版。
+        mhc_ffn_merged の名前)。inner_l_out: 2 本の中の層のグラフに、連続した l_out(2 本の平均)があるか。公式の改造版は、手を
+        入れないと 2 本の中の層の l_out をグラフから外す(third_party/sensenova-loop/official の 0001 で残す)。GuideboardLabs 版は、
+        l_out が片方の流れの view なら手を入れていないもの、2 本の平均なら guideboardlabs の 0001 を当てたもの。"""
         if self.loop is None:
-            return True
-        if self._loop_cvec is None:
+            return {"flavor": None, "inner_l_out": True}
+        if self._loop_graph is None:
             L = self.loop.lo1 + 1
             cap = Capture(lambda n: n == f"l_out-{L}")
             cap.raw_names = True                 # 名前を付け替えずに、グラフの l_out そのものを見る
+            cap.record_names = True
             ctx = self._new_ctx(n_ctx=256, n_batch=32, n_ubatch=32, n_seq_max=1, capture=cap, logits_all=False)
             try:
                 cap.reset()
                 ids = self._with_bos(self.tokenize("Hello there.")) or [0]
                 self._decode(ctx, [(t, i, 0, i == len(ids) - 1) for i, t in enumerate(ids[:16])])
-                self._loop_cvec = f"l_out-{L}" in cap.take()
+                got = cap.take()
             finally:
                 ctx.free()
+            seen = set(cap.seen)
+            flavor = ("official" if f"mhc_input-{L}" in seen else "guideboardlabs" if f"mhc_ffn_merged-{L}" in seen else "unknown")
+            self._loop_graph = {"flavor": flavor, "inner_l_out": f"l_out-{L}" in got}
+        return dict(self._loop_graph)
+
+    def loop_cvec_reaches(self) -> bool:
+        """同じ層を 2 回実行する arch で、2 本の流れの中の層に足した control vector が次の層に届くグラフか。公式の改造版は
+        2 本の流れの両方に足す。GuideboardLabs 版は、グラフの l_out が 2 本の平均(連続したテンソル)なら両方に足すように直した
+        llama.cpp、片方の流れの view なら届かない元の llama.cpp。"""
+        if self.loop is None:
+            return True
+        if self._loop_cvec is None:
+            g = self.loop_graph()
+            self._loop_cvec = g["flavor"] == "official" or g["inner_l_out"]
         return bool(self._loop_cvec)
+
+    def loop_inner_resid(self) -> bool:
+        """2 本の流れの中の層(4〜26・28〜50)の残差 l_out を読めるか。GuideboardLabs 版は混ぜ合わせの値から作れるのでいつも読める。"""
+        g = self.loop_graph()
+        return g["flavor"] != "official" or g["inner_l_out"]
 
     def loop_runtime_names(self) -> bool:
         """同じ層を 2 回実行する arch で、この llama.cpp が 2 回目の層の重みに別のテンソル名(blk.<2 回目の層>.*)を持つか。

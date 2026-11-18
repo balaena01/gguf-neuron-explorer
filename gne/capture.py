@@ -54,8 +54,12 @@ class Capture:
         # 残差が複数本の arch(qwen4exp の hyper-connections)では層の出力が l_last-L = [n_embd, hc, T]。
         # 本数を入れると l_out-L という名前で流れの平均(n_tokens, n_embd)を返す。他のコードは今までどおり l_out-L を見ればよい
         self.hc_streams = 0
-        # 同じ層を 2 回実行する arch(sensenova_loop。loop.py): 各回の中では残差が 2 本の流れで、グラフの名前が違う。
-        # Engine が loop(LoopPlan)・loop_d(n_embd)・loop_full(full attention の層)を入れると、ふつうの名前で返す:
+        # 同じ層を 2 回実行する arch(sensenova_loop。loop.py): 各回の中では残差が 2 本の流れ。
+        # 公式の改造版(OpenSenseNova/llama.cpp)に third_party/sensenova-loop/official の 0001 を当てると、グラフの名前がそのまま
+        # ふつうの名前になる(l_out = 2 本の平均、attn_residual・attn_post_norm = MLP の入力、mhc_*_gates = ルーターの値)。
+        # 1 つ目の mhc_input(attention の入力)は attn_in、mhc_stream_a / _b は並べて l_out_streams-L にする。
+        # 以下は GuideboardLabs 版のグラフの名前。Engine が loop(LoopPlan)・loop_d(n_embd)・loop_full
+        # (full attention の層)を入れると、ふつうの名前で返す:
         #   l_out-L        = 2 本の平均(llama.cpp のグラフの l_out は、2 本の中の層では片方の流れの飛び飛びの view。
         #                    流れの中で control vector を足すように直した llama.cpp では、平均そのものがグラフの l_out になる)
         #   l_out_pre-L    = 層の最後の混ぜ合わせ(mhc_ffn_merged)の 2 本の平均(control vector を足す前)
@@ -66,6 +70,9 @@ class Capture:
         self.loop = None
         self.loop_d = 0
         self.loop_full: frozenset[int] = frozenset()
+        # 2 本の中の層の残差を読めない llama.cpp(公式の改造版に手を入れていないもの)では、Engine が (理由, 直し方) を入れる。
+        # その層の l_out・attn_residual・attn_post_norm を欲しいのに無ければ、take() が理由と直し方を書いて断る
+        self.loop_refuse: tuple[str, str] | None = None
         self._cb = C.ggml_backend_sched_eval_callback(self._on_tensor)  # 参照を保持(GC 対策)
 
     def install(self, cparams: C.llama_context_params) -> None:
@@ -88,11 +95,17 @@ class Capture:
             self._step = {}
 
     def _loop_fill(self, st: dict) -> None:
-        """2 本の中の層の l_out-L が無ければ(グラフの l_out が飛び飛びの view のとき)、l_out_pre-L(2 本の平均)で埋める。"""
+        """2 本の中の層の l_out-L が無ければ(GuideboardLabs 版でグラフの l_out が飛び飛びの view のとき)、l_out_pre-L(2 本の平均)で
+        埋める。公式の改造版(0001 を当てたもの)の 2 本の流れ mhc_stream_a-L・mhc_stream_b-L は、並べて l_out_streams-L にする。"""
         for name in [n for n in st if n.startswith("l_out_pre-")]:
             L = name[len("l_out_pre-"):]
             if f"l_out-{L}" not in st and self.loop.inner(int(L)) and self._wanted(f"l_out-{L}"):
                 st[f"l_out-{L}"] = st[name]
+        for name in [n for n in st if n.startswith("mhc_stream_a-")]:
+            L = name[len("mhc_stream_a-"):]
+            b = st.get(f"mhc_stream_b-{L}")
+            if b is not None and self._wanted(f"l_out_streams-{L}") and f"l_out_streams-{L}" not in st:
+                st[f"l_out_streams-{L}"] = np.concatenate([st[name], b], axis=1)
         for name in [n for n in st if not self._wanted(n)]:      # 別の名前のために取っただけのもの
             del st[name]
 
@@ -107,6 +120,13 @@ class Capture:
         for st in steps:
             for name, arr in st.items():
                 out.setdefault(name, []).append(arr)
+        if self.loop_refuse is not None and steps:
+            miss = [f"{b}-{L}" for L in range(self.loop.n_layer) if self.loop.inner(L)
+                    for b in ("l_out", "attn_residual", "attn_post_norm") if self._wanted(f"{b}-{L}") and f"{b}-{L}" not in out]
+            if miss:
+                from .steer import GneError
+                raise GneError("ARCH_UNSUPPORTED", self.loop_refuse[0] + f"(読めない名前: {', '.join(miss[:4])}{' …' if len(miss) > 4 else ''})",
+                               self.loop_refuse[1])
         return {k: (v[0] if len(v) == 1 else np.concatenate(v, axis=0)) for k, v in out.items()}
 
     def _canon(self, name: str) -> str:
@@ -114,9 +134,11 @@ class Capture:
             return self._loop_canon(name)
         return "l_out-" + name[7:] if self.hc_streams and name.startswith("l_last-") else name
 
+    # GuideboardLabs 版のグラフの名前と、公式の改造版の 2 本の流れの入力(mhc_input。1 つ目が attention の入力。
+    # 0001 を当てると 2 つ目は attn_residual の名前になる)
     _LOOP_NAMES = {"mhc_ffn_merged": "l_out_pre", "mhc_attn_merged": "attn_merged", "mhc_ffn_packed": "attn_residual",
                    "mhc_attn_packed": "attn_in", "mhc_ffn_norm": "attn_post_norm", "mhc_attn_norm": "attn_norm",
-                   "mhc_ffn_out": "ffn_out"}
+                   "mhc_ffn_out": "ffn_out", "mhc_input": "attn_in"}
 
     def _loop_canon(self, name: str) -> str:
         base, sep, L = name.rpartition("-")
@@ -135,6 +157,8 @@ class Capture:
             return False
         base, _, L = name.rpartition("-")
         if base == "l_out_pre" and self.loop.inner(int(L)) and self._wanted(f"l_out-{L}"):
+            return True
+        if base in ("mhc_stream_a", "mhc_stream_b") and self._wanted(f"l_out_streams-{L}"):
             return True
         derived = self._LOOP_DERIVED.get(base)
         return bool(derived and self._wanted(f"{derived}-{L}"))

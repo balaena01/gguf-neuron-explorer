@@ -173,7 +173,7 @@ class Session:
                 llama = {"ok": True, "n_layer": e.n_layer, "n_embd": e.n_embd, "n_vocab": e.n_vocab}
                 if e.loop is not None:                 # 同じ層を 2 回実行するモデル: この llama.cpp で何ができるか
                     llama["loop"] = {"cvec_inner": e.loop_cvec_reaches(), "per_visit_names": e.loop_runtime_names(),
-                                     "edits": e.loop_edits}
+                                     "edits": e.loop_edits, **e.loop_graph(), "inner_resid": e.loop_inner_resid()}
                 if e.n_layer != m.n_layer:
                     self.warn(f"llama.cpp の n_layer {e.n_layer} と block_count {m.n_layer} が違います(MTP 層など)")
             except Exception as ex:  # noqa: BLE001

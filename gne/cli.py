@@ -339,9 +339,13 @@ def info(c: Common, holder: dict,
                      if lc["ok"] else f"読み込めません: {lc['error']}(新しい llama.cpp でのビルドが必要かもしれません、R6)"))
         lp = lc.get("loop") if lc["ok"] else None
         if lp:                                       # 同じ層を 2 回実行するモデル(docs/sensenova_loop.md)
-            rows.append(("2 回実行する層", ("2 本の流れの中の層の control vector: 届く" if lp["cvec_inner"]
-                                           else "2 本の流れの中の層の control vector: 届かない(層 0〜3・出口の層・繰り返しの後の層だけ)")
-                         + "、2 回目の層の名前: " + ("ある" if lp["per_visit_names"] else "無い")
+            kind = {"official": "公式の改造版", "guideboardlabs": "GuideboardLabs 版"}.get(lp.get("flavor"), "不明な改造版")
+            rows.append(("2 回実行する層", f"{kind}。"
+                         + ("2 本の流れの中の層の残差: 読める" if lp.get("inner_resid", True)
+                            else "2 本の流れの中の層の残差: 読めない(third_party/sensenova-loop/official の 0001 で読める)")
+                         + "、control vector: " + ("全部の層に届く" if lp["cvec_inner"]
+                                                   else "2 本の流れの中の層には届かない(層 0〜3・出口の層・繰り返しの後の層だけ。third_party/sensenova-loop/guideboardlabs の 0001 で届く)")
+                         + "、2 回目の層の名前: " + ("ある" if lp["per_visit_names"] else "無い(使っている改造版のフォルダの 0002 で付く)")
                          + "、書き換え: " + ("ユニットの回だけ" if lp["edits"] == "per_visit" else "両方の回")))
     sp = d.get("speed")
     if sp:
@@ -425,8 +429,13 @@ def verify(c: Common, holder: dict,
     if not s.engine.cvec_supported:
         why |= dict.fromkeys(("V3", "V4", "V12"), f"{s.meta.arch} のグラフは control vector を読みません")
     lp = s.engine.loop                               # 同じ層を 2 回実行するモデル: 2 本の流れの中の層の control vector が届くか
+    if lp is not None and not s.engine.loop_inner_resid() and any(lp.inner(x) for x in (v.L, v.L + 1, v.L + 2)):
+        from .loop import INNER_RESID_FIX, INNER_RESID_WHY
+        raise GneError("ARCH_UNSUPPORTED", INNER_RESID_WHY + f"(--layer {v.L} は、その後の 2 層まで残差を読みます)",
+                       INNER_RESID_FIX + "。--layer に 0、51、52 などを渡すと、手を入れない llama.cpp でも確かめられます")
     if lp is not None and not s.engine.loop_cvec_reaches():
-        hint = "(--layer に繰り返しの外の層か出口の層を渡すか、2 本の流れの両方に足すように直した llama.cpp を使ってください)"
+        hint = ("(--layer に繰り返しの外の層か出口の層を渡すか、2 本の流れの両方に足す llama.cpp を使ってください: GuideboardLabs 版なら "
+                "third_party/sensenova-loop/guideboardlabs の 0001。公式版は最初から両方に足す)")
         if lp.inner(v.L):
             why |= dict.fromkeys(("V4", "V12"), f"層 {v.L} は残差が 2 本の流れの中の層で、この llama.cpp では control vector が次の層に届きません{hint}")
         if any(lp.inner(x) for x in (v.L, v.L + 1, v.L + 2) if x < lp.n_layer):
@@ -3016,7 +3025,7 @@ def heads_pipeline(c: Common, holder: dict,
         lines += _causal_layer_lines(ca) + _by_layer_lines(al)
     if s.weights.loop is not None:                           # 回ごとの効き目(1 回目だけ・2 回目だけ・両方で止める)を勧める
         lines.append(f"回ごとの効き目: gne heads visits --name {d['name']}(2 回目の層に別の名前がある llama.cpp が要る。"
-                     + ("この llama.cpp で使える)" if s.engine.loop_runtime_names() else "この llama.cpp では使えない。third_party/sensenova-loop のパッチ 0002)"))
+                     + ("この llama.cpp で使える)" if s.engine.loop_runtime_names() else "この llama.cpp では使えない。third_party/sensenova-loop の、使っている改造版のフォルダのパッチ 0002)"))
     if d["recommended"]:
         lines.append(f"レシピ: {d['recommended']['recipe']}。確かめる: gne eval --recipe {d['recommended']['recipe']} --random-controls 16")
     return d, "\n".join(lines), 0
