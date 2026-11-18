@@ -136,7 +136,7 @@ def kinds_from_loop_keys(get, arch: str) -> list[int] | None:
 
 def plan_of(get, arch: str) -> LoopPlan | None:
     """GGUF のメタデータを読む関数 get(key) から。同じ層を 2 回実行する arch でなければ None。公式の GGUF の
-    loop.* / mhc.* の鍵を先に見て、無ければ GuideboardLabs 版の GGUF の {arch}.mhc.layer_kinds を読む(確認の対象外)。"""
+    loop.* / mhc.* の鍵を先に見て、無ければ GuideboardLabs 版の GGUF の {arch}.mhc.layer_kinds を読む。"""
     if not arch:
         return None
     kinds = kinds_from_loop_keys(get, arch)
@@ -248,12 +248,13 @@ def per_visit_refusal(what: str) -> str:
 INNER_RESID_WHY = ("この llama.cpp(公式の改造版 OpenSenseNova/llama.cpp、手を入れていないもの)は、2 本の流れの中の層"
                    "(繰り返しの各回の入口から出口の手前まで。実行順で 4〜26・28〜50)の残差をグラフに残さないので、そこを読む処理"
                    "(全部の層で方向を作る・基準層を探す・その層に FiSH を書くなど)はできません。")
-INNER_RESID_FIX = ("gne の third_party/sensenova-loop/0001 を当ててビルドした llama.cpp を使ってください(残差と MLP の入力に名前を付けて"
+INNER_RESID_FIX = ("gne の third_party/sensenova-loop/official/0001 を当ててビルドした llama.cpp を使ってください(残差と MLP の入力に名前を付けて"
                    "グラフに残すだけで、計算の結果は変わりません)。手を入れない llama.cpp で読めるのは、繰り返しの外の層"
-                   "(0〜3・52〜55)と各回の出口(27・51)です(例: --score-layers loop)")
+                   "(0〜3・52〜55)と各回の出口(27・51)です(例: --score-layers loop)。GuideboardLabs 版の llama.cpp と GGUF なら、手を入れなくても読めます")
 
 PER_VISIT_FIX = ("回ごとに探した結果は gne heads loop-merge で両方の回に当てる形(shared)のレシピに直すと、0002 を当てない llama.cpp で"
-                 "使えます。回ごとに当てるには third_party/sensenova-loop の 0002 を当ててビルドした llama.cpp が要ります。"
+                 "使えます。回ごとに当てるには、使っている改造版に合う third_party/sensenova-loop/official か guideboardlabs の 0002 を"
+                 "当ててビルドした llama.cpp が要ります。"
                  "回ごとに測る(--score-layers loop、--select-layer)のは、0002 が無くてもできます")
 
 

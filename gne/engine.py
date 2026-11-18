@@ -500,8 +500,9 @@ class Engine:
                 raise GneError("ARCH_UNSUPPORTED",
                                f"層 {', '.join(map(str, bad[:8]))}{' …' if len(bad) > 8 else ''} は残差が 2 本の流れの中の層です。この llama.cpp は"
                                "そこに足した control vector を次の層に渡さないので、足しても何も起きません(止めました)",
-                               f"効くのは層 {', '.join(map(str, ok))} です。2 本の中の層にも足すには、2 本の流れの両方に足すように直した "
-                               "llama.cpp が要ります(docs/sensenova_loop.md)")
+                               f"効くのは層 {', '.join(map(str, ok))} です。2 本の中の層にも足すには、2 本の流れの両方に足す llama.cpp が要ります"
+                               "(GuideboardLabs 版なら third_party/sensenova-loop/guideboardlabs の 0001。公式版は最初から両方に足す。"
+                               "docs/sensenova_loop.md)")
         if not vectors:
             rc = C.llama_set_adapter_cvec(ctx.ptr, None, 0, self.n_embd, -1, -1)
         else:
@@ -515,9 +516,10 @@ class Engine:
 
     def loop_graph(self) -> dict:
         """同じ層を 2 回実行する arch のグラフを、小さい文脈で 1 回だけ調べて覚える。
-        flavor: official(OpenSenseNova/llama.cpp。2 本の流れの入力に mhc_input の名前)/ guideboardlabs(mhc_ffn_merged の名前。
-        確認の対象外)。inner_l_out: 2 本の中の層のグラフに、連続した l_out(2 本の平均)があるか。公式の改造版は、手を入れないと
-        2 本の中の層の l_out をグラフから外す(third_party/sensenova-loop の 0001 で残す)。"""
+        flavor: official(OpenSenseNova/llama.cpp。2 本の流れの入力に mhc_input の名前)/ guideboardlabs(GuideboardLabs 版。
+        mhc_ffn_merged の名前)。inner_l_out: 2 本の中の層のグラフに、連続した l_out(2 本の平均)があるか。公式の改造版は、手を
+        入れないと 2 本の中の層の l_out をグラフから外す(third_party/sensenova-loop/official の 0001 で残す)。GuideboardLabs 版は、
+        l_out が片方の流れの view なら手を入れていないもの、2 本の平均なら guideboardlabs の 0001 を当てたもの。"""
         if self.loop is None:
             return {"flavor": None, "inner_l_out": True}
         if self._loop_graph is None:

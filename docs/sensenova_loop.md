@@ -1,74 +1,113 @@
 # SenseNova-Loop(sensenova_loop)で gne を使う
 
-**公式の llama.cpp(ggml-org)は、このモデル(arch `sensenova_loop`)をまだ読めない。** 使うには、モデルの開発元の改造版 [OpenSenseNova/llama.cpp](https://github.com/OpenSenseNova/llama.cpp) をビルドし、それを読む llama-cpp-python を入れた、このモデル専用の仮想環境が要る(下の「環境を作る」)。改造版は llama.cpp 1.0 が元なので、ふだんの gne の環境(llama-cpp-python 0.3.36 と、それに合う llama.cpp)とは分けておく。
+**公式の llama.cpp(ggml-org)は、このモデル(arch `sensenova_loop`)をまだ読めない。** 使うには、このモデルを読める改造版の llama.cpp をビルドし、それを読む llama-cpp-python を入れた、このモデル専用の仮想環境が要る。gne は 2 つの改造版に対応していて、どちらも確かめてある(下の「環境を選ぶ」)。ふだんの gne の環境とは分けておく。
 
 SenseNova-Loop-9B は、同じ層を 2 回続けて実行する(ループさせる)言語モデル。保存されている層は 32 で、そのうち 4〜27 を 2 回通るので、1 回の計算で 56 層分を実行する。
+
+## 環境を選ぶ
+
+| | 公式版 | GuideboardLabs 版 |
+|---|---|---|
+| llama.cpp | モデルの開発元の [OpenSenseNova/llama.cpp](https://github.com/OpenSenseNova/llama.cpp) のコミット `24ea7bb`(llama.cpp 1.0 が元) | 第三者の [GuideboardLabs/llama.cpp-sensenova-loop](https://github.com/GuideboardLabs/llama.cpp-sensenova-loop) のコミット `a7f77a7`(llama.cpp 0.8 が元) |
+| 読める GGUF | 公式の [sensenova/SenseNova-Loop-9B-GGUF](https://huggingface.co/sensenova/SenseNova-Loop-9B-GGUF)(BF16・Q8_0・Q5_K_M・Q4_K_M) | [guideboardlabs/SenseNova-Loop-9B-GGUF](https://huggingface.co/guideboardlabs/SenseNova-Loop-9B-GGUF)(Q8_0・Q4_K_M ほか) |
+| 生成の速さ(Q4_K_M、RTX 3080、文脈 8,192) | 約 11 tok/s | 約 56 tok/s |
+| `gne heads pipeline`(question_kinds、この arch の既定。どちらもパッチ 0001 + 0002) | 約 52 分(因果スクリーニング 35 分) | 約 5 分(因果スクリーニング 4 分) |
+| GPU のメモリ(画面の分を除く) | 約 6.6 GB(パッチ 2 本で 7.0 GB) | 約 6.1 GB |
+| 2 本の流れの中の層の control vector | 最初から届く | パッチ 0001 が要る |
+| 2 本の流れの中の層の残差 | パッチ 0001 が要る | 最初から読める |
+| 片方の回だけの書き換え | パッチ 0001 と 0002 が要る | パッチ 0001 と 0002 が要る |
+| MTP(先読みの層)・画像の入力(mmproj) | MTP の層は GGUF の中に、mmproj は GGUF のリポジトリにある(どちらも gne は使わない) | どちらも無い |
+
+- 速さを取るなら GuideboardLabs 版とその GGUF。公式版はルーターを ggml のふつうの演算の組み合わせで計算する(専用の GPU の処理を足していない、と改造版の docs/models.md にある)ので、生成は約 5 分の 1 の速さで、gne の処理もそのぶん時間がかかる。
+- 公式の GGUF や BF16 を使うなら公式版。
+- 2 つの改造版は、互いの GGUF を読めない(メタデータとテンソル名が違う。重みの中身はほぼ同じ)。llama.cpp の版と GGUF の変換の違いで、同じモデルでも出力はこのくらい動く: 公開のひな形の 64 問で、最初のトークンの 1 位が一致したのは 91%、分布の差(KL)は平均 0.027・最大 0.24(どちらも Q4_K_M・GPU)。差の出始めは最初の full attention の層の中の数値の違いで、GGUF の重みの丸めの違いも加わる。
+- パッチと、どの機能にどのパッチが要るかは [third_party/sensenova-loop/](../third_party/sensenova-loop/README.md) にある(公式版は `official/`、GuideboardLabs 版は `guideboardlabs/`)。
 
 ## 構造
 
 | 部分 | 中身 |
 |---|---|
-| 層 | 保存されている層 32。層 4〜27 を 2 回実行するので、実行順では 56 層。公式の GGUF の `block_count` は 57(56 層と、先読み用の MTP の層 1 つ。gne は MTP の層を数えない) |
+| 層 | 保存されている層 32。層 4〜27 を 2 回実行するので、実行順では 56 層。GGUF の `block_count` は 56(公式の GGUF は 57: 56 層と、先読み用の MTP の層 1 つ。gne は MTP の層を数えない) |
 | 2 回目の層 | 実行順の層 28〜51。重みは層 4〜27 と同じもの(GGUF にも 1 回分しか入っていない) |
 | 残差 | 繰り返しの各回の中では 2 本の流れ(mHC: manifold-constrained hyper-connections)。回の入口で 1 本を 2 本に複製し、出口で平均して 1 本に戻す |
-| ルーター | 各層の attention と MLP の前にある小さな行列(`hc_attn_fn`・`hc_ffn_fn`、F32)。2 本のどちらをどれだけ読むか、出力をどちらにどれだけ足すか、2 本をどう混ぜるかを、トークンごとに決める |
-| ヘッド | 4 層ごとに full attention(16 ヘッド、幅 256)、ほかは線形注意(32 ヘッド、幅 128。入力の行列は `attn_qkv_gate`・`ssm_beta_alpha` にまとめて入っている) |
+| ルーター | 各層の attention と MLP の前にある小さな行列(F32)。2 本のどちらをどれだけ読むか、出力をどちらにどれだけ足すか、2 本をどう混ぜるかを、トークンごとに決める。計算は 2 つの改造版で同じ |
+| ヘッド | 4 層ごとに full attention(16 ヘッド、幅 256)、ほかは線形注意(32 ヘッド、幅 128。公式の GGUF では入力の行列が `attn_qkv_gate`・`ssm_beta_alpha` にまとめて入っている) |
 | MLP | 12,288 ニューロン(SwiGLU) |
 
 ## 環境を作る
 
-確かめた環境は Linux(WSL2)、CUDA 12.4、Python 3.12、RTX 3080 12 GB。改造版は [OpenSenseNova/llama.cpp](https://github.com/OpenSenseNova/llama.cpp) のコミット `24ea7bb78410e0f0f7bbb362e37c60cd9ecfc761`(モデルカードが指定するもの。ggml-org の llama.cpp の 2026-11-17 の版が元)、GGUF は [sensenova/SenseNova-Loop-9B-GGUF](https://huggingface.co/sensenova/SenseNova-Loop-9B-GGUF)。gne のリポジトリの [third_party/sensenova-loop/](../third_party/sensenova-loop/README.md) に、改造版に当てるパッチ 2 本と、llama-cpp-python に当てる必須のパッチ 1 本がある。
+確かめた環境は Linux(WSL2)、CUDA 12.4、Python 3.12、RTX 3080 12 GB。下の `<gne>` は gne のリポジトリ、`<llama.cpp>` は改造版をビルドしたフォルダ。12 GB の GPU では Q4_K_M を勧める。
 
-1. 改造版の llama.cpp を取ってきて、パッチを当ててビルドする(共有ライブラリで)。0001 は gne のほとんどの機能に要る(下の表)。名前を付けてグラフに残すだけで、計算の結果は変わらない。0002 は片方の回だけを書き換えるときに要る。
+### 1. 改造版の llama.cpp をビルドする
 
-   ```bash
-   git clone https://github.com/OpenSenseNova/llama.cpp llama.cpp-sensenova
-   cd llama.cpp-sensenova
-   git checkout 24ea7bb78410e0f0f7bbb362e37c60cd9ecfc761
-   git apply <gne>/third_party/sensenova-loop/0001-sensenova-loop-graph-names-for-gne.patch
-   git apply <gne>/third_party/sensenova-loop/0002-sensenova-loop-per-visit-weight-names.patch      # 任意(0001 の後)
-   cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON -DBUILD_SHARED_LIBS=ON -DLLAMA_USE_PREBUILT_UI=OFF -DLLAMA_OPENSSL=OFF
-   cmake --build build -j 8 --target llama ggml mtmd llama-completion llama-cli
-   ```
+公式版(パッチ 0001 は gne のほとんどの機能に要る。名前を付けてグラフに残すだけで、計算の結果は変わらない。0002 は片方の回だけを書き換えるときに要る):
 
-2. 専用の仮想環境を作り、gne が使うパッケージを入れる。llama-cpp-python は pip で入れない(中で別の llama.cpp をビルドしてしまうため)。
+```bash
+git clone https://github.com/OpenSenseNova/llama.cpp llama.cpp-sensenova
+cd llama.cpp-sensenova
+git checkout 24ea7bb78410e0f0f7bbb362e37c60cd9ecfc761
+git apply <gne>/third_party/sensenova-loop/official/0001-sensenova-loop-graph-names-for-gne.patch
+git apply <gne>/third_party/sensenova-loop/official/0002-sensenova-loop-per-visit-weight-names.patch      # 任意(0001 の後)
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON -DBUILD_SHARED_LIBS=ON -DLLAMA_USE_PREBUILT_UI=OFF -DLLAMA_OPENSSL=OFF
+cmake --build build -j 8 --target llama ggml mtmd llama-completion llama-cli
+```
 
-   ```bash
-   uv venv --python 3.12 ~/sensenova-venv
-   uv pip install --python ~/sensenova-venv/bin/python gguf numpy typer pyyaml jinja2 pydantic safetensors fastapi uvicorn pytest
-   uv pip install --python ~/sensenova-venv/bin/python --no-deps -e <gne>
-   ```
+GuideboardLabs 版(パッチ 0001・0002 は任意。0001 は 2 本の流れの中の層の control vector に、0002 は片方の回だけの書き換えに要る):
 
-3. llama-cpp-python 0.3.36 の Python のパッケージ(`llama_cpp/` のフォルダ)だけを取り出し、llama.cpp 1.0 向けの直しを当てて、仮想環境に置く。直しは 2 つ。llama.cpp 1.0 で外された古い関数 36 個(`llama_load_model_from_file` など)があると 0.3.36 は読み込みの時点で止まるので、無い関数は呼んだときだけ止まるようにする。構造体の 2 か所(`llama_context_params`・`llama_perf_context_data`)を改造版の `include/llama.h` に合わせる。構造体を直さないと、モデルを読み込むときの設定が全部ずれて読まれる。
+```bash
+git clone https://github.com/GuideboardLabs/llama.cpp-sensenova-loop
+cd llama.cpp-sensenova-loop
+git checkout a7f77a788893ef2cb17c82b9ac0cb1279bcd0918
+git apply <gne>/third_party/sensenova-loop/guideboardlabs/0001-sensenova-loop-control-vector-on-both-mHC-streams.patch   # 任意
+git apply <gne>/third_party/sensenova-loop/guideboardlabs/0002-sensenova-loop-per-visit-weight-names.patch               # 任意(0001 の後)
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON -DBUILD_SHARED_LIBS=ON -DLLAMA_USE_PREBUILT_UI=OFF -DLLAMA_OPENSSL=OFF
+cmake --build build -j 8 --target llama ggml mtmd llama-server llama-completion
+```
 
-   ```bash
-   git clone --depth 1 --branch v0.3.36 https://github.com/abetlen/llama-cpp-python
-   cd llama-cpp-python
-   git apply <gne>/third_party/sensenova-loop/llama-cpp-python-0.3.36-llama-cpp-1.0.patch
-   SP=$(~/sensenova-venv/bin/python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
-   cp -r llama_cpp "$SP/llama_cpp"
-   mkdir -p "$SP/llama_cpp/lib" && ln -sf <llama.cpp-sensenova>/build/bin/lib*.so* "$SP/llama_cpp/lib/"
-   ```
+### 2. 専用の仮想環境を作る
 
-4. 改造版のライブラリを指して gne を動かす。
+llama-cpp-python は pip で入れない(中で別の llama.cpp をビルドしてしまうため)。
 
-   ```bash
-   export LLAMA_CPP_LIB_PATH=<llama.cpp-sensenova>/build/bin LD_LIBRARY_PATH=<llama.cpp-sensenova>/build/bin
-   ~/sensenova-venv/bin/gne info -m SenseNova-Loop-9B-Q4_K_M.gguf
-   ```
+```bash
+uv venv --python 3.12 ~/sensenova-venv
+uv pip install --python ~/sensenova-venv/bin/python gguf numpy typer pyyaml jinja2 pydantic safetensors fastapi uvicorn pytest
+uv pip install --python ~/sensenova-venv/bin/python --no-deps -e <gne>
+```
 
-   `gne info` の表の「2 回実行する層」の行に、この llama.cpp で何ができるか(どちらの改造版か、2 本の流れの中の層の残差が読めるか、control vector が届くか、2 回目の層に別の名前があるか)が出る。
+### 3. llama-cpp-python 0.3.36 を直して置く
 
-12 GB の GPU では Q4_K_M を勧める(下の「目安」)。
+0.3.36 の Python のパッケージ(`llama_cpp/` のフォルダ)だけを取り出し、使う改造版に合う直しを当てる。
 
-| 機能 | 改造版のまま | + 0001 | + 0001 + 0002 |
-|---|---|---|---|
-| 読み込み・会話・gne serve、control vector(改造版は 2 本の流れの両方に足すので、全部の層で効く) | できる | できる | できる |
-| 繰り返しの外の層と各回の出口(0〜3・27・51〜55)の残差: 回ごとに測る(`--score-layers loop` = 27・51・54、`--select-layer`)、その測る層での CHiPS の一括の流れ、`gne heads measure`・`gne heads loop-merge` | できる | できる | できる |
-| 2 本の流れの中の層(4〜26・28〜50)の残差: 全部の層での方向づくり・基準層の探索、そこでの `gne verify`・FiSH(`gne nw …`)、ルーターの値(`mhc_*_gates`)と 2 本を並べた値(`l_out_streams`) | できない(理由と直し方を出して止める) | できる | できる |
-| 片方の回だけを書き換える(`GNE_LOOP_EDITS=per_visit`、`gne heads causal --visits first / second`、`gne heads visits`、`gne heads loop-pipeline`、`per_visit` と記録したレシピ・LoRA) | できない(理由と直し方を出して止める) | できない | できる |
+- 公式版: `official/llama-cpp-python-0.3.36-llama-cpp-1.0.patch`。llama.cpp 1.0 で外された古い関数 36 個(`llama_load_model_from_file` など)があると 0.3.36 は読み込みの時点で止まるので、無い関数は呼んだときだけ止まるようにする。構造体 2 か所(`llama_context_params`・`llama_perf_context_data`)を改造版の `include/llama.h` に合わせる。
+- GuideboardLabs 版: `guideboardlabs/llama-cpp-python-0.3.36-structs.patch`。構造体 2 か所(`llama_context_params` に `moe_cache_size`、`llama_perf_context_data` に `n_reallocs_same`・`n_reallocs_diff`)を合わせる。
+- どちらも、構造体を直さないと、モデルを読み込むときの設定が全部ずれて読まれる。
 
-以前の第三者の改造版(GuideboardLabs/llama.cpp-sensenova-loop)と、その GGUF(guideboardlabs/SenseNova-Loop-9B-GGUF)は、確認の対象外。改造版どうしで GGUF のメタデータとテンソル名が違い、互いの GGUF を読めない(重みの中身はほぼ同じ)。gne はその GGUF の段の対応(`sensenova_loop.mhc.layer_kinds`)も読めるが、試していない。0.7.0 で公開したそのためのパッチは `third_party/sensenova-loop/legacy-guideboardlabs/` にある。
+```bash
+git clone --depth 1 --branch v0.3.36 https://github.com/abetlen/llama-cpp-python
+cd llama-cpp-python
+git apply <gne>/third_party/sensenova-loop/<official か guideboardlabs>/llama-cpp-python-0.3.36-*.patch
+SP=$(~/sensenova-venv/bin/python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
+cp -r llama_cpp "$SP/llama_cpp"
+mkdir -p "$SP/llama_cpp/lib" && ln -sf <llama.cpp>/build/bin/lib*.so* "$SP/llama_cpp/lib/"
+```
+
+### 4. 改造版のライブラリを指して gne を動かす
+
+```bash
+export LLAMA_CPP_LIB_PATH=<llama.cpp>/build/bin LD_LIBRARY_PATH=<llama.cpp>/build/bin
+~/sensenova-venv/bin/gne info -m SenseNova-Loop-9B-Q4_K_M.gguf
+```
+
+`gne info` の表の「2 回実行する層」の行に、この llama.cpp で何ができるか(どちらの改造版か、2 本の流れの中の層の残差が読めるか、control vector が届くか、2 回目の層に別の名前があるか)が出る。できないことを頼むと、gne は理由と、当てるパッチを書いて止める。
+
+| 機能 | 公式版のまま | 公式版 + 0001 | 公式版 + 0001 + 0002 | GuideboardLabs 版のまま | GuideboardLabs 版 + 0001 | GuideboardLabs 版 + 0001 + 0002 |
+|---|---|---|---|---|---|---|
+| 読み込み・会話・gne serve | できる | できる | できる | できる | できる | できる |
+| 繰り返しの外の層と各回の出口(0〜3・27・51〜55)の残差、回ごとに測る(`--score-layers loop` = 27・51・54)、その測る層での CHiPS、`gne heads measure`・`gne heads loop-merge` | できる | できる | できる | できる | できる | できる |
+| 2 本の流れの中の層(4〜26・28〜50)の残差: 全部の層での方向づくり・基準層の探索・そこでの `gne verify`・FiSH | できない | できる | できる | できる | できる | できる |
+| ルーターの値(`mhc_*_gates`)と 2 本を並べた値(`l_out_streams`) | できない | できる | できる | できる | できる | できる |
+| 2 本の流れの中の層への control vector(FiSH の層を重ねる読み直しを含む。無ければ `--no-stack`) | できる | できる | できる | できない | できる | できる |
+| 片方の回だけを書き換える(`GNE_LOOP_EDITS=per_visit`、`gne heads causal --visits first / second`、`gne heads visits`、`gne heads loop-pipeline`、`per_visit` と記録したレシピ・LoRA) | できない | できない | できる | できない | できない | できる |
 
 ## 層の番号
 
@@ -76,11 +115,11 @@ gne の層の番号は実行順(0〜55)で、llama.cpp のテンソルの捕捉�
 
 ## 残差の読み方
 
-- 層の出力 `l_out-L` は、2 本の流れの平均。改造版は 2 本の中の層でもその平均を計算するが、どこからも読まれないので、手を入れないとグラフから外れる。0001 はそれをグラフに残す。
+- 層の出力 `l_out-L` は、2 本の流れの平均。公式版は 2 本の中の層でもその平均を計算するが、どこからも読まれないので、手を入れないとグラフから外れる。公式版の 0001 はそれをグラフに残す。GuideboardLabs 版は、そのままでも 2 本の合流の出力から gne が平均を組み立てる(GuideboardLabs 版の 0001 を当てると、グラフの `l_out` が 2 本の平均になる)。
 - 2 本の平均を使うのは、回の出口で 2 本が平均されて、それが最終の出力につながるため。各層が読むのは、ルーターが 2 本を重みづけして足したもの。平均から作った方向は、その層が読むものの近似になる。
-- 0001 は MLP の入力にも名前を付ける: `attn_residual`(正規化の前。2 本の中の層ではルーターが 2 本を重みづけして足したもの)と `attn_post_norm`(正規化の後。FiSH の鍵が読む値)。attention の入力(2 本の中の層ではルーターの出力)は `attn_in` として返す。
-- 2 本を並べたままの値(`l_out_streams-L`、0001 の `mhc_stream_a`・`mhc_stream_b` を並べたもの)と、ルーターの値(`mhc_attn_gates-L`・`mhc_ffn_gates-L`。トークンごとに 8 つ: 読む重み 2 つ・書き込みの重み 2 つ・混ぜる行列の 4 つ。どれも sigmoid や Sinkhorn の前の値)は、その名前を指定したときだけ返す。
-- 0001 を当てていない llama.cpp で 2 本の中の層の残差を欲しがると、gne は理由と直し方を書いて止める。
+- 公式版の 0001 は MLP の入力にも名前を付ける(GuideboardLabs 版は最初から名前がある): `attn_residual`(正規化の前。2 本の中の層ではルーターが 2 本を重みづけして足したもの)と `attn_post_norm`(正規化の後。FiSH の鍵が読む値)。attention の入力(2 本の中の層ではルーターの出力)は `attn_in` として返す。
+- 2 本を並べたままの値(`l_out_streams-L`)と、ルーターの値(`mhc_attn_gates-L`・`mhc_ffn_gates-L`。トークンごとに 8 つ: 読む重み 2 つ・書き込みの重み 2 つ・混ぜる行列の 4 つ。どれも sigmoid や Sinkhorn の前の値)は、その名前を指定したときだけ返す。
+- 公式版で 0001 を当てていない llama.cpp で 2 本の中の層の残差を欲しがると、gne は理由と直し方を書いて止める。
 
 ## 重みの書き換えは両方の回に効く
 
@@ -93,7 +132,7 @@ gne の層の番号は実行順(0〜55)で、llama.cpp のテンソルの捕捉�
   - `gne nw verify` は、重みを持つ 1 回目の層で式どおりかを確かめ(その前の層はこの LoRA で変わらない)、もう一方の回で上書きしたニューロンがどれだけ開いたか(`twin_act_max`)を出す。
   - ニューロンのふだんの働き(`gne nw neurons`)は両方の回を合わせて数える。同じ重みの 2 つの層(例 12 と 36)を両方選んだときは、既定のニューロンが重ならないように選ぶ。
 - gain・ablate も同じ(LoRA は重みを持つ層の名前に書き、両方の回に効く)。層ごとの方向を消す ablate(`--per-layer`)の LoRA は、1 回目と 2 回目の方向の射影を続けて掛けた 1 つにまとめる。焼き込みは重みを持つテンソルを 1 回だけ書き換えるので、層ごとの方向は 1 回目の層の方向を使う。
-- `gne verify` の V11(gain の確かめ)は、重みを持つ 1 回目の層で確かめる。0001 を当てていない llama.cpp では、2 本の流れの中の層を `--layer` に渡すと、理由と直し方を書いて止める(`--layer 0`・`51`・`52` などは確かめられる)。
+- `gne verify` の V11(gain の確かめ)は、重みを持つ 1 回目の層で確かめる。公式版で 0001 を当てていない llama.cpp では、2 本の流れの中の層を `--layer` に渡すと、理由と直し方を書いて止める(`--layer 0`・`51`・`52` などは確かめられる)。
 
 ### 片方の回だけを書き換える
 
@@ -142,7 +181,7 @@ gne の層の番号は実行順(0〜55)で、llama.cpp のテンソルの捕捉�
 
 ## control vector
 
-改造版は、2 本の流れの中の層に足した control vector を 2 本の両方に足すので、全部の層で効く(2 本の両方に足すのは、2 本の平均に足すのと同じ。2 本の差は変わらない)。FiSH の方向を作る段の「層を重ねる読み直し」も control vector を使う。
+公式版は、2 本の流れの中の層に足した control vector を 2 本の両方に足すので、全部の層で効く(2 本の両方に足すのは、2 本の平均に足すのと同じ。2 本の差は変わらない)。GuideboardLabs 版はそのままだと片方の流れにだけ足し、次の副層がそれを捨てるので、2 本の中の層(4〜26・28〜50)には届かない。GuideboardLabs 版の 0001 で、公式版と同じく両方に足すようになる。届かない llama.cpp で 2 本の中の層に足そうとすると、gne は理由と直し方を書いて止める。FiSH の方向を作る段の「層を重ねる読み直し」も control vector を使う(届かない llama.cpp では `--no-stack`)。
 
 ## 思考(thinking)
 
@@ -150,9 +189,9 @@ gne の層の番号は実行順(0〜55)で、llama.cpp のテンソルの捕捉�
 
 ## CHiPS と FiSH を流す(確かめたもの)
 
-**この節と次の節の数は、v0.7.0 のとき、GuideboardLabs 版の llama.cpp と GGUF で測った値。公式版では取り直していない。** llama.cpp の版と GGUF の変換の違いで、同じモデルでも出力はこのくらい動く: 公開のひな形の 64 問で、最初のトークンの 1 位が一致したのは 91%、分布の差(KL)は平均 0.027・最大 0.24(公式版と GuideboardLabs 版、どちらも Q4_K_M・GPU)。差の出始めは最初の full attention の層の中の数値の違いで、GGUF の重みの丸めの違いも加わる。公式版で確かめたのは、question_kinds の `gne heads pipeline`(この arch の既定)と `gne heads visits` が最後まで動くことと、gne の実物のテスト(0001 なし・0001・0001 + 0002)が通ることまで。
+**この節と次の節の数は、v0.7.0 のとき、GuideboardLabs 版の llama.cpp と GGUF で測った値。公式版では取り直していない。** llama.cpp の版と GGUF の変換の違いで、同じモデルでも出力はこのくらい動く: 公開のひな形の 64 問で、最初のトークンの 1 位が一致したのは 91%、分布の差(KL)は平均 0.027・最大 0.24(公式版と GuideboardLabs 版、どちらも Q4_K_M・GPU)。差の出始めは最初の full attention の層の中の数値の違いで、GGUF の重みの丸めの違いも加わる。公式版で確かめたのは、question_kinds の `gne heads pipeline`(この arch の既定)と `gne heads visits` が最後まで動くことと、gne の実物のテスト(0001 なし・0001・0001 + 0002)が通ることまで。gne の実物のテストは、GuideboardLabs 版(パッチなし・0001・0001 + 0002)でも、2 つの改造版に対応した今のコードで通る。
 
-公開のひな形で、次の順に流して最後まで動くことを確かめた(Q4_K_M と Q8_0、元の llama.cpp)。
+公開のひな形で、次の順に流して最後まで動くことを確かめた(Q4_K_M と Q8_0、GuideboardLabs 版のパッチなしの llama.cpp)。
 
 ```
 gne heads pipeline --spec configs/pipeline/disclaimer.json --target B --n-heads 10,6,4,2,1 -m <model>
@@ -162,14 +201,14 @@ gne nw verify --recipe <名前> --iv <同じレシピ> --contrast configs/fish/c
 gne nw check  --recipe <名前> --iv <同じレシピ> --contrast configs/fish/closing_rmbase.json -m <model>
 ```
 
-- `--no-stack` は元の llama.cpp のとき(上の「control vector」)。2 本の流れの両方に足すように直した llama.cpp なら付けない。
+- `--no-stack` は、control vector が 2 本の中の層に届かない llama.cpp(GuideboardLabs 版でパッチ 0001 なし)のとき(上の「control vector」)。公式版や、GuideboardLabs 版 + 0001 なら付けない。
 - 層 40〜46 は動作の確認のための選び方(2 回目の層。上書きしたニューロンが 1 回目の層 16〜22 でも動くので、その数え方を確かめられる)で、勧める層ではない。
 - この確認では、もう一方の回(層 16〜22)で書いた分が大きかった。区間 1〜3 では合計の約半分がもう一方の回の分で、狙った量(1)を超える質問が多い。位置 0 では、もう一方の回が逆向きに書いた(成分を取り除く形 !rmbase の基準値は、ユニットの層で中立の文から測った値なので、もう一方の回では合わない)。2 回目の層に書くときは、この合計で強さを決めるか、繰り返しの外の層(0〜3・52〜54)を使う。片方の回だけに書くには、2 回目の層に別の名前がある llama.cpp で `GNE_LOOP_EDITS=per_visit` にする(同じ確認を Q4_K_M で流すと、位置 1〜3 の書いた量の平均は 0.80〜1.05 から 0.62〜0.73 に、位置 0 の逆向きの分は −0.22 から +0.01 になった。当てた CHiPS のレシピは、それぞれの当て方で探したもので同じではない。この LoRA はその llama.cpp でしか当てられない)。
 - Q4_K_M では `gne nw verify` が、入力の行の誤差(4〜10%)で許容(5%)を超えて不合格になった。量子化の丸めによる差で、Q8_0 では全部の層で合格(2〜4%)。
 
 ### 回ごとの CHiPS(確かめたもの)
 
-公開のひな形 `disclaimer.json` と `question_kinds.json`(各側 16 問)、Q4_K_M、2 本の流れの両方に足し 2 回目の層に別の名前を付けた llama.cpp で、同じヘッド数(6)の組を候補の範囲を変えて作り、段 54 で比べた。どれも目標は段 54 の B 側の平均で、同じ方向で測った。値は、段 54 の A と B の差のうち縮めた割合(1 で B 側の平均に届く)/ B 側の直交成分のずれ。「両方」は両方の回に当てた形(配れる形)。
+公開のひな形 `disclaimer.json` と `question_kinds.json`(各側 16 問)、Q4_K_M、GuideboardLabs 版 + 0001 + 0002 の llama.cpp で、同じヘッド数(6)の組を候補の範囲を変えて作り、段 54 で比べた。どれも目標は段 54 の B 側の平均で、同じ方向で測った。値は、段 54 の A と B の差のうち縮めた割合(1 で B 側の平均に届く)/ B 側の直交成分のずれ。「両方」は両方の回に当てた形(配れる形)。
 
 | 選び方(6 ヘッド) | disclaimer | question_kinds |
 |---|---|---|
@@ -202,14 +241,14 @@ gne nw check  --recipe <名前> --iv <同じレシピ> --contrast configs/fish/c
 
 ## 目安(Q4_K_M、RTX 3080 12 GB)
 
-公式版で測った値(llama-completion、文脈 8,192、全層を GPU に載せ、256 トークンまで生成。GPU のメモリは画面の分を除いた最大値)。
+2 つの改造版を同じ測り方で測った値(llama-completion、文脈 8,192、全層を GPU に載せ、256 トークンまで生成。GPU のメモリは画面の分を除いた最大値)。それぞれの改造版の Q4_K_M を使った。
 
-| 処理 | 公式版 | 公式版 + 0001 + 0002 | 参考: GuideboardLabs 版(同じ測り方) |
+| 処理 | 公式版 | 公式版 + 0001 + 0002 | GuideboardLabs 版 |
 |---|---|---|---|
 | 生成 | 約 11 tok/s | 約 11 tok/s | 約 56 tok/s |
 | 短いプロンプトの読み込み(20 トークン) | 約 45 tok/s | 約 41 tok/s | 約 290 tok/s |
 | GPU のメモリ | 約 6.6 GB | 約 7.0 GB | 約 6.1 GB |
-| `gne heads pipeline`(question_kinds、各側 16 問、この arch の既定。ヘッド 144 個を止めて測る) | — | 約 52 分(因果スクリーニング 35 分) | 参考: v0.7.0 の同じひな形で約 4.5 分(測る層の指定が違い、止めたヘッドは 112 個) |
+| `gne heads pipeline`(question_kinds、各側 16 問、この arch の既定。ヘッド 144 個を止めて測る) | — | 約 52 分(因果スクリーニング 35 分) | 約 5 分(因果スクリーニング 4 分。0001 + 0002 で測った値) |
 
 公式版は 2 本の流れのルーターを ggml のふつうの演算の組み合わせで計算する(専用の GPU の処理は足していない、と改造版の docs/models.md にある)ので、生成は GuideboardLabs 版の約 5 分の 1 の速さだった。gne の処理も、そのぶん時間がかかる。ほかの処理の時間は、公式版では測っていない。
 

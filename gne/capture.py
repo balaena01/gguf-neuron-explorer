@@ -55,10 +55,10 @@ class Capture:
         # 本数を入れると l_out-L という名前で流れの平均(n_tokens, n_embd)を返す。他のコードは今までどおり l_out-L を見ればよい
         self.hc_streams = 0
         # 同じ層を 2 回実行する arch(sensenova_loop。loop.py): 各回の中では残差が 2 本の流れ。
-        # 公式の改造版(OpenSenseNova/llama.cpp)に third_party/sensenova-loop の 0001 を当てると、グラフの名前がそのまま
+        # 公式の改造版(OpenSenseNova/llama.cpp)に third_party/sensenova-loop/official の 0001 を当てると、グラフの名前がそのまま
         # ふつうの名前になる(l_out = 2 本の平均、attn_residual・attn_post_norm = MLP の入力、mhc_*_gates = ルーターの値)。
         # 1 つ目の mhc_input(attention の入力)は attn_in、mhc_stream_a / _b は並べて l_out_streams-L にする。
-        # 以下は GuideboardLabs 版のグラフの名前(確認の対象外)。Engine が loop(LoopPlan)・loop_d(n_embd)・loop_full
+        # 以下は GuideboardLabs 版のグラフの名前。Engine が loop(LoopPlan)・loop_d(n_embd)・loop_full
         # (full attention の層)を入れると、ふつうの名前で返す:
         #   l_out-L        = 2 本の平均(llama.cpp のグラフの l_out は、2 本の中の層では片方の流れの飛び飛びの view。
         #                    流れの中で control vector を足すように直した llama.cpp では、平均そのものがグラフの l_out になる)
@@ -134,7 +134,7 @@ class Capture:
             return self._loop_canon(name)
         return "l_out-" + name[7:] if self.hc_streams and name.startswith("l_last-") else name
 
-    # GuideboardLabs 版のグラフの名前(確認の対象外)と、公式の改造版の 2 本の流れの入力(mhc_input。1 つ目が attention の入力。
+    # GuideboardLabs 版のグラフの名前と、公式の改造版の 2 本の流れの入力(mhc_input。1 つ目が attention の入力。
     # 0001 を当てると 2 つ目は attn_residual の名前になる)
     _LOOP_NAMES = {"mhc_ffn_merged": "l_out_pre", "mhc_attn_merged": "attn_merged", "mhc_ffn_packed": "attn_residual",
                    "mhc_attn_packed": "attn_in", "mhc_ffn_norm": "attn_post_norm", "mhc_attn_norm": "attn_norm",
