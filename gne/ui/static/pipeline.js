@@ -90,7 +90,7 @@ export function checkSpec(text) {
     }
   }
   const nMulti = [...(pa || []), ...(samePrompts ? [] : pb || [])].filter((q) => Array.isArray(q)).length;
-  if (nMulti) out.warns.push(t("会話の履歴を書いた質問が {n} 個あります(最後の user の発話への返事の直前で測ります)", { n: nMulti }));
+  if (nMulti) out.warns.push(t("会話の履歴を書いた質問が {n} 個あります(最後の user の発話への応答の直前で測ります)", { n: nMulti }));
   if (pa && pb) out.summary = { n: samePrompts ? pa.length : `${pa.length} / ${pb.length}`, A: sideText(d, "a"), B: sideText(d, "b"), validate: d.validate && d.validate.match };
   return out;
 }
@@ -150,7 +150,7 @@ export class PipelinePanel {
         <label class="muted" title="${t("配分で A 側の射影の値をここまで下げる(射影の値を測る最後の層)。数か、B(B 側の平均まで = 消し切る)。空なら A と B の平均の真ん中(半分ほど消す)")}">${t("射影の目標")} <input id="pp-target" size="7" placeholder="${t("真ん中")}" spellcheck="false"></label>
         <label class="muted" title="${t("比べる組のヘッドの数(カンマ区切り)。少ない組ほど 1 ヘッドの強さが大きくなる")}">${t("ヘッド数")} <input id="pp-nheads" size="8" value="${DEFAULTS.n_heads}" spellcheck="false"></label>
         <label class="muted" title="${t("射影の値を測る段(基準層・因果・配分)で使う質問の数(等間隔に間引く)。方向づくりには全部使う")}">${t("測る質問の数")} <input id="pp-mx" type="number" min="4" max="4096" value="${DEFAULTS.max_examples}"></label>
-        <label class="muted" title="${t("方向を作る位置。last = 質問の最後のトークン、response = 返事を書かせてその位置(遅い)")}">${t("方向を作る位置")} <select id="pp-pos"><option value="last">${t("質問の最後")}</option><option value="response">${t("返事(遅い)")}</option></select></label>
+        <label class="muted" title="${t("方向を作る位置。last = 質問の最後のトークン、response = 応答を書かせてその位置(遅い)")}">${t("方向を作る位置")} <select id="pp-pos"><option value="last">${t("質問の最後")}</option><option value="response">${t("応答(遅い)")}</option></select></label>
         <label class="muted" title="${t("層ごとのスクリーニングのあと、ヘッドを 1 個ずつ止めて測る層の数")}">${t("ヘッドを測る層の数")} <input id="pp-tl" type="number" min="1" max="64" value="${DEFAULTS.top_layers}"></label>
         <label class="muted" title="${t("効率を測るときの、射影の値が残りやすい質問の数")}">${t("残りやすい質問の数")} <input id="pp-hard" type="number" min="1" max="1024" value="${DEFAULTS.hard}"></label>
         <label class="muted" title="${t("同じ JSON・同じ設定で作り済みの方向と因果の結果があっても使い回さず、最初から作り直す(止めて流し直すときは外したままにすると配分からやり直せる)")}"><input type="checkbox" id="pp-fresh"> ${t("最初から作り直す")}</label></div>
@@ -446,15 +446,15 @@ export class PipelinePanel {
     if (!ok) return "";
     const sp = [["llama_server", t("llama-server の既定")], ["common", t("よく使う設定")], ["greedy", "greedy"]];
     return `<div class="pp-cand"><h4 class="pp-sub">${t("強さの候補を作る(名前を伏せて採点する)")}</h4>
-      ${noteHTML(t("比較表の組それぞれに全体の倍率を何段か掛けて、A 側(振る舞いが出ている状態)と B 側(ふつうの状態)で返事を作ります。正の倍率は A 側で振る舞いを消す向き(A 側の返事を採点)、負の倍率は符号を返して B 側で強める向き(B 側の返事を採点)。無介入(base)は必ず入ります。どの候補の返事か伏せて採点し、候補ごとに集計します。調整に使っていない質問で作ると、強さを決めるのに使えます。"), "muted note")}
+      ${noteHTML(t("比較表の組それぞれに全体の倍率を何段か掛けて、A 側(振る舞いが出ている状態)と B 側(ふつうの状態)で応答を作ります。正の倍率は A 側で振る舞いを消す向き(A 側の応答を採点)、負の倍率は符号を返して B 側で強める向き(B 側の応答を採点)。無介入(base)は必ず入ります。どの候補の応答か伏せて採点し、候補ごとに集計します。調整に使っていない質問で作ると、強さを決めるのに使えます。"), "muted note")}
       <div class="pp-set">
         <label class="muted" title="${t("カンマ区切り。正 = A 側で消す向き、負 = B 側で強める向き。0 は使えない(無介入は base)")}">${t("強さ")} <input id="pc-scales" size="16" value="${esc(f.scales)}" spellcheck="false"></label>
         <label class="muted" title="${t("比較表のどの組を使うか(ヘッド数、カンマ区切り)。空なら全部")}">${t("組(ヘッド数)")} <input id="pc-nheads" size="6" value="${esc(f.n_heads)}" placeholder="${t("全部")}" spellcheck="false"></label>
         <label class="muted" title="${t("各側の質問の数の上限(多ければ等間隔に間引く)")}">${t("質問の数")} <input id="pc-mp" type="number" min="1" max="1000" value="${f.max_prompts}"></label>
-        <label class="muted" title="${t("返事の長さの上限(トークン)")}">${t("返事の長さ")} <input id="pc-mt" type="number" min="1" max="2048" value="${f.max_tokens}"></label>
+        <label class="muted" title="${t("応答の長さの上限(トークン)")}">${t("応答の長さ")} <input id="pc-mt" type="number" min="1" max="2048" value="${f.max_tokens}"></label>
         <label class="muted" title="${t("全部の候補(無介入も)で同じ種を使うので、違いは介入だけになる")}">${t("サンプリング")} <select id="pc-sp">${sp.map(([k, l]) => `<option value="${k}"${f.sampling === k ? " selected" : ""}>${esc(l)}</option>`).join("")}</select></label>
         <label class="muted">${t("種")} <input id="pc-seed" type="number" min="0" value="${f.seed}"></label>
-        <label class="muted" title="${t("全部の候補の両側の返事を採点する(既定は、消す向きは A 側、強める向きは B 側だけ)")}"><input type="checkbox" id="pc-jb"${f.judge_b ? " checked" : ""}> ${t("両側を採点する")}</label></div>
+        <label class="muted" title="${t("全部の候補の両側の応答を採点する(既定は、消す向きは A 側、強める向きは B 側だけ)")}"><input type="checkbox" id="pc-jb"${f.judge_b ? " checked" : ""}> ${t("両側を採点する")}</label></div>
       <div class="pp-cand-q"><textarea id="pc-qa" rows="4" spellcheck="false" placeholder="${t("A 側の質問(調整に使っていないもの。1 行に 1 つ。空なら対照集合の質問)")}">${esc(f.qa)}</textarea>
         <textarea id="pc-qb" rows="4" spellcheck="false" placeholder="${t("B 側の質問(空なら A と同じ質問)")}">${esc(f.qb)}</textarea></div>
       <div class="pp-set"><label class="muted" title="${t("全部の候補(無介入も)に重ねるレシピ(ニューロンの種火など)。保存したレシピの名前か .yaml のパス")}">${t("重ねるレシピ")} <input id="pc-with" size="28" value="${esc(f.with_recipe)}" placeholder="${t("なし")}" spellcheck="false"></label></div>
@@ -566,7 +566,7 @@ export class PipelinePanel {
   // 3. 最初の比率
   stage3(d) {
     const a = d.allocate || {}, init = a.initial;
-    const intro = `${noteHTML(t("前の段の因果の効き目(ヘッドを 1 個ずつ止めたときに、後ろの層の射影の値がどれだけ下がるか)が大きいヘッドを選び、強さはこの効き目に比例させます。全体の大きさ α だけを、返事を書かせずに測る射影の値が目標に届くよう二分探索で決めます。"), "muted note")}`;
+    const intro = `${noteHTML(t("前の段の因果の効き目(ヘッドを 1 個ずつ止めたときに、後ろの層の射影の値がどれだけ下がるか)が大きいヘッドを選び、強さはこの効き目に比例させます。全体の大きさ α だけを、応答を書かせずに測る射影の値が目標に届くよう二分探索で決めます。"), "muted note")}`;
     if (!init) return `<section class="pp-stage"><h4>${t("3. 最初の比率")}</h4>${intro}<p class="muted note">${t("(この実行には最初の組がありません)")}</p></section>`;
     const us = (init.heads || []).map(parseUnit).filter(Boolean);
     const mx = Math.max(1e-9, ...us.map((u) => u.s));

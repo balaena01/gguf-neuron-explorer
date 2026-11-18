@@ -434,19 +434,19 @@ export class RecipePanel {
       ${r.units.length ? `<div class="rc-actions"><button class="small quiet" id="rc-clear" title="${t("すべてのユニットを外す")}">${t("レシピを空にする")}</button></div>` : ""}
       </div>
       <div ${panel("try")}>
-      ${noteHTML(t("いまのレシピを当てた返事を、何もしない返事・逆向きに当てた返事と並べて比べます。チャットは「くわしく見る」のニューロンの Chat に開きます。"), "muted note")}
+      ${noteHTML(t("いまのレシピを当てた応答を、何もしない応答・逆向きに当てた応答と並べて比べます。チャットは「くわしく見る」のニューロンの Chat に開きます。"), "muted note")}
       <div class="rc-actions"><button class="main" id="rc-chat"${r.empty() ? " disabled" : ""}>${t("3 列チャットで試す")}</button></div>
       </div>
       <div ${panel("out")}>
-      ${noteHTML(t("書き出しはここにまとめています。足す押し方(ニューロン・方向)は cvec、ヘッド・鍵つきの書き込みは「LoRA・焼き込み」、計算で作るニューロン(FiSH)は nw の LoRA です。"), "muted note")}
+      ${noteHTML(t("書き出しはここにまとめています。足す押し方(ニューロン・方向)は cvec、ヘッド・キーつきの書き込みは「LoRA・マージ」、計算で作るニューロン(FiSH)は nw の LoRA です。"), "muted note")}
       <div class="rc-actions">
         <button id="rc-export"${r.addSpecs().length && document.body.dataset.cvec !== "off" ? "" : " disabled"}>${t("cvec を書き出す")}</button>
         <label class="muted"><input type="checkbox" id="rc-verify"> ${t("llama.cpp で確かめる")}</label>
-        <button id="rc-lora"${r.heads().length || r.projs().length || r.keyed().length ? "" : " disabled"} title="${t("ヘッドの方向成分(proj)と倍率(gain)、鍵つきの書き込み(keyed)を、llama.cpp の --lora で使う LoRA アダプタか、重みに焼き込んだ GGUF に書き出す")}">${t("LoRA・焼き込み")}${this.lxOpen ? " ▴" : " ▾"}</button>
+        <button id="rc-lora"${r.heads().length || r.projs().length || r.keyed().length ? "" : " disabled"} title="${t("ヘッドの方向成分(proj)と倍率(gain)、キーつきの書き込み(keyed)を、llama.cpp の --lora で使う LoRA アダプタか、重みにマージした GGUF に書き出す")}">${t("LoRA・マージ")}${this.lxOpen ? " ▴" : " ▾"}</button>
       </div>
-      ${r.keyed().length ? `${noteHTML(t("鍵つきの書き込み(keyed)は control vector に入りません(入力の活性で効き分けるので足し算にならない)。「LoRA・焼き込み」で書き出します。"), "muted note")}` : ""}
-      ${r.nws().length ? `<div class="rc-actions"><button id="rc-nw" title="${t("計算で作るニューロン(nw)を、llama.cpp の --lora で使う LoRA アダプタに書き出す(焼き込みは無い)")}">${t("nw の LoRA を書き出す")}</button></div>
-        ${noteHTML(t("計算で作るニューロン(nw)は control vector にも「LoRA・焼き込み」にも入りません。「nw の LoRA を書き出す」で別のアダプタにします。"), "muted note")}` : ""}
+      ${r.keyed().length ? `${noteHTML(t("キーつきの書き込み(keyed)は control vector に入りません(入力の活性で効き分けるので足し算にならない)。「LoRA・マージ」で書き出します。"), "muted note")}` : ""}
+      ${r.nws().length ? `<div class="rc-actions"><button id="rc-nw" title="${t("計算で作るニューロン(nw)を、llama.cpp の --lora で使う LoRA アダプタに書き出す(マージは無い)")}">${t("nw の LoRA を書き出す")}</button></div>
+        ${noteHTML(t("計算で作るニューロン(nw)は control vector にも「LoRA・マージ」にも入りません。「nw の LoRA を書き出す」で別のアダプタにします。"), "muted note")}` : ""}
       ${this.lxOpen ? this.lxHTML() : ""}
       </div>
       <div id="rc-result"></div>`;
@@ -570,18 +570,18 @@ export class RecipePanel {
   nwRow(u, i) {
     const a = +u.alpha;
     const what = `L${u.layer} N${u.neuron}${u.pair !== null && u.pair !== undefined ? `+N${u.pair}` : ""}`;
-    const form = u.pair !== null && u.pair !== undefined ? t("上限つき(2 個を組)") : u.key2 ? t("鍵 2 つ") : t("鍵 1 つ");
+    const form = u.pair !== null && u.pair !== undefined ? t("上限つき(2 個を組)") : u.key2 ? t("キー 2 つ") : t("キー 1 つ");
     const removes = !!(u.take || u.remove);
-    const how = u.take ? `<span title="${t("取り除く量を、この鍵(MLP の入力の空間)で位置ごとに当てる。入力の行 = 量の鍵、出力の列 = −α·r̂(r̂ は方向の向き)。CHiPS のヘッドの分を場面で取り除くユニット(gne nw heads)の形")}">${t("取り除く形: 量の鍵")} <span class="mono">${esc(u.take)}</span></span>`
-      : u.remove === "part" ? `<span title="${t("鍵が開いた位置で、その位置の方向の成分を α の割合だけ取り除く(!rm)")}">${t("取り除く形: その位置の成分")}</span>`
-      : u.remove === "excess" ? `<span title="${t("鍵が開いた位置で、中立の文での成分の平均(基準値)を超えた分だけを取り除く(!rmbase)")}">${t("取り除く形: 基準値を超えた分")}</span>` : "";
+    const how = u.take ? `<span title="${t("取り除く量を、このキー(MLP の入力の空間)で位置ごとに当てる。入力の行 = 量のキー、出力の列 = −α·r̂(r̂ は方向の向き)。CHiPS のヘッドの分を場面で取り除くユニット(gne nw heads)の形")}">${t("取り除く形: 量のキー")} <span class="mono">${esc(u.take)}</span></span>`
+      : u.remove === "part" ? `<span title="${t("キーが開いた位置で、その位置の方向の成分を α の割合だけ取り除く(!rm)")}">${t("取り除く形: その位置の成分")}</span>`
+      : u.remove === "excess" ? `<span title="${t("キーが開いた位置で、中立の文での成分の平均(基準値)を超えた分だけを取り除く(!rmbase)")}">${t("取り除く形: 基準値を超えた分")}</span>` : "";
     const ks = u.kscale ? `<span title="${t("量子化の丸めへの倍率 k: 入力の行を 1/k、出力の列を k 倍にする(足す量は同じで、活性だけが 1/k になる)。auto は層の活性の大きさから決める(!k4・!kauto)")}">${t("量子化の倍率")} <span class="mono">k${esc(u.kscale)}</span></span>` : "";
     return `
       <tr data-i="${i}" class="rc-nw${removes ? " rc-nw-rm" : ""}"><td class="id"><span class="mono">${esc(what)}</span>
-        <span class="badge keyed" title="${removes ? t("計算で作るニューロン: ニューロンを計算した重みで上書きし、鍵が開いた位置でだけ方向の成分を取り除く(LoRA)") : t("計算で作るニューロン: ニューロンを計算した重みで上書きし、鍵が反応する位置でだけ方向を書く(LoRA)")}">nw</span>${
+        <span class="badge keyed" title="${removes ? t("計算で作るニューロン: ニューロンを計算した重みで上書きし、キーが開いた位置でだけ方向の成分を取り除く(LoRA)") : t("計算で作るニューロン: ニューロンを計算した重みで上書きし、キーが反応する位置でだけ方向を書く(LoRA)")}">nw</span>${
         removes ? ` <span class="badge minus" title="${t("強さ α は取り除く割合の目安(1 で全部)")}">${t("取り除く")}</span>` : ""}
         <button class="small quiet rm" data-rm="${i}" title="${t("外す")}">×</button>
-        <div class="rc-kx muted mono" title="${t("方向・鍵・形は direction ビューの FiSH のタブ(か CLI・MCP の gne nw …)で決める(docs/fish.md)")}">@${esc(u.direction || "—")} #${esc(u.key || "—")}${u.key2 ? `&amp;${esc(u.key2)}` : ""} · ${esc(form)}</div>${
+        <div class="rc-kx muted mono" title="${t("方向・キー・形は direction ビューの FiSH のタブ(か CLI・MCP の gne nw …)で決める(docs/fish.md)")}">@${esc(u.direction || "—")} #${esc(u.key || "—")}${u.key2 ? `&amp;${esc(u.key2)}` : ""} · ${esc(form)}</div>${
         how || ks ? `<div class="rc-kx rc-nwx muted">${[how, ks].filter(Boolean).join(" · ")}</div>` : ""}
         <div class="sl"><span class="muted">−${KEYED.max}</span><input type="range" class="dose" data-i="${i}" min="${-KEYED.max}" max="${KEYED.max}" step="${KEYED.step}" value="${a}" style="background:${trackBG(a, KEYED.max)}"><span class="muted">+${KEYED.max}</span>
           <span class="sg mono ${a >= 0 ? "plus" : "minus"}">${aLabel(a)}</span>
@@ -594,23 +594,23 @@ export class RecipePanel {
     const kinfo = kname ? keys.find((k) => k.name === String(kname).replace(/~\d+$/, "")) : null;
     const warn = [];
     if (!dname) warn.push(t("方向がありません"));
-    if (!kname) warn.push(t("鍵がありません"));
-    else if (!kinfo) warn.push(t("鍵 {k} が見つかりません", { k: kname }));
+    if (!kname) warn.push(t("キーがありません"));
+    else if (!kinfo) warn.push(t("キー {k} が見つかりません", { k: kname }));
     else {
-      if (!kinfo.layers.includes(u.layer)) warn.push(t("鍵 {k} に L{L} がありません(ある層: {ls})", { k: kname, L: u.layer, ls: kinfo.layers.join(",") }));
-      if (kinfo.target !== keyedTarget(u)) warn.push(t("鍵の書き込み先は {t} です", { t: kinfo.target }));
+      if (!kinfo.layers.includes(u.layer)) warn.push(t("キー {k} に L{L} がありません(ある層: {ls})", { k: kname, L: u.layer, ls: kinfo.layers.join(",") }));
+      if (kinfo.target !== keyedTarget(u)) warn.push(t("キーの書き込み先は {t} です", { t: kinfo.target }));
     }
     const opts = (xs, cur, def) => [`<option value=""${cur ? "" : " selected"}>${esc(def ? t("既定: {x}", { x: def }) : t("既定(なし)"))}</option>`,
       ...[...xs, ...(cur && !xs.includes(cur) ? [cur] : [])].map((x) => `<option${x === cur ? " selected" : ""}>${esc(x)}</option>`)].join("");
     const kinds = KEYED_KINDS.map((k) => `<option value="${k}"${k === u.kind ? " selected" : ""}>${k === "shared" ? "S" : k === "expert" ? "E" : k}</option>`).join("");
     return `
       <tr data-i="${i}" class="rc-keyed"><td class="id"><span class="mono">L${u.layer}</span>
-        <select class="rc-kkind" data-kkind="${i}" title="${t("書き込み先: ffn = ffn_down、attn = attn_output、S = shared expert、E = 専門家 e(鍵を作った書き込み先と同じにする)")}">${kinds}</select>${
+        <select class="rc-kkind" data-kkind="${i}" title="${t("書き込み先: ffn = ffn_down、attn = attn_output、S = shared expert、E = 専門家 e(キーを作った書き込み先と同じにする)")}">${kinds}</select>${
           u.kind === "expert" ? `<input type="number" class="num rc-kexp" data-kexp="${i}" min="0" value="${esc(String(this.kexpDraft && this.kexpDraft.u === u ? this.kexpDraft.v : u.expert ?? 0))}" title="${t("専門家の番号")}">` : ""}
-        <span class="badge keyed" title="${t("鍵つきの書き込み: 入力の活性に鍵が反応するときだけ方向を書く(LoRA)")}">keyed</span>
+        <span class="badge keyed" title="${t("キーつきの書き込み: 入力の活性にキーが反応するときだけ方向を書く(LoRA)")}">keyed</span>
         <button class="small quiet rm" data-rm="${i}" title="${t("外す")}">×</button>
         <div class="rc-kx"><span class="mono">@</span><select data-kdir="${i}" title="${t("書き込む方向(gne direction の方向セットの r_L)")}">${opts(dirs, u.direction, r.defaultDirection)}</select>
-          <span class="mono">#</span><select data-kkey="${i}" title="${t("鍵(direction ビューの「鍵」か gne direction key で作ったもの)")}">${opts(keys.map((k) => k.name), u.key, r.defaultKey)}</select>
+          <span class="mono">#</span><select data-kkey="${i}" title="${t("キー(direction ビューの「キー」か gne direction key で作ったもの)")}">${opts(keys.map((k) => k.name), u.key, r.defaultKey)}</select>
           ${warn.map((w) => `<span class="badge warn">${esc(w)}</span>`).join(" ")}</div>
         <div class="sl"><span class="muted">−${KEYED.max}</span><input type="range" class="dose" min="-${KEYED.max}" max="${KEYED.max}" step="${KEYED.step}" value="${u.alpha}" data-i="${i}" style="background:${trackBG(u.alpha, KEYED.max)}"><span class="muted">+${KEYED.max}</span>
           <span class="sg mono ${u.alpha >= 0 ? "plus" : "minus"}">${aLabel(u.alpha)}</span>
@@ -622,10 +622,10 @@ export class RecipePanel {
     const r = this.r, dirs = this.projDirections(), keys = this.keys().filter((k) => !k.error).map((k) => k.name);
     const opt = (xs, cur) => [`<option value="">${t("なし")}</option>`,
       ...[...xs, ...(cur && !xs.includes(cur) ? [cur] : [])].map((x) => `<option${x === cur ? " selected" : ""}>${esc(x)}</option>`)].join("");
-    return `<div class="rc-ablate rc-kdef" title="${t("@方向・#鍵を「既定」にした keyed の行が使う方向と鍵(保存するとレシピの default_direction・default_key)")}"><span class="muted">${t("keyed の既定")}</span>
+    return `<div class="rc-ablate rc-kdef" title="${t("@方向・#キーを「既定」にした keyed の行が使う方向とキー(保存するとレシピの default_direction・default_key)")}"><span class="muted">${t("keyed の既定")}</span>
         <span class="mono">@</span><select id="rc-kdd">${opt(dirs, r.defaultDirection)}</select>
         <span class="mono">#</span><select id="rc-kdk">${opt(keys, r.defaultKey)}</select></div>
-      ${noteHTML(t("鍵つきの書き込み a: 入力の活性 x に鍵 κ が反応する(鍵の反応の強さ ρ = κᵀx が大きい)ときだけ、方向 r_L を α·ρ 倍で書く(α = 1 で、観測した A − B の平均差をそのまま)。書き込みたくない位置では ρ ≈ 0 で何も足さない。LoRA で当てるので cvec には入りません。3 列チャットの − 列は α が負(打ち消す)。"), "muted note")}`;
+      ${noteHTML(t("キーつきの書き込み a: 入力の活性 x にキー κ が反応する(キーの出力 ρ = κᵀx が大きい)ときだけ、方向 r_L を α·ρ 倍で書く(α = 1 で、観測した A − B の平均差をそのまま)。書き込みたくない位置では ρ ≈ 0 で何も足さない。LoRA で当てるので cvec には入りません。3 列チャットの − 列は α が負(打ち消す)。"), "muted note")}`;
   }
 
   // 「鍵つきの書き込み(keyed)を足す」: 鍵・その鍵の層・方向・α を選んで行を足す(保存した鍵があるときだけ)
@@ -639,10 +639,10 @@ export class RecipePanel {
     if (!f.direction && !this.r.defaultDirection && dirs.length) f.direction = dirs.includes(f.key) ? f.key : dirs[0];
     const dopts = [`<option value=""${f.direction ? "" : " selected"}>${esc(this.r.defaultDirection ? t("既定: {x}", { x: this.r.defaultDirection }) : t("既定(なし)"))}</option>`,
       ...dirs.map((d) => `<option${d === f.direction ? " selected" : ""}>${esc(d)}</option>`)].join("");
-    return `<details class="rc-kadd"${this.kaOpen ? " open" : ""}><summary class="muted note">${t("鍵つきの書き込み(keyed)を足す")}</summary>
-      <div class="rc-ablate"><span class="mono">#</span><select id="rc-ka-key" title="${t("鍵")}">${keys.map((x) => `<option${x.name === f.key ? " selected" : ""}>${esc(x.name)}</option>`).join("")}</select>
+    return `<details class="rc-kadd"${this.kaOpen ? " open" : ""}><summary class="muted note">${t("キーつきの書き込み(keyed)を足す")}</summary>
+      <div class="rc-ablate"><span class="mono">#</span><select id="rc-ka-key" title="${t("キー")}">${keys.map((x) => `<option${x.name === f.key ? " selected" : ""}>${esc(x.name)}</option>`).join("")}</select>
         <span class="muted">${t("層")}</span><select id="rc-ka-L">${k.layers.map((L) => `<option value="${L}"${L === f.layer ? " selected" : ""}>L${L}</option>`).join("")}</select>
-        <span class="muted mono" title="${t("鍵の書き込み先")}">${esc(k.target)}</span>
+        <span class="muted mono" title="${t("キーの書き込み先")}">${esc(k.target)}</span>
         <span class="mono">@</span><select id="rc-ka-dir" title="${t("書き込む方向(gne direction の方向セットの r_L)")}">${dopts}</select>
         <span class="muted">α</span><input id="rc-ka-a" type="number" step="${KEYED.step}" value="${f.alpha}" class="num">
         <button class="small" id="rc-ka-go">${t("レシピに足す")}</button></div></details>`;
@@ -799,25 +799,25 @@ export class RecipePanel {
     return `<div class="rc-lx">
       <div class="rc-lx-row"><span class="muted">${t("形式")}</span>
         <label title="${t("小さいファイル(同じ層・同じ方向のヘッドは階数 1 にまとまる)。llama.cpp では --lora で当てる。元のモデルはそのまま")}"><input type="radio" name="lx-kind" value="lora"${bake ? "" : " checked"}> ${t("LoRA アダプタ")}</label>
-        <label title="${t("関係するテンソルだけ書き換えた GGUF を丸ごと作る。--lora なしでそのまま使える。モデルと同じくらいのディスクが要る")}"><input type="radio" name="lx-kind" value="bake"${bake ? " checked" : ""}> ${t("重みに焼き込む(GGUF)")}</label></div>
-      <div class="rc-lx-row${bake ? "" : " off"}"><span class="muted" title="${t("空なら、いま読んでいるモデルに焼き込む。同じモデルの量子化していない GGUF(F16 / BF16)のパスを入れると、方向はこのモデルで作ったものを使い、そちらに焼き込む(GPU は使わない。少し誤差がある。LoRA 版との比較はできない)")}">${t("焼き込む先")}</span>
+        <label title="${t("関係するテンソルだけ書き換えた GGUF を丸ごと作る。--lora なしでそのまま使える。モデルと同じくらいのディスクが要る")}"><input type="radio" name="lx-kind" value="bake"${bake ? " checked" : ""}> ${t("重みにマージする(GGUF)")}</label></div>
+      <div class="rc-lx-row${bake ? "" : " off"}"><span class="muted" title="${t("空なら、いま読んでいるモデルにマージする。同じモデルの量子化していない GGUF(F16 / BF16)のパスを入れると、方向はこのモデルで作ったものを使い、そちらにマージする(GPU は使わない。少し誤差がある。LoRA 版との比較はできない)")}">${t("マージ先")}</span>
         <input id="lx-into" size="30" value="${esc(f.into)}" placeholder="${t("空ならいま読んでいるモデル")}" spellcheck="false"${dis}></div>
       <div class="rc-lx-row${bake ? "" : " off"}"><span class="muted" title="${t("書き換えたテンソルを何の型で書くか。Q8_0 は元より少し大きくなることがある、F16 はもっと大きい。下の「元の型に戻す」を使うとほぼ元の大きさ")}">${t("書き換えたテンソルの型")}</span>
         <select id="lx-requant"${dis || (f.via_f16 ? " disabled" : "")}>${nk ? `<option value="auto"${rq === "auto" ? " selected" : ""}>${t("自動(Q8_0 は元のまま、ほかは F16)")}</option>` : ""}<option value="q8_0"${rq === "q8_0" ? " selected" : ""}>Q8_0</option><option value="f16"${rq === "f16" ? " selected" : ""}>F16</option><option value="keep"${rq === "keep" ? " selected" : ""}>${t("元と同じ(F16・BF16 のモデル)")}</option></select>
         <label title="${t("書き換えたテンソルを F16 で書いてから、llama-quantize で元の量子化の型に戻す(ファイルの大きさを元に近く保つ。低ビットの型は imatrix があると誤差が小さい)")}"><input type="checkbox" id="lx-viaf16"${f.via_f16 ? " checked" : ""}${dis}> ${t("元の量子化の型に戻す")}</label></div>
-      ${bake && nk ? `<div class="rc-lx-row"><span class="muted note">${t("鍵つきの書き込みを含むので、書き換えたテンソルの型の既定は「自動」: 元が Q8_0 のテンソルは Q8_0 のまま(F16 にすると計算方法が変わり、LoRA 版とかえってずれる)、それ以外は F16。Q8_0 のままでは編集の 1 割以上が丸めに消えるテンソルだけ F16(配るなら LoRA がおすすめ)")}</span></div>` : ""}
+      ${bake && nk ? `<div class="rc-lx-row"><span class="muted note">${t("キーつきの書き込みを含むので、書き換えたテンソルの型の既定は「自動」: 元が Q8_0 のテンソルは Q8_0 のまま(F16 にすると計算方法が変わり、LoRA 版とかえってずれる)、それ以外は F16。Q8_0 のままでは編集の 1 割以上が丸めに消えるテンソルだけ F16(配るなら LoRA がおすすめ)")}</span></div>` : ""}
       ${bake && f.via_f16 ? `<div class="rc-lx-row"><span class="muted">llama-quantize</span><input id="lx-lq" size="28" value="${esc(f.llama_quantize)}" placeholder="${t("空なら GNE_LLAMA_QUANTIZE か PATH から探す")}" spellcheck="false">
         <span class="muted" title="${t("低ビットの型(IQ1・IQ2・IQ3_XXS)に戻すときは必須。空なら、モデルの隣の <モデル名>.imatrix.gguf / .imatrix.dat / imatrix.gguf を探して使う")}">imatrix</span><input id="lx-imatrix" size="22" value="${esc(f.imatrix)}" placeholder="${t("空ならモデルの隣を探す")}" spellcheck="false"></div>` : ""}
-      <div class="rc-lx-row${bake && !f.into.trim() ? "" : " off"}"><label title="${t("焼き込み版と LoRA 版で、方向への射影の値・最初のトークンの分布・最尤トークン・ppl が一致するかを確かめる(モデルを 2 回読むので時間がかかる)")}"><input type="checkbox" id="lx-verify"${f.verify ? " checked" : ""}${bake && !f.into.trim() ? "" : " disabled"}> ${t("LoRA 版と一致するか確かめる")}</label>
+      <div class="rc-lx-row${bake && !f.into.trim() ? "" : " off"}"><label title="${t("マージ版と LoRA 版で、方向への射影の値・最初のトークンの分布・最尤トークン・ppl が一致するかを確かめる(モデルを 2 回読むので時間がかかる)")}"><input type="checkbox" id="lx-verify"${f.verify ? " checked" : ""}${bake && !f.into.trim() ? "" : " disabled"}> ${t("LoRA 版と一致するか確かめる")}</label>
         ${bake && f.verify && !f.into.trim() ? `<span class="muted">${t("対照集合")}</span><input id="lx-contrast" size="24" value="${esc(f.contrast)}" placeholder="${t("空なら方向を作った対照集合")}" spellcheck="false">` : ""}</div>
       <div class="rc-lx-row"><span class="muted" title="${t("書き出すファイルの名前(拡張子なし)。空ならレシピの名前から作る。保存先は <root>/export/")}">${t("ファイル名")}</span>
         <input id="lx-file" size="26" value="${esc(f.file)}" placeholder="${esc(this.lxDefaultStem())}" spellcheck="false"><span class="muted mono">${bake ? ".gguf" : ".lora.gguf"}</span></div>
-      <div class="rc-lx-row"><label title="${t("gne が書く記録(gne.* のメタデータ: レシピ・ヘッド・強さ・方向の鍵、名前の印、横の .headproj.json)を入れない。人に渡すファイル用。書いたあと、メタデータに手元のパスが残っていないかも確かめる")}"><input type="checkbox" id="lx-strip"${f.strip ? " checked" : ""}> ${t("gne の記録(メタデータ)を入れない(人に渡す用)")}</label></div>
+      <div class="rc-lx-row"><label title="${t("gne が書く記録(gne.* のメタデータ: レシピ・ヘッド・強さ・方向のキー、名前の印、横の .headproj.json)を入れない。人に渡すファイル用。書いたあと、メタデータに手元のパスが残っていないかも確かめる")}"><input type="checkbox" id="lx-strip"${f.strip ? " checked" : ""}> ${t("gne の記録(メタデータ)を入れない(人に渡す用)")}</label></div>
       ${bake ? "" : `<div class="rc-lx-row"><span class="muted" title="${t("LoRA のファイルの中の名前の欄(general.name)。空なら「元のモデルの名前 gain レシピの名前」、記録を入れないときは adapter")}">${t("名前の欄")}</span>
         <input id="lx-adname" size="26" value="${esc(f.adapterName)}" placeholder="${f.strip ? "adapter" : ""}" spellcheck="false"></div>`}
-      <div class="rc-lx-row"><button class="main" id="lx-go">${t(bake ? "焼き込む" : "LoRA を書き出す")}</button>
-        <span class="muted note">${nk ? t("名前は上のレシピの名前(空なら headproj)。LoRA に入るユニット {n} 個(ヘッド {h}・鍵つきの書き込み {k})", { n, h: n - nk, k: nk })
-          : t("名前は上のレシピの名前(空なら headproj)。ヘッドのユニット {n} 個が入る", { n })}${nAdd ? ` · ${t("add のユニット {k} 個は入らない(cvec で書き出す)", { k: nAdd })}` : ""}${bake ? ` · ${t("焼き込みはモデルを丸ごともう 1 つ書く(同じくらいのディスク・時間)")}` : ""}</span></div>
+      <div class="rc-lx-row"><button class="main" id="lx-go">${t(bake ? "マージする" : "LoRA を書き出す")}</button>
+        <span class="muted note">${nk ? t("名前は上のレシピの名前(空なら headproj)。LoRA に入るユニット {n} 個(ヘッド {h}・キーつきの書き込み {k})", { n, h: n - nk, k: nk })
+          : t("名前は上のレシピの名前(空なら headproj)。ヘッドのユニット {n} 個が入る", { n })}${nAdd ? ` · ${t("add のユニット {k} 個は入らない(cvec で書き出す)", { k: nAdd })}` : ""}${bake ? ` · ${t("マージはモデルを丸ごともう 1 つ書く(同じくらいのディスク・時間)")}` : ""}</span></div>
       <div id="lx-result">${this.lxMsg ? this.lxMsg.html : ""}</div></div>`;
   }
 
@@ -872,7 +872,7 @@ export class RecipePanel {
       const j = await this.onRunJob("headproj_export", p);
       if (!j) { this.lxSet(`<p class="muted note">${t("やめました")}</p>`); return; }
       this.lxJobId = j.id;
-      this.lxSet(`<p class="muted note">${t(f.bake ? "焼き込んでいます(下のジョブのバーに進み具合)。終わるとここに場所が出ます" : "書き出しています。終わるとここに場所が出ます")}</p>`);
+      this.lxSet(`<p class="muted note">${t(f.bake ? "マージしています(下のジョブのバーに進み具合)。終わるとここに場所が出ます" : "書き出しています。終わるとここに場所が出ます")}</p>`);
     } catch (e) { this.lxSet(`<p class="err">${esc(e.message)}</p>`); }
   }
 
@@ -889,7 +889,7 @@ export class RecipePanel {
     if (j.status !== "done") { this.lxSet(`<p class="err">${t("失敗")}: ${esc((j.error && j.error.message) || j.status)}</p>${j.error && j.error.hint ? `<p class="muted note">${esc(j.error.hint)}</p>` : ""}`); return; }
     const x = j.result || {}, mb = (x.bytes || 0) / 1e6;
     const layers = Object.entries(x.proj_layers || {}).map(([L, v]) => `L${L}: ${t("階数 {r}", { r: v.rank })}`).join(" · ");
-    const klayers = Object.entries(x.keyed_layers || {}).map(([L, v]) => `L${L} keyed: ${t("鍵 {k}", { k: (v.keys || []).join(", ") })} · ${t("階数 {r}", { r: v.rank })}`).join(" · ");
+    const klayers = Object.entries(x.keyed_layers || {}).map(([L, v]) => `L${L} keyed: ${t("キー {k}", { k: (v.keys || []).join(", ") })} · ${t("階数 {r}", { r: v.rank })}`).join(" · ");
     const rqe = x.requant_error_max;
     const v = x.verify;
     const how = x.url ? t("llama.cpp で使う: {cmd}", { cmd: `<code>llama-server -m &lt;model&gt; --lora ${esc(x.path)}</code>` })
@@ -897,7 +897,7 @@ export class RecipePanel {
     this.lxSet(`<p class="note">${x.url ? t("{file} を書き出しました", { file: `<a href="${esc(x.url)}" download="${esc(x.file)}">${esc(x.file)}</a>` })
         : t("{file} を書き出しました", { file: `<span class="mono">${esc(x.path)}</span>` })}(${fmt(mb, mb < 10 ? 2 : 0)} MB)</p>
       ${x.url ? `<p class="muted note mono">${esc(x.path)}</p>` : ""}
-      ${x.into ? `<p class="muted note">${t("焼き込む先: {f}", { f: esc(x.into) })}</p>` : ""}
+      ${x.into ? `<p class="muted note">${t("マージ先: {f}", { f: esc(x.into) })}</p>` : ""}
       ${x.imatrix ? `<p class="muted note">${t(x.imatrix_auto ? "imatrix: {f}(モデルの隣で見つけたもの)" : "imatrix: {f}", { f: esc(x.imatrix) })}</p>` : ""}
       ${x.strip_meta ? `<p class="note">${(x.local_path_keys || []).length
         ? `⚠ ${t("gne の記録は入れていませんが、メタデータに手元のパスらしい文字列が残っています: {k}", { k: esc(x.local_path_keys.join(", ")) })}`

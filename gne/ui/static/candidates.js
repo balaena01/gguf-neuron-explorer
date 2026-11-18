@@ -48,7 +48,7 @@ export class CandidatesPanel {
     this.saving = Promise.resolve();   // 保存は 1 つずつ(速く付けても順に書く)
     this.done = false;                 // 全部付けた(集計を出している)
     root.innerHTML = `
-      ${noteHTML(t("配分の組を全体の倍率で何段か当てた返事を、どの候補か伏せて採点し(P = 目標の振る舞いがどれだけ出ているか、C = 自然さ、1〜5)、候補ごとに集計します。候補はパイプラインの結果の「候補を作る」で作ります。"))}
+      ${noteHTML(t("配分の組を全体の倍率で何段か当てた応答を、どの候補か伏せて採点し(P = 目標の振る舞いがどれだけ出ているか、C = 自然さ、1〜5)、候補ごとに集計します。候補はパイプラインの結果の「候補を作る」で作ります。"))}
       <div class="pp-actions"><button class="main" id="cd-make" title="${t("CHiPS の結果を開いて、手順 5 で倍率と質問を決めて作る")}">${t("候補を作る(CHiPS の手順 5)")}</button></div>
       <h4>${t("保存した候補")}</h4><div id="cd-list"><p class="muted note">${t("読み込み中…")}</p></div>
       <div id="cd-result"></div>`;
@@ -62,7 +62,7 @@ export class CandidatesPanel {
     try { this.list = await getJSON("/api/candidates"); } catch { this.list = []; }
     const el = this.$("#cd-list");
     if (!this.list.length) { el.innerHTML = `<p class="muted note">${t("まだありません")}</p>`; return; }
-    el.innerHTML = `<table class="evx mono pp-past"><thead><tr><th class="l">${t("名前")}</th><th class="l">${t("方向")}</th><th>${t("候補")}</th><th>${t("採点する返事")}</th><th>${t("集計")}</th><th class="l">${t("更新")}</th></tr></thead><tbody>${
+    el.innerHTML = `<table class="evx mono pp-past"><thead><tr><th class="l">${t("名前")}</th><th class="l">${t("方向")}</th><th>${t("候補")}</th><th>${t("採点する応答")}</th><th>${t("集計")}</th><th class="l">${t("更新")}</th></tr></thead><tbody>${
       this.list.map((x) => `<tr data-cd="${esc(x.name)}" class="pick${this.data && this.data.name === x.name ? " on" : ""}"><td class="l">${esc(x.name)}</td><td class="l">${esc(x.direction || "—")}</td>
         <td>${x.n_candidates ?? "—"}</td><td>${x.n_judge ?? "—"}</td><td>${x.scored ? "✓" : ""}</td><td class="l">${esc((x.updated || "").replace("T", " ").slice(0, 16))}</td></tr>`).join("")}</tbody></table>`;
     for (const tr of el.querySelectorAll("tr[data-cd]")) tr.addEventListener("click", () => this.open(tr.dataset.cd));
@@ -97,7 +97,7 @@ export class CandidatesPanel {
     if (!d) { out.innerHTML = ""; return; }
     const ho = d.held_out || {}, sp = d.sampling;
     const warn = !(ho.A && ho.B) ? `${noteHTML(t("注意: 調整に使った質問で生成しています({sides} 側)。強さを決めるには、調整に使っていない質問で作り直してください。", { sides: ["A", "B"].filter((k) => !ho[k]).join("・") }), "pp-warn note")}` : "";
-    const seg = `<span class="seg" id="cd-mode">${[["summary", t("要約")], ["grid", t("返事を並べる")], ["score", t("名前を伏せて採点する")]].map(([k, l]) =>
+    const seg = `<span class="seg" id="cd-mode">${[["summary", t("要約")], ["grid", t("応答を並べる")], ["score", t("名前を伏せて採点する")]].map(([k, l]) =>
       `<button data-cm="${k}" class="${this.mode === k ? "on" : ""}">${l}</button>`).join("")}</span>`;
     out.innerHTML = `<div class="pp-res">
       <h3>${t("{name} の候補", { name: esc(d.name) })} <span class="muted note mono">${esc((d.updated || "").replace("T", " ").slice(0, 16))}${d.seconds ? ` · ${t("{n} 秒", { n: Math.round(d.seconds) })}` : ""}</span></h3>
@@ -139,13 +139,13 @@ export class CandidatesPanel {
       <button class="small" data-load="${esc(b.name)}">${t("レシピを置き換える")}</button> <button class="small" data-chat="${esc(b.name)}">${t("1 列チャットで試す")}</button></div>`).join("");
     const missing = (d.scores_missing || []).length;
     el.innerHTML = `${bests}
-      ${!has ? `<p class="note">${t("まだ集計していません。「名前を伏せて採点する」で全部の返事に点を付けると、候補ごとに集計します。")}</p>` : missing ? `<p class="pp-warn note">${t("点の無い返事が {n} 本あります(集計はある分だけ)。", { n: missing })}</p>` : ""}
+      ${!has ? `<p class="note">${t("まだ集計していません。「名前を伏せて採点する」で全部の応答に点を付けると、候補ごとに集計します。")}</p>` : missing ? `<p class="pp-warn note">${t("点の無い応答が {n} 本あります(集計はある分だけ)。", { n: missing })}</p>` : ""}
       <div class="evx-scroll"><table class="evx mono cd-sum"><thead><tr><th class="l">${t("候補")}</th><th title="${t("全体の強さ(正 = A 側で消す向き、負 = B 側で強める向き)")}">${t("強さ")}</th>
         <th title="${t("採点した側(A = 振る舞いが出ている状態、B = ふつうの状態)")}">${t("側")}</th><th>${t("向き")}</th>
-        <th title="${t("判定(validate.match)に合う返事の割合")}">${t("一致")}</th><th title="${t("4-gram の重複の少なさ(1 = 繰り返し無し)")}">d4</th>
-        <th title="${t("採点しない側で、無介入と違う返事の割合(同じ種なので、変わらなければ一致する)")}">${t("反対側の変化")}</th>
+        <th title="${t("判定(validate.match)に合う応答の割合")}">${t("一致")}</th><th title="${t("4-gram の重複の少なさ(1 = 繰り返し無し)")}">d4</th>
+        <th title="${t("採点しない側で、無介入と違う応答の割合(同じ種なので、変わらなければ一致する)")}">${t("反対側の変化")}</th>
         ${has ? `<th title="${t("目標の振る舞いの平均(1〜5)")}">P</th><th title="${t("自然さの平均(1〜5)")}">C</th><th title="${t("消す向きは min(6 − P, C)、強める向きは min(P, C) の平均")}">${t("目的")}</th><th>n</th>` : ""}<th></th></tr></thead><tbody>${rows.join("")}</tbody></table></div>
-      ${noteHTML(t("一致 = 判定(validate.match)に合う返事の割合、d4 = 繰り返しの少なさ、反対側の変化 = 採点しない側で無介入と違う返事の割合。目的 = 消す向きは min(6 − P, C)、強める向きは min(P, C) の平均。緑の行 = 向きごとにいちばん良い候補。"), "muted note")}
+      ${noteHTML(t("一致 = 判定(validate.match)に合う応答の割合、d4 = 繰り返しの少なさ、反対側の変化 = 採点しない側で無介入と違う応答の割合。目的 = 消す向きは min(6 − P, C)、強める向きは min(P, C) の平均。緑の行 = 向きごとにいちばん良い候補。"), "muted note")}
       <p class="muted note" id="cd-note"></p>`;
     for (const b of el.querySelectorAll("[data-load]")) b.addEventListener("click", () => this.use(b.dataset.load, false));
     for (const b of el.querySelectorAll("[data-chat]")) b.addEventListener("click", () => this.use(b.dataset.chat, true));
@@ -172,7 +172,7 @@ export class CandidatesPanel {
       return `<div class="cd-q"><div class="cd-prompt">${qHTML(q, `${side}${i + 1}`)}</div><div class="cd-grid">${cells}</div></div>`;
     }).join("");
     el.innerHTML = `<div class="pp-actions"><span class="seg" id="cd-side">${["A", "B"].map((s) => `<button data-sd="${s}" class="${side === s ? "on" : ""}" title="${
-      s === "A" ? t("A 側(振る舞いが出ている状態)の質問と返事") : t("B 側(ふつうの状態)の質問と返事")}">${s}</button>`).join("")}</span>
+      s === "A" ? t("A 側(振る舞いが出ている状態)の質問と応答") : t("B 側(ふつうの状態)の質問と応答")}">${s}</button>`).join("")}</span>
       <label class="muted"><input type="checkbox" id="cd-named"${this.named ? " checked" : ""}> ${t("候補の名前を出す")}</label>
       <span class="muted note">${this.named ? t("候補の順は表と同じ") : t("名前を伏せ、質問ごとに順番を混ぜています")}</span></div>${blocks}`;
     for (const b of el.querySelectorAll("[data-sd]")) b.addEventListener("click", () => { this.side = b.dataset.sd; this.render(); });
@@ -212,15 +212,15 @@ export class CandidatesPanel {
     const P = this.cur.P ?? (have ? have[0] : null), C = this.cur.C ?? (have ? have[1] : null);
     const btns = (which, val) => [1, 2, 3, 4, 5].map((v) => `<button class="cd-sc${val === v ? " on" : ""}" data-${which}="${v}">${v}</button>`).join("");
     el.innerHTML = `<div class="cd-score">
-      <div class="pp-actions"><button class="small" id="cd-prev" title="${t("前の返事(←)")}">← ${t("前へ")}</button>
+      <div class="pp-actions"><button class="small" id="cd-prev" title="${t("前の応答(←)")}">← ${t("前へ")}</button>
         <button class="small" id="cd-skip" title="${t("点を付けずに次へ(→)")}">${t("とばす")} →</button>
         <span class="mono">#${it.id}</span> <span class="muted note">${t("{i} 本目 / {n} 本", { i: this.pos + 1, n })}${have ? ` · ${t("付けた点 P {p} C {c}", { p: have[0], c: have[1] })}` : ""}</span>
         <span class="cd-bar"><span style="width:${(100 * k / Math.max(n, 1)).toFixed(1)}%"></span></span> <span class="muted note" id="cd-saved"></span></div>
       <div class="cd-prompt">${qHTML(it.prompt)}</div>
-      <div class="cd-reply">${esc(stripThink(it.text)) || `<span class="muted">${t("(空の返事)")}</span>`}</div>
+      <div class="cd-reply">${esc(stripThink(it.text)) || `<span class="muted">${t("(空の応答)")}</span>`}</div>
       <div class="cd-pc"><span class="cd-pc-l" title="${t("目標の振る舞いがどれだけ出ているか(1 = まったく出ていない、5 = 典型的に全体に出ている)")}">P</span>${btns("p", P)}
         <span class="cd-pc-l" title="${t("自然さ(1 = 崩れている、5 = 完全に自然)")}">C</span>${btns("c", C)}</div>
-      ${noteHTML(t("キー: 数字 1〜5 で P、続けてもう一度押すと C(そろうと保存して次へ)。← 前へ、→ とばす、Esc 付けかけを消す。どの候補の返事かは伏せてあります。"), "muted note")}
+      ${noteHTML(t("キー: 数字 1〜5 で P、続けてもう一度押すと C(そろうと保存して次へ)。← 前へ、→ とばす、Esc 付けかけを消す。どの候補の応答かは伏せてあります。"), "muted note")}
       <details class="cd-rub"><summary class="muted note">${t("採点基準")}</summary><pre class="note">${esc(b.rubric || "")}</pre></details></div>`;
     const $ = (s) => el.querySelector(s);
     $("#cd-prev").addEventListener("click", () => this.move(-1));

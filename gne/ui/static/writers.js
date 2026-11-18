@@ -29,10 +29,10 @@ export class WritersView {
         <button id="wrx-map" title="${t("地図の色を、この分析の寄与にする")}">${t("地図に重ねる")}</button>
         <span class="evx-run">
           <label class="muted">${t("対照集合")} <input id="wrx-contrast" placeholder="configs/contrast/yandere.yaml" size="30" spellcheck="false"></label>
-          <label class="muted" title="${t("A の返事を生成せずに読ませる(別のモデルの返事を借りるとき)。空なら生成する")}">${t("A の返事")} <input id="wrx-replies" placeholder="${t("(生成する)")}" size="16" spellcheck="false"></label>
+          <label class="muted" title="${t("A の応答を生成せずに読ませる(別のモデルの応答を借りるとき)。空なら生成する")}">${t("A の応答")} <input id="wrx-replies" placeholder="${t("(生成する)")}" size="16" spellcheck="false"></label>
           <label class="muted">${t("参照の層")} <input id="wrx-ref" placeholder="${t("既定")}" size="4"></label>
           <button class="main" id="wrx-go">${t("測る")}</button></span></div>
-      ${noteHTML(t("A(見たい状態、例 ヤンデレの system)と B(中立)の返事のトークンで、各ニューロンが残差に書き足した量(活性の差 × 書く向き)を測る。寄与は、参照の層の A − B の方向 r* への直接の成分。活性の差だけを見る「読み手」と違い、方向に実際に書いているものが上に来る。"), "muted note evx-help")}
+      ${noteHTML(t("A(見たい状態、例 ヤンデレの system)と B(中立)の応答のトークンで、各ニューロンが残差に書き足した量(活性の差 × 書く向き)を測る。寄与は、参照の層の A − B の方向 r* への直接の成分。活性の差だけを見る「読み手」と違い、方向に実際に書いているものが上に来る。"), "muted note evx-help")}
       <div id="wrx-body"></div>`;
     this.$ = (s) => root.querySelector(s);
     useContrastList(this.$("#wrx-contrast"));                           // 対照集合は同じ候補の一覧から選べる
@@ -97,10 +97,10 @@ export class WritersView {
         <td>${i + start}</td><td>L${x.layer} N${x.neuron}</td><td class="${x.share >= 0 ? "ok" : "ng"}">${pct(x.share, 2)}</td>
         <td>${fmt(x.act_a)}</td><td>${fmt(x.act_b)}</td><td>${fmt(x.act_diff)}</td><td>${fmt(x.align)}</td></tr>`).join("");
     const head = `<thead><tr><th>#</th><th>${t("住所")}</th><th title="${t("参照の方向 r* への直接の寄与(‖r*‖ に対する割合)")}">${t("寄与")}</th>
-      <th title="${t("A の返事のトークンでの平均の活性")}">${t("活性 A")}</th><th title="${t("B の返事のトークンでの平均の活性")}">${t("活性 B")}</th>
+      <th title="${t("A の応答のトークンでの平均の活性")}">${t("活性 A")}</th><th title="${t("B の応答のトークンでの平均の活性")}">${t("活性 B")}</th>
       <th title="${t("活性の差(読み手の指標)")}">${t("差")}</th><th title="${t("書く向き(post norm 込み)と r* の cos")}">${t("向き")}</th></tr></thead>`;
     body.innerHTML = `
-      <p class="note mono">${esc(d.contrast.split("/").pop())} <span class="muted">· A ${d.n_tokens.A} / B ${d.n_tokens.B} ${t("トークン")} · A=${esc(d.replies.A === "given" ? t("読ませた返事") : t("生成"))} · ${fmt(d.seconds, 0)} s</span></p>
+      <p class="note mono">${esc(d.contrast.split("/").pop())} <span class="muted">· A ${d.n_tokens.A} / B ${d.n_tokens.B} ${t("トークン")} · A=${esc(d.replies.A === "given" ? t("読ませた応答") : t("生成"))} · ${fmt(d.seconds, 0)} s</span></p>
       <p class="note">${t("L{L} の方向(‖r*‖ = {n})を書いた割合", { L: d.ref_layer, n: fmt(d.ref_norm) })}:
         <b>${t("埋め込み")} ${pct(tt.embed, 0)} · mixer ${pct(tt.mixer, 0)} · MLP ${pct(tt.mlp, 0)}</b>
         <span class="muted">· ${t("MLP の上位 {a} 個 {x}、{b} 個 {y}、{c} 個 {z}", { a: 10, x: pct(tt.top10, 0), b: 100, y: pct(tt.top100, 0), c: 1000, z: pct(tt.top1000, 0) })}
@@ -112,7 +112,7 @@ export class WritersView {
       <table class="evx mono wrx">${head}<tbody>${rows(d.top)}</tbody></table>
       <details><summary class="muted note">${t("方向から引いたニューロン({n})", { n: d.bottom.length })}</summary>
         <table class="evx mono wrx">${head}<tbody>${rows(d.bottom)}</tbody></table></details>
-      <details><summary class="muted note">${t("返事の例(A / B)")}</summary>${d.samples.map((s) => `<p class="note"><span class="muted">${esc(s.prompt)}</span><br>
+      <details><summary class="muted note">${t("応答の例(A / B)")}</summary>${d.samples.map((s) => `<p class="note"><span class="muted">${esc(s.prompt)}</span><br>
         A: ${esc(s.A)}<br><span class="muted">B: ${esc(s.B)}</span></p>`).join("")}</details>`;
     for (const tr of body.querySelectorAll("tr[data-layer]")) tr.addEventListener("click", () => this.onOpen({ layer: +tr.dataset.layer, n: +tr.dataset.n }));
     this.cv = body.querySelector("#wrx-canvas");

@@ -955,8 +955,11 @@ def test_fish_build_all_sends_every_setting(server, browser):
     assert q["alpha"] == [0.9, 0.7] and q["cap"] == "0.3-0.7" and q["key_fit"] == "ridge" and q["key_c"] == 2
     assert q["iv"] == "chips_r" and q["max_tokens"] == 64 and q["stack_fast"] is True and q["same_reply"] is False
     assert q["response_tokens"] == 80 and q["pseudo"] == 3 and q["top"] == 12 and q["rekey"] is False
+    # セルに会話の形を入れるか・ユニットの書き方・方向のもとは、付けないときも切・空で送る(ひな形の fish の値より欄を使う)
+    assert q["key_conv_cells"] is False and q["kscale"] == "" and q["remove"] == "" and q["token"] == ""
     assert set(q) == {"spec", "name", "layers", "segments", "form", "max_tokens", "iv", "key_fit", "key_c", "alpha", "same_reply", "stack",
-                      "stack_fast", "compare", "rekey", "pseudo", "response_tokens", "top", "cap"}, sorted(q)
+                      "stack_fast", "compare", "rekey", "pseudo", "response_tokens", "top", "cap", "key_conv_cells", "kscale", "remove",
+                      "token"}, sorted(q)
     assert not errors, errors
     pg.close()
 
@@ -2894,7 +2897,8 @@ def test_pipeline_api_and_panel(pipe_server, browser):
             urllib.request.urlopen(url + f"/api/pipelines/{bad}")
         assert ei.value.code == 400
     tpl = get("/api/pipeline-templates")                                   # 用途別のテンプレート(configs/pipeline/)
-    assert [x["spec"]["name"] for x in tpl] == ["evil_sys", "cold_vs_warm", "evil_neurons_4b", "ja_vs_en", "repeat_vs_progress"]
+    assert [x["spec"]["name"] for x in tpl] == ["evil_sys", "cold_vs_warm", "evil_neurons_4b", "ja_vs_en", "repeat_vs_progress",
+                                                 "disclaimer_heads"]
     assert all("about" not in x["spec"] and x["ja"]["title"] and x["en"]["text"] for x in tpl)
     for lang in ("ja", "en"):
         pg = browser.new_page(viewport={"width": 1600, "height": 1000})

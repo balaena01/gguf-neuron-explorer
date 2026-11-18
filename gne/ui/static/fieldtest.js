@@ -23,17 +23,17 @@ export class FieldtestPanel {
     this.data = null;
     this.openSeq = 0;                                 // open の通し番号(後から別の結果を開いたら、先に始めた読み込みの結果は捨てる)
     root.innerHTML = `
-      ${noteHTML(t("本番と同じ動かし方(llama-server、思考あり、サンプリングあり)で、長い作業・ツール呼び出し・質問集・perplexity を測り、ファイルどうしを比べます。eval で見えない、長い思考の途中のループや、ツール呼び出しの崩れを見ます。焼き込んだファイルもそのまま測れます。走っている間は読み込んでいるモデルを GPU から下ろすので、チャットなどは待たされます。27B で質問集 200 問を足して 1 ファイル 30〜45 分かかります。"), "muted note")}
+      ${noteHTML(t("本番と同じ動かし方(llama-server、思考あり、サンプリングあり)で、長い作業・ツール呼び出し・質問集・perplexity を測り、ファイルどうしを比べます。eval で見えない、長い思考の途中のループや、ツール呼び出しの崩れを見ます。マージしたファイルもそのまま測れます。走っている間は読み込んでいるモデルを GPU から下ろすので、チャットなどは待たされます。27B で質問集 200 問を足して 1 ファイル 30〜45 分かかります。"), "muted note")}
       <div class="ft-form">
         <label class="muted" title="${t("測るファイル(GGUF のパス)。空ならいま読んでいるモデル")}">${t("測るファイル")} <input id="ft-model" size="44" spellcheck="false" placeholder="${t("空ならいま読んでいるモデル")}"></label>
         <label class="muted" title="${t("比べるファイル(例 元のモデル)。空なら測るだけ")}">${t("比べるファイル")} <input id="ft-against" size="44" spellcheck="false" placeholder="${t("空なら比べない")}"></label>
         <label class="muted" title="${t("測るファイルに当てる LoRA(パス か パス:倍率)。比べるファイルが空なら、同じファイルの LoRA なしと比べる")}">LoRA <input id="ft-lora" size="30" spellcheck="false"></label>
         <label class="muted" title="${t("llama-server のパス。空なら GNE_LLAMA_SERVER か PATH から探す")}">llama-server <input id="ft-server" size="30" spellcheck="false" placeholder="${t("空なら自動で探す")}"></label>
         <label class="muted" title="${t("自分の質問集。1 行に 名前=ファイル(JSON か YAML のリスト)。ループ・本文が空・上限で切れた割合を測る")}">${t("質問集")} <textarea id="ft-prompts" rows="2" cols="40" spellcheck="false" placeholder="name=/path/questions.json"></textarea></label>
-        <label class="muted" title="${t("質問集の返事の本文に当てる正規表現。一致率を出す")}">${t("判定")} <input id="ft-match" size="24" spellcheck="false"></label>
-        <label class="muted" title="${t("長い作業の返事の上限")}">${t("長い作業のトークン")} <input id="ft-long" type="number" min="16" max="65536" value="3072"></label>
-        <label class="muted" title="${t("ツール呼び出しの返事の上限")}">${t("ツールのトークン")} <input id="ft-tool" type="number" min="16" max="65536" value="1536"></label>
-        <label class="muted" title="${t("質問集の返事の上限")}">${t("質問集のトークン")} <input id="ft-ptok" type="number" min="16" max="65536" value="1536"></label>
+        <label class="muted" title="${t("質問集の応答の本文に当てる正規表現。一致率を出す")}">${t("判定")} <input id="ft-match" size="24" spellcheck="false"></label>
+        <label class="muted" title="${t("長い作業の応答の上限")}">${t("長い作業のトークン")} <input id="ft-long" type="number" min="16" max="65536" value="3072"></label>
+        <label class="muted" title="${t("ツール呼び出しの応答の上限")}">${t("ツールのトークン")} <input id="ft-tool" type="number" min="16" max="65536" value="1536"></label>
+        <label class="muted" title="${t("質問集の応答の上限")}">${t("質問集のトークン")} <input id="ft-ptok" type="number" min="16" max="65536" value="1536"></label>
         <label class="muted" title="${t("参照テキストの perplexity も測る(gne でファイルを読み直す)")}"><input id="ft-ppl" type="checkbox" checked> perplexity</label>
         <label class="muted" title="${t("能力を測るベンチマーク。データは初回に取得する。合わせて数時間かかる")}"><input id="ft-gsm8k" type="checkbox"> GSM8K</label>
         <label class="muted" title="${t("能力を測るベンチマーク。データは初回に取得する。合わせて数時間かかる")}"><input id="ft-mmlu" type="checkbox"> MMLU-Pro</label>

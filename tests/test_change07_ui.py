@@ -855,15 +855,15 @@ def test_key_check_dont_touch_reply_start_cell(ui_server, browser):
         pg.evaluate(f"(() => {{ const k = window.gne.directionView.key; k.checked = {json.dumps(DTS_CHECK)}; k.renderCheck(); }})()")
         cell = "document.querySelectorAll('#kc-res table.kx-check tbody tr')[0].cells[9]"
         full = pg.evaluate(f"{cell}.textContent")
-        text = full.split("返事の冒頭" if lang == "ja" else "start of the reply")[0]       # 下の段(返事の冒頭)の前まで
+        text = full.split("応答の冒頭" if lang == "ja" else "start of the response")[0]       # 下の段(返事の冒頭)の前まで
         reds = pg.evaluate(f"[...{cell}.querySelectorAll('.kx-ng')].map(s => s.textContent)")
         head = pg.evaluate("document.querySelector('#kc-res .kx-res p.note').textContent")
         if lang == "ja":
             assert text == "english 0.19(書き始める直前 0.62) · tasks 0.02(書き始める直前 0.90)", full
             assert "dt english(書き始める直前) 2/2" in head and "dt english 2/2" in head
         else:
-            assert text == "english 0.19 (just before the reply 0.62) · tasks 0.02 (just before the reply 0.90)", text
-            assert "dt english (just before the reply) 2/2" in head
+            assert text == "english 0.19 (just before the response 0.62) · tasks 0.02 (just before the response 0.90)", text
+            assert "dt english (just before the response) 2/2" in head
         assert "0.62" in reds and "0.90" not in reds                                # tasks は例が 1 つなので赤にしない
         pg.evaluate(f"(() => {{ const k = window.gne.directionView.key; k.checked = {json.dumps(START_CHECK)}; k.renderCheck(); }})()")
         assert "書き始める直前" not in pg.evaluate(f"{cell}.textContent") and "just before" not in pg.evaluate(f"{cell}.textContent")

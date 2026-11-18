@@ -35,18 +35,18 @@ export class ChipsLeft {
       <div class="pp-set">
         <label class="muted" title="${t("CHiPS で使った方向(gne direction で作ったもの)。出力の keyed.direction")}">${t("CHiPS の方向")} <select id="kb-dir"></select></label>
         <label class="muted" title="${t("B 側の質問・validate.match・A 側の質問を取る対照集合。既定は方向を作った対照集合")}">${t("対照集合")} <select id="kb-contrast"></select></label>
-        <label class="muted" title="${t("CHiPS のレシピ(保存したレシピ)。behave で当て、出力の keyed.iv に入れる(鍵はこのレシピを当てた状態で作る)")}">${t("レシピ")} <select id="kb-recipe"></select></label>
+        <label class="muted" title="${t("CHiPS のレシピ(保存したレシピ)。behave で当て、出力の keyed.iv に入れる(キーはこのレシピを当てた状態で作る)")}">${t("レシピ")} <select id="kb-recipe"></select></label>
       </div>
       <div id="kb-src" class="note"></div>
       <details class="kb-adv"><summary class="muted note">${t("behave の細かい設定")}</summary><div class="pp-set">
-        <label class="muted" title="${t("返事の長さ(振る舞いが返事の後ろのほうで出るなら長めに)")}">${t("返事の長さ")} <input class="w5" id="kb-mt" type="number" min="1" max="4096" value="256"></label>
+        <label class="muted" title="${t("応答の長さ(振る舞いが応答の後ろのほうで出るなら長めに)")}">${t("応答の長さ")} <input class="w5" id="kb-mt" type="number" min="1" max="4096" value="256"></label>
         <label class="muted" title="${t("0 なら greedy(種は 1 つ)。0 より大きければ種ごとに 1 回ずつサンプリングする")}">${t("温度")} <input class="w45" id="kb-temp" type="number" min="0" max="2" step="0.1" value="0"></label>
         <label class="muted" title="${t("温度ありのとき、種ごとに 1 回(1,2,3)")}">${t("種")} <input id="kb-seeds" size="8" placeholder="0" spellcheck="false"></label>
-        <label class="muted" title="${t("返事に一致を数える正規表現(大文字小文字を区別)。空なら対照集合の validate.match")}">${t("判定の正規表現")} <input id="kb-bmatch" size="22" spellcheck="false"></label>
+        <label class="muted" title="${t("応答に一致を数える正規表現(大文字小文字を区別)。空なら対照集合の validate.match")}">${t("判定の正規表現")} <input id="kb-bmatch" size="22" spellcheck="false"></label>
         <label class="muted" title="${t("保存名(<root>/behave/<model_id>/<名前>.json)。空なら <レシピ>_<対照集合>")}">${t("名前")} <input id="kb-bname" size="16" spellcheck="false"></label>
         <label class="muted"><input type="checkbox" id="kb-think"> ${t("思考あり")}</label>
-        <label class="muted" title="${t("読み手の判定のラベル(返事の最後に出てきたものを採る)")}">${t("判定のラベル")} <input id="kb-labels" size="8" value="R,P,C" spellcheck="false"></label>
-      </div><textarea id="kb-judge" class="mono" rows="3" spellcheck="false" placeholder="${t("judge の文面(任意)。{q} に質問、{a} に返事が入る。返事の最後に labels のどれかを書かせる")}"></textarea></details>
+        <label class="muted" title="${t("読み手の判定のラベル(応答の最後に出てきたものを採る)")}">${t("判定のラベル")} <input id="kb-labels" size="8" value="R,P,C" spellcheck="false"></label>
+      </div><textarea id="kb-judge" class="mono" rows="3" spellcheck="false" placeholder="${t("judge の文面(任意)。{q} に質問、{a} に応答が入る。応答の最後に labels のどれかを書かせる")}"></textarea></details>
       <div class="pp-go"><button class="main" id="kb-run" title="${t("選んだレシピを当てて、対照集合の A 側の質問に答えさせる(ジョブ behave)")}">${t("behave を回す")}</button> <span class="muted note" id="kb-status"></span></div>
       <div id="kb-prog" class="note mono"></div>
       <div class="pp-set">
@@ -56,12 +56,12 @@ export class ChipsLeft {
       <div id="kb-binfo" class="note"></div>
       <div class="pp-set">
         <label class="muted" title="${t("「残った」とみなす判定")}">${t("判定")} <select id="kb-method"><option value="match">${t("正規表現")}</option><option value="label">${t("judge のラベル")}</option></select></label>
-        <label class="muted" id="kb-match-l" title="${t("返事にこの正規表現が一致すれば「出た」。空なら behave の判定の正規表現、無ければ validate.match(大文字小文字を無視)")}">${t("正規表現")} <input id="kb-match" size="22" spellcheck="false"></label>
+        <label class="muted" id="kb-match-l" title="${t("応答にこの正規表現が一致すれば「出た」。空なら behave の判定の正規表現、無ければ validate.match(大文字小文字を無視)")}">${t("正規表現")} <input id="kb-match" size="22" spellcheck="false"></label>
         <label class="muted hidden" id="kb-label-l" title="${t("「出た」とみなすラベル(カンマ区切りで複数可)")}">${t("ラベル")} <input id="kb-label" size="6" placeholder="P" spellcheck="false"></label>
         <label class="muted" title="${t("振る舞いが出た種の割合がこれ以上の質問を入れる(1 = 全部の種で出た質問だけ)")}">${t("残ったとみなす割合")} <input class="w45" id="kb-minrate" type="number" min="0.05" max="1" step="0.05" value="1"></label>
         <label class="muted" title="${t("書き込みたい位置。空なら before:<validate.match>(英字があれば (?i) を付ける)。一致が広すぎると警告が出るので、振る舞いの書き始めに当たる正規表現を入れる")}">${t("書く位置")} <input id="kb-pos" size="26" spellcheck="false"></label>
-        <label class="muted" title="${t("JSON と鍵の名前。空なら <behave の名前>_keyed")}">${t("JSON の名前")} <input id="kb-name" size="16" spellcheck="false"></label>
-        <label class="muted" title="${t("behave の返事を JSON の replies に入れる(鍵の作成は返事を作らずにそれを読む)")}"><input type="checkbox" id="kb-replies" checked> ${t("返事を入れる")}</label>
+        <label class="muted" title="${t("JSON とキーの名前。空なら <behave の名前>_keyed")}">${t("JSON の名前")} <input id="kb-name" size="16" spellcheck="false"></label>
+        <label class="muted" title="${t("behave の応答を JSON の replies に入れる(キーの作成は応答を作らずにそれを読む)")}"><input type="checkbox" id="kb-replies" checked> ${t("応答を入れる")}</label>
         <label class="muted" title="${t("behave の結果が、選んだレシピを当てて A 側の質問に答えたものでなければ作らない")}"><input type="checkbox" id="kb-strict"> ${t("当てたレシピの結果に限る")}</label>
       </div>
       <div class="pp-go"><button id="kb-make" title="${t("残った質問を集めて <root>/keyed/ に JSON を保存し、入力欄に入れる(モデルは動かさない)")}">${t("JSON を作る")}</button> <span class="muted note" id="kb-mstatus"></span></div>
@@ -123,7 +123,7 @@ export class ChipsLeft {
     this.src = r;
     const warns = [];
     if (!r.direction_exists && r.direction) warns.push(t("方向 {d} がありません", { d: r.direction }));
-    if (r.system_a) warns.push(t("この対照集合の A 側は system_a(か recipe_a)で作った状態です。behave と鍵の作成は system なしの返事を読むので、system で起こした振る舞いには向きません"));
+    if (r.system_a) warns.push(t("この対照集合の A 側は system_a(か recipe_a)で作った状態です。behave とキーの作成は system なしの応答を読むので、system で起こした振る舞いには向きません"));
     if (r.same_sha === false) warns.push(t("方向はこの対照集合とは中身の違うファイルから作られています"));
     if (!r.match) warns.push(t("validate.match が無いので、判定の正規表現と positions を入れてください"));
     el.innerHTML = `<span class="muted">${t("対照集合 {c} · A 側 {a} 問 · B 側 {b} 問(dont_touch の ordinary に入る)", { c: esc(r.contrast), a: r.n_a, b: r.n_b })}${
@@ -208,7 +208,7 @@ export class ChipsLeft {
     const match = v("#kb-bmatch") || s.match || null;
     const judge = this.$("#kb-judge").value.trim();
     if (!match && !judge) { this.status("#kb-status", t("判定の正規表現か judge の文面を入れてください"), true); return; }
-    if (judge && !(judge.includes("{q}") && judge.includes("{a}"))) { this.status("#kb-status", t("judge の文面には {q}(質問)と {a}(返事)が要ります"), true); return; }
+    if (judge && !(judge.includes("{q}") && judge.includes("{a}"))) { this.status("#kb-status", t("judge の文面には {q}(質問)と {a}(応答)が要ります"), true); return; }
     const p = { prompts: s.contrast_path, recipes: [recipe], name, max_tokens: +v("#kb-mt") || 256 };
     if (match) p.match = match;
     if (judge) { p.judge = judge; p.labels = v("#kb-labels") || "R,P,C"; }
@@ -308,15 +308,15 @@ export class ChipsLeft {
     const sh = r.position_share || {};
     const issues = (r.issues || []).map((x) => `<div class="${x.level === "error" ? "err" : "pp-warn"}">${esc(x.message)}</div>`).join("");
     const rows = (r.extracted || []).map((x) => `<tr><td>${x.i}</td><td class="l">${esc(x.question)}</td><td>${pct(x.rate)}</td><td>${x.starts}</td><td>${x.loop ? t("繰り返し") : ""}</td>
-      <td class="l"><details><summary class="muted note">${t("返事")}</summary><p class="muted note kx-sample">${esc(x.reply || "")}</p></details></td></tr>`).join("");
+      <td class="l"><details><summary class="muted note">${t("応答")}</summary><p class="muted note kx-sample">${esc(x.reply || "")}</p></details></td></tr>`).join("");
     el.innerHTML = `<div class="kx-res">
       <p class="note">${t("残った質問 {a} 問 · 一部の種だけ {p} 問 · 残らなかった {n} 問(全 {t} 問・種 {s} 個、{how}、min_rate {r})", { a: (r.extracted || []).length, p: r.n_partial, n: r.n_none, t: r.n_prompts, s: r.n_seeds, how: esc(how), r: j.min_rate })}<br>
-      positions <span class="mono">${esc(r.positions)}</span> · ${t("返事のトークンのうち書き込みたい位置になる割合の見込み {s}(25% 以上は広すぎる)", { s: pct(sh.share) })} · ${
-        t("書き込みたい位置の見込み: 鍵の作成 {a} 例・{b} 位置、key-check {c} 例・{d} 位置", { a: r.halves.even.examples, b: r.halves.even.positions, c: r.halves.odd.examples, d: r.halves.odd.positions })} · ${
+      positions <span class="mono">${esc(r.positions)}</span> · ${t("応答のトークンのうち書き込みたい位置になる割合の見込み {s}(25% 以上は広すぎる)", { s: pct(sh.share) })} · ${
+        t("書き込みたい位置の見込み: キーの作成 {a} 例・{b} 位置、key-check {c} 例・{d} 位置", { a: r.halves.even.examples, b: r.halves.even.positions, c: r.halves.odd.examples, d: r.halves.odd.positions })} · ${
         t("dont_touch の ordinary {n} 問", { n: r.ordinary.n })}</p>
       ${issues}${(r.notes || []).length ? `<p class="muted note">${r.notes.map(esc).join("<br>")}</p>` : ""}
-      ${rows ? `<div class="evx-scroll"><table class="evx mono kx-tab kb-rows"><thead><tr><th>#</th><th class="l">${t("残った質問")}</th><th title="${t("振る舞いが出た種の割合")}">${t("割合")}</th><th title="${t("返事の中の書き込みたい位置の見込み")}">${t("位置")}</th><th></th><th class="l"></th></tr></thead><tbody>${rows}</tbody></table></div>` : ""}
-      ${r.path ? `<div class="pp-actions"><button class="small" data-kbpipe="1" title="${t("入力欄の JSON(方向は keyed.direction、介入は keyed.iv)で、上の層の欄の層に鍵を作り、key-check まで回す")}">${t("方向から key-check まで")}</button>
-        <span class="muted note">${t("層は「鍵を作る」の層の欄で決める")}</span></div>` : ""}</div>`;
+      ${rows ? `<div class="evx-scroll"><table class="evx mono kx-tab kb-rows"><thead><tr><th>#</th><th class="l">${t("残った質問")}</th><th title="${t("振る舞いが出た種の割合")}">${t("割合")}</th><th title="${t("応答の中の書き込みたい位置の見込み")}">${t("位置")}</th><th></th><th class="l"></th></tr></thead><tbody>${rows}</tbody></table></div>` : ""}
+      ${r.path ? `<div class="pp-actions"><button class="small" data-kbpipe="1" title="${t("入力欄の JSON(方向は keyed.direction、介入は keyed.iv)で、上の層の欄の層にキーを作り、key-check まで回す")}">${t("方向から key-check まで")}</button>
+        <span class="muted note">${t("層は「キーを作る」の層の欄で決める")}</span></div>` : ""}</div>`;
   }
 }

@@ -314,7 +314,7 @@ def test_recipe_panel_new_units(served, browser, headed):
         base = by[f"L12 N{n[12][4]}+N{n[12][5]}"]
         old = by[f"L12 N{n[12][6]}"]
         if lang == "ja":
-            assert "取り除く形: 量の鍵 hga_amount" in take["t"] and "量子化の倍率 kauto" in take["t"] and "取り除く" in take["t"] and take["rm"]
+            assert "取り除く形: 量のキー hga_amount" in take["t"] and "量子化の倍率 kauto" in take["t"] and "取り除く" in take["t"] and take["rm"]
             assert "取り除く形: その位置の成分" in rm["t"] and "k4" in rm["t"] and "上限つき" in rm["t"]
             assert "取り除く形: 基準値を超えた分" in base["t"] and "kauto" in base["t"]
             assert not old["rm"] and not old["x"] and "取り除く" not in old["t"]
@@ -365,7 +365,7 @@ def test_heads_step_in_browser(served, browser):
     assert pg.evaluate("document.querySelector('#dv-fish [role=tab][data-step=heads]').classList.contains('sep')")
     opts = pg.evaluate("[...document.querySelectorAll('#fx-hg-recipe option')].map((o) => [o.value, o.textContent])")
     assert opts == [["chips_t", "chips_t(proj 2 個 · 層 8,12)"]]                         # proj の無いレシピは出ない
-    assert pg.evaluate("document.querySelector('#fx-hg-layers').textContent") == "CHiPS のヘッドの層: 8, 12(鍵はこの層を全部含むもの)"
+    assert pg.evaluate("document.querySelector('#fx-hg-layers').textContent") == "CHiPS のヘッドの層: 8, 12(キーはこの層を全部含むもの)"
     assert "gated_ui" in pg.evaluate("document.querySelector('#fx-hg-src').textContent")
     assert pg.evaluate("[document.querySelector('#fx-hg-scene').value, document.querySelector('#fx-hg-one').value]") == ["g_scene", "g_one"]
     one8 = pg.evaluate("(() => { const o = [...document.querySelectorAll('#fx-hg-one option')].find((x) => x.value === 'g_one8'); return [o.disabled, o.textContent]; })()")
@@ -405,7 +405,7 @@ def test_heads_step_in_browser(served, browser):
     fit = pg.evaluate("[...document.querySelectorAll('#fx-hg-fit tbody tr')].map((tr) => [...tr.children].map((x) => x.textContent))")
     assert [x[0] for x in fit] == ["L8", "L12"] and all(float(x[2]) <= 1 and int(x[4]) > 0 for x in fit)
     match = pg.evaluate("[...document.querySelectorAll('#fx-hg-match tbody tr')].map((tr) => [tr.dataset.hg, ...[...tr.children].map((x) => x.textContent)])")
-    assert [x[0] for x in match] == ["open", "scene", "other"] and [x[1] for x in match] == ["どこでも開く鍵・狙う場面", "本物の鍵・狙う場面", "本物の鍵・dont_touch"]
+    assert [x[0] for x in match] == ["open", "scene", "other"] and [x[1] for x in match] == ["どこでも開くキー・対象の場面", "本物のキー・対象の場面", "本物のキー・dont_touch"]
     assert all(x[2] != "—" and x[3] != "—" and int(x[4]) > 0 for x in match)
     assert pg.evaluate("document.querySelectorAll('#fx-hg-units tbody tr').length") == 2
     assert pg.evaluate("document.querySelector('#fx-hg-units tbody tr td.l').textContent").endswith("!kauto!takehgb_amount")
@@ -420,7 +420,7 @@ def test_heads_step_in_browser(served, browser):
     pg.wait_for_function("document.querySelectorAll('#recipe-list tr.rc-nw').length === 2", timeout=10000)
     assert "レシピに足しました(2 個)" in pg.evaluate("document.querySelector('#fx-status-heads').textContent")
     assert all(x.endswith("!kauto!takehgb_amount") for x in pg.evaluate("window.gne.recipe.specs(1, false)"))
-    assert "取り除く形: 量の鍵 hgb_amount" in pg.evaluate("document.querySelector('#recipe-list tr.rc-nw').textContent")
+    assert "取り除く形: 量のキー hgb_amount" in pg.evaluate("document.querySelector('#recipe-list tr.rc-nw').textContent")
     _shot(pg, "gated-step-added-ja.png")
     # 同じ名前でもう一度: 上書きを確かめ、やめたら投げない
     pg.wait_for_function(f"{f}.hg.keys.some((k) => k.name === 'hgb_amount') && {f}.hg.recipeNames.has('hgb_r')", timeout=30000)
@@ -429,7 +429,7 @@ def test_heads_step_in_browser(served, browser):
     pg.click("#fx-hg-go")
     pg.wait_for_function("document.querySelector('#fx-status-heads').textContent === 'やめました'", timeout=5000)
     asked = pg.evaluate("window.__asked")
-    assert asked and "方向 hgb_dir と取り除く量の鍵 hgb_amount・レシピ hgb_r を作り直します" in asked[-1]
+    assert asked and "方向 hgb_dir と取り除く量のキー hgb_amount・レシピ hgb_r を作り直します" in asked[-1]
     assert len(posts) == n_posts
     assert not errors, errors
     pg.close()

@@ -9,14 +9,14 @@ export const KIND = { embed: tr("埋め込み"), connections: "connections", lay
                stats_resid: tr("残差の統計"), stats_act: tr("活性の統計"), reverse: tr("逆引き"), eval: "eval",
                heads_contrast: tr("ヘッドの対照分析"), experts_contrast: tr("専門家の対照分析"), experts_sweep: tr("専門家の sweep"),
                heads_causal: tr("因果スクリーニング"), heads_allocate: tr("強さの配分"), head_pipeline: tr("方向とヘッドの一括"), direction: tr("方向"),
-               heads_candidates: tr("強さの候補"), heads_refine: tr("残りから追加"), headproj_export: tr("LoRA・焼き込み"), fieldtest: tr("実地テスト"),
-               direction_key: tr("鍵の作成"), direction_key_check: tr("鍵の確認"), direction_key_experts: tr("専門家の選ばれ方"),
+               heads_candidates: tr("強さの候補"), heads_refine: tr("残りから追加"), headproj_export: tr("LoRA・マージ"), fieldtest: tr("実地テスト"),
+               direction_key: tr("キーの作成"), direction_key_check: tr("キーの確認"), direction_key_experts: tr("専門家の選ばれ方"),
                direction_key_verify: tr("LoRA の確かめ(key-verify)"), direction_key_pipeline: tr("方向から key-check まで"),
                behave: tr("振る舞いを数える(behave)"), direction_key_causal: tr("効く層を探す(生成なし)"),
                direction_key_causal_verify: tr("効く層を確かめる(生成)"), writers: tr("書き手の強さ"),
                fish_pipeline: tr("FiSH をまとめて作る"), fish_direction: tr("FiSH の方向を作る"), fish_try: tr("FiSH を重みに入れる前に試す"),
-               nw_neurons: tr("FiSH のニューロンを選ぶ"), fish_keys: tr("FiSH の鍵を作る"), fish_verify: tr("FiSH が式どおりか確かめる"),
-               fish_check: tr("FiSH の漏れを確かめる"), fish_behave: tr("FiSH の返事を読む"), fish_heads: tr("CHiPS のヘッドの分を場面で取り除く"),
+               nw_neurons: tr("FiSH のニューロンを選ぶ"), fish_keys: tr("FiSH のキーを作る"), fish_verify: tr("FiSH が式どおりか確かめる"),
+               fish_check: tr("FiSH の誤検出を確かめる"), fish_behave: tr("FiSH の応答を読む"), fish_heads: tr("CHiPS のヘッドの分を場面で取り除く"),
                nw_check: tr("FiSH のユニットを確かめる(nw check)"), direction_token: tr("トークンの行の方向"),
                direction_token_scan: tr("トークンの行の層を走査する"), nw_prior: tr("前のやり取りの応答を埋める") };
 

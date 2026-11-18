@@ -22,8 +22,8 @@ const AMBER = [255, 196, 84], PLUS = [242, 210, 75], MINUS = [201, 79, 167], MAS
 const kindLabel = (k) => (k === "attn" ? "attention" : t("線形注意"));
 // gne heads contrast の指標(heads.py の METRICS)。signed は符号つき(基準値と比べるのは絶対値)
 const METRICS = [
-  ["trigger_mass", () => t("トリガーへの注目"), () => t("返事の各位置から、共通部分(ユーザーの発話 + 返事)への注目のうちトリガー区間が占める割合の平均。ペルソナあり − なし"), true],
-  ["pattern_shift", () => t("注目のずれ"), () => t("返事の各行の注目の分布の JS ダイバージェンス(bit)の平均。system の部分は 1 つにまとめる"), false],
+  ["trigger_mass", () => t("トリガーへの注目"), () => t("応答の各位置から、共通部分(ユーザーの発話 + 応答)への注目のうちトリガー区間が占める割合の平均。ペルソナあり − なし"), true],
+  ["pattern_shift", () => t("注目のずれ"), () => t("応答の各行の注目の分布の JS ダイバージェンス(bit)の平均。system の部分は 1 つにまとめる"), false],
   ["out_shift", () => t("出力の差"), () => t("ヘッドの出力の平均の差のノルム ÷ そのヘッドの典型的な出力ノルム"), false],
   ["dir_cos", () => t("方向との cos"), () => t("出力の差を W_O の列ブロックで残差に写したものと、その層の方向(gne direction)の cos"), true],
 ];
@@ -317,7 +317,7 @@ export class HeadPanel {
       return `<tr><td class="w">${esc(tokText(a.text, 24))}</td>${cell(a.last, b && b.last)}${cell(a.after, b && b.after)}</tr>`;
     }).join("");
     return `<h4>${t("トリガー区間への注目(共通部分の中の割合)")}</h4><table class="kv mono hp-trig">${head}${rows}</table>
-      ${noteHTML(t("割合 = その行の注目のうち、トリガーのトークンへのもの(比べるときは system の部分を除いた共通部分の中で。gne heads contrast の trigger_mass と同じ分母)。最後の行 = 返事の最初のトークンを決める位置。"), "muted note")}`;
+      ${noteHTML(t("割合 = その行の注目のうち、トリガーのトークンへのもの(比べるときは system の部分を除いた共通部分の中で。gne heads contrast の trigger_mass と同じ分母)。最後の行 = 応答の最初のトークンを決める位置。"), "muted note")}`;
   }
 
   drawHeat(cv) {
@@ -573,11 +573,11 @@ export class HeadPanel {
     if (!L.system && this.pat.system) L.system = this.pat.system;
     const dirs = this.directions();
     el.innerHTML = `
-      ${noteHTML(t("返事のトークンが、選んだヘッドで文脈のどのトークンに注目しているか。方向を選ぶと、文脈の各トークンがヘッドの出力を通してその方向にどれだけ寄与したか(注目 × ゲート × OV)も出す。"), "muted note")}
+      ${noteHTML(t("応答のトークンが、選んだヘッドで文脈のどのトークンに注目しているか。方向を選ぶと、文脈の各トークンがヘッドの出力を通してその方向にどれだけ寄与したか(注目 × ゲート × OV)も出す。"), "muted note")}
       <textarea id="ls-system" class="hp-sys" rows="3" placeholder="${t("system(空なら system なし)")}">${esc(L.system)}</textarea>
       <div class="ch-input"><textarea id="ls-user" rows="2" placeholder="${t("ユーザーの発話")}">${esc(L.user)}</textarea>
         <button class="main" id="ls-run"${this.busy ? " disabled" : ""}>${t("流す")}</button></div>
-      <textarea id="ls-reply" class="hp-sys" rows="2" placeholder="${t("返事(空なら greedy に作る)")}">${esc(L.reply)}</textarea>
+      <textarea id="ls-reply" class="hp-sys" rows="2" placeholder="${t("応答(空なら greedy に作る)")}">${esc(L.reply)}</textarea>
       <div class="list-tools ls-opts">
         <label class="muted">${t("ヘッド")} <input id="ls-heads" class="mono" value="${esc(L.heads)}" spellcheck="false" title="${t("例 14:H0-3,16:H2(L:H* で層の全ヘッド)")}"></label>
         <button class="small" id="ls-one" title="${t("開いているヘッドだけにする")}">L${d.layer} H${d.head}</button>
@@ -603,7 +603,7 @@ export class HeadPanel {
     const L = this.lis;
     if (!L.user.trim() || !L.heads.trim() || this.busy) return;
     this.busy = true;
-    this.lstatus = L.reply.trim() ? t("流しています(GPU を待つことがあります)…") : t("返事を作って流しています(GPU を待つことがあります)…");
+    this.lstatus = L.reply.trim() ? t("流しています(GPU を待つことがあります)…") : t("応答を作って流しています(GPU を待つことがあります)…");
     if (this.tab === "listen") this.render();
     const tok = this._token;
     try {
@@ -613,7 +613,7 @@ export class HeadPanel {
       if (!x.contrib) L.mode = "attn";
       else if (this.lres && L.mode === "attn" && !this._modeChosen) L.mode = "contrib";
       const share = this.contribShare(x);
-      this.lstatus = t("{n} トークン(返事 {r})", { n: x.n_tokens, r: x.n_tokens - x.reply_start })
+      this.lstatus = t("{n} トークン(応答 {r})", { n: x.n_tokens, r: x.n_tokens - x.reply_start })
         + (share ? ` · ${t("層の寄与のうち選んだヘッドの分 {p}", { p: share })}` : "")
         + (x.warnings && x.warnings.length ? ` · ${x.warnings.join(" / ")}` : "");
     } catch (e) { this.lstatus = `${t("エラー")}: ${e.message}`; }
@@ -664,9 +664,9 @@ export class HeadPanel {
     }).join("") : "";
     out.innerHTML = `${seg}
       <div class="ls-toks">${ctxHTML}</div>
-      <div class="ls-reply"><span class="muted">${t("返事")}:</span> ${repHTML}</div>
-      <p class="muted note">${contrib ? t("色 = そのトークンの方向への寄与(返事のトークンの平均)。黄 = 方向の向き、赤紫 = 逆向き。明るさ = √(|値| / 文脈の最大)。")
-        : t("色 = 返事の各トークンからの注目の平均(選んだヘッドの合計)。明るさ = √(値 / 文脈の最大)。")} ${t("トークンにマウスを当てるとヘッドごとの値。")}</p>
+      <div class="ls-reply"><span class="muted">${t("応答")}:</span> ${repHTML}</div>
+      <p class="muted note">${contrib ? t("色 = そのトークンの方向への寄与(応答のトークンの平均)。黄 = 方向の向き、赤紫 = 逆向き。明るさ = √(|値| / 文脈の最大)。")
+        : t("色 = 応答の各トークンからの注目の平均(選んだヘッドの合計)。明るさ = √(値 / 文脈の最大)。")} ${t("トークンにマウスを当てるとヘッドごとの値。")}</p>
       ${layers}
       <h4>${contrib ? t("寄与の上位(文脈のトークン)") : t("注目の上位(文脈のトークン)")}</h4>
       <table class="kv mono hp-trig"><tr><th>${tl("位置", "pos")}</th><th>${t("トークン")}</th><th>${t("役")}</th><th>${t("合計")}</th>${keys.map((k) => `<th>${esc(k)}</th>`).join("")}</tr>${rows}</table>

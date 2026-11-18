@@ -20,7 +20,7 @@ const fmt = (x, d = 3) => (x === null || x === undefined || !Number.isFinite(+x)
 const sgn = (x, d = 3) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : `${+x >= 0 ? "+" : "−"}${Math.abs(+x).toFixed(d)}`);
 const NAME_RE = /^[\w.][\w.-]*$/;
 // 表の上に出す注(サーバの keyed_causal.NOTE と同じ文。英語の画面では訳を出す)
-export const NOTE = "これは生成なしの目安です。比較用の鍵(ラベルをシャッフルして作った鍵)と見分けがつかない候補を外すためのもので、効くことの保証ではありません(生成で振る舞いが変わる場面でも、生成なしの確率の差は動かないことがあります)。効くかどうかは第 2 段(gne direction key-causal-verify、UI は「選んだ行を生成で確かめる」)の生成で数えてください";
+export const NOTE = "これは生成なしの目安です。比較用のキー(ラベルをシャッフルして作ったキー)と見分けがつかない候補を外すためのもので、効くことの保証ではありません(生成で振る舞いが変わる場面でも、生成なしの確率の差は動かないことがあります)。効くかどうかは第 2 段(gne direction key-causal-verify、UI は「選んだ行を生成で確かめる」)の生成で数えてください";
 
 // 鍵の target(ffn / attn / shared / expert:e)→ ユニットの短い書き方(ffn / attn / S / Ee)
 export function targetWho(target) {
@@ -87,7 +87,7 @@ export class KeyCausal {
     this.sort = { col: null, dir: 1 };              // 表の並べ替え(見出しのクリック)
     this.selKeys = new Set();                       // 選んだ行(書き込み先:層。並べ替え・強さの切り替えで描き直しても残す)
     root.innerHTML = `<h4>${t("効く層を探す")} <span class="muted note">${t("(keyed の効く場所: 生成なしのふるい分け → 生成での確かめ)")}</span></h4>
-      ${noteHTML(t("key-check は鍵が場面を分けるか(鍵の反応の強さ)しか見ません。どの層・どの書き込み先に書けば振る舞いが変わるかは別の問題です。第 1 段は、上の「鍵を作る」の対照集合で、候補(層 × 書き込み先)ごとに鍵を作り(偶数番目)、作成に使っていない奇数番目の返事で、keyed を当てたときに振る舞いの部分(positions の正規表現に一致した文字)の対数確率がどれだけ下がるかを、比較用の鍵と並べて生成なしで測ります。生成なしの値は保証ではないので、表から候補を数行選び、第 2 段の生成で振る舞いの数を確かめます。介入(iv)と返事の長さは「鍵を作る」の欄のものを使います。"), "muted note pp-help")}
+      ${noteHTML(t("key-check はキーが場面を分けるか(キーの出力)しか見ません。どの層・どの書き込み先に書けば振る舞いが変わるかは別の問題です。第 1 段は、上の「キーを作る」の対照集合で、候補(層 × 書き込み先)ごとにキーを作り(偶数番目)、作成に使っていない奇数番目の応答で、keyed を当てたときに振る舞いの部分(positions の正規表現に一致した文字)の対数確率がどれだけ下がるかを、比較用のキーと並べて生成なしで測ります。生成なしの値は保証ではないので、表から候補を数行選び、第 2 段の生成で振る舞いの数を確かめます。介入(iv)と応答の長さは「キーを作る」の欄のものを使います。"), "muted note pp-help")}
       <div class="pp-set">
         <label class="muted" title="${t("候補の層(カンマ区切りか 10-16)。空なら全層(最終層と MTP の層は除く)")}">${t("層")} ${layersInput("kz-layers", { placeholder: t("空なら全層") })}</label>
         <span class="muted" title="${t("候補の書き込み先。ffn = ffn_down、attn = attn_output。書けない書き込み先・層は外す")}">${t("書き込み先")}
@@ -95,13 +95,13 @@ export class KeyCausal {
           <span class="${this.moe ? "" : "hidden"}"><label><input type="checkbox" id="kz-t-shared"> shared</label>
           <label title="${t("専門家の番号(カンマ区切り)。空なら専門家は測らない")}">expert <input id="kz-t-exp" size="6" placeholder="e" spellcheck="false"></label></span></span>
         <label class="muted" title="${t("α の段(カンマ区切り)。空なら 1,2,4 に表の keyed.alpha の符号を掛けたもの")}">${t("α の段")} <input id="kz-alphas" size="10" spellcheck="false"></label>
-        <label class="muted" title="${t("候補ごとに測る比較用の鍵(ラベルをシャッフルして作った鍵)の本数。全候補の比較用の鍵をまとめた分布の 5% 点が印の基準")}">${t("比較用の鍵")} <input class="w4" id="kz-pseudo" type="number" min="1" max="16" value="3"></label>
+        <label class="muted" title="${t("候補ごとに測る比較用のキー(ラベルをシャッフルして作ったキー)の本数。全候補の比較用のキーをまとめた分布の 5% 点が印の基準")}">${t("比較用のキー")} <input class="w4" id="kz-pseudo" type="number" min="1" max="16" value="3"></label>
         <label class="muted" title="${t("効き目を測る振る舞いの部分の正規表現。空なら positions の before: の正規表現")}">${t("効き目の正規表現")} <input id="kz-match" size="18" spellcheck="false"></label>
         <label class="muted" title="${t("選択式の振る舞い向け: 1 行 1 問の JSONL({\"prompt\", \"prefix\": \"Answer:\", \"behavior\": \" B\", \"desired\": \" C\"}。書き込みたくない場面の行は \"group\" に群の名前)。その位置での log p(振る舞いの答え) − log p(望む答え) の変化を測る")}">${t("測る文のファイル")} <input type="file" id="kz-probe" accept=".jsonl,.json,application/json"></label>
         <span class="muted note" id="kz-pinfo"></span>
-        <label class="muted" title="${t("結果と鍵の名前。空なら <対照集合の名前>-causal(鍵は <名前>-ffn などで保存)")}">${t("名前")} <input id="kz-name" size="16" spellcheck="false"></label>
+        <label class="muted" title="${t("結果とキーの名前。空なら <対照集合の名前>-causal(キーは <名前>-ffn などで保存)")}">${t("名前")} <input id="kz-name" size="16" spellcheck="false"></label>
       </div>
-      <div class="pp-go"><button class="main" id="kz-go" title="${t("候補ごとに鍵を作り、生成なしで効き目・副作用・比較用の鍵を測る(direction_key_causal のジョブ)")}">${t("第 1 段: 生成なしで測る")}</button>
+      <div class="pp-go"><button class="main" id="kz-go" title="${t("候補ごとにキーを作り、生成なしで効き目・副作用・比較用のキーを測る(direction_key_causal のジョブ)")}">${t("第 1 段: 生成なしで測る")}</button>
         <span class="muted note" id="kz-status"></span></div>
       <div id="kz-prog" class="note mono"></div>
       <div class="pp-in"><span class="muted">${t("保存した結果")}</span> <select id="kz-saved"><option value="">${t("(なし)")}</option></select>
@@ -110,19 +110,19 @@ export class KeyCausal {
       <div id="kz-vwrap" class="hidden">
         <h4 class="note">${t("第 2 段: 選んだ行を生成で確かめる")} <span class="muted note" id="kz-vsel"></span></h4>
         <div class="pp-set">
-          <label class="muted" title="${t("返事の長さ(behave と同じ)")}">${t("返事の長さ")} <input class="w5" id="kz-vmt" type="number" min="1" max="4096" value="256"></label>
+          <label class="muted" title="${t("応答の長さ(behave と同じ)")}">${t("応答の長さ")} <input class="w5" id="kz-vmt" type="number" min="1" max="4096" value="256"></label>
           <label class="muted" title="${t("振る舞いを数える正規表現。空なら第 1 段で測った正規表現(無ければ対照集合の validate.match)")}">${t("判定の正規表現")} <input id="kz-vmatch" size="18" spellcheck="false"></label>
-          <label class="muted" title="${t("書き込みたくない場面(dont_touch)の質問にも答えさせ、返事が変わった数を数える")}"><input type="checkbox" id="kz-vdt" checked> dont_touch</label>
+          <label class="muted" title="${t("書き込みたくない場面(dont_touch)の質問にも答えさせ、応答が変わった数を数える")}"><input type="checkbox" id="kz-vdt" checked> dont_touch</label>
         </div>
         <details class="kz-adv"><summary class="muted note">${t("judge・温度")}</summary><div class="pp-set">
-          <label class="muted" title="${t("読み手の判定の文面({q} に質問、{a} に返事)。空なら正規表現で数える")}">${t("判定の指示")} <textarea id="kz-vjudge" class="mono" rows="2" cols="40" spellcheck="false"></textarea></label>
+          <label class="muted" title="${t("読み手の判定の文面({q} に質問、{a} に応答)。空なら正規表現で数える")}">${t("判定の指示")} <textarea id="kz-vjudge" class="mono" rows="2" cols="40" spellcheck="false"></textarea></label>
           <label class="muted">${t("判定のラベル")} <input id="kz-vlabels" size="8" value="R,P,C" spellcheck="false"></label>
           <label class="muted" title="${t("振る舞いとみなすラベル(judge のとき)")}">${t("振る舞いのラベル")} <input id="kz-vlabel" size="6" spellcheck="false"></label>
           <label class="muted">${t("温度")} <input class="w45" id="kz-vtemp" type="number" min="0" max="2" step="0.1" value="0"></label>
           <label class="muted" title="${t("種(カンマ区切り。温度があるとき)")}">${t("種")} <input id="kz-vseeds" size="8" spellcheck="false"></label>
         </div></details>
-        <div class="pp-go"><button id="kz-vgo" disabled title="${t("選んだ候補と、それぞれの比較用の鍵 1 本で、作成に使っていない質問に生成させる(direction_key_causal_verify のジョブ)")}">${t("選んだ行を生成で確かめる")}</button>
-          <button id="kz-vcombo" disabled title="${t("選んだ行(選んだ強さのユニット)を一緒に当てる組を 1 つの候補にして確かめる。比較用の鍵も、組の各ユニットを同じ番号の比較用の鍵に替えた組で比べる")}">${t("選んだ行をまとめて 1 つの候補として確かめる")}</button>
+        <div class="pp-go"><button id="kz-vgo" disabled title="${t("選んだ候補と、それぞれの比較用のキー 1 本で、作成に使っていない質問に生成させる(direction_key_causal_verify のジョブ)")}">${t("選んだ行を生成で確かめる")}</button>
+          <button id="kz-vcombo" disabled title="${t("選んだ行(選んだ強さのユニット)を一緒に当てる組を 1 つの候補にして確かめる。比較用のキーも、組の各ユニットを同じ番号の比較用のキーに替えた組で比べる")}">${t("選んだ行をまとめて 1 つの候補として確かめる")}</button>
           <label class="muted" title="${t("組と一緒に、選んだ行を 1 か所ずつの候補としても確かめ、結果の表に並べる")}"><input type="checkbox" id="kz-vsingles" checked> ${t("1 か所ずつも並べる")}</label>
           <span class="muted note" id="kz-vstatus"></span></div>
         <div id="kz-vprog" class="note mono"></div>
@@ -234,7 +234,7 @@ export class KeyCausal {
       const j = await this.onRun("direction_key_causal", p);
       if (!j) { this.status("run", t("やめました")); return; }
       this.jobs.run = j.id;
-      this.status("run", t("候補ごとに鍵を作って測っています(モデルを流します。GPU を待つことがあります)…"));
+      this.status("run", t("候補ごとにキーを作って測っています(モデルを流します。GPU を待つことがあります)…"));
       this.follow(j.id, "#kz-prog");
     } catch (e) { this.status("run", `${t("エラー")}: ${e.message}`, true); }
   }
@@ -313,37 +313,37 @@ export class KeyCausal {
     const only = this.$("#kz-onlymark") ? this.$("#kz-onlymark").checked : false;
     const marks = Object.entries(r.marks || {}).flatMap(([a, mk]) => Object.entries(mk).map(([m, v]) => {
       const pl = ((r.pool || {})[a] || {})[m] || {};
-      return `<li>${t("α {a}({m}): 印 {k} / 候補 {n}(偶然でも {n} × {c}% = {e} 個は印が付く)· 比較用の鍵の 5% 点 {p}({pn} 本)", {
-        a: esc(a), m: m === "reply" ? t("返事") : "probe", k: `<b>${v.marked}</b>`, n: v.candidates, c: Math.round((r.chance || 0.05) * 100),
+      return `<li>${t("α {a}({m}): 印 {k} / 候補 {n}(偶然でも {n} × {c}% = {e} 個は印が付く)· 比較用のキーの 5% 点 {p}({pn} 本)", {
+        a: esc(a), m: m === "reply" ? t("応答") : "probe", k: `<b>${v.marked}</b>`, n: v.candidates, c: Math.round((r.chance || 0.05) * 100),
         e: v.expected, p: sgn(pl.p5), pn: pl.n ?? "—" })}</li>`;
     })).join("");
     const iv = r.iv_spec ? (Array.isArray(r.iv_spec) ? r.iv_spec.join(" ") : r.iv_spec) : null;
     const c = r.counts || {}, ca = c.a || {};
     const head = `<p class="note">${t("結果")} <b class="mono">${esc(r.name)}</b> · ${t("対照集合")} ${esc(r.contrast)} · ${t("方向")} <span class="mono">${esc(r.direction)}</span> · ${
       iv ? `${t("介入(iv)")} <span class="mono">${esc(iv)}</span>` : t("介入なし")} · ${t("候補 {n} 個", { n: r.n_candidates })} · α ${(r.alphas || []).map((a) => sgn(a, 2)).join(", ")} · ${
-      t("候補ごとの比較用の鍵 {n} 本", { n: r.pseudo })} · ${fmt(r.seconds, 1)} ${t("秒")}</p>
-      ${hasReply ? `<p class="muted note">${t("効き目(返事)= 作成に使っていない {n} 問のうち、{re} に一致した {m} 問の返事で、一致した文字の対数確率の変化(iv だけとの差。負 = 振る舞いが出にくくなる)", {
+      t("候補ごとの比較用のキー {n} 本", { n: r.pseudo })} · ${fmt(r.seconds, 1)} ${t("秒")}</p>
+      ${hasReply ? `<p class="muted note">${t("効き目(応答)= 作成に使っていない {n} 問のうち、{re} に一致した {m} 問の応答で、一致した文字の対数確率の変化(iv だけとの差。負 = 振る舞いが出にくくなる)", {
         n: ca.examples ?? "—", re: `<span class="mono">${esc(r.measure.regex)}</span>`, m: ca.matched ?? "—" })}</p>` : ""}
       ${hasProbe ? `<p class="muted note">${t("効き目(probe)= log p(振る舞いの答え) − log p(望む答え) の変化(負 = 望む答えに寄る)")}</p>` : ""}`;
     const note = `<p class="pp-warn note kz-note">⚠ ${esc(t(NOTE))}</p>`;
     const floor = r.ratio_floor ?? 0.01;
-    const legend = `<p class="muted note kz-legend">${t("比較用の鍵 = 書き込みたい場面と書き込みたくない場面のラベルをでたらめに入れ替えて、同じ手順で作った鍵。偶然でどれくらい変わるかの基準にする。★ = その強さで、全部の候補の比較用の鍵の 5% 点より大きく確率が下がった(有意)。全部の強さで有意 = どの強さでも ★。副作用 = 書き込みたくない位置の返事の 1 トークンあたりの対数確率の変化(負 = 下がった)。確率の下がり方 ÷ 副作用 = (−確率の下がり方)÷(−副作用)で、副作用が {f} より小さいとき(上がったときも)は {f} で割り、確率が下がっていなければ —。大きいほど、書き込みたくない場面を変えずに振る舞いを下げる。", { f: floor })}<br>${
-      t("選び方の目安: 確率の下がり方・副作用・全部の強さで有意か、の 3 つを並べて自分で選ぶ(この選び方の根拠は Qwen3.5-4B の語尾の 1 例だけ)。確率の下がり方だけで選ぶと、返事を繰り返しに落として確率を下げている候補を拾うことがある。")}</p>`;
+    const legend = `<p class="muted note kz-legend">${t("比較用のキー = 書き込みたい場面と書き込みたくない場面のラベルをでたらめに入れ替えて、同じ手順で作ったキー。偶然でどれくらい変わるかの基準にする。★ = その強さで、全部の候補の比較用のキーの 5% 点より大きく確率が下がった(有意)。全部の強さで有意 = どの強さでも ★。副作用 = 書き込みたくない位置の応答の 1 トークンあたりの対数確率の変化(負 = 下がった)。確率の下がり方 ÷ 副作用 = (−確率の下がり方)÷(−副作用)で、副作用が {f} より小さいとき(上がったときも)は {f} で割り、確率が下がっていなければ —。大きいほど、書き込みたくない場面を変えずに振る舞いを下げる。", { f: floor })}<br>${
+      t("選び方の目安: 確率の下がり方・副作用・全部の強さで有意か、の 3 つを並べて自分で選ぶ(この選び方の根拠は Qwen3.5-4B の語尾の 1 例だけ)。確率の下がり方だけで選ぶと、応答を繰り返しに落として確率を下げている候補を拾うことがある。")}</p>`;
     const sortMark = (col) => (this.sort.col === col ? (this.sort.dir > 0 ? " ▲" : " ▼") : "");
     const th = (col, label, title, cls = "") => `<th class="kz-sort${cls ? ` ${cls}` : ""}" data-kzsort="${esc(col)}" title="${esc(title)}">${label}${sortMark(col)}</th>`;
     const ra = this.ralpha;
     const ralphaSel = `<label class="muted" title="${t("「確率の下がり方 ÷ 副作用」・副作用・dont_touch の変化を出す強さ。行を選んで確かめるときも、この強さのユニットを使う")}">${t("強さ")} <select id="kz-ralpha">${
       alphas.map((a) => `<option value="${esc(a)}"${a === ra ? " selected" : ""}>${sgn(+a, 2)}</option>`).join("")}</select></label>`;
-    const effTitle = t("この強さでの確率の下がり方(振る舞いの部分の対数確率の変化。例ごとの差の平均、± は 95% の幅)。★ = 有意(全部の候補の比較用の鍵の 5% 点より大きく下がった)");
+    const effTitle = t("この強さでの確率の下がり方(振る舞いの部分の対数確率の変化。例ごとの差の平均、± は 95% の幅)。★ = 有意(全部の候補の比較用のキーの 5% 点より大きく下がった)");
     const thead = `<tr><th></th>${th("target", t("書き込み先"), t("書き込み先(並べ替えは書き込み先・層の順)"))}${th("layer", t("層"), t("層"))}${
       hasReply ? alphas.map((a) => th(`eff:${a}`, `α ${sgn(+a, 2)}`, effTitle)).join("") + th("all", t("全部の強さで有意"), t("どの強さでも ★(有意)が付いた")) : ""}${
       hasProbe ? alphas.map((a) => th(`probe:${a}`, `probe α ${sgn(+a, 2)}`, effTitle)).join("") + th("allp", t("全部の強さで有意(probe)"), t("どの強さでも ★(有意)が付いた")) : ""}${
       th("ratio", t("下がり方 ÷ 副作用"), t("(−確率の下がり方)÷(−副作用)。選んだ強さで。大きいほど、書き込みたくない場面を変えずに振る舞いを下げる"))}${
-      th("side", t("副作用"), t("書き込みたくない位置(同じ返事の一致以外の位置か、B 側の返事)の 1 トークンあたりの対数確率の変化。選んだ強さで"))}${
-      th("dt", t("dont_touch の変化"), t("dont_touch の群の返事の 1 トークンあたりの対数確率の変化のうち、最も下がった群。選んだ強さで"))}${
-      th("kc", t("key-check の余裕"), t("参考: key-check の選択性 − 比較用の鍵の p95"))}${
+      th("side", t("副作用"), t("書き込みたくない位置(同じ応答の一致以外の位置か、B 側の応答)の 1 トークンあたりの対数確率の変化。選んだ強さで"))}${
+      th("dt", t("dont_touch の変化"), t("dont_touch の群の応答の 1 トークンあたりの対数確率の変化のうち、最も下がった群。選んだ強さで"))}${
+      th("kc", t("key-check の余裕"), t("参考: key-check の選択性 − 比較用のキーの p95"))}${
       th("lin", t("比例"), t("最大の |α| での効き目 ÷ 最小の |α| での効き目を |α| の比で割った値(1 = 比例、1 未満 = 頭打ち)。向き× = α の段で符号がそろわない。— = 最小の |α| での効き目が 95% の幅の中(比は出さない)"))}<th></th></tr>`;
-    const effCell = (e, mark, ps) => (e ? `<td title="${esc(`${t("比較用の鍵")} ${range(ps)}`)}">${eff(e)}${mark ? ` <span class="kx-ok">★</span>` : ""}</td>` : "<td>—</td>");
+    const effCell = (e, mark, ps) => (e ? `<td title="${esc(`${t("比較用のキー")} ${range(ps)}`)}">${eff(e)}${mark ? ` <span class="kx-ok">★</span>` : ""}</td>` : "<td>—</td>");
     const body = this.sortedCandidates().map(({ c: x, i }) => {
       const ba = x.by_alpha || {};
       const anyMark = Object.values(ba).some((b) => b.mark || b.probe_mark);
@@ -420,7 +420,7 @@ export class KeyCausal {
       if (!j) { this.status("verify", t("やめました")); return; }
       this.jobs.verify = j.id;
       this.verifyFor = r.name;
-      this.status("verify", t("生成しています(iv だけ・候補・比較用の鍵)…"));
+      this.status("verify", t("生成しています(iv だけ・候補・比較用のキー)…"));
       this.follow(j.id, "#kz-vprog");
     } catch (e) { this.status("verify", `${t("エラー")}: ${e.message}`, true); }
   }
@@ -438,7 +438,7 @@ export class KeyCausal {
       const dt = groups.map((g) => {
         const d = (x.dt || {})[g] || {};
         const ch = (y) => (y && y.changed !== null && y.changed !== undefined
-          ? `${y.changed}/${y.n}${y.same_prefix !== null && y.same_prefix !== undefined ? `<span class="muted" title="${t("iv だけの返事の先頭から同じ部分の割合の平均")}">(${Math.round(y.same_prefix * 100)}%)</span>` : ""}` : "—");
+          ? `${y.changed}/${y.n}${y.same_prefix !== null && y.same_prefix !== undefined ? `<span class="muted" title="${t("iv だけの応答の先頭から同じ部分の割合の平均")}">(${Math.round(y.same_prefix * 100)}%)</span>` : ""}` : "—");
         return `<div>${esc(g)}: ${t("変わった {a} / {b}", { a: ch(d.keyed), b: ch(d.pseudo) })} · ${t("振る舞い {a} / {b}", { a: cnt(d.keyed), b: cnt(d.pseudo) })}</div>`;
       }).join("");
       const label = x.combo ? `<span class="kz-combo">${t("組")}</span> ${esc(x.label || "")}<div class="muted">${(x.units || []).map(esc).join("<br>")}</div>` : esc(x.unit);
@@ -448,14 +448,14 @@ export class KeyCausal {
         <td class="l">${dt || "—"}</td><td>${lim(k)} / ${lim(p)} <span class="muted">(${lim(b.a)})</span></td></tr>`;
     }).join("");
     el.innerHTML = `<div class="kx-res"><p class="note">${t("書き込みたい場面 {n} 問(作成に使っていない奇数番目)", { n: v.n_a })}${
-      groups.length ? ` · dont_touch ${groups.map((g) => `${esc(g)} ${v.n_dt[g]}`).join(" · ")}` : ""} · ${t("返事 {n} トークン", { n: v.max_tokens })} · ${
+      groups.length ? ` · dont_touch ${groups.map((g) => `${esc(g)} ${v.n_dt[g]}`).join(" · ")}` : ""} · ${t("応答 {n} トークン", { n: v.max_tokens })} · ${
       v.greedy ? "greedy" : t("温度 {x}", { x: v.temperature })} · ${t("判定")}: ${how} · ${fmt(v.seconds, 1)} ${t("秒")}</p>
       <div class="evx-scroll"><table class="evx mono kx-tab kz-vtab"><thead><tr><th class="l">${t("候補")}</th>
-        <th title="${t("iv だけのときに振る舞いが出た返事の数")}">${t("iv のみ")}</th><th title="${t("候補を足したとき")}">keyed</th><th title="${t("候補と同じ層・書き込み先・α で、比較用の鍵を使ったとき")}">${t("比較用の鍵")}</th>
-        <th title="${t("正規表現の一致の総数(keyed / 比較用の鍵、括弧は iv のみ)")}">${t("一致の総数")}</th>
-        <th title="${t("iv だけのときから返事が変わった数(greedy のとき)")}">${t("返事が変わった")}</th>
-        <th class="l" title="${t("dont_touch の群ごとの、返事が変わった数と振る舞いの数(keyed / 比較用の鍵)")}">${t("dont_touch")}</th>
-        <th title="${t("繰り返し・空の返事・上限で切れた数(keyed / 比較用の鍵、括弧は iv のみ)")}">${t("繰り返し・空・上限")}</th></tr></thead><tbody>${rows}</tbody></table></div>
+        <th title="${t("iv だけのときに振る舞いが出た応答の数")}">${t("iv のみ")}</th><th title="${t("候補を足したとき")}">keyed</th><th title="${t("候補と同じ層・書き込み先・α で、比較用のキーを使ったとき")}">${t("比較用のキー")}</th>
+        <th title="${t("正規表現の一致の総数(keyed / 比較用のキー、括弧は iv のみ)")}">${t("一致の総数")}</th>
+        <th title="${t("iv だけのときから応答が変わった数(greedy のとき)")}">${t("応答が変わった")}</th>
+        <th class="l" title="${t("dont_touch の群ごとの、応答が変わった数と振る舞いの数(keyed / 比較用のキー)")}">${t("dont_touch")}</th>
+        <th title="${t("繰り返し・空の応答・上限で切れた数(keyed / 比較用のキー、括弧は iv のみ)")}">${t("繰り返し・空・上限")}</th></tr></thead><tbody>${rows}</tbody></table></div>
       ${(v.notes || []).length ? `<p class="muted note">${v.notes.map(esc).join("<br>")}</p>` : ""}
       ${(v.warnings || []).length ? `<ul class="evx-notes">${v.warnings.map((w) => `<li>${esc(w)}</li>`).join("")}</ul>` : ""}</div>`;
   }

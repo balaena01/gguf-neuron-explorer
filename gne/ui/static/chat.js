@@ -9,7 +9,7 @@ import { Mic } from "./mic.js";
 import { askConfirm } from "./ui.js";
 
 // 足す位置(when)。値はジョブ・CLI と同じ、表示は画面の言葉
-const WHEN = [["all", "全位置"], ["gen", "生成中だけ"], ["assistant", "assistant の発話だけ"], ["skip-replies", "過去の返事以外"], ["after", "文字列が出てから"], ["ramp", "倍率を a から b へ"]];
+const WHEN = [["all", "全位置"], ["gen", "生成中だけ"], ["assistant", "assistant の発話だけ"], ["skip-replies", "過去の応答以外"], ["after", "文字列が出てから"], ["ramp", "倍率を a から b へ"]];
 
 // "14:8949:+1" → "L14 N8949 +1"、ヘッドの gain "21:H7:x0" → "L21 H7 ×0"、方向 "30:dir:NAME:+0.3" → "L30 dir:NAME +0.3"。
 // MoE(CHANGE-05): "12:E37:N511:+0.8" → "L12 E37 N511 +0.8"、"12:E3:x0" → "L12 E3 ×0"、"12:E3:route:+2" → "L12 E3 route +2"、
@@ -115,7 +115,7 @@ export class ChatPanel {
     const opts = [["greedy", tr("サンプリングなし(greedy)")], ["llama_server", tr("llama-server の既定")], ["common", tr("よく使う設定")],
                   ...(recipeSp || this.spPreset === "recipe" ? [["recipe", tr("レシピの設定"), !recipeSp]] : []), ["custom", tr("自由")]];
     const v = this.spValues();
-    const sel = `<span class="muted" title="${tr("greedy は毎回いちばん確率の高い語を選ぶ(同じ入力なら毎回同じ返事)。サンプリングは llama.cpp と同じ順番(presence penalty → top-k → top-p → min-p → 温度)で、3 列とも同じ乱数で引くので、違いは介入の違いだけ")}">${tr("サンプリング")}</span><select id="ch-sp">${
+    const sel = `<span class="muted" title="${tr("greedy は毎回いちばん確率の高い語を選ぶ(同じ入力なら毎回同じ応答)。サンプリングは llama.cpp と同じ順番(presence penalty → top-k → top-p → min-p → 温度)で、3 列とも同じ乱数で引くので、違いは介入の違いだけ")}">${tr("サンプリング")}</span><select id="ch-sp">${
       opts.map(([k, label, dis]) => `<option value="${k}"${k === this.spPreset ? " selected" : ""}${dis ? " disabled" : ""}>${label}</option>`).join("")}</select>`;
     if (!v) return sel;
     const fields = SP_FIELDS.map(([k, label, step]) => `<span class="muted">${k === "temperature" ? tr(label) : label}</span><input class="sp-v" data-k="${k}" type="number" step="${step}" min="${k === "presence_penalty" ? -2 : 0}" value="${v[k]}">`).join("");
@@ -185,20 +185,20 @@ export class ChatPanel {
     const turns = this.turns.map((t, ti) => `
       <div class="ch-user"><span class="muted">${tr("あなた")}</span> ${t.audio ? `🎤 <audio controls src="data:audio/wav;base64,${t.audio}"></audio><span class="muted note">${tr("{s} 秒の音声", { s: fmt(t.seconds, 1) })}</span> ` : ""}${esc(t.user)}${t.labels.join() !== cols.map((c) => c.label).join() ? `<span class="muted note">(${t.labels.map(esc).join(" / ")})</span>` : ""}${t.sp ? `<span class="muted note ch-sp-used">${esc(t.sp)}</span>` : ""}</div>
       <div class="ch-row">${t.replies.map((r, ci) => `<div class="ch-cell ${(t.cls || ["minus", "", "plus"])[ci] || ""}" data-t="${ti}" data-c="${ci}">${this.cellHTML(t, ci)}</div>`).join("")}</div>`).join("");
-    const colSeg = `<span class="seg" title="${tr("3 列: −・無介入・+ を並べて比べる / 1 列: + の列(レシピありか、このニューロンを + で押した返事)だけで話す。1 列は生成が 3 分の 1 で、長い会話を試すのに向く")}">${
+    const colSeg = `<span class="seg" title="${tr("3 列: −・無介入・+ を並べて比べる / 1 列: + の列(レシピありか、このニューロンを + で押した応答)だけで話す。1 列は生成が 3 分の 1 で、長い会話を試すのに向く")}">${
       [["3", tr("3 列")], ["1", tr("1 列")]].map(([v, l]) => `<button data-cols="${v}"${(this.single ? "1" : "3") === v ? ' class="on"' : ""}${this.busy ? " disabled" : ""}>${l}</button>`).join("")}</span>`;
     return `
-      <div class="ch-tools">${colSeg}${amount}<span class="muted">${tr("返事の長さ")}</span><input id="ch-max" type="number" min="1" max="2048" value="${this.maxTokens}">
-        <span class="muted" title="${tr("足す位置: all = 全位置 / gen = 生成中だけ(プロンプトの理解を壊さない)/ assistant = assistant の発話だけ / skip-replies = 過去の返事以外(過去の返事は素のまま読む)/ after = 出力にその文字列が出てから / ramp = 倍率を a から b へ変える")}">${tr("足す位置")}</span><select id="ch-when">${
+      <div class="ch-tools">${colSeg}${amount}<span class="muted">${tr("応答の長さ")}</span><input id="ch-max" type="number" min="1" max="2048" value="${this.maxTokens}">
+        <span class="muted" title="${tr("足す位置: all = 全位置 / gen = 生成中だけ(プロンプトの理解を壊さない)/ assistant = assistant の発話だけ / skip-replies = 過去の応答以外(過去の応答は素のまま読む)/ after = 出力にその文字列が出てから / ramp = 倍率を a から b へ変える")}">${tr("足す位置")}</span><select id="ch-when">${
           WHEN.map(([w, l]) => `<option value="${w}"${this.when === w ? " selected" : ""}>${tr(l)}</option>`).join("")}</select>${
           this.when === "after" || this.when === "ramp" ? `<input id="ch-when-x" size="8" value="${esc(this.whenArg)}" placeholder="${this.when === "after" ? tr("結論:") : "1.5-0.5"}">` : ""}</div>
       <div class="ch-tools">${this.samplingHTML()}</div>
       <div class="ch-tools"><span class="muted">system</span><input id="ch-system" class="ch-system" value="${esc(this.system)}" placeholder="${tr("空なら無し(音声で話すなら Respond in text.)")}">
-        <label class="muted" title="${tr("右の列の返事を、ブラウザの音声で読み上げる")}"><input type="checkbox" id="ch-speak"${this.speak ? " checked" : ""}> 🔊 ${tr("読み上げ")}</label></div>
+        <label class="muted" title="${tr("右の列の応答を、ブラウザの音声で読み上げる")}"><input type="checkbox" id="ch-speak"${this.speak ? " checked" : ""}> 🔊 ${tr("読み上げ")}</label></div>
       <div class="ch-log${this.single ? " single" : ""}">
         <div class="ch-row ch-head">${cols.map((c) => `<div class="${c.cls}">${esc(c.label)}${
           this.target === "recipe" && c.units.length ? `<div class="ch-units muted">${c.units.map((u) => `<span class="u">${esc(unitLabel(u))}</span>`).join(" · ")}</div>` : ""}</div>`).join("")}</div>
-        ${turns || `<p class="muted note">${this.single ? tr("+ の列(レシピありか、このニューロンを + で押した返事)だけで話します。比べたいときは 3 列に切り替えてください。")
+        ${turns || `<p class="muted note">${this.single ? tr("+ の列(レシピありか、このニューロンを + で押した応答)だけで話します。比べたいときは 3 列に切り替えてください。")
           : tr("同じ発話を 3 列で生成します(左から −、無介入、+)。返答は列ごとに別の履歴になります。")}</p>`}
       </div>
       <div class="ch-input"><textarea id="ch-text" rows="2" placeholder="${tr("メッセージ(Ctrl+Enter で送る)")}"${this.busy ? " disabled" : ""}>${esc(this.draft)}</textarea>

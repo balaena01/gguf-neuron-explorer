@@ -129,7 +129,7 @@ export class DirectionView {
       : `<option value="">${t("(なし)")}</option>`;
     if (!this.list.length) {
       this.name = null; this.meta = null;
-      this.$("#dv-info").innerHTML = `<p class="muted">${t("方向がありません。上の帯の「CHiPS」か「鍵」「FiSH」で作れます(gne direction --contrast でも作れます)")}</p>`;
+      this.$("#dv-info").innerHTML = `<p class="muted">${t("方向がありません。上の帯の「CHiPS」か「キー」「FiSH」で作れます(gne direction --contrast でも作れます)")}</p>`;
       this.$("#dv-run").disabled = true;
       this.draw();
       return;
