@@ -721,6 +721,7 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
         return await call(build, session, recipe, contrast, name=name, scene_key=scene_key, one_key=one_key, neurons=nmap,
                           subset=subset, max_tokens=max_tokens, save=save)
 
+    @srv.tool()
     async def nw_verify(units: list[str] | None = None, recipe: str | None = None, texts: list[str] | None = None,
                         iv: str | list[str] | None = None, contrast: str | None = None, subset: str = "all",
                         n_prompts: int = 6, max_tokens: int = 48) -> dict:
