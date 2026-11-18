@@ -328,3 +328,23 @@ def test_jobs_and_mcp_entries(sess):
     src = inspect.getsource(mcp_server)
     for name in ("async def direction_token(", "async def direction_token_scan(", "async def nw_prior(", "first_token: str | None"):
         assert name in src
+
+
+def test_after_positions_select():
+    from gne.keyed_build import parse_positions, select_positions, start_positions
+
+    class E:
+        def is_eog(self, t):
+            return t == 0
+
+        def token_bytes(self, t):
+            return {1: "あ".encode(), 2: "。".encode(), 3: "い".encode()}[t]
+    reply = [1, 2, 3, 3, 2, 1, 0]                      # あ。いい。あ <eog>
+    p = parse_positions("after:。")
+    assert p.kind == "after" and p.needs_reply and parse_positions("not-after:。").kind == "not-after"
+    # 位置 k = 返事の k 番目のトークンを決める位置(列 P − 1 + k)。「。」はトークン 1・4 → 位置 2・5
+    assert select_positions(E(), reply, "after:。", n_prompt=10).tolist() == [11, 14]
+    assert select_positions(E(), reply, "not-after:。", n_prompt=10).tolist() == [9, 10, 12, 13, 15]
+    assert start_positions(E(), reply, "after:。", n_prompt=10, k=3).tolist() == [11]
+    with pytest.raises(GneError):
+        parse_positions("after:")
