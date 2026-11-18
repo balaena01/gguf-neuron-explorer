@@ -301,6 +301,20 @@ def test_score_layers_and_candidate_ranges():
     assert rng["first"] == list(range(0, 28)) and rng["second"] == list(range(28, 55))
 
 
+def test_loop_pipeline_defaults():
+    """sensenova_loop だけの一括の既定: 測る層 loop・選ぶ層 54・いつも測る層 52,53。渡した値はそのまま(今までの既定は base / none)。"""
+    from gne.api import Session
+    li = [SimpleNamespace(index=L, head_dim=4, head_writer="attn_output") for L in range(56)]
+    w = SimpleNamespace(loop=plan_from_kinds(KINDS), arch=SimpleNamespace(layers=li))
+    fake = SimpleNamespace(weights=w)
+    pipe = {"score_layers": None, "select_layer": None, "always_layers": None}
+    used = Session._loop_pipeline_defaults(fake, pipe)
+    assert pipe == {"score_layers": "loop", "select_layer": 54, "always_layers": [52, 53]} and used == pipe
+    kept = {"score_layers": "base", "select_layer": None, "always_layers": "none"}
+    assert Session._loop_pipeline_defaults(fake, kept) is None and kept["score_layers"] == "base"
+    assert Session._loop_pipeline_defaults(SimpleNamespace(weights=SimpleNamespace(loop=None)), dict(pipe)) is None
+
+
 MODEL = os.environ.get("GNE_TEST_SENSENOVA")
 real = pytest.mark.skipif(not MODEL or not Path(MODEL).exists(), reason="GNE_TEST_SENSENOVA に SenseNova-Loop の GGUF がありません")
 

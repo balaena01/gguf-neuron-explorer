@@ -2067,7 +2067,8 @@ class Session:
                      top_layers: int = 4, positions: str = "last", subset: str = "all", b_examples: int = 16,
                      name: str | None = None, direction_layer: str = "own", max_examples: int | None = None,
                      drift_max: float | None = 0.5, include_score_layers: bool = False,
-                     select_layer: int | None = None, candidate_layers: list[int] | None = None) -> dict:
+                     select_layer: int | None = None, candidate_layers: list[int] | None = None,
+                     always_layers: list[int] | None = None) -> dict:
         """CHANGE-06 C: 因果スクリーニング。ablate は層単位(layers="auto" のとき)→ 下がり方の大きい top_layers 層のヘッドを
         1 個ずつ止める。marginal は base_recipe / base_units の組から s を delta_s 上げたときの効きにくい例での効率 η。
         結果は <root>/heads/<model_id>/<name>.causal.jsonl(と .causal.json)。"""
@@ -2116,6 +2117,10 @@ class Session:
                     self.warn(f"射影の値を測る層 L{first} より前に、止めて射影の値が下がる層がないので、測る層のヘッドも測ります")
                 pos = sorted(ok if include_score_layers or not early else early, key=lambda r: -r[rank])
                 Ls = sorted(r["layer"] for r in pos[:max(1, top_layers)])
+                if always_layers:                 # 層の順位に関係なく、いつもヘッド単位で測る層(候補の境より前で、壊すだけでない層)
+                    okL = {r["layer"] for r in layer_rows if not r.get("excluded")}
+                    Ls = sorted(set(Ls) | {int(L) for L in always_layers
+                                           if int(L) in okL and (include_score_layers or int(L) < first)})
             elif layers in ("auto", "all", None):
                 Ls = head_layers(self, max(st.score_layers))
             else:
@@ -2174,6 +2179,7 @@ class Session:
                    **({"score_layers_given": True} if score_layers or select_layer is not None else {}),
                    **({"select_layer": int(select_layer)} if select_layer is not None else {}),
                    **({"candidate_layers": sorted({int(x) for x in candidate_layers})} if candidate_layers is not None else {}),
+                   **({"always_layers": sorted({int(x) for x in always_layers})} if always_layers else {}),
                    **({"loop_edits": self.loop_edits_mode()} if self.weights.loop is not None else {}),
                    "base_scores": {str(L): {"A": float(st.base["A"][L].mean()), "B": float(st.base["B"][L].mean())}
                                    for L in st.score_layers},
@@ -2194,7 +2200,7 @@ class Session:
                        pool: int = 30, s_max: float | None = None, remain_threshold: float = 0.0, positions: str | None = None,
                        subset: str | None = None, direction_layer: str = "own", name: str | None = None,
                        max_examples: int | None = None, method: str = "proportional", include_score_layers: bool = False,
-                       candidate_layers: list[int] | None = None) -> dict:
+                       candidate_layers: list[int] | None = None, report_initial: bool = True) -> dict:
         """CHANGE-06 D: 効率ベースの強さ配分。candidates は heads causal の結果(名前か .causal.jsonl のパス、既定は方向の名前)。
         method は proportional(s ∝ η で全体を二分探索、s_max の既定 30)か greedy(1 本ずつ上げる、s_max の既定はなし)。"""
         from .causal import allocate, causal_paths, load_causal
@@ -2231,12 +2237,33 @@ class Session:
                         positions=positions or summ.get("positions") or "last", subset=subset or summ.get("subset") or "all",
                         direction_layer=direction_layer, score_layers=summ.get("score_layers"),
                         max_examples=max_examples if max_examples is not None else summ.get("max_examples"),
-                        progress=self.progress)
+                        progress=self.progress, report_initial=report_initial)
 
     PIPELINE_DEFAULTS = {"positions": "last", "score_positions": "last", "target": None, "n_heads": [6, 5, 4], "hard": 16,
                          "top_layers": 4, "max_examples": 64, "s_max": 30.0, "direction_layer": "own", "resume": True,
                          "include_score_layers": False, "same_reply": False, "score_layers": None, "select_layer": None,
-                         "candidate_layers": None}
+                         "candidate_layers": None, "always_layers": None}
+
+    def _loop_pipeline_defaults(self, pipe: dict) -> dict | None:
+        """同じ層を 2 回実行するモデル(sensenova_loop)の一括の既定。測る層を指定しなければ loop(段 27・51・54)・選ぶ層 54 にし、
+        ループの外の段 52・53 はいつもヘッド単位で測る(層を止めた下がり方の順位に関係なく)。今までの既定は score_layers: base、
+        段 52・53 を足さないのは always_layers: none。ほかのモデルでは何もしない(None)。"""
+        lp = self.weights.loop
+        if lp is None:
+            return None
+        used = {}
+        if pipe.get("score_layers") in (None, "", []):
+            pipe["score_layers"] = "loop"
+            used["score_layers"] = "loop"
+            if pipe.get("select_layer") in (None, ""):
+                pipe["select_layer"] = lp.n_layer - 2
+                used["select_layer"] = lp.n_layer - 2
+        if pipe.get("always_layers") is None:
+            tail = [L for L in range(lp.hi2, lp.n_layer - 2)
+                    if self.weights.arch.layers[L].head_dim and self.weights.arch.layers[L].head_writer]
+            pipe["always_layers"] = tail
+            used["always_layers"] = tail
+        return used or None
 
     @staticmethod
     def _layers_of(spec) -> list[int] | None:
@@ -2251,8 +2278,8 @@ class Session:
     def score_layers_of(self, spec) -> list[int] | None:
         """射影の値を測る層の指定: None(既定 = 基準層と後段の 2 層)、層の番号の並び("27,51,54" か [27, 51, 54])、
         loop(同じ層を 2 回実行するモデル: 1 回目の出口・2 回目の出口・最後の層の 1 つ前。最後の層は捕捉の行が間引かれるので測れない)。"""
-        if spec in (None, "", []):
-            return None
+        if spec in (None, "", []) or (isinstance(spec, str) and spec.strip().lower() in ("base", "default")):
+            return None                           # base: 基準層と後段の 2 層(同じ層を 2 回実行するモデルでも、今までの既定)
         if isinstance(spec, str) and spec.strip().lower() == "loop":
             lp = self.weights.loop
             if lp is None:
@@ -2317,6 +2344,7 @@ class Session:
             raise
         mx = int(pipe["max_examples"]) if pipe["max_examples"] else None
         sp = pipe["score_positions"]
+        arch_default = self._loop_pipeline_defaults(pipe)          # 同じ層を 2 回実行するモデルだけの既定(引数で渡せば今までどおり)
         sls = self.score_layers_of(pipe["score_layers"])          # 測る層(None = 既定)
         cand = self._layers_of(pipe["candidate_layers"])
         sel = None if pipe["select_layer"] in (None, "") else int(pipe["select_layer"])
@@ -2324,7 +2352,7 @@ class Session:
             raise GneError("BAD_ARGS", f"選ぶのに使う層 L{sel} が、射影の値を測る層 {sls} に入っていません")
         out: dict = {"name": name, "contrast": str(path), "n_prompts": len(cs.prompts("A")),
                      **({"n_prompts_b": len(cs.prompts("B"))} if cs.separate_prompts else {}), "sides": cs.describe(),
-                     "settings": dict(pipe)}
+                     "settings": dict(pipe), **({"arch_defaults": arch_default} if arch_default else {})}
         reused: list[str] = []                     # resume: 同じ対照集合・同じ設定で作り済みの段は使い回す(止めて流し直したとき)
         self.engine.free_steer()                   # 生成しないので、生成用のコンテキストを空けて VRAM を使えるようにする
         ts = time.perf_counter()                                   # 1. 方向(全部の質問)
@@ -2355,7 +2383,8 @@ class Session:
             c = self.heads_causal(name, contrast=path, mode="ablate", layers="auto", top_layers=int(pipe["top_layers"]),
                                   positions=sp, max_examples=mx, direction_layer=pipe["direction_layer"],
                                   include_score_layers=bool(pipe["include_score_layers"]),
-                                  score_layers=sls, select_layer=sel, candidate_layers=cand)
+                                  score_layers=sls, select_layer=sel, candidate_layers=cand,
+                                  always_layers=self._layers_of(pipe["always_layers"]) if pipe["always_layers"] != "none" else None)
         out["causal"] = {"reused": "causal" in reused, "path": c["path"], "score_layers": c["score_layers"], "primary": c["primary"],
                          "base_scores": c["base_scores"], "n_rows": c["n_rows"], "n_a": c["n_a"], "n_b": c["n_b"],
                          "layers": c.get("layers"), "measured_layers": sorted({r["layer"] for r in c["rows"]}),
@@ -2602,8 +2631,11 @@ class Session:
         want = self.score_layers_of(pipe.get("score_layers"))     # 測る層・選ぶ層を指定したときは、同じ層で測った結果だけ
         if same and want is None and (m.get("score_layers_given") or pipe.get("select_layer") not in (None, "")):
             same = False                                          # 既定の層で測るのに、前の結果は指定した層で測ったもの
-        cl = self._layers_of(pipe.get("candidate_layers"))      # 候補の層と当て方も同じものだけ
-        if same and (m.get("candidate_layers") != cl or m.get("loop_edits") != self.loop_edits_mode()):
+        cl = self._layers_of(pipe.get("candidate_layers"))      # 候補の層・いつも測る層・当て方も同じものだけ
+        al = pipe.get("always_layers")
+        al = None if al in (None, "none") else (self._layers_of(al) or None)
+        if same and (m.get("candidate_layers") != cl or m.get("loop_edits") != self.loop_edits_mode()
+                     or m.get("always_layers") != al):
             same = False
         if same and want is not None:
             same = [int(x) for x in m.get("score_layers") or []] == want and (

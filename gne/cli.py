@@ -2758,6 +2758,7 @@ def heads_allocate(c: Common, holder: dict,
                      f"{r['b_side_delta']:>+7.2f} {r['seconds']:>5.0f}  " + " ".join(r["units"])
                      + ("" if r["reached"] else "  (目標に届かない)") + ("  ← 推す" if r["recommended"] else ""))
         lines += _allocate_note(r, d)
+    lines += _initial_lines(d)
     if d["recommended"] is not None:
         rp = next(r["recipe"] for r in d["table"] if r.get("recommended"))
         lines.append(f"レシピ: {rp}。確かめる: gne eval --recipe {rp} --random-controls 16")
@@ -2933,6 +2934,7 @@ def heads_pipeline(c: Common, holder: dict,
                    score_layers: Optional[str] = typer.Option(None, "--score-layers", help="射影の値を測る層(例 27,51,54。既定は基準層と後段の 2 層)。loop で、同じ層を 2 回実行するモデルの 1 回目の出口・2 回目の出口・最後の層の 1 つ前"),
                    select_layer: Optional[int] = typer.Option(None, "--select-layer", help="ヘッドの順位づけと配分の目標に使う層(--score-layers のどれか。既定は、順位づけは基準層、目標は測る最後の層)"),
                    candidate_layers: Optional[str] = typer.Option(None, "--candidate-layers", help="候補のヘッドを探す層(例 28-53)。同じ層を 2 回実行するモデルで、1 回目だけ・2 回目だけから選ぶとき(GNE_LOOP_EDITS=per_visit と一緒に)"),
+                   always_layers: Optional[str] = typer.Option(None, "--always-layers", help="層を止めた下がり方の順位に関係なく、いつもヘッド単位で測る層(例 52,53)。none で足さない。sensenova_loop の既定はループの外の段 52・53"),
                    fresh: bool = typer.Option(False, "--fresh", help="作り済みの方向と因果の結果を使い回さず、最初から作り直す"),
                    yes: bool = _YES):
     """対照集合から、方向づくり → 基準層 → 因果スクリーニング(層ごと → ヘッド 1 個ずつ止める)→ 強さの配分(効き目に比例した
@@ -2941,7 +2943,7 @@ def heads_pipeline(c: Common, holder: dict,
     over = {"target": target, "n_heads": _ints(n_heads), "max_examples": max_examples, "positions": positions,
             "top_layers": top_layers, "hard": hard, "resume": False if fresh else None,
             "include_score_layers": True if include_score_layers else None, "score_layers": score_layers,
-            "select_layer": select_layer, "candidate_layers": candidate_layers}
+            "select_layer": select_layer, "candidate_layers": candidate_layers, "always_layers": always_layers}
     _gate(s, "head_pipeline", {"spec": str(spec), **{k: v for k, v in over.items() if v is not None}}, yes, None)
     d = s.heads_pipeline(spec, **over)
     sc, ca, al = d["score"], d["causal"], d["allocate"]
@@ -2965,11 +2967,37 @@ def heads_pipeline(c: Common, holder: dict,
             continue
         lines.append(f"   {r['n_heads']} 個: 最大 s {r['s_max']:.2f}、残る {r['remain']}/{al['n_a']}、B 直交 {r['b_drift_orth']:.4f}  "
                      + " ".join(r["units"]) + ("  ← 推す" if r["recommended"] else "") + ("" if r["reached"] else "(目標に届かない)"))
+    lines += _initial_lines(al)
+    if d.get("arch_defaults"):                               # この arch だけの既定(sensenova_loop)
+        ad = d["arch_defaults"]
+        lines.append("既定: このモデル(同じ層を 2 回実行する arch)用の既定で流した("
+                     + "、".join(x for x in (f"測る層 {ad['score_layers']}(段 27・51・54)" if "score_layers" in ad else "",
+                                              f"選ぶ層 L{ad['select_layer']}" if "select_layer" in ad else "",
+                                              f"いつもヘッド単位で測る層 {','.join(map(str, ad['always_layers']))}" if ad.get("always_layers") else "") if x)
+                     + ")。今までの既定に戻すには --score-layers base --always-layers none")
     if (d.get("settings") or {}).get("score_layers"):        # 測る層を指定したときだけ、層ごとの値を並べる
         lines += _causal_layer_lines(ca) + _by_layer_lines(al)
+    if s.weights.loop is not None:                           # 回ごとの効き目(1 回目だけ・2 回目だけ・両方で止める)を勧める
+        lines.append(f"回ごとの効き目: gne heads visits --name {d['name']}(2 回目の層に別の名前がある llama.cpp が要る。"
+                     + ("この llama.cpp で使える)" if s.engine.loop_runtime_names() else "この llama.cpp では使えない。third_party/sensenova-loop のパッチ 0002)"))
     if d["recommended"]:
         lines.append(f"レシピ: {d['recommended']['recipe']}。確かめる: gne eval --recipe {d['recommended']['recipe']} --random-controls 16")
     return d, "\n".join(lines), 0
+
+
+def _initial_lines(al: dict) -> list[str]:
+    """最初の組(効き目に比例)を同じ物差しで測った行と、効率で配り直した組から外れたヘッド(知らせるだけ。推す組は変えない)。"""
+    ir = al.get("initial_row")
+    if not ir:
+        return []
+    out = [f"   最初の組({ir['n_heads']} 個、効き目に比例。比べるための行で、推す組は変えない): 最大 s {ir['s_max']:.2f}、残る {ir['remain']}、"
+           f"B 直交 {ir['b_drift_orth']:.4f}  {ir['recipe']}"]
+    for x in al.get("dropped") or []:
+        if x["heads"]:
+            out.append(f"   {x['n_heads']} 個の組で、効率で配り直して外れた最初の組のヘッド: " + " ".join(
+                f"L{h['layer']}H{h['head']}(止めたときの下がり {h['causal']:+.2f}、最初の s {h['s_initial']:.2f})" if h.get("causal") is not None
+                else f"L{h['layer']}H{h['head']}" for h in x["heads"]))
+    return out
 
 
 def _causal_layer_lines(ca: dict, n: int = 6) -> list[str]:

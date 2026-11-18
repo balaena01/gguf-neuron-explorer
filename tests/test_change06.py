@@ -313,6 +313,12 @@ def test_screen_heads_both_modes_and_allocate(session):
     assert Path(session.store.hard_dir(session.meta.model_id) / "evil.json").exists()
     rec = Recipe.load(ok[0]["recipe"])
     assert rec.default_direction == "evil" and all(u.mode == "proj" for u in rec.units)
+    # 最初の組の行と外れたヘッドは知らせるだけ: 測らないときと、比較表(組・強さ)と推す組が同じ
+    assert a["initial_row"]["units"] == a["initial"]["heads"] and len(a["dropped"]) == len(ok)
+    b = session.heads_allocate("evil", target=float(m["base_scores"][str(sl[-1])]["A"]) * 0.5, score_layer=sl[-1],
+                               n_heads=(2, 1), hard=4, pool=3, report_initial=False)
+    key = lambda t: [(r["n_heads"], r.get("units"), r.get("recommended"), r.get("remain")) for r in t]
+    assert key(a["table"]) == key(b["table"]) and a["recommended"] == b["recommended"] and "initial_row" not in b
 
 
 @pytest.mark.model

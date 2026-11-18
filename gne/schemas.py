@@ -1032,6 +1032,7 @@ class HeadsCausalOut(Envelope):                 # CHANGE-06 C(gne heads causal)
     score_layers_given: bool | None = None       # 射影の値を測る層か選ぶ層を指定した(一括の使い回しの判定)
     select_layer: int | None = None              # 順位づけと候補の境に使った層(--select-layer)
     candidate_layers: list[int] | None = None    # 候補を探した層(同じ層を 2 回実行するモデルの回ごとの探索など)
+    always_layers: list[int] | None = None       # 層の順位に関係なく、いつもヘッド単位で測った層(sensenova_loop の既定は 52・53)
     loop_edits: Literal["shared", "per_visit"] | None = None   # 同じ層を 2 回実行するモデルの当て方
     seconds: float
 
@@ -1084,6 +1085,8 @@ class HeadsAllocateOut(Envelope):               # CHANGE-06 D(gne heads allocate
     eta: list[dict[str, Any]]
     table: list[dict[str, Any]]
     recommended: int | None
+    initial_row: dict[str, Any] | None = None   # 最初の組(効き目に比例)を同じ物差しで測った行(知らせるだけ。推す組は変えない)
+    dropped: list[dict[str, Any]] | None = None # 効率で配り直した組ごとの、外れた最初の組のヘッド
     seconds: float
 
 
@@ -1105,6 +1108,7 @@ class HeadsPipelineOut(Envelope):               # gne heads pipeline(方向 → 
     seconds: float
     updated: str | None = None
     reused: list[str] | None = None              # 使い回した段(direction・causal、resume)
+    arch_defaults: dict[str, Any] | None = None  # この arch だけの既定を使ったとき、その中身(sensenova_loop の測る層など)
 
 
 class HeadsLoopOut(Envelope):                   # gne heads visits / loop-pipeline / loop-merge / measure(同じ層を 2 回実行するモデル)

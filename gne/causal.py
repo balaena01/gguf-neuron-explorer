@@ -452,7 +452,7 @@ def allocate(session, ds, cs, *, candidates, target: float, score_layer: int, ha
              s_max: float | None = 30.0, remain_threshold: float = 0.0, name: str | None = None, positions: str = "last",
              subset: str = "all", direction_layer: str = "own", score_layers=None, b_examples: int = 16,
              max_examples: int | None = None, drift_max: float | None = 0.5, method: str = "proportional",
-             progress: Progress | None = None) -> dict:
+             progress: Progress | None = None, report_initial: bool = True) -> dict:
     """効率ベースの強さ配分(CHANGE-06 D)。
     1. いまの組(base_units。無ければ candidates の ablate の行の上位 max(n_heads) 個に causal 比例で、A 側の平均が target に
        なるよう二分探索した組)を当てた状態で、A 側の射影の値が高く残る hard 件を効きにくい例にする(hard/<model_id>/<name>.json)。
@@ -648,6 +648,29 @@ def allocate(session, ds, cs, *, candidates, target: float, score_layer: int, ha
         rec_n = min(r["n_heads"] for r in same)
     for r in table:
         r["recommended"] = r.get("n_heads") == rec_n and rec_n is not None
+    # 5. 知らせるだけ(推す組と強さは変えない): 最初の組(効き目に比例)を同じ物差しで測った 1 行と、効率で配り直した組から
+    #    外れた最初の組のヘッド。配り直しで、止めたときの効き目が大きいヘッドが外れることがある
+    initial_row, dropped = None, []
+    if init is not None and report_initial:
+        with st.tmp.use(st.builder.tensors([p for p in cur if p.s])) as lora:
+            got = st.scorer.run(lora, sides="AB", which={"A": a_all})
+            gb = st.scorer.run(lora, sides="B", which={"B": st.b_idx}, keep=True)
+        va = got["A"]["values"][S]
+        par, orth = drift(st.base["B_resid"][S], gb["B"]["resid"][S], st.scorer.r[S])
+        initial_row = {"n_heads": len(cur), "units": [p.spec() for p in cur], "s_max": max(p.s for p in cur),
+                       "remain": int((va > remain_threshold).sum()), "a_max": float(va.max()), "a_mean": float(va.mean()),
+                       "b_mean": float(got["B"]["values"][S].mean()),
+                       "b_side_delta": float(got["B"]["values"][S].mean() - b_all0.mean()),
+                       "b_drift_par": par, "b_drift_orth": orth, "recipe": init.get("recipe"),
+                       "by_layer": {str(L): {"A": float(got["A"]["values"][L].mean()), "B": float(got["B"]["values"][L].mean())}
+                                    for L in st.score_layers}}
+        for r in table:
+            if r.get("skipped") or not r.get("heads"):
+                continue
+            kept = {(h["layer"], h["head"]) for h in r["heads"]}
+            gone = [{"layer": p.layer, "head": p.head, "s_initial": p.s, "causal": cz.get((p.layer, p.head))}
+                    for p in cur if (p.layer, p.head) not in kept]
+            dropped.append({"n_heads": r["n_heads"], "heads": sorted(gone, key=lambda x: -(x["causal"] or 0))})
     out = {"name": name, "direction": ds.name, "contrast_sha": cs.sha, "score_layer": S, "score_layers": st.score_layers,
            "max_examples": max_examples, "drift_max": drift_max,
            "target": target, "positions": positions, "subset": subset, "direction_layer": direction_layer,
@@ -658,7 +681,9 @@ def allocate(session, ds, cs, *, candidates, target: float, score_layer: int, ha
            "initial": init, "current": [p.spec() for p in cur], "hard": {"n": len(h_idx), **({k: v for k, v in hard_rep.items() if k != "idx"} if hard_rep else {})},
            "eta": [{k: r.get(k) for k in ("layer", "head", "kind", "eta", "causal", "b_side_delta", "drift_orth_b",
                                            "excluded", "in_base")} for r in sorted(mrows, key=lambda r: -r["eta"])],
-           "table": table, "recommended": rec_n, "seconds": time.perf_counter() - t_all}
+           "table": table, "recommended": rec_n,
+           **({"initial_row": initial_row, "dropped": dropped} if initial_row is not None else {}),
+           "seconds": time.perf_counter() - t_all}
     if progress:                                   # 見積もりの回数に届かなくても、進捗の行を閉じる
         progress(steps[0], steps[0], "allocate")
     p = session.store.heads_dir(session.meta.model_id) / f"{name}.alloc.json"
