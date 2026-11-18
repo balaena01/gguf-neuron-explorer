@@ -212,6 +212,23 @@ class Engine:
         self.arch = self.meta_str("general.architecture") or ""
         self.hc_streams = int(self.meta_str(f"{self.arch}.hyper_connection.count") or 0)   # 残差の本数(0 = 1 本)
         self.cvec_supported = self.arch not in NO_CVEC
+        # 同じ層を 2 回実行する arch(sensenova_loop、loop.py)。配列のメタデータは C の API では読めないので GGUF のヘッダーから
+        self.loop = None
+        self.loop_full: frozenset[int] = frozenset()
+        self._loop_cvec: bool | None = None       # 2 本の中の層の control vector が次の層に届くグラフか(調べたら覚える)
+        self._loop_names: bool | None = None      # 2 回目の層に別のテンソル名がある llama.cpp か(調べたら覚える)
+        self._lora_alias: dict[str, str] = {}     # LoRA のファイル → 両方の回の名前に写したファイル(2 回目の名前がある llama.cpp)
+        # 重みの書き換え(LoRA)の当て方: shared = 両方の回に当てる(既定。元の llama.cpp ではいつもこれ)。
+        # 2 回目の層に別の名前がある llama.cpp では、LoRA の 1 回目の層のテンソルを 2 回目の名前にも写して読み込む
+        self.loop_edits = "shared"
+        if self.arch:
+            from .gguf_fast import FastGGUF
+            from .loop import plan_of
+            g = FastGGUF(self.path)
+            self.loop = plan_of(g.get, self.arch)
+            if self.loop is not None:
+                rec = g.get(f"{self.arch}.attention.recurrent_layers")
+                self.loop_full = frozenset(i for i, x in enumerate(rec or []) if not x)
         self._steer: _Ctx | None = None
         self._probe: _Ctx | None = None
         self._probe_logits_all = False
@@ -265,6 +282,8 @@ class Engine:
             p.n_outputs_max_per_seq = 0   # 既定 1(各 seq 最終位置だけ)。0 = n_outputs_max
         if capture is not None:
             capture.hc_streams = self.hc_streams
+            if self.loop is not None and capture.loop is None and not getattr(capture, "raw_names", False):
+                capture.loop, capture.loop_d, capture.loop_full = self.loop, self.n_embd, self.loop_full
             capture.install(p)
         ptr = C.llama_init_from_model(self.model, p)
         if not ptr:
@@ -470,6 +489,15 @@ class Engine:
         if vectors and not self.cvec_supported:
             raise GneError("ARCH_UNSUPPORTED", f"{self.arch} のグラフは control vector を読みません。足しても何も起きないので止めました。"
                            "gain・射影(proj)・ablate は LoRA で動きます")
+        if vectors and self.loop is not None:
+            bad = sorted(int(L) for L, v in vectors.items() if self.loop.inner(int(L)) and np.any(v))
+            if bad and not self.loop_cvec_reaches():
+                ok = [L for L in range(self.n_layer) if not self.loop.inner(L)]
+                raise GneError("ARCH_UNSUPPORTED",
+                               f"層 {', '.join(map(str, bad[:8]))}{' …' if len(bad) > 8 else ''} は残差が 2 本の流れの中の層です。この llama.cpp は"
+                               "そこに足した control vector を次の層に渡さないので、足しても何も起きません(止めました)",
+                               f"効くのは層 {', '.join(map(str, ok))} です。2 本の中の層にも足すには、2 本の流れの両方に足すように直した "
+                               "llama.cpp が要ります(docs/sensenova_loop.md)")
         if not vectors:
             rc = C.llama_set_adapter_cvec(ctx.ptr, None, 0, self.n_embd, -1, -1)
         else:
@@ -481,12 +509,67 @@ class Engine:
         if rc != 0:
             raise RuntimeError(f"llama_set_adapter_cvec が失敗しました (rc={rc})")
 
+    def loop_cvec_reaches(self) -> bool:
+        """同じ層を 2 回実行する arch で、2 本の流れの中の層に足した control vector が次の層に届くグラフか。グラフの l_out が
+        2 本の平均(連続したテンソル)なら、流れの両方に足すように直した llama.cpp。片方の流れの view なら、届かない元の llama.cpp。
+        小さい文脈で 1 回だけ調べて覚える。"""
+        if self.loop is None:
+            return True
+        if self._loop_cvec is None:
+            L = self.loop.lo1 + 1
+            cap = Capture(lambda n: n == f"l_out-{L}")
+            cap.raw_names = True                 # 名前を付け替えずに、グラフの l_out そのものを見る
+            ctx = self._new_ctx(n_ctx=256, n_batch=32, n_ubatch=32, n_seq_max=1, capture=cap, logits_all=False)
+            try:
+                cap.reset()
+                ids = self._with_bos(self.tokenize("Hello there.")) or [0]
+                self._decode(ctx, [(t, i, 0, i == len(ids) - 1) for i, t in enumerate(ids[:16])])
+                self._loop_cvec = f"l_out-{L}" in cap.take()
+            finally:
+                ctx.free()
+        return bool(self._loop_cvec)
+
+    def loop_runtime_names(self) -> bool:
+        """同じ層を 2 回実行する arch で、この llama.cpp が 2 回目の層の重みに別のテンソル名(blk.<2 回目の層>.*)を持つか。
+        小さい LoRA(中身 0)を読み込めるかで調べて覚える。元の llama.cpp は 2 回目の層が 1 回目と同じ名前なので読めない。"""
+        if self.loop is None:
+            return False
+        if self._loop_names is None:
+            import tempfile
+
+            from gguf import GGUFWriter
+            L = self.loop.lo2
+            with tempfile.TemporaryDirectory() as td:
+                p = Path(td) / "probe.lora.gguf"
+                w = GGUFWriter(str(p), arch=self.arch)
+                w.add_type("adapter")
+                w.add_string("adapter.type", "lora")
+                n_ff = int(self.meta_str(f"{self.arch}.feed_forward_length") or 0)
+                w.add_tensor(f"blk.{L}.ffn_up.weight.lora_a", np.zeros((1, self.n_embd), np.float32))
+                w.add_tensor(f"blk.{L}.ffn_up.weight.lora_b", np.zeros((n_ff, 1), np.float32))
+                w.write_header_to_file()
+                w.write_kv_data_to_file()
+                w.write_tensors_to_file()
+                w.close()
+                a = C.llama_adapter_lora_init(self.model, str(p).encode())
+                self._loop_names = bool(a)
+                if a:
+                    C.llama_adapter_lora_free(a)
+        return bool(self._loop_names)
+
     def lora(self, path: str | Path):
         """LoRA アダプタ GGUF を読み込む(同じファイルは 1 回だけ)。"""
         key = str(Path(path).resolve())
         a = self._loras.get(key)
         if a is None:
-            a = C.llama_adapter_lora_init(self.model, key.encode())
+            load = key
+            if self.loop is not None and self.loop_edits == "shared" and self.loop_runtime_names():
+                # 2 回目の層に別の名前がある llama.cpp: 1 回目の層のテンソルを 2 回目の名前にも写して、両方の回に当てる
+                from .loop import lora_both_visits
+                load = key + ".both-visits.gguf"
+                lora_both_visits(key, load, self.loop)
+                self._lora_alias[key] = load
+            a = C.llama_adapter_lora_init(self.model, load.encode())
             if not a:
                 raise RuntimeError(f"LoRA {path} を読み込めません(arch やテンソルの形が合っているか)")
             self._loras[key] = a
@@ -503,6 +586,9 @@ class Engine:
             if c is not None:
                 C.llama_set_adapters_lora(c.ptr, None, 0, None)
         C.llama_adapter_lora_free(a)
+        alias = self._lora_alias.pop(key, None)
+        if alias is not None:
+            Path(alias).unlink(missing_ok=True)
         return True
 
     def set_lora(self, ctx: _Ctx, loras: list[tuple[str | Path, float]] | None) -> None:

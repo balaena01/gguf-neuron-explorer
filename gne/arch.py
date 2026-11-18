@@ -44,6 +44,9 @@ class LayerInfo:
     # qwen4exp: 疎な attention(上位 top_k の位置だけを見る。0 = 全位置)と n-gram 埋め込みの層
     sparse_top_k: int = 0
     has_ple: bool = False
+    # 同じ層を 2 回実行する arch(sensenova_loop): 何回目か(0 = 繰り返しの外)と、重みを持つ層の番号(loop.py)
+    visit: int = 0
+    stored: int = -1
 
 
 @dataclass
@@ -55,6 +58,8 @@ class ArchInfo:
     layers: list[LayerInfo]
     grid_side: int             # シートの一辺の最大(§4.1)
     hc_streams: int = 0        # 残差の本数(hyper-connections。0 = ふつうの 1 本)
+    loop: dict | None = None   # 同じ層を 2 回実行する arch の対応(loop.LoopPlan.to_dict)。ふつうは None
+    mhc_streams: int = 0       # 繰り返しの各回の中の残差の本数(sensenova_loop は 2)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -142,9 +147,13 @@ def arch_info(weights) -> ArchInfo:
             routing = "group_topk" if int(get(f"{arch}.expert_group_count", 0) or 0) > 1 else \
                 "sigmoid_topk" if gating == 2 else "softmax_topk"
         norm = get(f"{arch}.expert_weights_norm")
+        lp = getattr(weights, "loop", None)
         layers.append(LayerInfo(L, mixer, nh, nkv, ffn, n_ff, n_exp, used, n_shexp,
                                 "post_ffw_norm.weight" in ts, hd, writer if wt is not None else None, outs,
                                 bias, routing, None if norm is None or not ffn.startswith("moe") else bool(norm),
-                                top_k if mixer == "attention" and _per_layer(compress, L) else 0, has("ple_")))
+                                top_k if mixer == "attention" and _per_layer(compress, L) else 0, has("ple_"),
+                                lp.visit(L) if lp is not None else 0, lp.stored(L) if lp is not None else L))
     side = max([sheet_side(li) for li in layers] + [1])
-    return ArchInfo(arch, m.n_layer, m.n_embd, m.n_vocab, layers, side, int(get(f"{arch}.hyper_connection.count", 0) or 0))
+    lp = getattr(weights, "loop", None)
+    return ArchInfo(arch, m.n_layer, m.n_embd, m.n_vocab, layers, side, int(get(f"{arch}.hyper_connection.count", 0) or 0),
+                    lp.to_dict() if lp is not None else None, int(get(f"{arch}.mhc.streams", 0) or 0) if lp is not None else 0)

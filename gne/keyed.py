@@ -73,12 +73,12 @@ _NAME_RE = re.compile(r"^[\w.\-]+$")
 # bitnet は build_lora_mm(ffn_down, x, ffn_down_s) で W x に s を掛けてから LoRA を足す(LoRA の出力に s は掛からない)。
 # llama・qwen3・qwen35 は build_ffn に ffn_down_s を渡し、LoRA を足した後に s を掛ける(LoRA の出力にも掛かる)
 _FFN_SCALE_BEFORE_LORA = {"bitnet"}
-_FFN_SCALE_AFTER_LORA = {"llama", "qwen3", "qwen35"}
+_FFN_SCALE_AFTER_LORA = {"llama", "qwen3", "qwen35", "sensenova_loop"}
 # attention の出力で、build_lora_mm(wo, x) の後に wo_s を掛ける arch(LoRA の出力にも s が掛かる)
 _ATTN_SCALE_AFTER_LORA = {"glm4", "glm4moe", "jais2"}
 # 線形注意の ssm_out を build_lora_mm(ssm_out, x, ssm_out_s) で読む arch(W x に s を掛けてから LoRA を足すので、
 # LoRA の出力に s は掛からない。src/models/qwen35.cpp・qwen35moe.cpp・qwen4exp.cpp の build_layer_attn_linear)
-_SSM_OUT_SCALE_BEFORE_LORA = {"qwen35", "qwen35moe", "qwen4exp"}
+_SSM_OUT_SCALE_BEFORE_LORA = {"qwen35", "qwen35moe", "qwen4exp", "sensenova_loop"}
 # attention の出力(LoRA の差分を含む)に、書き込み行列の後で arch の倍率を掛ける arch(src/models/mimo2.cpp の v_scale)。
 # keyed の大きさがずれるので attn の keyed は断る
 _ATTN_OUT_RESCALED = {"mimo2"}

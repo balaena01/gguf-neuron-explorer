@@ -179,13 +179,18 @@ def needed(n_seg: int, form: str) -> int:
 
 
 def default_neurons(usage: dict, n_seg: int, form: str) -> dict[int, list[int]]:
-    """既定の候補: 表(働きの小さい順)の上から、層ごとに必要な個数。"""
+    """既定の候補: 表(働きの小さい順)の上から、層ごとに必要な個数。同じ層を 2 回実行するモデルで、同じ重みを持つ 2 つの層
+    (表の stored_layer が同じ)を両方選んだときは、先の層で使ったニューロンを後の層では飛ばす(同じニューロンを 2 回上書きしない)。"""
     n = needed(n_seg, form)
     out = {}
+    taken: dict[int, set[int]] = {}
     for row in usage["layers"]:
-        js = [int(r["neuron"]) for r in row["rows"][:n]]
+        st = int(row.get("stored_layer", row["layer"]))
+        used = taken.setdefault(st, set())
+        js = [int(r["neuron"]) for r in row["rows"] if int(r["neuron"]) not in used][:n]
         if len(js) < n:
             raise GneError("BAD_ARGS", f"L{row['layer']}: 表のニューロンが {len(js)} 個で、必要な {n} 個に足りません", "top を増やしてください")
+        used.update(js)
         out[int(row["layer"])] = js
     return out
 
@@ -290,6 +295,15 @@ def direction_step(session, contrast: str, *, name: str, layers=None, segments=N
     whole = before_mode(segs)                    # 文字の直前に書く: 方向は返事の全部の位置の平均(区切らない・重ねない)
     if whole:
         stack = False
+    e = session.engine
+    if stack and len(Ls) > 1 and e.loop is not None and any(e.loop.inner(L) for L in Ls[:-1]) and not e.loop_cvec_reaches():
+        # 重ねる読み直しは、下の層に方向を control vector で足して読む。2 本の流れの中の層では、元の llama.cpp だと届かない
+        inner = [L for L in Ls[:-1] if e.loop.inner(L)]
+        raise GneError("ARCH_UNSUPPORTED",
+                       f"層 {', '.join(map(str, inner[:8]))} は残差が 2 本の流れの中の層で、この llama.cpp では、方向を重ねる読み直し"
+                       "(下の層に方向を足して上の層を読む)ができません",
+                       "--no-stack(UI では「層を重ねる」を切る)で、層ごとに別々に方向を作るか、2 本の流れの両方に足すように直した "
+                       "llama.cpp を使ってください(docs/sensenova_loop.md)")
     notes = []
     fast = bool(stack_fast) and bool(stack) and bool(same_reply) and len(Ls) > 1
     if stack_fast and not fast:
@@ -625,7 +639,8 @@ def pipeline(session, contrast: str, *, name: str, layers=None, segments=None, f
     dname = d["name"]
     lap("direction", t)
     t = time.perf_counter()
-    usage = session.nw_neurons(Ls, top=max(int(top), needed(len(segs), form)), iv=iv)
+    twice = 2 if getattr(session.weights, "loop", None) is not None else 1   # 同じ重みの 2 つの層を選んだときに重ならない分
+    usage = session.nw_neurons(Ls, top=max(int(top), twice * needed(len(segs), form)), iv=iv)
     picked = {int(k): [int(j) for j in v] for k, v in (neurons or default_neurons(usage, len(segs), form)).items()}
     lap("neurons", t)
     t = time.perf_counter()
@@ -747,7 +762,9 @@ def summary(d: dict) -> dict:
                                         for sg, c in x["by_question"].items()}
     qs = (d.get("check") or {}).get("question_summary")
     ver = d.get("verify") or {}
+    twin = _twin_summary(d.get("check") or {})
     return {"name": d.get("name"), "ok": bool(ver.get("ok")), "layers": list(d.get("layers") or []), "segments": list(d.get("segments") or []),
+            **({"twin": twin} if twin else {}),
             "form": d.get("form"), "alpha": d.get("alpha"), "cap": d.get("cap"), "n_units": len(d.get("units") or []),
             "n_neurons": sum(1 + (1 if r.get("pair") is not None else 0) for r in rows),
             "direction": d.get("direction_name") or d.get("name"), "direction_reused": bool(d.get("direction_reused")),
@@ -761,6 +778,23 @@ def summary(d: dict) -> dict:
             "check_path": (d.get("check") or {}).get("path"), "notes": list(d.get("notes") or []),
             "stage_seconds": {k: round(float(v), 1) for k, v in (d.get("stage_seconds") or {}).items()},
             "seconds": None if d.get("seconds") is None else round(float(d["seconds"]), 1)}
+
+
+def _twin_summary(chk: dict) -> dict | None:
+    """同じ層を 2 回実行するモデルで、上書きしたニューロンがもう一方の回でも書いた分(nw check の amount_twin)。群ごと・区間ごとに、
+    質問ごとの値の中央値で、合計(amount)ともう一方の回の分(twin)を返す。もう一方の回が無ければ None。"""
+    out: dict = {}
+    for g, x in (chk.get("groups") or {}).items():
+        segs: dict = {}
+        for q in x.get("questions") or []:
+            for sg, v in (q.get("segments") or {}).items():
+                if v and v.get("amount_twin") is not None:
+                    segs.setdefault(sg, ([], []))
+                    segs[sg][0].append(v["amount"])
+                    segs[sg][1].append(v["amount_twin"])
+        if segs:
+            out[g] = {sg: {"amount": round(float(np.median(a)), 3), "twin": round(float(np.median(t)), 3)} for sg, (a, t) in segs.items()}
+    return out or None
 
 
 def summary_text(d: dict) -> str:
@@ -780,6 +814,9 @@ def summary_text(d: dict) -> str:
     for g, x in s["check"].items():
         cells = "  ".join(f"{b}: {a['mean']:+.2f}({a['min']:+.2f}〜{a['max']:+.2f})" for b, a in x["amount"].items())
         lines.append(f"足した量 [{g}] {x['n']} 問、繰り返し {x['loops']}: {cells}")
+    for g, segs in (s.get("twin") or {}).items():
+        lines.append(f"もう一方の回の分 [{g}](同じ重みの層でも書いた量。上の足した量はその分を含む合計、質問ごとの中央値): "
+                     + "  ".join(f"区間 {sg}: 合計 {v['amount']:+.2f} のうち {v['twin']:+.2f}" for sg, v in segs.items()))
     q = s.get("questions")
     if q:
         from .nwrite import question_lines

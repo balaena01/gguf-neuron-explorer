@@ -129,18 +129,30 @@ class ProjBuilder:
         return r, rw, src
 
     def matrices(self, heads: list[ProjHead], warn: Callable[[str], None] | None = None) -> dict[int, tuple[np.ndarray, np.ndarray]]:
-        """層 → (A (r, n_in), B (n_embd, r))。同じ層・同じ方向は 1 本に畳む。"""
+        """層 → (A (r, n_in), B (n_embd, r))。同じ層・同じ方向は 1 本に畳む。
+        同じ層を 2 回実行する arch で 2 回の重みが共有されているとき(loop.py)は、重みを持つ層ごとにまとめる(鍵は保存されている
+        層の番号)。同じヘッドに 1 回目と 2 回目の両方のユニットがあれば、2 つの射影を続けて掛けたもの
+        W' = (I − s₂ r₂ r₂ᵀ)(I − s₁ r₁ r₁ᵀ) W にする(足し合わせると、2 本の向きが重なる分を 2 回引いてしまう)。"""
+        plan = getattr(self.weights, "loop", None)
+        shared = plan is not None and not getattr(self.weights, "per_visit_names", False)
         by_layer: dict[int, list[ProjHead]] = defaultdict(list)
         for p in heads:
-            by_layer[p.layer].append(p)
+            by_layer[plan.stored(p.layer) if shared else p.layer].append(p)
         out = {}
         for L, ps in sorted(by_layer.items()):
             groups: dict[tuple[str, int], list] = {}
-            for p in ps:
-                r, rw, src = self.r_rw(L, p.direction)
+            done: dict[int, list[tuple[int, tuple[str, int]]]] = defaultdict(list)   # ヘッド → 先に掛けた (層, 群)
+            for p in sorted(ps, key=lambda q: q.layer):
+                r, rw, src = self.r_rw(p.layer, p.direction)
                 g = groups.setdefault((p.direction, src), [r, np.zeros_like(rw)])
                 _, lo, hi = self.weights.head_block(L, p.head)
-                g[1][lo:hi] += np.float32(p.s) * rw[lo:hi]
+                row = np.float32(p.s) * rw[lo:hi]
+                for L0, gk in done[p.head] if shared else ():
+                    if L0 != p.layer:                # 別の回のユニットの後に掛ける: r ᵀ(W + ΔW) = rᵀW − Σ (r·r_g) a_g
+                        r_g, a_g = groups[gk]
+                        row = row - np.float32(p.s) * np.float32(r @ r_g) * a_g[lo:hi]
+                g[1][lo:hi] += row
+                done[p.head].append((p.layer, (p.direction, src)))
             A = np.stack([g[1] for g in groups.values()]).astype(np.float32)
             B = np.stack([-g[0] for g in groups.values()], axis=1).astype(np.float32)
             if len(groups) > 1 and warn is not None:
@@ -218,8 +230,9 @@ def layer_summary(weights, heads: list[ProjHead], tens: dict[str, tuple[np.ndarr
     for p in heads:
         by[p.layer].append(p)
     out = {}
+    from .loop import stored_tensor_name
     for L, ps in sorted(by.items()):
-        name = weights.head_block(L, 0)[0]
+        name = stored_tensor_name(weights, weights.head_block(L, 0)[0])
         rank = int(tens[name][1].shape[1]) if name in tens else 0
         out[str(L)] = {"heads": [[p.head, p.s, p.direction] for p in ps], "rank": rank,
                        "directions": sorted({p.direction for p in ps}), "folded": rank == 1}
@@ -445,9 +458,14 @@ def control_pool(weights, recipe: Recipe, *, pool: str = "before", score_layers:
         Ls = sorted({L for L, _ in used})
     elif pool == "before":
         top = max(score_layers) if score_layers else max(L for L, _ in used)
-        Ls = [li.index for li in arch.layers if li.head_dim and li.head_writer and li.index <= top]
+        plan = getattr(weights, "loop", None)
+        shared = plan is not None and not getattr(weights, "per_visit_names", False)
+        Ls = [li.index for li in arch.layers if li.head_dim and li.head_writer and li.index <= top
+              and not (shared and plan.second(li.index))]          # 2 回目の層のヘッドは 1 回目の層のヘッドと同じ重み
     else:
         raise GneError("BAD_ARGS", f"--control-pool は before か same-layers です({pool!r})")
+    if pool == "before" and getattr(weights, "loop", None) is not None and not getattr(weights, "per_visit_names", False):
+        used = used | {(weights.loop.stored(L), h) for L, h in used}
     out = []
     for L in Ls:
         li = arch.layers[L]

@@ -182,9 +182,12 @@ def export_gain_lora(weights, recipe: Recipe, path: str | Path, *,
             w.add_key_value("gne.headproj", json.dumps(extra_meta, ensure_ascii=False), GGUFValueType.STRING)
         for k, v in (extra_kv or {}).items():
             w.add_key_value(k, v, GGUFValueType.STRING)
-    for L, (A, B) in tens.items():
-        w.add_tensor(f"blk.{L}.ffn_up.weight.lora_a", cast(A))
-        w.add_tensor(f"blk.{L}.ffn_up.weight.lora_b", cast(B))
+    from .loop import to_stored
+    dense = to_stored(weights, {f"blk.{L}.ffn_up.weight": ab for L, ab in tens.items()})   # 2 回目の層は重みを持つ層の名前に
+    htens = to_stored(weights, htens)
+    for name, (A, B) in sorted(dense.items(), key=lambda x: int(x[0].split(".")[1])):
+        w.add_tensor(f"{name}.lora_a", cast(A))
+        w.add_tensor(f"{name}.lora_b", cast(B))
     for name, (A, B) in sorted(htens.items(), key=lambda x: int(x[0].split(".")[1])):
         w.add_tensor(f"{name}.lora_a", cast(A))
         w.add_tensor(f"{name}.lora_b", cast(B))
@@ -203,7 +206,9 @@ def export_gain_lora(weights, recipe: Recipe, path: str | Path, *,
            "rank": {str(L): len(nk) for L, nk in by_layer.items()}, "bytes": Path(path).stat().st_size}
     if heads:
         out["heads"] = {str(L): [[h, k] for h, k in hk] for L, hk in heads.items()}
-        out["head_rank"] = {str(L): int(htens[weights.head_block(L, hk[0][0])[0]][0].shape[0]) for L, hk in heads.items()}
+        from .loop import stored_tensor_name
+        out["head_rank"] = {str(L): int(htens[stored_tensor_name(weights, weights.head_block(L, hk[0][0])[0])][0].shape[0])
+                            for L, hk in heads.items()}
     if extra and extra_meta is not None:
         out["proj_rank"] = {name.split(".")[1]: int(B.shape[-1]) for name, (_, B) in extra.items()}
     if experts:

@@ -562,7 +562,7 @@ def set_head_name(session, L: int, h: int, name: str) -> None:
 
 # --- 条件付きクエリ操作(CHANGE-04 E、実験的) ------------------------------------------------------------
 
-GATED_Q_ARCHS = ("qwen35", "qwen35moe", "qwen3next")        # attn_q がヘッドごとに [q | ゲート] の 2 倍幅の arch
+GATED_Q_ARCHS = ("qwen35", "qwen35moe", "qwen3next", "sensenova_loop")        # attn_q がヘッドごとに [q | ゲート] の 2 倍幅の arch
 
 
 def q_rows(weights, L: int, h: int) -> tuple[int, int]:
@@ -689,8 +689,10 @@ def write_query_lora(session, L: int, h: int, qv: dict, scale: float, path: str 
     wr.add_key_value("gne.query", json.dumps({"layer": L, "head": h, "scale": scale, "v_gap": qv["v_gap"],
                                               "q_norm": qv["q_norm"]}), GGUFValueType.STRING)
     wr.add_key_value("gne.source_model_id", m.model_id, GGUFValueType.STRING)
-    wr.add_tensor(f"blk.{L}.attn_q.weight.lora_a", A)
-    wr.add_tensor(f"blk.{L}.attn_q.weight.lora_b", B)
+    from .loop import stored_tensor_name
+    qname = stored_tensor_name(w, f"blk.{L}.attn_q.weight")
+    wr.add_tensor(f"{qname}.lora_a", A)
+    wr.add_tensor(f"{qname}.lora_b", B)
     wr.write_header_to_file()
     wr.write_kv_data_to_file()
     wr.write_tensors_to_file()

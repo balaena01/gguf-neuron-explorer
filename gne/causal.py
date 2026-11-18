@@ -133,8 +133,23 @@ def _row_common(st: Setup, got: dict, ref: dict, a_ref_idx: list[int] | None = N
 
 
 def head_layers(session, up_to: int | None = None) -> list[int]:
-    arch = session.weights.arch
-    return [li.index for li in arch.layers if li.head_dim and li.head_writer and (up_to is None or li.index <= up_to)]
+    """ヘッドのある層(up_to 以前)。同じ層を 2 回実行する arch で 2 回の重みが共有されているとき(loop.py)は、2 回目の層を
+    除く(2 回目の層のヘッドを止める LoRA は、1 回目の層のヘッドを止める LoRA と同じもの。候補の番号は 1 回目の層で表す)。"""
+    w = session.weights
+    arch = w.arch
+    plan = getattr(w, "loop", None)
+    shared = plan is not None and not getattr(w, "per_visit_names", False)
+    return [li.index for li in arch.layers if li.head_dim and li.head_writer and (up_to is None or li.index <= up_to)
+            and not (shared and plan.second(li.index))]
+
+
+def _visits(session, L: int) -> list[int]:
+    """層 L のヘッドの重みが実行される層。2 回の重みが共有されていれば [L, L + 24] のように 2 つ、ほかは [L]。"""
+    w = session.weights
+    plan = getattr(w, "loop", None)
+    if plan is None or getattr(w, "per_visit_names", False):
+        return [int(L)]
+    return plan.visits(L)
 
 
 def kind_of(session, L: int) -> str:
@@ -168,7 +183,9 @@ def head_contrib(st: Setup, heads: list[tuple[int, int]], *, chunk: int = 4) -> 
     """無介入の A 側で、ヘッドが書く r̂_Sᵀ W[:, blk_h] x_h の平均(層 S ごと。S より後ろのヘッドは 0)。"""
     from .attn import capture_attention
     s, w = st.session, st.session.weights
-    Ls = sorted({L for L, _ in heads})
+    # 2 回の重みが共有されているヘッドは、両方の回の書き込みを足す(1 回目の層の番号で表したヘッドが、2 回目の層でも書く)
+    vis = {L: _visits(s, L) for L in {L for L, _ in heads}}
+    Ls = sorted({V for vs in vis.values() for V in vs})
     U = {}                                        # (S, L) → (n_head, head_dim)
     for L in Ls:
         li = w.arch.layers[L]
@@ -189,12 +206,13 @@ def head_contrib(st: Setup, heads: list[tuple[int, int]], *, chunk: int = 4) -> 
         for ac, (_, rows) in zip(caps, part, strict=True):
             n += 1
             for (L, h) in heads:
-                if L not in ac.head_out:
-                    continue
-                x = ac.head_out[L][rows, h, :].astype(np.float64)      # (P, head_dim)
-                for S in st.score_layers:
-                    if (S, L) in U:
-                        acc[(L, h)][str(S)] += float((x @ U[(S, L)][h]).mean())
+                for V in vis[L]:
+                    if V not in ac.head_out:
+                        continue
+                    x = ac.head_out[V][rows, h, :].astype(np.float64)      # (P, head_dim)
+                    for S in st.score_layers:
+                        if (S, V) in U:
+                            acc[(L, h)][str(S)] += float((x @ U[(S, V)][h]).mean())
     s.engine.free_attn_probe()
     return {hk: {k: v / max(n, 1) for k, v in d.items()} for hk, d in acc.items()}
 

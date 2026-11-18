@@ -38,7 +38,8 @@ from .steer import GneError
 
 # ゲートつきの MLP を build_ffn(…, LLM_FFN_SILU, LLM_FFN_PAR)で作り、MLP の入力に下の名前を付ける arch
 # (llama.cpp の src/models/<arch>.cpp を読んで確かめたものだけ。ほかは ARCH_UNSUPPORTED)
-SWIGLU_ARCHS = {"llama": "ffn_norm", "qwen2": "ffn_norm", "qwen3": "ffn_norm", "qwen35": "attn_post_norm"}
+SWIGLU_ARCHS = {"llama": "ffn_norm", "qwen2": "ffn_norm", "qwen3": "ffn_norm", "qwen35": "attn_post_norm",
+                "sensenova_loop": "attn_post_norm"}
 S_DEFAULT, S_CAP, CAP_DEFAULT = 4.0, 16.0, (0.4, 0.8)
 
 
@@ -56,6 +57,22 @@ def amount_cap(rho, one=1.0, s: float = S_CAP, a: float = CAP_DEFAULT[0], b: flo
     """上限つきの形で足す量(α·d を 1 として)。one = κ1ᵀh(ほぼ 1)。"""
     rho = np.asarray(rho, dtype=np.float64)
     return (silu(s * (rho - a * one)) - silu(s * (rho - b * one))) / (s * (b - a)) * one
+
+
+def _shared(weights) -> bool:
+    """同じ層を 2 回実行する arch で、2 回の重みが共有されているか(loop.py)。共有なら、2 回目の層のニューロンは 1 回目の層の
+    ニューロンと同じもので、上書きすると両方の回に効く。"""
+    return getattr(weights, "loop", None) is not None and not getattr(weights, "per_visit_names", False)
+
+
+def tensor_layer(weights, L: int) -> int:
+    """層 L のユニットを書くテンソルの層(2 回の重みが共有されていれば、重みを持つ 1 回目の層)。"""
+    return weights.loop.stored(L) if _shared(weights) else int(L)
+
+
+def twin_layer(weights, L: int) -> int | None:
+    """層 L のユニットが、同じ重みで動くもう一方の回の層(共有でなければ、繰り返しの外なら None)。"""
+    return weights.loop.twin(L) if _shared(weights) else None
 
 
 def check_mlp(weights, L: int) -> None:
@@ -167,13 +184,15 @@ def nw_plan(weights, recipe, key_of, dir_of, stats_of=None) -> list[dict]:
         n_ff, n_embd = weights.meta.n_ff_at(L), weights.meta.n_embd
         f = form_of(u)
         js = [int(u.neuron)] + ([int(u.pair)] if u.pair is not None else [])
+        TL = tensor_layer(weights, L)
         for j in js:
             if not 0 <= j < n_ff:
                 raise GneError("BAD_RECIPE", f"{u.label()}: L{L} のニューロン {j} は範囲外です(0..{n_ff - 1})")
-            if (L, j) in used:
-                raise GneError("BAD_RECIPE", f"L{L} のニューロン {j} を 2 つのユニット({used[(L, j)]}、{u.label()})で上書きしようとしています",
+            if (TL, j) in used:
+                same = f"(層 {L} は層 {TL} と同じ重みを 2 回目に使う層です)" if TL != L else ""
+                raise GneError("BAD_RECIPE", f"L{TL} のニューロン {j} を 2 つのユニット({used[(TL, j)]}、{u.label()})で上書きしようとしています{same}",
                                "ユニットごとに別のニューロンを使ってください(gne nw neurons で働きの小さいものを選べます)")
-            used[(L, j)] = u.label()
+            used[(TL, j)] = u.label()
         dname = u.direction or recipe.default_direction
         kname = u.key or recipe.default_key
         d = np.asarray(K.raw_direction(dir_of(dname), L)[0], dtype=np.float64)
@@ -245,8 +264,8 @@ def nw_tensors(weights, rows: list[dict]) -> dict[str, tuple[np.ndarray, np.ndar
     """行 → LoRA のテンソル {テンソル名: (A, B)}。層ごとに、ffn_gate・ffn_up は A = (新しい行 − 元の行)、B = e_j、
     ffn_down は A = e_j、B = (新しい列 − 元の列)。元の行・列は float に戻した値(量子化のままの掛け算との小さなずれが残る)。"""
     by_layer: dict[int, list] = {}
-    for r in rows:
-        by_layer.setdefault(r["layer"], []).extend(r["parts"])
+    for r in rows:                              # 2 回の重みが共有されていれば、重みを持つ層のテンソルに書く
+        by_layer.setdefault(tensor_layer(weights, r["layer"]), []).extend(r["parts"])
     out = {}
     for L, parts in sorted(by_layer.items()):
         n_ff = weights.meta.n_ff_at(L)
@@ -341,13 +360,16 @@ def neuron_usage(session, layers: Sequence[int], *, prompts: Sequence[str] | Non
     if corpus_tokens:
         seqs += corpus_chunks(e, load_corpus(), 512, int(corpus_tokens))
     seen = e.list_names(seqs[0][:16])
+    # 2 回の重みが共有されていれば、層 L のニューロンはもう一方の回の層でも働く。両方の回の働きを合わせて数える
+    # (上書きしても困らないのは、どちらの回でも働きの小さいニューロン)
+    vis = {L: sorted({L} | ({twin_layer(w, L)} if twin_layer(w, L) is not None else set())) for L in Ls}
     names = {}
-    for L in Ls:
-        nm = pick_act_name(seen, L)
+    for V in sorted({V for vs in vis.values() for V in vs}):
+        nm = pick_act_name(seen, V)
         if nm is None:
-            raise GneError("ARCH_UNSUPPORTED", f"層 {L} のニューロンの活性が捕捉できません")
-        names[L] = nm
-    wanted = set(names.values()) | {f"ffn_out-{L}" for L in Ls}
+            raise GneError("ARCH_UNSUPPORTED", f"層 {V} のニューロンの活性が捕捉できません")
+        names[V] = nm
+    wanted = set(names.values()) | {f"ffn_out-{V}" for V in names}
     cap = Capture(lambda n: n in wanted)
     dn = {L: np.asarray(w.down_norms(L), dtype=np.float64) for L in Ls}
     acc = {L: {"sum": np.zeros(dn[L].size), "max": np.zeros(dn[L].size), "n": 0, "out": []} for L in Ls}
@@ -363,13 +385,14 @@ def neuron_usage(session, layers: Sequence[int], *, prompts: Sequence[str] | Non
             e.set_cvec(ctx, None)
             e.set_lora(ctx, None)
         for L in Ls:
-            c = np.abs(got[names[L]][1:]).astype(np.float64) * dn[L][None, :]
             a = acc[L]
-            a["sum"] += c.sum(0)
-            a["max"] = np.maximum(a["max"], c.max(0))
-            a["n"] += c.shape[0]
-            if f"ffn_out-{L}" in got:
-                a["out"].append(np.linalg.norm(got[f"ffn_out-{L}"][1:], axis=1))
+            for V in vis[L]:
+                c = np.abs(got[names[V]][1:]).astype(np.float64) * dn[L][None, :]
+                a["sum"] += c.sum(0)
+                a["max"] = np.maximum(a["max"], c.max(0))
+                a["n"] += c.shape[0]
+                if f"ffn_out-{V}" in got:
+                    a["out"].append(np.linalg.norm(got[f"ffn_out-{V}"][1:], axis=1))
     rk = lambda v: np.argsort(np.argsort(v)) + 1
     out_layers = []
     for L in Ls:
@@ -380,6 +403,7 @@ def neuron_usage(session, layers: Sequence[int], *, prompts: Sequence[str] | Non
         order = np.argsort(key, kind="stable")[:int(top)]
         out_med = float(np.median(np.concatenate(a["out"]))) if a["out"] else None
         out_layers.append({"layer": L, "n_ff": int(mean.size), "positions": int(a["n"]), "out_norm_median": out_med,
+                           **({"visits": vis[L], "stored_layer": tensor_layer(w, L)} if len(vis[L]) > 1 else {}),
                            "median": {"mean": float(np.median(mean)), "max": float(np.median(mx))},
                            "min": {"mean": float(mean.min()), "max": float(mx.min())},
                            "rows": [{"neuron": int(j), "mean": float(mean[j]), "max": float(mx[j]),
@@ -625,14 +649,22 @@ def verify(session, recipe, *, texts: Sequence[str] | None = None, iv=None, cont
         tens = nw_tensors(w, sub)
         path = tmp_dir / f"nw-verify-{cache_hash(tens)}.lora.gguf"
         write_lora_tensors(w, tens, path, name="nw verify")
-        nm = _capture_names(session, seqs[0], L)
+        # 2 回の重みが共有されていれば、重みを持つ 1 回目の層で確かめる(その前の層は、この LoRA で変わらない)。
+        # もう一方の回(twin)では、上書きしたニューロンがどれだけ開いたかだけを出す(上流が変わるので式との比較はしない)
+        CL, TW = tensor_layer(w, L), None
+        nm = _capture_names(session, seqs[0], CL)
+        TW = twin_layer(w, CL)
+        tw_act = _capture_names(session, seqs[0], TW)["a"] if TW is not None else None
         Wd = w.down_matrix(L).astype(np.float64)
         js = [p[0] for r in sub for p in r["parts"]]
-        stats = {"gate": [], "up": [], "act": [], "others": [], "out_rel": [], "out_norm": [], "act_max": [], "block": []}
+        stats = {"gate": [], "up": [], "act": [], "others": [], "out_rel": [], "out_norm": [], "act_max": [], "block": [],
+                 "twin_act_max": []}
         try:
             for ids in seqs:
                 b = _run_capture(session, ids, set(nm.values()), iv_lora, iv_vecs)
-                g = _run_capture(session, ids, set(nm.values()), [*iv_lora, (str(path), 1.0)], iv_vecs)
+                g = _run_capture(session, ids, set(nm.values()) | ({tw_act} if tw_act else set()), [*iv_lora, (str(path), 1.0)], iv_vecs)
+                if tw_act:
+                    stats["twin_act_max"].append(float(np.abs(g[tw_act][1:, js]).max()))
                 h = g[nm["h"]][1:]
                 pred = -(b[nm["a"]][1:, js] @ Wd[:, js].T)
                 # 誤差は「予測の最大」か「その層のふつうのニューロンの値の大きさ」の大きいほうに対する比(鍵が反応しない文でも割れるように)
@@ -665,6 +697,8 @@ def verify(session, recipe, *, texts: Sequence[str] | None = None, iv=None, cont
                "out_change_max": max(stats["out_norm"]), "act_max": max(stats["act_max"]),
                "block_max_median": float(np.median(stats["block"])),
                "kscale": {r["unit"].label(): r["kscale_used"] for r in sub}}
+        if CL != L or TW is not None:
+            row.update(checked_layer=CL, twin_layer=TW, twin_act_max=max(stats["twin_act_max"]) if stats["twin_act_max"] else None)
         # ゲート・入力の誤差には、量子化のままの掛け算と float に戻した行を引く計算のずれ(1〜2% ほど)が残る
         row["ok"] = bool(row["gate_err"] < 0.05 and row["up_err"] < 0.05 and row["act_err"] < 1e-3
                          and row["others_changed_max"] < 1e-4 and row["out_rel_err_median"] < 0.05)
@@ -775,6 +809,10 @@ def check(session, recipe, contrast, *, subset: str = "odd", max_tokens: int = 9
         di = _subset(len(dt.prompts), subset)
         groups.append((f"dont_touch:{dt.name}", dt.convs(di), [question_text(dt.prompts[i]) for i in di]))
     Ls = sorted({r["layer"] for r in rows})
+    # 2 回の重みが共有されていれば、上書きしたニューロンはもう一方の回(twin)でも同じ列を書く。書いた量はその分も足して数える
+    # (amount・total は両方の回の合計。amount_twin がもう一方の回の分)
+    twins = {r["layer"]: twin_layer(w, r["layer"]) for r in rows}
+    Lcap = sorted(set(Ls) | {T for T in twins.values() if T is not None})
     names = None
     buckets = [str(k) for k in range(n_pos)] + [f"{n_pos}+"]
     bins = None
@@ -806,7 +844,8 @@ def check(session, recipe, contrast, *, subset: str = "odd", max_tokens: int = 9
     for label, convs, qtexts in groups:
         outs = _generate(session, [(c, int(max_tokens)) for c in convs], iv_vecs, lora if replies == "own" else (iv_lora or None),
                          "all", lambda k: None)
-        acc = {id(r): {b: {"amount": [], "rho_gate": [], "rho_up": []} for b in buckets} for r in rows}
+        acc = {id(r): {b: {"amount": [], "rho_gate": [], "rho_up": [], **({"amount_twin": []} if twins[r["layer"]] is not None else {})}
+                       for b in buckets} for r in rows}
         loops = 0
         qrows = []
         for qi, (c, o) in enumerate(zip(convs, outs, strict=True)):
@@ -816,17 +855,23 @@ def check(session, recipe, contrast, *, subset: str = "odd", max_tokens: int = 9
             loops += looped
             ids = p + rid
             if names is None:
-                names = {L: _capture_names(session, ids, L) for L in Ls}
-            got = _run_capture(session, ids, {names[L][k] for L in Ls for k in ("h", "a")}, lora, iv_vecs)
+                names = {L: _capture_names(session, ids, L) for L in Lcap}
+            got = _run_capture(session, ids, {names[L][k] for L in Ls for k in ("h", "a")}
+                               | {names[T]["a"] for T in twins.values() if T is not None}, lora, iv_vecs)
             hit = None
             if positions is not None:                           # 列の番号 → 返事の位置 k = 番号 − (P − 1)
                 hit = {int(x) - (len(p) - 1) for x in select_positions(e, rid, positions, n_prompt=len(p))}
-            per = {sg: {"amount": [], "rho": []} for sg in seg_names}       # 区間 → その区間を担当するユニットごとの、位置の並び
+            per = {sg: {"amount": [], "rho": [], "twin": []} for sg in seg_names}   # 区間 → その区間を担当するユニットごとの、位置の並び
             for r in rows:
                 L = r["layer"]
                 h = got[names[L]["h"]][len(p) - 1:]
                 a = got[names[L]["a"]][len(p) - 1:]
                 amt = sum(g * a[:, j] for (j, _, _, _, g) in r["parts"])
+                amt_tw = None
+                if twins[L] is not None:
+                    at = got[names[twins[L]]["a"]][len(p) - 1:]
+                    amt_tw = sum(g * at[:, j] for (j, _, _, _, g) in r["parts"])
+                    amt = amt + amt_tw
                 rg, ru = h @ r["kappa_gate"], h @ r["kappa_up"]
                 for k in range(amt.shape[0]):
                     b = ("match" if k in hit else "other") if hit is not None else bucket_of(k)
@@ -835,6 +880,10 @@ def check(session, recipe, contrast, *, subset: str = "odd", max_tokens: int = 9
                     acc[id(r)][b]["amount"].append(float(amt[k]))
                     acc[id(r)][b]["rho_gate"].append(float(rg[k]))
                     acc[id(r)][b]["rho_up"].append(float(ru[k]))
+                    if amt_tw is not None:
+                        acc[id(r)][b]["amount_twin"].append(float(amt_tw[k]))
+                if amt_tw is not None:
+                    per[seg_of[id(r)]]["twin"].append(np.asarray(amt_tw, dtype=np.float64))
                 # 区間の鍵の反応: 上限つきの形は、ほぼ 1 を返す鍵の反応で割った値(しきい値 a・b と比べる値)。鍵 2 つの形は入力の側の鍵
                 rho = (rg / np.where(np.abs(ru) > 1e-6, ru, 1.0)) if r["form"] == "cap" else (ru if r["form"] == "two" else rg)
                 per[seg_of[id(r)]]["amount"].append(np.asarray(amt, dtype=np.float64))
@@ -852,13 +901,15 @@ def check(session, recipe, contrast, *, subset: str = "odd", max_tokens: int = 9
                     mask = (ks >= lo) & ((ks < hi) if hi is not None else True)
                 qsegs[sg] = None if not mask.any() else {
                     "amount": float(own[sg][mask].mean()), "total": float(total[mask].mean()),
-                    "rho": float(np.mean(per[sg]["rho"], axis=0)[mask].mean()), "n_pos": int(mask.sum())}
+                    "rho": float(np.mean(per[sg]["rho"], axis=0)[mask].mean()), "n_pos": int(mask.sum()),
+                    **({"amount_twin": float(np.mean(per[sg]["twin"], axis=0)[mask].mean())} if per[sg]["twin"] else {})}
             qrows.append({"i": qi, "prompt": qtexts[qi], "reply_start": (o["text"] or "")[:40], "n_tokens": len(rid), "loop": looped,
                           "segments": qsegs, "pos0_total": float(total[0]), "form": conv_form_of(c),
                           "finish": o.get("finish")})
         st = lambda v: None if not v else {"mean": float(np.mean(v)), "min": float(np.min(v)), "max": float(np.max(v)), "n": len(v)}
         res[label] = {"n": len(convs), "loops": loops,
                       "units": [{"unit": spec_of(r["unit"]), "layer": r["layer"], "form": r["form"],
+                                 **({"twin_layer": twins[r["layer"]]} if twins[r["layer"]] is not None else {}),
                                  "positions": {b: {k: st(v) for k, v in d.items()} for b, d in acc[id(r)].items()}} for r in rows],
                       "by_question": _question_summary(qrows, seg_names, label == "scene", float(low), float(over), float(leak)),
                       "by_form": _form_summary(qrows, seg_names, label == "scene", rows, float(leak)),
@@ -876,7 +927,10 @@ def check(session, recipe, contrast, *, subset: str = "odd", max_tokens: int = 9
            "notes": ["amount は、その位置で実際に足した量(α·d を 1 として。負は逆向き)。rho_gate・rho_up は鍵の反応です。",
                      "scene は狙う場面(対照集合の質問)、dont_touch:<名前> は書き込みたくない場面です。",
                      "平均だけでは、一部の質問でまったく書けていないことが隠れます。質問ごとの値(by_question・questions)で、"
-                     "ほとんど書けていない質問が無いかを見てください。"],
+                     "ほとんど書けていない質問が無いかを見てください。"]
+           + (["同じ層を 2 回実行するモデルで、上書きしたニューロンはもう一方の回の層(twin_layer)でも同じ向きを書きます。"
+               "amount・total は両方の回の合計で、そのうちもう一方の回の分が amount_twin です。"]
+              if any(T is not None for T in twins.values()) else []),
            "seconds": time.perf_counter() - t0}
     if save is not None:
         path = session.store.root / "behave" / session.meta.model_id / f"{save}_check.json"

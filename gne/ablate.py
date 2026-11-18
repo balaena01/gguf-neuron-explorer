@@ -182,6 +182,8 @@ def write_lora_tensors(weights, tensors: dict[str, tuple[np.ndarray, np.ndarray]
     (スクリーニングの一時ファイル用)。kv は gne.* のメタデータ(JSON の文字列)。source_id=False なら、元のモデルの識別子
     (gne.source_model_id)を書かない(人に渡す版。name にも元のモデルの名前を入れないのは呼ぶ側の役目)。
     general.architecture(arch の名前)は、llama.cpp がアダプタとモデルの組み合わせを確かめるのに使うので、いつも書く。"""
+    from .loop import to_stored
+    tensors = to_stored(weights, tensors)        # 同じ層を 2 回実行する arch: 2 回目の層の名前を、重みを持つ層の名前に
     m = weights.meta
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     w = GGUFWriter(str(path), arch=m.arch)
