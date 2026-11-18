@@ -2944,18 +2944,19 @@ def headproj_check(c: Common, holder: dict, layer: int = typer.Option(..., "--la
 def heads_pipeline(c: Common, holder: dict,
                    spec: Path = typer.Option(..., "--spec", help="対照集合の JSON か YAML(name・user_prompts か側ごとの prompts_a / prompts_b・system_a / system_b か recipe_a / recipe_b、任意で pipeline の設定)"),
                    target: Optional[str] = typer.Option(None, "--target", help="効きにくい例の射影の値の目標: 数、B(B 側の平均まで消す)、mid(既定、A と B の真ん中)"),
-                   n_heads: Optional[str] = typer.Option(None, "--n-heads", help="比べる組のヘッド数(既定 6,5,4)"),
+                   n_heads: Optional[str] = typer.Option(None, "--n-heads", help="--rank causal: 比べる組のヘッド数(既定 6,5,4)。--rank writes は --n-units"),
                    max_examples: Optional[int] = typer.Option(None, "--max-examples", help="止めて測る段階で使う質問の数(既定 64、等間隔に間引く)"),
                    positions: Optional[str] = typer.Option(None, "--positions", help="方向を作る位置: last(既定)/ response など"),
-                   top_layers: Optional[int] = typer.Option(None, "--top-layers"), hard: Optional[int] = typer.Option(None, "--hard"),
+                   top_layers: Optional[int] = typer.Option(None, "--top-layers", help="--rank causal: ヘッドを 1 個ずつ測る層の数(既定 4)"),
+                   hard: Optional[int] = typer.Option(None, "--hard", help="--rank causal: 効率を測る、射影の値が残りやすい質問の数(既定 16)"),
                    include_score_layers: bool = typer.Option(False, "--include-score-layers", help="射影の値を測る層とそれより後のヘッドも候補にする(既定は外す。測る量を直接動かすだけで、振る舞いは変わりにくい)"),
                    score_layers: Optional[str] = typer.Option(None, "--score-layers", help="射影の値を測る層(例 27,51,54。既定は基準層と後段の 2 層)。loop で、同じ層を 2 回実行するモデルの 1 回目の出口・2 回目の出口・最後の層の 1 つ前"),
                    select_layer: Optional[int] = typer.Option(None, "--select-layer", help="ヘッドの順位づけと配分の目標に使う層(--score-layers のどれか。既定は、順位づけは基準層、目標は測る最後の層)"),
-                   candidate_layers: Optional[str] = typer.Option(None, "--candidate-layers", help="候補のヘッドを探す層(例 28-53)。同じ層を 2 回実行するモデルで、1 回目だけ・2 回目だけから選ぶとき(GNE_LOOP_EDITS=per_visit と一緒に)"),
-                   always_layers: Optional[str] = typer.Option(None, "--always-layers", help="層を止めた下がり方の順位に関係なく、いつもヘッド単位で測る層(例 52,53)。none で足さない。sensenova_loop の既定はループの外の段 52・53"),
+                   candidate_layers: Optional[str] = typer.Option(None, "--candidate-layers", help="候補の部品を探す層(例 28-53)。同じ層を 2 回実行するモデルで、1 回目だけ・2 回目だけから選ぶとき(GNE_LOOP_EDITS=per_visit と一緒に)"),
+                   always_layers: Optional[str] = typer.Option(None, "--always-layers", help="--rank causal: 層を止めた下がり方の順位に関係なく、いつもヘッド単位で測る層(例 52,53)。none で足さない。sensenova_loop の --rank causal の既定はループの外の段 52・53"),
                    fresh: bool = typer.Option(False, "--fresh", help="作り済みの方向と因果の結果を使い回さず、最初から作り直す"),
-                   rank: Optional[str] = typer.Option(None, "--rank", help="候補の探し方: causal(既定。層ごとに止める → 上位の層のヘッドを 1 個ずつ止める → 効率で配り直す)/ writes(全部の部品を、方向への書き込みの量で一度に順位づけ → 上位を s=1 で確かめる → s=1 から組を作る)"),
-                   unit_kinds: Optional[str] = typer.Option(None, "--unit-kinds", help="--rank writes の部品の種類: all(既定。注意ヘッド・線形注意のヘッド・MLP のニューロン)/ heads(ヘッドだけ)/ neurons"),
+                   rank: Optional[str] = typer.Option(None, "--rank", help="候補の探し方: writes(既定。全部の部品を、方向への書き込みの量で一度に順位づけ → 上位を s=1 で確かめる → s=1 から組を作る)/ causal(v0.7.0 までの既定。層ごとに止める → 上位の層のヘッドを 1 個ずつ止める → 効率で配り直す)。応答が変わらないときは、もう一方も試す"),
+                   unit_kinds: Optional[str] = typer.Option(None, "--unit-kinds", help="--rank writes の部品の種類: heads(既定。注意ヘッド・線形注意のヘッド)/ all(+ MLP のニューロン)/ neurons"),
                    verify_top: Optional[int] = typer.Option(None, "--verify-top", help="--rank writes: 1 個ずつ流し直して確かめる上位の数(既定 64)"),
                    verify_sample: Optional[int] = typer.Option(None, "--verify-sample", help="--rank writes: 上位より下から等間隔に足して確かめる数(既定 16。順位相関を広い範囲で測る。組の候補にもなる)"),
                    verify_mode: Optional[str] = typer.Option(None, "--verify-mode", help="--rank writes: 確かめ方。proj(既定。s=1 で射影)/ ablate(出力を 0)"),
@@ -2963,10 +2964,11 @@ def heads_pipeline(c: Common, holder: dict,
                    check_replies: Optional[int] = typer.Option(None, "--check-replies", help="--rank writes: 選んだ組で応答を書かせて validate.match を数える質問の数(側ごと。既定 16、0 で切る)"),
                    check_tokens: Optional[int] = typer.Option(None, "--check-tokens", help="応答での確かめの長さの上限(既定 512)"),
                    yes: bool = _YES):
-    """対照集合から、方向づくり → 基準層 → 因果スクリーニング(層ごと → ヘッド 1 個ずつ止める)→ 強さの配分(効き目に比例した
-    最初の組を二分探索 → 射影の値が残りやすい質問で効率を測って 0 から配り直す → ヘッド数を変えた組の比較)を 1 回で回す。
-    --rank writes は 3 段目から: 全部の部品(注意ヘッド・線形注意のヘッド・MLP のニューロン)を方向への書き込みの量で順位づけ →
-    上位を 1 個ずつ s=1 で流し直して確かめる → 効き目の大きい順に s=1 で組に足し、足りなければ全体の強さを上げる → 応答での確かめ。"""
+    """対照集合から、方向づくり → 基準層 → 候補づくり → 強さの配分 を 1 回で回す。候補づくりと配分は 2 通り:
+    --rank writes(既定): 全部の部品(注意ヘッド・線形注意のヘッド、--unit-kinds all で MLP のニューロンも)を方向への書き込みの量で
+    順位づけ → 上位を 1 個ずつ s=1 で流し直して確かめる → 効き目の大きい順に s=1 で組に足し、足りなければ全体の強さを上げる → 応答での確かめ。
+    --rank causal(v0.7.0 までの既定): 因果スクリーニング(層ごと → ヘッド 1 個ずつ止める)→ 効き目に比例した最初の組を二分探索 →
+    射影の値が残りやすい質問で効率を測って 0 から配り直す → ヘッド数を変えた組の比較。"""
     s = holder["session"] = c.session()
     over = {"target": target, "n_heads": _ints(n_heads), "max_examples": max_examples, "positions": positions,
             "top_layers": top_layers, "hard": hard, "resume": False if fresh else None,
@@ -2978,11 +2980,14 @@ def heads_pipeline(c: Common, holder: dict,
     d = s.heads_pipeline(spec, **over)
     if d.get("writes"):
         return d, "\n".join(_pipeline_writes_lines(d)), 0
+    rank_line = ("選び方: v0.7.0 までの選び方(--rank causal。層ごとに止める → 上位の層のヘッドを 1 個ずつ止める → 効率で配り直す)"
+                 + (f"。{d['rank_note']}" if d.get("rank_note") else ""))
     sc, ca, al = d["score"], d["causal"], d["allocate"]
     ck = "causal" if (d.get("settings") or {}).get("select_layer") not in (None, "") else "causal_max"
     lines = [f"{d['path']}({d['n_prompts']} 問、{d['seconds']:.0f} 秒"
              + (f"、作り済みの{'・'.join({'direction': '方向', 'causal': '因果'}[x] for x in d['reused'])}を使い回した" if d.get("reused") else "")
              + ")",
+             rank_line,
              f"1. 方向 {d['name']}({d['direction']['positions']}、{d['direction']['seconds']:.0f} 秒)",
              f"2. 基準層 L{sc['base_layer']}(cohen_d 最大、止めて測る段階は {sc['n'].get('A')} 問)",
              f"3. 因果: 測る層 L{','.join(map(str, ca['score_layers']))}、{ca['n_rows']} ヘッド、上位 " +
@@ -3030,6 +3035,9 @@ def _pipeline_writes_lines(d: dict) -> list[str]:
     wr, ve, al = d["writes"], d["verify"], d["allocate"]
     ts = wr.get("totals_share") or {}
     lines = [f"{d['path']}({d['n_prompts']} 問、{d['seconds']:.0f} 秒)",
+             "選び方: 全部の部品を書き込みの量で並べる(--rank writes、既定。部品 "
+             + {"attn,linear": "ヘッド", "attn,linear,neuron": "ヘッドとニューロン", "neuron": "ニューロン"}.get(",".join(wr["kinds"]), ",".join(wr["kinds"]))
+             + "。v0.7.0 までの選び方は --rank causal)",
              f"1. 方向 {d['name']}({d['direction']['positions']}、{d['direction']['seconds']:.0f} 秒)",
              f"2. 基準層 L{d['score']['base_layer']}(cohen_d 最大)",
              f"3. 書き込みの順位づけ: 選ぶ層 L{wr['select_layer']}、A {wr['n']['A']} 問・B {wr['n']['B']} 問、A−B の差 {wr['gap']:.2f}、"
@@ -3063,6 +3071,11 @@ def _pipeline_writes_lines(d: dict) -> list[str]:
             lines.append("   (選ぶのに使った質問での確かめ。調整に使っていない質問で gne behave を流して確かめる)")
         if ck.get("note"):
             lines.append("   注意: " + ck["note"])
+        if ck.get("suggest"):
+            lines.append("   応答が変わらないときは --rank causal(v0.7.0 までの選び方)も試してください。Qwen3.5-4B の注意書き(disclaimer)では、"
+                         "この選び方は射影の値が届いても応答を変えず、v0.7.0 までの選び方は注意書きを減らした(ただし軽い質問にも注意書きを足した)")
+    if d.get("unused_settings"):
+        lines.append("使わなかった設定(--rank causal だけで使う): " + ", ".join(d["unused_settings"]) + "。組の部品の数は --n-units")
     lines.append("弱点: 順位づけは直接の書き込みだけを見る。後ろの層の書き手を動かしているだけの部品は、点数に出ない")
     if d["recommended"]:
         lines.append(f"レシピ: {d['recommended']['recipe']}。確かめる: gne eval --recipe {d['recommended']['recipe']} --random-controls 16")

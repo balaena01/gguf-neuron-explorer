@@ -313,6 +313,9 @@ def test_loop_pipeline_defaults():
     kept = {"score_layers": "base", "select_layer": None, "always_layers": "none"}
     assert Session._loop_pipeline_defaults(fake, kept) is None and kept["score_layers"] == "base"
     assert Session._loop_pipeline_defaults(SimpleNamespace(weights=SimpleNamespace(loop=None)), dict(pipe)) is None
+    # rank writes(v0.8.0 からの一括の既定)は全部の層を順位づけるので、段 52・53 をいつも測る指定は足さない(測る層・選ぶ層は同じ)
+    pw = {"score_layers": None, "select_layer": None, "always_layers": None, "rank": "writes"}
+    assert Session._loop_pipeline_defaults(fake, pw) == {"score_layers": "loop", "select_layer": 54} and pw["always_layers"] is None
 
 
 MODEL = os.environ.get("GNE_TEST_SENSENOVA")

@@ -486,15 +486,15 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
                              check_replies: int | None = None) -> dict:
         """対照集合(name・user_prompts か側ごとの質問 prompts_a / prompts_b・system_a / system_b か recipe_a / recipe_b、
         任意で pipeline の設定。表か JSON / YAML の
-        パス)から、方向づくり → 基準層 → 因果スクリーニング → 強さの配分(効き目に比例した最初の組 → 効率で配り直す →
-        ヘッド数の比較)をジョブで 1 回で回す(job_status で結果)。質問は何百個でもよく、止めて測る段階は max_examples 個
+        パス)から、方向づくり → 基準層 → 候補づくり → 強さの配分 をジョブで 1 回で回す(job_status で結果)。質問は何百個でもよく、止めて測る段階は max_examples 個
         (既定 64)に間引く。target は数か "B"(B 側の平均まで消す)か "mid"(省いたときの既定、A と B の真ん中)。
         真ん中では振る舞いが半分ほどしか消えないことが多いので、消し切りたいときは "B"。結果の recommended が推す組のレシピ。resume(既定 True)なら、
         同じ対照集合・同じ設定で作り済みの方向と因果の結果を使い回す(止めて流し直したとき、配分からやり直せる)。
-        rank="writes" は 3 段目から別の流れ: 全部の部品(注意ヘッド・線形注意のヘッド・MLP のニューロン。unit_kinds="heads" で
-        ヘッドだけ)を方向への書き込みの量で順位づけ → 上位を 1 個ずつ s=1 で射影して確かめる → 効き目の大きい順に s=1 で組に足し、
-        足りなければ全体の強さを上げる(n_units が組の部品の数の上限、既定 [24, 12, 6])→ 選んだ組で応答を書かせて validate.match を
-        数える(check_replies 問、既定 16、0 で切る)。既定は rank="causal"(今までの流れ)。"""
+        3 段目からは 2 通り。rank="writes"(既定): 全部の部品(注意ヘッド・線形注意のヘッド。unit_kinds="all" で MLP のニューロンも)を
+        方向への書き込みの量で順位づけ → 上位を 1 個ずつ s=1 で射影して確かめる → 効き目の大きい順に s=1 で組に足し、足りなければ全体の
+        強さを上げる(n_units が組の部品の数の上限、既定 [24, 12, 6])→ 選んだ組で応答を書かせて validate.match を数える(check_replies 問、
+        既定 16、0 で切る)。rank="causal" は v0.7.0 までの流れ(因果スクリーニング → 効率で配り直す。n_heads はこちらだけ)。
+        応答での確かめで A 側がほとんど変わらない(check.suggest)ときは、もう一方の rank も試す。結果の rank がどちらで流したか。"""
         try:
             p = {"spec": spec, "target": target, "n_heads": n_heads, "max_examples": max_examples,
                  "resume": None if resume else False, "rank": rank, "unit_kinds": unit_kinds, "n_units": n_units,

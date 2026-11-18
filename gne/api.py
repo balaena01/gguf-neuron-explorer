@@ -2246,15 +2246,18 @@ class Session:
                          "top_layers": 4, "max_examples": 64, "s_max": 30.0, "direction_layer": "own", "resume": True,
                          "include_score_layers": False, "same_reply": False, "score_layers": None, "select_layer": None,
                          "candidate_layers": None, "always_layers": None}
-    # rank: causal(今まで: 層 → ヘッドを止めて測る因果スクリーニング → 効率で配り直す)/ writes(v0.8.0: 全部の部品を
-    # 書き込みの量で順位づけ → 上位を s=1 で確かめる → s=1 から組を作る)。writes のときだけ使う設定(causal の結果の設定には載せない)
-    PIPELINE_WRITES = {"rank": "causal", "unit_kinds": "all", "verify_top": 64, "verify_sample": 16, "verify_mode": "proj",
+    # rank: writes(v0.8.0 からの既定: 全部の部品を書き込みの量で順位づけ → 上位を s=1 で確かめる → s=1 から組を作る)/
+    # causal(v0.7.0 までの既定: 層 → ヘッドを止めて測る因果スクリーニング → 効率で配り直す)。unit_kinds の既定は heads(ニューロンは
+    # 指定で足す)。rank 以外は writes のときだけ使う設定(causal の結果の settings には rank だけを載せる)
+    PIPELINE_WRITES = {"rank": "writes", "unit_kinds": "heads", "verify_top": 64, "verify_sample": 16, "verify_mode": "proj",
                        "n_units": [24, 12, 6], "check_replies": None, "check_tokens": 512}
+    CAUSAL_ONLY = ("n_heads", "hard", "top_layers", "always_layers", "include_score_layers")   # rank causal だけで使う設定
 
     def _loop_pipeline_defaults(self, pipe: dict) -> dict | None:
-        """同じ層を 2 回実行するモデル(sensenova_loop)の一括の既定。測る層を指定しなければ loop(段 27・51・54)・選ぶ層 54 にし、
-        ループの外の段 52・53 はいつもヘッド単位で測る(層を止めた下がり方の順位に関係なく)。今までの既定は score_layers: base、
-        段 52・53 を足さないのは always_layers: none。ほかのモデルでは何もしない(None)。"""
+        """同じ層を 2 回実行するモデル(sensenova_loop)の一括の既定。測る層を指定しなければ loop(段 27・51・54)・選ぶ層 54 にする
+        (rank writes の選ぶ層の既定も最後に測れる層 = 段 54 なので同じ)。rank causal のときは、ループの外の段 52・53 もいつもヘッド単位で
+        測る(層を止めた下がり方の順位に関係なく。rank writes は全部の層を順位づけるので要らない)。v0.7.0 より前の既定は
+        score_layers: base、段 52・53 を足さないのは always_layers: none。ほかのモデルでは何もしない(None)。"""
         lp = self.weights.loop
         if lp is None:
             return None
@@ -2265,12 +2268,21 @@ class Session:
             if pipe.get("select_layer") in (None, ""):
                 pipe["select_layer"] = lp.n_layer - 2
                 used["select_layer"] = lp.n_layer - 2
-        if pipe.get("always_layers") is None:
+        if pipe.get("always_layers") is None and pipe.get("rank", "causal") == "causal":
             tail = [L for L in range(lp.hi2, lp.n_layer - 2)
                     if self.weights.arch.layers[L].head_dim and self.weights.arch.layers[L].head_writer]
             pipe["always_layers"] = tail
             used["always_layers"] = tail
         return used or None
+
+    def _rank_fallback(self, pipe: dict, rank_given: bool) -> str | None:
+        """rank を指定していない(既定の writes)のに、書き込みの順位づけに未対応のモデル(残差が複数本の流れ = hyper-connections)なら、
+        pipe の rank を causal にして理由を返す(モデルは読み込まず、GGUF のメタデータで決める)。指定したときは何もしない。"""
+        hc = int(self.weights.field(f"{self.meta.arch}.hyper_connection.count", 0) or 0)
+        if pipe.get("rank") == "writes" and not rank_given and hc:
+            pipe["rank"] = "causal"
+            return "残差が複数本の流れのモデル(hyper-connections)は書き込みの順位づけに未対応なので、rank causal で流した"
+        return None
 
     @staticmethod
     def _layers_of(spec) -> list[int] | None:
@@ -2325,7 +2337,9 @@ class Session:
             raise GneError("BAD_ARGS", "spec は対照集合の表(name・user_prompts・system_a / system_b か recipe_a / recipe_b)です")
         spec = dict(spec)
         spec.pop("about", None)                    # テンプレート(configs/pipeline/)の説明。対照集合には入れない
-        pipe = {**self.PIPELINE_DEFAULTS, **self.PIPELINE_WRITES, **(spec.pop("pipeline", None) or {}),
+        spec_pipe = spec.pop("pipeline", None) or {}
+        given = {**{k: v for k, v in spec_pipe.items() if v is not None}, **{k: v for k, v in over.items() if v is not None}}
+        pipe = {**self.PIPELINE_DEFAULTS, **self.PIPELINE_WRITES, **spec_pipe,
                 **{k: v for k, v in over.items() if v is not None}}
         unknown = sorted(set(pipe) - set(self.PIPELINE_DEFAULTS) - set(self.PIPELINE_WRITES) - {"name"})
         if unknown:
@@ -2334,15 +2348,18 @@ class Session:
         if pipe["rank"] not in ("causal", "writes"):
             raise GneError("BAD_ARGS", f"rank は causal(層 → ヘッドを止めて測る、今までの既定)か writes(全部の部品を書き込みの量で"
                                        f"順位づけ)です({pipe['rank']!r})")
+        rank_given = "rank" in given
+        rank_note = self._rank_fallback(pipe, rank_given)
         writes = pipe["rank"] == "writes"
         if writes:
             from .unitwrites import parse_kinds
             parse_kinds(pipe["unit_kinds"])                             # 書き方の誤りは流す前に返す
             if pipe["verify_mode"] not in ("proj", "ablate"):
                 raise GneError("BAD_ARGS", "verify_mode は proj(s=1 で射影)か ablate(出力を 0)です")
-        else:                                       # 今までの流れ: writes の設定は使わない(結果の settings も今までと同じ)
+        else:                                       # v0.7.0 までの流れ: writes の設定は使わない(settings には rank だけを残す)
             for k in self.PIPELINE_WRITES:
-                pipe.pop(k, None)
+                if k != "rank":
+                    pipe.pop(k, None)
         self._pipeline_target(pipe["target"], {"A": 0.0, "B": 0.0})          # 目標の書き方の誤りは、流す前に返す
         name = str(pipe.pop("name", None) or spec.get("name") or "")
         if not re.fullmatch(r"[\w.\-]+", name):
@@ -2372,7 +2389,12 @@ class Session:
             raise GneError("BAD_ARGS", f"選ぶのに使う層 L{sel} が、射影の値を測る層 {sls} に入っていません")
         out: dict = {"name": name, "contrast": str(path), "n_prompts": len(cs.prompts("A")),
                      **({"n_prompts_b": len(cs.prompts("B"))} if cs.separate_prompts else {}), "sides": cs.describe(),
-                     "settings": dict(pipe), **({"arch_defaults": arch_default} if arch_default else {})}
+                     "settings": dict(pipe), "rank": pipe["rank"], **({"rank_note": rank_note} if rank_note else {}),
+                     **({"arch_defaults": arch_default} if arch_default else {})}
+        if writes:                                  # rank causal だけで使う設定を引数で渡したとき(使わないことを知らせる。ひな形の pipeline の値は除く)
+            unused = sorted(k for k in self.CAUSAL_ONLY if over.get(k) not in (None, False, "none"))
+            if unused:
+                out["unused_settings"] = unused
         reused: list[str] = []                     # resume: 同じ対照集合・同じ設定で作り済みの段は使い回す(止めて流し直したとき)
         self.engine.free_steer()                   # 生成しないので、生成用のコンテキストを空けて VRAM を使えるようにする
         ts = time.perf_counter()                                   # 1. 方向(全部の質問)
@@ -2396,7 +2418,24 @@ class Session:
                         "layers": [{k: r[k] for k in ("layer", "cohen_d", "cos_base")} | {"A": r["A"]["mean"], "B": r["B"]["mean"]}
                                    for r in sc["layers"]], "seconds": time.perf_counter() - ts}
         if writes:                                                 # 3〜5. 書き込みの順位づけ → 確かめ → s=1 から組を作る
-            return self._pipeline_writes(out, name, path, cs, val, pipe, sp, mx, sls, sel, reused, t0)
+            try:
+                return self._pipeline_writes(out, name, path, cs, val, pipe, sp, mx, sls, sel, reused, t0, cand)
+            except GneError as e:
+                if rank_given or e.code != "ARCH_UNSUPPORTED":
+                    raise
+                # 既定(rank を指定していない)で、この arch の捕捉に未対応だったときは、v0.7.0 までの選び方で続ける
+                self.warn(f"書き込みの順位づけはこのモデルに未対応なので、rank causal で流します({e.message})")
+                pipe["rank"] = "causal"
+                for k in self.PIPELINE_WRITES:
+                    if k != "rank":
+                        pipe.pop(k, None)
+                more = self._loop_pipeline_defaults(pipe)
+                if more:
+                    out["arch_defaults"] = {**(out.get("arch_defaults") or {}), **more}
+                out.update(settings=dict(pipe), rank="causal", rank_note=f"書き込みの順位づけに未対応({e.message})なので rank causal で流した")
+                out.pop("unused_settings", None)
+                for k in ("writes", "verify"):
+                    out.pop(k, None)
         ts = time.perf_counter()                                   # 3. 因果(層ごと → 効く層のヘッドを 1 個ずつ止める)
         c = self._pipeline_causal_reuse(name, cs, sp, mx, pipe) if pipe["resume"] and "direction" in reused else None
         if c is not None:
@@ -2432,7 +2471,8 @@ class Session:
         return out
 
     def _pipeline_writes(self, out: dict, name: str, path: Path, cs, val, pipe: dict, sp: str, mx: int | None,
-                         sls: list[int] | None, sel: int | None, reused: list[str], t0: float) -> dict:
+                         sls: list[int] | None, sel: int | None, reused: list[str], t0: float,
+                         candidate_layers: list[int] | None = None) -> dict:
         """一括の rank writes の 3〜5 段(heads_pipeline から)。gne/unitwrites.py。"""
         from .causal import prepare
         from .direction import score_layers_default
@@ -2442,7 +2482,8 @@ class Session:
         ds = self.direction_set(name)
         ts = time.perf_counter()                                   # 3. 書き込みの順位づけ(質問は全部)
         summ, arrays = measure_writes(self, ds, cs, select_layer=S, positions=sp, kinds=kinds,
-                                      direction_layer=pipe["direction_layer"], progress=self.progress)
+                                      direction_layer=pipe["direction_layer"], candidate_layers=candidate_layers,
+                                      progress=self.progress)
         out["writes"] = {k: summ[k] for k in ("select_layer", "kinds", "n", "skipped_long", "gap", "base", "n_units",
                                                "totals", "totals_share", "check")}
         out["writes"]["seconds"] = time.perf_counter() - ts
@@ -2531,6 +2572,8 @@ class Session:
             out["a_changed"] = (a0["match_finished"] or 0) - (a1["match_finished"] or 0)
             out["note"] = None if out["a_changed"] >= max(1, len(pa) // 6) else \
                 "射影の値は目標に届いても、A 側の応答の一致はほとんど減っていません(振る舞いが変わっていない可能性)"
+            # 書き込みの量で選ぶと効かず、v0.7.0 までの選び方(基準層の手前の層のヘッド)が効く題材がある(Qwen3.5-4B の disclaimer)
+            out["suggest"] = None if out["note"] is None else "rank causal"
         out["seconds"] = time.perf_counter() - t0
         return out
 
@@ -2651,16 +2694,18 @@ class Session:
         pipe.setdefault("score_positions", pos)
         if isinstance(st.get("target"), str):                           # B / mid は、残りの一括でも同じ意味
             pipe["target"] = st["target"]
-        pipe.update(n_heads=[int(x) for x in new_heads], hard=max(1, min(int(st.get("hard") or 16), len(qa))))
         rk = rank or st.get("rank") or "causal"
         if rk == "writes":                                              # 新しい選び方で足す部品を探す(ニューロンも選べる)
-            pipe.update(rank="writes", unit_kinds=unit_kinds or st.get("unit_kinds") or "all",
+            pipe.pop("top_layers", None)
+            pipe.update(rank="writes", unit_kinds=unit_kinds or st.get("unit_kinds") or "heads",
                         n_units=[int(x) for x in new_heads], check_replies=0,
                         **{k_: st[k_] for k_ in ("verify_top", "verify_sample", "verify_mode", "select_layer") if st.get(k_) is not None})
-        elif rk != "causal":
+        elif rk == "causal":                                            # 元が v0.7.0 までの流れ(rank の記録が無い古い結果も)
+            if unit_kinds not in (None, "heads"):
+                raise GneError("BAD_ARGS", "ニューロンも足すには rank writes にしてください(rank causal はヘッドだけ)")
+            pipe.update(rank="causal", n_heads=[int(x) for x in new_heads], hard=max(1, min(int(st.get("hard") or 16), len(qa))))
+        else:
             raise GneError("BAD_ARGS", f"rank は causal か writes です({rk!r})")
-        elif unit_kinds not in (None, "heads"):
-            raise GneError("BAD_ARGS", "ニューロンも足すには rank writes にしてください(rank causal はヘッドだけ)")
         spec = {"name": out_name, **({"system_a": cs.system_a} if cs.system_a is not None else {}),
                 **({"system_b": cs.system_b} if cs.system_b is not None else {}),
                 "recipe_a": side_recipe("A"), "recipe_b": side_recipe("B"), "prompts_a": qa, "prompts_b": cs.prompts("B"),

@@ -22,7 +22,7 @@ const DRAFT = "gne.pipeline.draft";               // 入力欄の下書き(こ�
 // 設定の欄 → ジョブの引数(spec の pipeline に値があれば、読み込んだときに欄に入れる)
 const FIELDS = [["target", "#pp-target"], ["n_heads", "#pp-nheads"], ["max_examples", "#pp-mx"], ["positions", "#pp-pos"],
                 ["top_layers", "#pp-tl"], ["hard", "#pp-hard"], ["rank", "#pp-rank"], ["unit_kinds", "#pp-kinds"]];
-const DEFAULTS = { target: "", n_heads: "6,5,4", max_examples: 64, positions: "last", top_layers: 4, hard: 16, rank: "causal", unit_kinds: "all" };
+const DEFAULTS = { target: "", n_heads: "6,5,4", max_examples: 64, positions: "last", top_layers: 4, hard: 16, rank: "writes", unit_kinds: "heads" };
 const ETA_SHOWN = 12;                             // η の表で最初に出す行の数(残りはボタンで)
 
 // 「ひな形」で入れる小さな例(system で A / B を作る。レシピで作るときは recipe_a: ["14:8949:+1.0"] など)
@@ -139,7 +139,7 @@ export class PipelinePanel {
     this.lastPipe = null;                        // 最後に欄に入れた spec の pipeline(変わったときだけ設定の欄を書き換える)
     root.innerHTML = `
       <div id="pp-input">
-      ${noteHTML(t("1 つの JSON(対照集合と同じ中身)から、方向 → 基準層 → 因果スクリーニング → 強さの配分 を 1 回のジョブで回します。A と B は system_a / system_b(system の文)か recipe_a / recipe_b(レシピの名前・パス・ユニットのリスト)で作ります。片側の system を省くと system なしで読ませます。"))}
+      ${noteHTML(t("1 つの JSON(対照集合と同じ中身)から、方向 → 基準層 → 候補づくり → 強さの配分 を 1 回のジョブで回します。候補づくりは、既定では全部の部品を方向への書き込みの量で並べます(「止めて選ぶ」で v0.7.0 までの選び方)。A と B は system_a / system_b(system の文)か recipe_a / recipe_b(レシピの名前・パス・ユニットのリスト)で作ります。片側の system を省くと system なしで読ませます。"))}
       <div class="pp-in">
         <label class="muted">${t("JSON ファイル")} <input type="file" id="pp-file" accept=".json,application/json"></label>
         <label class="muted" title="${t("用途別のテンプレート(configs/pipeline/)。選ぶと入力欄に入る")}">${t("ひな形")}
@@ -157,8 +157,8 @@ export class PipelinePanel {
         <label class="muted" title="${t("方向を作る位置。last = 質問の最後のトークン、response = 応答を書かせてその位置(遅い)")}">${t("方向を作る位置")} <select id="pp-pos"><option value="last">${t("質問の最後")}</option><option value="response">${t("応答(遅い)")}</option></select></label>
         <label class="muted" title="${t("層ごとのスクリーニングのあと、ヘッドを 1 個ずつ止めて測る層の数")}">${t("ヘッドを測る層の数")} <input id="pp-tl" type="number" min="1" max="64" value="${DEFAULTS.top_layers}"></label>
         <label class="muted" title="${t("効率を測るときの、射影の値が残りやすい質問の数")}">${t("残りやすい質問の数")} <input id="pp-hard" type="number" min="1" max="1024" value="${DEFAULTS.hard}"></label>
-        <label class="muted" title="${t("候補の探し方。止めて選ぶ = 層ごとに止めた効き目の上位の層のヘッドを 1 個ずつ止め、効率で配り直す(今までの既定)。書き込みの量で全部から = 全部の層の注意ヘッド・線形注意のヘッド・MLP のニューロンを方向への書き込みの量で並べ、上位を s=1 で確かめてから、s=1 で組に足す(足りないときだけ全体の強さを上げる)")}">${t("候補の探し方")} <select id="pp-rank"><option value="causal">${t("止めて選ぶ(既定)")}</option><option value="writes">${t("書き込みの量で全部から")}</option></select></label>
-        <label class="muted" title="${t("書き込みの量で全部から選ぶときの部品の種類")}">${t("部品")} <select id="pp-kinds"><option value="all">${t("ヘッド・線形注意・ニューロン")}</option><option value="heads">${t("ヘッドだけ")}</option></select></label>
+        <label class="muted" title="${t("候補の探し方。書き込みの量で全部から(既定) = 全部の層の注意ヘッド・線形注意のヘッド(部品で選べばニューロンも)を方向への書き込みの量で並べ、上位を s=1 で確かめてから、s=1 で組に足す(足りないときだけ全体の強さを上げる)。止めて選ぶ = v0.7.0 までの選び方(層ごとに止めた効き目の上位の層のヘッドを 1 個ずつ止め、効率で配り直す)。応答が変わらないときは、もう一方も試す")}">${t("候補の探し方")} <select id="pp-rank"><option value="writes">${t("書き込みの量で全部から(既定)")}</option><option value="causal">${t("止めて選ぶ(v0.7.0 まで)")}</option></select></label>
+        <label class="muted" title="${t("書き込みの量で全部から選ぶときの部品の種類")}">${t("部品")} <select id="pp-kinds"><option value="heads">${t("ヘッドだけ(既定)")}</option><option value="all">${t("ヘッド・線形注意・ニューロン")}</option></select></label>
         <label class="muted" title="${t("同じ JSON・同じ設定で作り済みの方向と因果の結果があっても使い回さず、最初から作り直す(止めて流し直すときは外したままにすると配分からやり直せる)")}"><input type="checkbox" id="pp-fresh"> ${t("最初から作り直す")}</label></div>
       </div>
       <div class="pp-go" id="pp-run"><button class="main" id="pp-go" disabled>${t("方向とヘッドを作る")}</button> <span class="muted note" id="pp-status"></span></div>
@@ -275,7 +275,8 @@ export class PipelinePanel {
     if (mx === null || tl === null || hard === null) { this.status(t("max_examples・top_layers・hard は整数で(max_examples は 4 以上)"), true); return null; }
     const p = { spec: c.spec, n_heads: nh, max_examples: mx, positions: this.$("#pp-pos").value, top_layers: tl, hard };
     if (this.$("#pp-fresh").checked) p.resume = false;
-    if (this.$("#pp-rank").value === "writes") { p.rank = "writes"; p.unit_kinds = this.$("#pp-kinds").value; }
+    p.rank = this.$("#pp-rank").value;                                   // writes(既定)/ causal(v0.7.0 まで)
+    if (p.rank === "writes") p.unit_kinds = this.$("#pp-kinds").value;
     const tg = this.$("#pp-target").value.trim();
     if (tg) {
       if (/^b$/i.test(tg)) p.target = "B";
@@ -390,6 +391,7 @@ export class PipelinePanel {
       <div class="pp-res"><div class="pp-res-head">
       <h3>${t("{name} の結果", { name: esc(d.name) })} <span class="muted note mono">${esc((d.updated || "").replace("T", " ").slice(0, 16))} · ${t("{n} 秒", { n: Math.round(d.seconds || 0) })}</span></h3>
       <p class="note">${t("質問 {n} 個", { n: d.n_prompts ?? "—" })} · A: ${esc(side(sides.A))} · B: ${esc(side(sides.B))}</p>
+      <p class="note">${d.writes ? t("選び方: 書き込みの量で全部の部品から(--rank writes、既定)") : t("選び方: 止めて選ぶ(v0.7.0 までの選び方、--rank causal)")}${d.rank_note ? ` <span class="muted">${esc(d.rank_note)}</span>` : ""}</p>
       ${this.refineNote(d)}
       ${(d.reused || []).length ? `<p class="note muted">${t("同じ JSON・同じ設定で作り済みの{w}を使い回しました(作り直すときは「最初から作り直す」に印を付けて流し直す)",
         { w: d.reused.map((x) => (x === "direction" ? t("方向") : x === "causal" ? t("因果の結果") : x)).join(t("と")) })}</p>` : ""}
@@ -585,7 +587,8 @@ export class PipelinePanel {
       ${ck ? `<section class="pp-stage"><h4>${t("6. 応答での確かめ")}</h4>
         ${noteHTML(t("選んだ組と無介入で応答を書かせ、書き終えた応答のうち validate.match に一致した数を数えます(A 側 / B 側)。射影の値が目標に届いても応答が変わらないことがあるので、その確かめです。"), "muted note")}
         <table class="evx mono"><thead><tr><th></th><th>A</th><th>B</th><th>${t("空")} A / B</th><th>${t("繰り返し")} A / B</th><th>${t("上限で切れた")} A / B</th></tr></thead><tbody>${ckRows}</tbody></table>
-        ${ck.note ? `<p class="note ng">${t(ck.note)}</p>` : ""}</section>` : ""}`;
+        ${ck.note ? `<p class="note ng">${t(ck.note)}</p>` : ""}
+        ${ck.suggest ? `<p class="note">${t("応答が変わらないときは「止めて選ぶ」(v0.7.0 までの選び方、--rank causal)も試してください。Qwen3.5-4B の注意書き(disclaimer)では、この選び方は射影の値が届いても応答を変えず、v0.7.0 までの選び方は注意書きを減らした(ただし軽い質問にも注意書きを足した)")}</p>` : ""}</section>` : ""}`;
   }
 
   // 2. 因果スクリーニング: 層ごと(外した層と理由)→ ヘッドを 1 個ずつ(外したヘッドと理由)

@@ -89,8 +89,9 @@ def parse_kinds(spec) -> tuple[str, ...]:
 
 def measure_writes(session, ds, cs, *, select_layer: int, positions: str = "last", subset: str = "all",
                    max_examples: int | None = None, kinds=KINDS, direction_layer: str = "own", top_q: int = 256,
-                   progress=None) -> tuple[dict, dict]:
-    """部品ごとの書き込み(と層ごとの更新のベクトル)を測る。戻り値 (まとめ, 保存する配列)。"""
+                   candidate_layers: list[int] | None = None, progress=None) -> tuple[dict, dict]:
+    """部品ごとの書き込み(と層ごとの更新のベクトル)を測る。戻り値 (まとめ, 保存する配列)。candidate_layers を渡すと、
+    順位に入れる部品をその層のものに絞る(層ごとの更新のベクトルは全部の層で測る)。"""
     from .attn import _names, _probe, head_out_names, writer_out_name
     from .capture import pick_act_name
     from .direction import Scorer
@@ -111,6 +112,11 @@ def measure_writes(session, ds, cs, *, select_layer: int, positions: str = "last
     builder = ProjBuilder(w, session.direction_set, direction_layer=direction_layer, keep_w=4)
     rS = ds.unit(S).astype(np.float64)
     hl, nl = unit_layers(session, S - 1, kinds)
+    if candidate_layers is not None:
+        keep = {int(x) for x in candidate_layers}
+        hl, nl = [L for L in hl if L in keep], [L for L in nl if L in keep]
+        if not hl and not nl:
+            raise GneError("BAD_ARGS", f"candidate_layers に、選ぶ層 L{S} より前の部品のある層がありません")
     exec_layers = list(range(n_layer - 1))               # 最後の層は行が間引かれるので測れない
     # 捕まえる名前
     items = {s: [(ids, rows) for ids, rows in sc.items[s] if len(ids) <= e.probe_ubatch] for s in "AB"}

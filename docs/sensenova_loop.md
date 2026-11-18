@@ -106,15 +106,15 @@ gne の層の番号は実行順(0〜55)で、llama.cpp のテンソルの捕捉�
 
 | 段階 | コマンド | 元の llama.cpp |
 |---|---|---|
-| 回ごとに測る | `gne heads pipeline --score-layers loop --select-layer 27`(`heads causal` も同じ指定) | できる |
+| 回ごとに測る | `gne heads pipeline --rank causal --score-layers loop --select-layer 27`(`heads causal` も同じ指定) | できる |
 | 回ごとに探す | `gne heads causal --visits first / second / both`、`gne heads visits`、`gne heads loop-pipeline` | both 以外はできない(理由と代わりの方法を出して止める) |
 | 仕上げ | `gne heads loop-merge`、`gne heads measure` | できる(回ごとに当てた値の列だけ省く) |
 
 ### 回ごとに測る
 
 - `--score-layers loop` は、射影の値(残差を方向に射影した値)を、1 回目の出口(段 27)・2 回目の出口(段 51)・最後の層の 1 つ前(段 54)で測る。最後の層(段 55)は、llama.cpp が最後のトークン以外の行を捨てるので測れない。
-- **このモデルでの `gne heads pipeline` の既定**(ほかの arch は今までどおり): 測る層を指定しなければ `--score-layers loop --select-layer 54` で流し、ループの外の段 52・53 は、層を止めた下がり方の順位に関係なく、いつもヘッド単位で測る(`--always-layers`)。下の「確かめたもの」で、効くヘッドが今までの既定の候補から漏れたため。今までの既定に戻すには `--score-layers base --always-layers none`。一括の出力に、この arch 用の既定で流したことが 1 行出る。
-- `--candidate-layers` は、候補のヘッドを探す層(例 `28-53`)。`GNE_LOOP_EDITS=per_visit` と一緒に使うと、1 回目だけ・2 回目だけから選べる。
+- **このモデルでの `gne heads pipeline` の既定**(ほかの arch は今までどおり): 測る層を指定しなければ `--score-layers loop --select-layer 54` で流す。v0.8.0 からの一括の既定 `--rank writes` は、選ぶ層の既定が最後に測れる層(段 54)で、全部の層の部品を順位づけるので、これと同じ段 54 で選ぶ。`--rank causal`(v0.7.0 までの選び方)のときだけ、さらにループの外の段 52・53 を、層を止めた下がり方の順位に関係なく、いつもヘッド単位で測る(`--always-layers`)。下の「確かめたもの」で、効くヘッドが `--rank causal` の候補から漏れたため。それより前の既定に戻すには `--rank causal --score-layers base --always-layers none`。一括の出力に、この arch 用の既定で流したことが 1 行出る。
+- `--candidate-layers` は、候補の部品を探す層(例 `28-53`。`--rank writes` と `--rank causal` の両方)。`GNE_LOOP_EDITS=per_visit` と一緒に使うと、1 回目だけ・2 回目だけから選べる。
 - `--select-layer` は、ヘッドの順位づけと配分の目標に使う層。`--select-layer 27` なら「1 回目の終わりの値で選ぶ」(段 27 での下がり方で順位をつけ、段 27 より前のヘッドを候補にし、目標は段 27 の B 側の平均)。
 - 測る層を指定すると、一括の結果に、因果スクリーニングの上位のヘッドの層ごとの下がり方と、配分した組ごとの層ごとの A 側・B 側の平均が並ぶ。1 回目の終わりでどこまで下がり、2 回目でどう変わったかを 1 つの表で読める。
 - 途中の残差に出力層をかけて読む値(logit lens)は目安にしかならない。このモデルは 1 回目の終わりの残差を出力層で読む前提で作られていないので、それを「1 回目の出力」とは読まない。
@@ -123,7 +123,7 @@ gne の層の番号は実行順(0〜55)で、llama.cpp のテンソルの捕捉�
 
 - `gne heads causal --visits first`(または `second`): ヘッドを 1 回目だけ(または 2 回目だけ)止めて因果スクリーニングをする。`both` は両方の回で止める(既定と同じ)。
 - `gne heads visits --name <方向>`: 同じヘッドを 1 回目だけ・2 回目だけ・両方で止めた効き目を並べ、回の間の順位相関(Spearman)を出す。「両方−和」は、両方で止めた下がり方から片方ずつの和を引いたもの。
-- `gne heads loop-pipeline --spec <ひな形> --n-first 3 --n-second 3`: 2 段で選ぶ。
+- `gne heads loop-pipeline --spec <ひな形> --n-first 3 --n-second 3`: 2 段で選ぶ(どちらの段も `--rank causal` の一括で流す。一括の既定には従わない)。
   1. 段 0〜27 のヘッドから、段 27 の射影の値で選ぶ(1 回目だけに当てる)。
   2. その組を対照集合の両側に当てた状態で、段 28〜53 のヘッドから、段 54 の射影の値で選ぶ(2 回目だけに当てる)。対照集合の側には、レシピを重ねて当てる書き方 `recipe_a: {stack: [<レシピ>, …]}` を使う。
   3. 2 つを合わせたレシピ(`<名前>_loop.per_visit.yaml`)を、次の仕上げにかける。
@@ -147,10 +147,10 @@ gne の層の番号は実行順(0〜55)で、llama.cpp のテンソルの捕捉�
 
 ## CHiPS と FiSH を流す(確かめたもの)
 
-公開のひな形で、次の順に流して最後まで動くことを確かめた(Q4_K_M と Q8_0、元の llama.cpp)。
+公開のひな形で、次の順に流して最後まで動くことを確かめた(Q4_K_M と Q8_0、元の llama.cpp。一括は v0.7.0 までの選び方 `--rank causal` で流した。v0.8.0 からの既定 `--rank writes` では、組の上限の数は `--n-units` で、レシピの名前は `…alloc-n24.yaml` などになる)。
 
 ```
-gne heads pipeline --spec configs/pipeline/disclaimer.json --target B --n-heads 10,6,4,2,1 -m <model>
+gne heads pipeline --spec configs/pipeline/disclaimer.json --rank causal --target B --n-heads 10,6,4,2,1 -m <model>
 gne nw pipeline --contrast configs/fish/closing_rmbase.json --layers 40-46 --remove rmbase --kscale auto \
     --iv <heads pipeline が書いたレシピ(…alloc-n10.yaml など)> --no-stack --save <名前> -m <model>
 gne nw verify --recipe <名前> --iv <同じレシピ> --contrast configs/fish/closing_rmbase.json -m <model>
@@ -163,6 +163,8 @@ gne nw check  --recipe <名前> --iv <同じレシピ> --contrast configs/fish/c
 - Q4_K_M では `gne nw verify` が、入力の行の誤差(4〜10%)で許容(5%)を超えて不合格になった。量子化の丸めによる差で、Q8_0 では全部の層で合格(2〜4%)。
 
 ### 回ごとの CHiPS(確かめたもの)
+
+(この節の値は、v0.7.0 までの選び方 `--rank causal` での値。v0.8.0 からの既定 `--rank writes` との比べは、下の「全部の部品を書き込みの量で並べる」の節。)
 
 公開のひな形 `disclaimer.json` と `question_kinds.json`(各側 16 問)、Q4_K_M、2 本の流れの両方に足し 2 回目の層に別の名前を付けた llama.cpp で、同じヘッド数(6)の組を候補の範囲を変えて作り、段 54 で比べた。どれも目標は段 54 の B 側の平均で、同じ方向で測った。値は、段 54 の A と B の差のうち縮めた割合(1 で B 側の平均に届く)/ B 側の直交成分のずれ。「両方」は両方の回に当てた形(配れる形)。
 
@@ -197,13 +199,13 @@ gne nw check  --recipe <名前> --iv <同じレシピ> --contrast configs/fish/c
 
 ### 全部の部品を書き込みの量で並べる(`gne heads writes`・`--rank writes`)
 
-[docs/head-component-steering.md](head-component-steering.md) §3.9 の選び方は、このモデルでもそのまま使える(既定の選ぶ層は段 54)。
+[docs/head-component-steering.md](head-component-steering.md) §3.9 の選び方(v0.8.0 からの一括の既定)は、このモデルでもそのまま使える(既定の選ぶ層は段 54)。
 
 - 部品は、重みを持つ層の番号で表す(段 4〜27 のヘッド・ニューロンは、2 回目の段 28〜51 でも同じ重みで書くので、2 回分の書き込みを足して 1 つの部品にする)。ニューロンの射影も両方の回に効く。
 - 2 本の流れの中の層では、副層(注意・MLP)の出力 `y` は 2 本に `post₀·y`・`post₁·y` として足され、2 本を混ぜる行列は行も列も和が 1(Sinkhorn で作る)なので、2 本の平均の残差の増分は `c·y`(`c = (post₀ + post₁)/2`)。書き込みにはこの `c` を掛ける。`post` はルーターの値で、捕捉の `mhc_attn_gates-L`・`mhc_ffn_gates-L` の先頭 2 つ。
 - 部品から組み立てた層の更新が、捕まえた残差の差 `l_out(L) − l_out(L−1)` と合うかを、結果の `check.layer_rel_median` / `layer_rel_max` に出す。Q4_K_M で中央値 0.4〜0.5%・最大 1.3〜2.3% だった。
 
-確かめ(Q4_K_M、改造版の llama.cpp のまま、両方の回に当てる形、目標 `B`。応答は方向づくりにも選ぶのにも使っていない質問の各側 30 問、greedy、上限 1,024 トークン)。(1) はこのモデルの既定(`--rank causal`、測る層 loop・選ぶ層 54)、(2) は `--rank writes --unit-kinds heads`、(3) は `--rank writes`。値は、段 54 の A と B の差を縮めた割合 / B 側の直交成分のずれ、書き終えた応答のうち `validate.match` に一致した数。
+確かめ(Q4_K_M、改造版の llama.cpp のまま、両方の回に当てる形、目標 `B`。応答は方向づくりにも選ぶのにも使っていない質問の各側 30 問、greedy、上限 1,024 トークン)。(1) は v0.7.0 までのこのモデルの既定(`--rank causal`、測る層 loop・選ぶ層 54・段 52・53 をいつも測る)、(2) は `--rank writes --unit-kinds heads`(v0.8.0 からの既定)、(3) は `--rank writes --unit-kinds all`。値は、段 54 の A と B の差を縮めた割合 / B 側の直交成分のずれ、書き終えた応答のうち `validate.match` に一致した数。
 
 | ひな形 | 条件 | 部品 | 強さ 最大 / 中央値 | 段 54 | A 一致 | B 一致 |
 |---|---|---|---|---|---|---|
@@ -219,6 +221,7 @@ gne nw check  --recipe <名前> --iv <同じレシピ> --contrast configs/fish/c
 - question_kinds: (1) は前と同じく、英語の質問に日本語で答えるようにした(B 側を壊した)。(2)・(3) は日本語の質問に英語で答え、英語の質問はそのまま。無作為に選んだ同じ数の部品では変わらない。どの組も、段 54 の目標(B 側の平均)には届かず(縮めた割合 0.9 前後)、推す組は無かった(残る数が最少の組を使った)。
 - disclaimer: どの条件も応答を変えなかった。(2)・(3) は射影の値を B 側の平均まで下げている。ニューロンを入れると、同じ目標に要る強さは 19.4 から 13.6 に下がった。
 - system_persona は、このモデルが悪意の AI の system を与えてもふつうに答える(無介入で A 側の一致 0/30)ので、応答では比べられなかった。
+- この表の (1) は、このモデルの v0.7.0 までの既定。v0.8.0 からの一括の既定は (2)(`--rank writes`、ヘッドだけ)。
 - 時間は (1) が 300〜360 秒、(2)・(3) が 340〜460 秒(順位づけ 1 分前後、上位 80 個の確かめ約 2 分、組づくり 1〜2 分、応答での確かめ 0.5〜3 分)。
 
 ## 目安(Q4_K_M、RTX 3080 12 GB)
@@ -227,7 +230,8 @@ gne nw check  --recipe <名前> --iv <同じレシピ> --contrast configs/fish/c
 |---|---|
 | llama-server(文脈 8,192) | GPU 約 5.7 GB(画面の分を除く)、生成 約 52 tok/s |
 | 文脈の長さ | 65,536 まで余裕あり(約 9 GB)。131,072 は 12 GB にほぼいっぱい |
-| `gne heads pipeline`(各側 16 問) | 約 4 分(方向 3 秒、因果スクリーニング 3 分、配分 1 分強)、GPU 約 6 GB。Q8_0 は約 5 分(`--n-ctx 2048` で GPU 最大 11.5 GB) |
+| `gne heads pipeline --rank causal`(各側 16 問) | 約 4 分(方向 3 秒、因果スクリーニング 3 分、配分 1 分強)、GPU 約 6 GB。Q8_0 は約 5 分(`--n-ctx 2048` で GPU 最大 11.5 GB) |
+| `gne heads pipeline`(既定の `--rank writes`、各側 16 問) | 約 6〜8 分(順位づけ 1 分前後、上位 80 個の確かめ約 2 分、組づくり 1〜2 分、応答での確かめ 0.5〜3 分) |
 | `gne nw pipeline`(層 7 つ、質問 12 + 8) | 約 2 分 20 秒 |
 | `gne nw verify --contrast`・`gne nw check` | それぞれ約 20 秒 |
 | `gne heads loop-pipeline`(各側 16 問、3+3) | 約 8〜9 分(一括の流れ 2 回と、仕上げの測り直し) |

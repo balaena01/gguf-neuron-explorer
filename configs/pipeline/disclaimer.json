@@ -9,7 +9,7 @@
           "h": "何をするか",
           "body": [
             "- A 側(prompts_a)は、モデルが自分で注意書きを添えやすい深刻な相談、B 側(prompts_b)は同じ話題の軽い質問です。どちらもシステムプロンプトなしで読みます。",
-            "- 方向 → 基準層 → 因果スクリーニング → 強さの配分を 1 回で回し、注意書きの方向を書くヘッドと強さを選びます。",
+            "- 方向 → 基準層 → 候補づくり → 強さの配分を 1 回で回し、注意書きの方向を書くヘッドと強さを選びます。候補づくりの既定は、全部のヘッドを方向への書き込みの量で並べる形(--rank writes)で、v0.7.0 までの選び方は --rank causal です。",
             "- CHiPS のレシピは、どの場面でもそのヘッドの成分を弱めます。場面を選んで取り除くには、できたレシピを FiSH の画面の「CHiPS のヘッドの分を場面で取り除く」に渡します。"
           ]
         },
@@ -30,8 +30,9 @@
         {
           "h": "確かめた範囲と数",
           "body": [
-            "- 試した範囲: Qwen3.5-4B(Q8_0)で 1 回(131 秒)。このひな形の 16 問ずつでは、目標に届いた組が無く推奨の組は出ませんでした。いちばん大きい 8 個の組は、層 7・11 のヘッドでした。注意書きが減ったかは測っていません。",
-            "- 同じ題材(健康・法律・お金の深刻な相談、Qwen3.5-4B)で gne の heads pipeline が選んだ組は 6 個(層 6・7・11・12)でした(docs/verification.md §23)。"
+            "- 試した範囲(v0.7.0 までの選び方、--rank causal での値): Qwen3.5-4B(Q8_0)で 1 回(131 秒)。このひな形の 16 問ずつでは、目標に届いた組が無く推奨の組は出ませんでした。いちばん大きい 8 個の組は、層 7・11 のヘッドでした。注意書きが減ったかは測っていません。",
+            "- 同じ題材(健康・法律・お金の深刻な相談、Qwen3.5-4B)で gne の heads pipeline(--rank causal)が選んだ組は 6 個(層 6・7・11・12)でした(docs/verification.md §23)。",
+            "- 2 つの選び方の比べ(Qwen3.5-4B、目標 B、調整に使っていない質問 各 30 問、書き終えた応答で注意書きの正規表現に一致した数): 無介入は深刻な相談 28/30・軽い質問 1/26。--rank writes(v0.8.0 からの既定)は 25/30・0/29 で、射影の値は B 側の平均まで下がったのに、注意書きはほとんど減りませんでした。--rank causal は 10/29 に減らしましたが、軽い質問にも「私は AI であり医師でもありませんので…」を足しました(9/29。前の報告と同じ 6 個の組では 9/29・3/27)。この題材では --rank causal も試してください(docs/head-component-steering.md §3.9)。"
           ]
         },
         {
@@ -51,7 +52,7 @@
           "h": "What it does",
           "body": [
             "- Side A (prompts_a) holds serious consultations, where the model tends to add a disclaimer by itself; side B (prompts_b) holds light questions on the same topics. Both are read without a system prompt.",
-            "- One run goes through direction → base layer → causal screening → strength allocation and picks the heads that write the disclaimer direction and their strengths.",
+            "- One run goes through direction → base layer → candidates → strength allocation and picks the heads that write the disclaimer direction and their strengths. By default the candidates come from ranking every head by its write along the direction (--rank writes); the selection used up to v0.7.0 is --rank causal.",
             "- A CHiPS recipe weakens those heads' component in every scene. To remove it only in chosen scenes, pass the recipe to \"Remove CHiPS head contribution by scene\" on the FiSH screen."
           ]
         },
@@ -72,8 +73,9 @@
         {
           "h": "Checked range and numbers",
           "body": [
-            "- Tried on: Qwen3.5-4B (Q8_0), one run (131 s). With 16 questions each, no group reached the target, so no group was recommended; the largest group of 8 used heads at layers 7 and 11. Whether disclaimers dropped was not measured.",
-            "- On the same subject (serious health, legal and money consultations, Qwen3.5-4B), gne heads pipeline picked 6 heads (layers 6, 7, 11, 12) (docs/verification.md §23)."
+            "- Tried on (values from the selection used up to v0.7.0, --rank causal): Qwen3.5-4B (Q8_0), one run (131 s). With 16 questions each, no group reached the target, so no group was recommended; the largest group of 8 used heads at layers 7 and 11. Whether disclaimers dropped was not measured.",
+            "- On the same subject (serious health, legal and money consultations, Qwen3.5-4B), gne heads pipeline (--rank causal) picked 6 heads (layers 6, 7, 11, 12) (docs/verification.md §23).",
+            "- The two selections compared (Qwen3.5-4B, target B, 30 held-out questions per side, finished replies matching the disclaimer regex): no intervention 28/30 on serious consultations and 1/26 on light questions. --rank writes (the default from v0.8.0) gave 25/30 and 0/29: the projection reached the B-side mean but the disclaimers barely dropped. --rank causal brought them down to 10/29 but also added \"I am an AI and not a doctor…\" to light questions (9/29; the 6-head set from the earlier report gave 9/29 and 3/27). On this subject, try --rank causal as well (docs/head-component-steering.md §3.9)."
           ]
         },
         {

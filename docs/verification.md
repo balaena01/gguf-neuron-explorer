@@ -6,6 +6,7 @@
 - 環境: RTX 3080 12GB(WSL2、CUDA 12.4)、Python 3.12.13(uv の venv)
 - llama-cpp-python 0.3.36(ソースからビルド、`CMAKE_ARGS="-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=86"`)。同梱 llama.cpp は **commit `0c1e570`(2026-10-01)**。設計書が読んだ master `d854d98` とは違う版なので、[確認済] の項目はこの版のソースで読み直した(§2)
 - gguf-py 0.19.0、numpy 2.5.4
+- `gne heads pipeline` の既定は v0.8.0 から `--rank writes`(全部の部品を書き込みの量で並べる選び方)に変わった。この文書の `gne heads pipeline` の結果と、それで作った CHiPS の組は、断りが無ければ v0.7.0 までの選び方(`--rank causal`)での値。同じ組を作り直すには `--rank causal` を付ける。
 - `llama-completion`: 同じ commit の llama.cpp を `build/llama.cpp` でビルド(V4 の生成比較用)
 - モデル: Qwen3-0.6B Q8_0(`Qwen/Qwen3-0.6B-GGUF`)、Qwen3.5-4B Q8_0(`unsloth/Qwen3.5-4B-GGUF`、ハイブリッド: 4 層ごとに full attention)、SmolLM2-135M-Instruct Q8_0 と F16(`bartowski/SmolLM2-135M-Instruct-GGUF`、arch `llama`、V9 用)
 
@@ -2094,7 +2095,7 @@ keyed write(§21.9 と同じ層・同じ鍵)の方向だけを (ii) に替える
   当てた状態で作り直す(`--iv`)ほうがよかった。
 - 性格らしい数は読み手の分け方で 1〜2 問動く。実験の 5 問と今回の 7 問の差は、誤差の範囲と、ニューロン・鍵の作り方の違い
   (dont_touch の返事の全部の位置を Q に入れた)の両方がありうる(切り分けていない)。「俺」「お前」が混じる点は同じ。
-- 逆の順(nw のレシピを対照集合の `recipe_a` にして `gne direction`・`gne heads pipeline --positions response`)は最後まで回った
+- 逆の順(nw のレシピを対照集合の `recipe_a` にして `gne direction`・`gne heads pipeline --positions response`、v0.7.0 までの選び方 `--rank causal`)は最後まで回った
   (4 問の小さい集合で、動くことだけを確かめた)。
 
 ### 22.10 Web UI だけでの確かめ
@@ -3023,7 +3024,7 @@ verify の目安 5% を超えた(入力の行を 1/k にした分、元の行と
 ### 23.2 ヘッドの分を場面で取り除く流れ(`gne nw heads`)を、実験用のスクリプトと比べる
 題材: Qwen3.5-4B Q8_0、システムプロンプトなし。深刻な相談(健康・法律・お金)に付く「医師に相談を」のような注意書きを取り除き、
 軽い質問(同じ 3 つの話題)と関係のない質問では残す。
-- CHiPS の組は gne の heads pipeline の配分の 6 個(層 6・7・11・12。いちばん強いのは層 12 のヘッド 31、s = 24.4)。
+- CHiPS の組は gne の heads pipeline(v0.7.0 までの選び方、`--rank causal`)の配分の 6 個(層 6・7・11・12。いちばん強いのは層 12 のヘッド 31、s = 24.4)。
 - 鍵は `gne nw key --role scene / one`(深刻な相談 60 問・軽い質問 120 問・関係のない質問 40 問)。
 
 | 項目 | gne のコマンドだけ | 実験用のスクリプト |

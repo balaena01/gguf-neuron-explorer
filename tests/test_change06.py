@@ -647,7 +647,7 @@ def test_pipeline_resumes_direction_and_causal(session, tmp_path):
     設定(top_layers)が違えば因果は作り直す。"""
     d = yaml.safe_load(EVIL.read_text(encoding="utf-8"))
     spec = {"name": "pipe_r", "system_a": d["system_a"], "system_b": d["system_b"], "user_prompts": d["user_prompts"],
-            "pipeline": {"n_heads": [2], "max_examples": 8, "top_layers": 1, "hard": 4}}
+            "pipeline": {"rank": "causal", "n_heads": [2], "max_examples": 8, "top_layers": 1, "hard": 4}}
     first = session.heads_pipeline(dict(spec))
     assert not first["reused"] and not first["direction"]["reused"]
     again = session.heads_pipeline(dict(spec))
@@ -692,7 +692,7 @@ def test_pipeline_runs_end_to_end(session, tmp_path):
     """対照集合の表から、方向 → 基準層 → 因果 → 配分 が 1 回で回り、結果とレシピが残る。止めて測る段階は間引いた質問で。"""
     d = yaml.safe_load(EVIL.read_text(encoding="utf-8"))
     spec = {"name": "pipe_t", "system_a": d["system_a"], "system_b": d["system_b"], "user_prompts": d["user_prompts"] * 2,
-            "pipeline": {"n_heads": [2], "max_examples": 8, "top_layers": 1, "hard": 4}}
+            "pipeline": {"rank": "causal", "n_heads": [2], "max_examples": 8, "top_layers": 1, "hard": 4}}
     out = session.heads_pipeline(spec)
     assert out["n_prompts"] == 24 and Path(out["contrast"]).exists() and Path(out["path"]).exists()
     assert out["direction"]["n_rows"]["A"] == 24                       # 方向は全部の質問から
@@ -761,7 +761,7 @@ def test_separate_prompts_direction_score_causal_pipeline(session, tmp_path):
     c = session.heads_causal("ja_en", layers=[sc["best_layer"] - 1], candidates="contrib:2", b_examples=4)
     assert c["n_rows"] == 2 and c["n_b"] == 4
     out = session.heads_pipeline({"name": "ja_en_p", "prompts_a": JA, "prompts_b": EN,
-                                  "pipeline": {"n_heads": [2], "max_examples": 6, "top_layers": 1, "hard": 3}})
+                                  "pipeline": {"rank": "causal", "n_heads": [2], "max_examples": 6, "top_layers": 1, "hard": 3}})
     assert out["n_prompts"] == 8 and out["n_prompts_b"] == 10 and out["allocate"]["table"]
 
 
@@ -977,8 +977,13 @@ def test_refine_adds_heads_from_remaining_questions(session, tmp_path):
     元の組と合わせたレシピを作って測り直す。残りが無ければ断る。同じ組で流し直すと同じ名前で、方向と因果を使い回す。"""
     d = yaml.safe_load(EVIL.read_text(encoding="utf-8"))
     spec = {"name": "rf", "system_a": d["system_a"], "system_b": d["system_b"], "user_prompts": d["user_prompts"],
-            "validate": d["validate"], "pipeline": {"n_heads": [2], "max_examples": 8, "top_layers": 1, "hard": 4}}
+            "validate": d["validate"], "pipeline": {"rank": "causal", "n_heads": [2], "max_examples": 8, "top_layers": 1, "hard": 4}}
     session.heads_pipeline(spec)
+    pj = session.store.heads_dir(session.meta.model_id) / "rf.pipeline.json"
+    pd0 = json.loads(pj.read_text(encoding="utf-8"))
+    assert pd0["settings"]["rank"] == "causal" and pd0["rank"] == "causal"
+    del pd0["settings"]["rank"]                                              # v0.7.0 までの結果(rank の記録が無い)を引き継いでも causal
+    pj.write_text(json.dumps(pd0), encoding="utf-8")
     hd = session.store.heads_dir(session.meta.model_id)
     ap = hd / "rf.alloc.json"
     al = json.loads(ap.read_text(encoding="utf-8"))
@@ -998,7 +1003,7 @@ def test_refine_adds_heads_from_remaining_questions(session, tmp_path):
     assert base_specs == {f"{u['layer']}:H{u['head']}" for u in c["recipe_b"]["units"]}          # 両側に元の組
     assert len(c["prompts_a"]) == rm["used"] and c["prompts_b"] == d["user_prompts"] and c.get("validate")
     pd = json.loads(Path(out["pipeline"]["path"]).read_text(encoding="utf-8"))
-    assert pd["refine"]["base"] == "rf" and pd["refine"]["n_heads"] == 2
+    assert pd["refine"]["base"] == "rf" and pd["refine"]["n_heads"] == 2 and pd["rank"] == "causal"
     rows = [r for r in out["pipeline"]["table"] if not r.get("skipped")]
     assert len(out["combined_rows"]) == len(rows)                           # 比較表のどの組も、元の組と合わせる
     base_u = out["base_units"]
@@ -1034,7 +1039,7 @@ def test_pipeline_target_b_uses_b_mean(session):
     """target="B" は物差しの最後の層での B 側の平均を目標にし、残りもそれを超える例で数える。方向と因果は使い回す。"""
     d = yaml.safe_load(EVIL.read_text(encoding="utf-8"))
     spec = {"name": "pipe_b", "system_a": d["system_a"], "system_b": d["system_b"], "user_prompts": d["user_prompts"],
-            "pipeline": {"n_heads": [2], "max_examples": 8, "top_layers": 1, "hard": 4}}
+            "pipeline": {"rank": "causal", "n_heads": [2], "max_examples": 8, "top_layers": 1, "hard": 4}}
     mid = session.heads_pipeline(dict(spec))
     out = session.heads_pipeline(dict(spec), target="B")
     S = str(out["causal"]["score_layers"][-1])

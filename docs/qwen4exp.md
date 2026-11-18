@@ -25,7 +25,7 @@ Qwen4 の試作アーキテクチャ。177B パラメータで、一番小さい
 
 | 道具 | 状態 | 理由 |
 |---|---|---|
-| CHiPS の射影(`proj`)、`gain`、`heads pipeline` | 使える | LoRA で動く。V24・V25(射影が正しく、直交成分が変わらないかの検証)で確かめた(小さいモデル)。分割ファイルのままでも 1 ファイル版と同じ出力で、射影は 4 本のストリームのどれでも r̂ の向きだけを動かす |
+| CHiPS の射影(`proj`)、`gain`、`heads pipeline` | 使える | LoRA で動く。`heads pipeline` の既定の `--rank writes`(書き込みの量で並べる選び方)は残差が複数本の流れに未対応なので、`--rank` を付けなければ自動で `--rank causal` で流す(出力の `rank_note`)。V24・V25(射影が正しく、直交成分が変わらないかの検証)で確かめた(小さいモデル)。分割ファイルのままでも 1 ファイル版と同じ出力で、射影は 4 本のストリームのどれでも r̂ の向きだけを動かす |
 | 専門家・ニューロンの `gain` | 使える | LoRA で動く |
 | 方向の読み取り(`direction`、`reverse`、`heads causal`) | 使える | 残差の平均を読む |
 | `ablate` の LoRA | 使えない | MoE の `ffn_down_exps` を LoRA で射影できないので断る。attention の書き込みから方向を消すだけなら、`gne headproj ablate --direction <方向> --per-layer --layers 1-47` で LoRA にできる(L0 は止めると中立の入力まで崩れるので外す) |

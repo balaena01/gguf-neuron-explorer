@@ -136,7 +136,7 @@ def loop_pipeline(session, spec, *, n_first: int = 3, n_second: int = 3, target=
                   how: str = "max", resume: bool = True, **pipe_over) -> dict:
     """1 回目で効くヘッドを選ぶ(段 0〜27 の候補、段 27 の射影の値で選ぶ)→ その組を 1 回目だけに当てた状態で、2 回目で効くヘッドを
     選ぶ(段 28〜53 の候補、段 54 で選ぶ)→ 2 つを合わせて、両方の回に当てるレシピに直して測り直す(loop_merge)。
-    どちらの段も heads pipeline(方向 → 基準層 → 因果 → 配分)。2 段目は、1 段目の組を対照集合の両側に重ねて当てる。"""
+    どちらの段も heads pipeline の rank causal(方向 → 基準層 → 因果 → 配分)。2 段目は、1 段目の組を対照集合の両側に重ねて当てる。"""
     import yaml
     lp = _plan(session)
     require_per_visit(session, "1 回目と 2 回目で別々にヘッドを選ぶ流れ")
@@ -154,6 +154,9 @@ def loop_pipeline(session, spec, *, n_first: int = 3, n_second: int = 3, target=
         base_pipe.pop(k, None)
     base_pipe.update({k: v for k, v in pipe_over.items() if v is not None})
     base_pipe["target"] = target
+    # 2 段の流れは、回ごとの候補の層(candidate_layers)と、その回の出口の層での因果スクリーニングで作ったもの。
+    # 一括の既定(v0.8.0 から rank writes)に関係なく、v0.7.0 までの選び方(rank causal)で流す
+    base_pipe.setdefault("rank", "causal")
     name = str(name or raw.get("name") or "")
     if not re.fullmatch(r"[\w.\-]+", name):
         raise GneError("BAD_ARGS", f"名前 {name!r} は英数字・_・-・. だけにしてください")

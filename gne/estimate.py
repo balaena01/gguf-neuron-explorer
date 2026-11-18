@@ -274,25 +274,40 @@ def estimate(session, kind: str, params: dict) -> dict:
         b = min(16, mx)
         n_head = max((li.n_head for li in session.weights.arch.layers if li.head_dim), default=1)
         n_hl = sum(1 for li in session.weights.arch.layers if li.head_dim and li.head_writer)
-        trials_causal = n_hl + int(pipe.get("top_layers", 4)) * n_head
-        trials_alloc = 20 + 30 + len(pipe.get("n_heads") or (6, 5, 4)) * 16
-        hard = int(pipe.get("hard", 16))
-        prefills = 2 * n * 2 + 2 * mx + trials_causal * (mx + b) + trials_alloc * (hard + b)
-        sec = prefills * sp.setprefill / 1000 * 1.2
+        rank = str(pipe.get("rank") or "writes")
+        if rank == "causal":                                   # v0.7.0 までの流れ: 因果(層 → ヘッド)+ 効率で配り直す
+            trials_causal = n_hl + int(pipe.get("top_layers", 4)) * n_head
+            trials_alloc = 20 + 30 + len(pipe.get("n_heads") or (6, 5, 4)) * 16
+            hard = int(pipe.get("hard", 16))
+            prefills = 2 * n * 2 + 2 * mx + trials_causal * (mx + b) + trials_alloc * (hard + b)
+            trials = trials_causal + trials_alloc
+            gen = 0.0
+        else:                                                  # rank writes: 順位づけ(全部の質問)+ 上位の確かめ + s=1 から組 + 応答での確かめ
+            n_ver = int(pipe.get("verify_top", 64)) + int(pipe.get("verify_sample", 16))
+            nu = [int(x) for x in (pipe.get("n_units") or (24, 12, 6))]
+            trials = n_ver + max(nu) + len(nu) * 12
+            prefills = 2 * n * 2 + 2 * mx + 2 * n + trials * (mx + b)
+            ck = 16 if pipe.get("check_replies") is None else int(pipe.get("check_replies"))
+            gen = 2 * sp.gen(2 * min(ck, n), int(pipe.get("check_tokens") or 512)) if ck > 0 else 0.0
+        sec = prefills * sp.setprefill / 1000 * 1.2 + gen
         if pipe.get("positions") == "response":
             sec += 2 * sp.gen(n, 96)
-        detail = {"prompts": n, "screened": mx, "trials": trials_causal + trials_alloc}
+        detail = {"prompts": n, "screened": mx, "trials": trials, "rank": rank}
     elif kind == "heads_refine":                               # 残りを測る + 残りの質問で一括(方向 → 因果 → 配分)+ 合わせた組を測る
         import yaml
         name = str(p.get("name") or "")
         hd = session.store.heads_dir(session.meta.model_id)
         pj = hd / f"{name}.pipeline.json"
         n_a, n_b = 32, 32
+        rank = p.get("rank")
         if pj.exists():
             pd = json.loads(pj.read_text(encoding="utf-8"))
             n_a, n_b = int(pd.get("n_prompts") or 32), int(pd.get("n_prompts_b") or pd.get("n_prompts") or 32)
+            rank = rank or (pd.get("settings") or {}).get("rank")
+        rank = rank or "causal"                                # rank の記録が無い古い結果は v0.7.0 までの流れ
+        nh = list(p.get("new_heads") or (3, 2, 1))
         spec = {"user_prompts": ["q"] * max(4, n_a // 3), "prompts_b": ["q"] * n_b,
-                "pipeline": {"n_heads": list(p.get("new_heads") or (3, 2, 1))}}
+                "pipeline": {"rank": rank, **({"n_heads": nh} if rank == "causal" else {"n_units": nh, "check_replies": 0})}}
         sub = estimate(session, "head_pipeline", {"spec": spec})
         sec = (sub.get("seconds") or 0.0) + (2 * n_a + 3 * min(64, n_b)) * sp.setprefill / 1000 * 1.2
         detail = {"prompts_a": n_a, "remaining_guess": max(4, n_a // 3), "pipeline": sub.get("detail")}

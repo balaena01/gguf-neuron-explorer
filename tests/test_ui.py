@@ -3152,6 +3152,8 @@ def test_pipeline_writes_result_panel(pipe_writes_server, browser):
         assert pg.evaluate(f"document.querySelectorAll('{res} section.pp-stage').length") == 5          # 1 + 3〜6
         assert pg.evaluate(f"document.querySelectorAll('{res} table.pp-top tbody tr').length") == 3
         assert pg.evaluate(f"document.querySelector('{res} #pp-map')") is None
+        assert "--rank writes" in pg.evaluate(f"document.querySelector('{res} .pp-res-head').innerText")   # どちらの選び方で流したか
+        assert pg.evaluate("[document.querySelector('#pp-rank').value, document.querySelector('#pp-kinds').value]") == ["writes", "heads"]
         cmp = pg.evaluate(f"[...document.querySelectorAll('{res} table.pp-cmp tbody tr')].map(tr => [tr.className, tr.dataset.n || ''])")
         assert cmp == [["", "4"], ["rec", "2"]]
         txt = pg.evaluate(f"document.querySelector('{res} table.pp-cmp').innerText")

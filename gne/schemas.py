@@ -1110,6 +1110,9 @@ class HeadsPipelineOut(Envelope):               # gne heads pipeline(方向 → 
     updated: str | None = None
     reused: list[str] | None = None              # 使い回した段(direction・causal、resume)
     arch_defaults: dict[str, Any] | None = None  # この arch だけの既定を使ったとき、その中身(sensenova_loop の測る層など)
+    rank: str | None = None                      # どちらの選び方で流したか: writes(v0.8.0 からの既定)/ causal(v0.7.0 まで)
+    rank_note: str | None = None                 # 既定の rank writes に未対応のモデルで causal に切り替えたときの理由
+    unused_settings: list[str] | None = None     # rank writes で使わない、rank causal だけの設定を渡したとき(n_heads・hard など)
     writes: dict[str, Any] | None = None         # rank writes: 書き込みの順位づけのまとめ(選ぶ層・A−B の差・種類ごとの数と和・保存先)
     verify: dict[str, Any] | None = None         # rank writes: 上位を 1 個ずつ確かめた結果(順位相関・上位の行)
     check: dict[str, Any] | None = None          # rank writes: 応答での確かめ(無介入と組の、書き終えた応答の一致数など)

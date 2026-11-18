@@ -217,6 +217,22 @@ def test_pipeline_writes_settings_are_checked(tmp_path):
     with pytest.raises(GneError):
         s.heads_pipeline({**spec, "pipeline": {"bogus": 1}})
     assert set(Session.PIPELINE_WRITES) >= {"rank", "unit_kinds", "verify_top", "verify_mode", "n_units", "check_replies"}
+    # v0.8.0 の既定: rank writes・部品はヘッドだけ(ニューロンは unit_kinds all で足す)
+    assert Session.PIPELINE_WRITES["rank"] == "writes" and Session.PIPELINE_WRITES["unit_kinds"] == "heads"
+
+
+def test_rank_fallback_for_hyper_connections():
+    """既定(rank を指定しない)の writes は、残差が複数本の流れのモデルでは causal に切り替えて理由を返す。指定したときはそのまま。"""
+    from gne.api import Session
+    hc = SimpleNamespace(weights=SimpleNamespace(field=lambda k, d=None: 4 if k.endswith("hyper_connection.count") else d),
+                         meta=SimpleNamespace(arch="qwen4exp"))
+    one = SimpleNamespace(weights=SimpleNamespace(field=lambda k, d=None: d), meta=SimpleNamespace(arch="qwen35"))
+    p = {"rank": "writes"}
+    assert Session._rank_fallback(hc, p, False) and p["rank"] == "causal"
+    p = {"rank": "writes"}
+    assert Session._rank_fallback(hc, p, True) is None and p["rank"] == "writes"      # 指定したときは切り替えない
+    p = {"rank": "writes"}
+    assert Session._rank_fallback(one, p, False) is None and p["rank"] == "writes"
 
 
 # --- モデルを使う ------------------------------------------------------------------------------------
@@ -286,14 +302,18 @@ def test_measure_writes_decomposes_and_saves(session):
 
 @pytest.mark.model
 def test_pipeline_rank_writes_end_to_end(session):
-    """--rank writes: 順位づけ → 確かめ → s=1 から組 → 応答での確かめ。表は heads allocate と同じ形で、レシピが残る。"""
+    """既定(rank を指定しない)は rank writes・部品はヘッドだけ: 順位づけ → 確かめ → s=1 から組 → 応答での確かめ。表は heads allocate と
+    同じ形で、レシピが残る。rank causal だけの設定を引数で渡すと、使わなかったことが出る。"""
     d = yaml.safe_load(EVIL.read_text(encoding="utf-8"))
     spec = {"name": "pw", "system_a": d["system_a"], "system_b": d["system_b"], "user_prompts": d["user_prompts"],
             "validate": d["validate"],
-            "pipeline": {"rank": "writes", "verify_top": 6, "verify_sample": 0, "n_units": [4, 2], "max_examples": 8,
+            "pipeline": {"verify_top": 6, "verify_sample": 0, "n_units": [4, 2], "max_examples": 8,
                          "check_replies": 2, "check_tokens": 16, "target": "B"}}
-    out = session.heads_pipeline(spec)
-    assert out["settings"]["rank"] == "writes" and out["writes"]["select_layer"] == session.meta.n_layer - 2
+    out = session.heads_pipeline(spec, n_heads=[3])
+    assert out["rank"] == "writes" and out["settings"]["rank"] == "writes" and out["settings"]["unit_kinds"] == "heads"
+    assert out["writes"]["select_layer"] == session.meta.n_layer - 2 and out["writes"]["kinds"] == ["attn", "linear"]
+    assert out["unused_settings"] == ["n_heads"]
+    assert all(r["kind"] != "neuron" for r in out["verify"]["top"])
     assert Path(out["writes"]["path"]).exists() and Path(out["writes"]["npz"]).exists()
     al = out["allocate"]
     assert al["method"] == "unit1" and [r["n_heads"] for r in al["table"]] == [4, 2]
@@ -328,13 +348,14 @@ def test_pipeline_rank_writes_end_to_end(session):
 
 @pytest.mark.model
 def test_pipeline_causal_settings_unchanged(session):
-    """既定(rank causal)の一括の結果の settings には、writes の設定が増えない(今までの結果と同じ形)。"""
+    """rank causal(v0.7.0 までの選び方)の一括の結果の settings は、今までの項目に rank だけが増える(writes の設定は載らない)。"""
     from gne.api import Session
     d = yaml.safe_load(EVIL.read_text(encoding="utf-8"))
     spec = {"name": "pc", "system_a": d["system_a"], "system_b": d["system_b"], "user_prompts": d["user_prompts"],
-            "pipeline": {"n_heads": [2], "max_examples": 8, "top_layers": 1, "hard": 4}}
+            "pipeline": {"rank": "causal", "n_heads": [2], "max_examples": 8, "top_layers": 1, "hard": 4}}
     out = session.heads_pipeline(spec)
-    assert set(out["settings"]) == set(Session.PIPELINE_DEFAULTS) and "writes" not in out
+    assert set(out["settings"]) == set(Session.PIPELINE_DEFAULTS) | {"rank"} and "writes" not in out
+    assert out["rank"] == "causal" and out["settings"]["rank"] == "causal" and out["causal"]["layers"]
 
 
 @pytest.mark.model

@@ -257,7 +257,7 @@ def test_attention_capture_on_both_mixers(session):
 def pipeline(session, tmp_path_factory):
     p = tmp_path_factory.mktemp("spec") / "spec.json"
     p.write_text(json.dumps(SPEC))
-    return session.heads_pipeline(p, n_heads=[4, 2], max_examples=8, top_layers=2)
+    return session.heads_pipeline(p, rank="causal", n_heads=[4, 2], max_examples=8, top_layers=2)
 
 
 def test_pipeline_reaches_a_recipe(pipeline):
@@ -516,7 +516,7 @@ def test_chips_runs_on_a_split_file(tmp_path):
     s = Session(first, root=tmp_path / "r1", n_gpu_layers=0, n_ctx=1024)
     s1 = Session(one, root=tmp_path / "r2", n_gpu_layers=0, n_ctx=1024)
     try:
-        p = s.heads_pipeline(spec, n_heads=[4, 2], max_examples=8, top_layers=2)
+        p = s.heads_pipeline(spec, rank="causal", n_heads=[4, 2], max_examples=8, top_layers=2)
         lora = tmp_path / "x.lora.gguf"
         export_proj_lora(s.weights, Recipe.load(p["recommended"]["recipe"]), lora, s.direction_set)
         ids = s.engine.tokenize(TEXT, add_special=False, parse_special=False)
