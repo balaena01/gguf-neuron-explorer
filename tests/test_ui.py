@@ -3117,6 +3117,30 @@ def _seed_pipeline_writes(s, name: str = "ppw") -> dict:
     return out
 
 
+def _seed_pipeline_writes_081(s, name: str = "ppw81") -> dict:
+    """v0.8.1 の形の rank writes の結果: 倍率ごとの点(raise)、倍率を上げる前の組(allocate.s1)、どれも届かないので組の効きで推した組
+    (上限 4 は B 側が A 側へ動いて止めた)。"""
+    out = _seed_pipeline_writes(s, name)
+    hd = s.store.heads_dir(s.meta.model_id)
+    al = out["allocate"]
+    pt = lambda a, am, bd, bo, ok=True: {"alpha": a, "a_mean": am, "b_delta": bd, "b_toward": bd / 40, "b_orth": bo,  # noqa: E731
+                                         "effect": 30 - am - abs(bd), "feasible": ok, "over": None if ok else "b_move", "phase": "grid"}
+    for r in al["table"]:
+        r.update(reached=False, recommended=r["n_heads"] == 4, effect=20.0 if r["n_heads"] == 4 else 12.0, feasible=True, b_toward=0.01)
+        r["raise"] = [dict(pt(1.0, 14.0, 0.2, 0.02), phase="s1"), pt(1.41, 12.0, 0.6, 0.03), pt(1.97, 9.5, 1.0, 0.04), pt(2.77, 8.0, 6.0, 0.05, False)]
+        r["stop"] = "b_move" if r["n_heads"] == 4 else "no_gain"
+    us = [f"12:H5:s1@{name}", f"14:N100:s1@{name}", f"13:N7:s1@{name}", f"12:H3:s1@{name}"]
+    (hd / f"{name}.alloc-s1.yaml").write_text((hd / f"{name}.alloc-n4.yaml").read_text().replace("s: 2.0", "s: 1.0"))
+    al.update(recommended=4, recommended_by="best_effect", b_move_max=0.1, drift_max=0.5,
+              s1={"n_heads": 4, "n_used": 4, "units": us, "heads": [dict(h, s=1.0) for h in al["table"][0]["heads"]],
+                  "kinds": al["table"][0]["kinds"], "s_max": 1.0, "s_median": 1.0, "alpha": 1.0, "reached": False, "remain": 5,
+                  "a_mean": 14.0, "b_side_delta": 0.2, "b_drift_orth": 0.02, "effect": 15.8, "recipe": str(hd / f"{name}.alloc-s1.yaml")})
+    out["recommended"] = {"n_heads": 4, "units": al["table"][0]["units"], "recipe": al["table"][0]["recipe"], "reached": False,
+                          "by": "best_effect"}
+    (hd / f"{name}.pipeline.json").write_text(json.dumps(out, ensure_ascii=False))
+    return out
+
+
 @pytest.fixture(scope="module")
 def pipe_writes_server(tmp_path_factory):
     """rank writes の一括の結果を開くテスト用のサーバ(CPU)。"""
@@ -3125,6 +3149,7 @@ def pipe_writes_server(tmp_path_factory):
     from gne.api import Session
     s = Session(MODEL, root=tmp_path_factory.mktemp("ui_pipe_w"), n_ctx=2048, n_seq_max=4, n_gpu_layers=0)
     _seed_pipeline_writes(s)
+    _seed_pipeline_writes_081(s)
     yield from _serve(s)
 
 
@@ -3162,6 +3187,44 @@ def test_pipeline_writes_result_panel(pipe_writes_server, browser):
         pg.click(f"{res} table.pp-cmp [data-load='2']")
         assert pg.evaluate("window.gne.recipe.specs()") == ["12:H5:s1@ppw", "14:N100:s1@ppw"]
         assert pg.evaluate("window.gne.recipe.skipped") == 0
+        if lang == "en":
+            assert pg.evaluate("[...window.gneI18n.missing]") == []
+        assert not errors, errors
+        pg.close()
+
+
+@pytest.mark.model
+def test_pipeline_writes_raise_trace_panel(pipe_writes_server, browser):
+    """v0.8.1: 組の表のいちばん上に倍率を上げる前の組(s=1)の行、各行に倍率ごとの A 平均・B Δ・B ⊥、止めた理由(B 側が A 側へ動く /
+    上げても良くならない)、見出しに「どれも目標に届かないので組の効きで推した」。s=1 の行からレシピを置き換えられる。"""
+    url = pipe_writes_server
+    for lang in ("ja", "en"):
+        pg = browser.new_page(viewport={"width": 1600, "height": 1000})
+        errors = []
+        pg.on("pageerror", lambda e: errors.append(str(e)))
+        _dialogs(pg)
+        pg.goto(url + f"/?lang={lang}")
+        pg.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
+        pg.evaluate("window.gne.recipe.clear(); try { localStorage.removeItem('gne.pipeline.draft') } catch {}")
+        pg.click("#views button[data-view=chips]")
+        pg.wait_for_function("window.gne.directionView && window.gne.directionView.mode === 'pipe'", timeout=60000)
+        _step(pg, "chips", "past")
+        pg.wait_for_selector("#pp-past tr[data-pp=ppw81]", timeout=30000)
+        pg.click("#pp-past tr[data-pp=ppw81]")
+        _step(pg, "chips", "alloc")
+        pg.wait_for_selector("#pp-result table.pp-cmp", timeout=30000)
+        res = "#pp-result"
+        rows = pg.evaluate(f"[...document.querySelectorAll('{res} table.pp-cmp > tbody > tr')].map(tr => [tr.className, tr.dataset.n || ''])")
+        assert rows == [["pp-s1", ""], ["rec", "4"], ["", "2"]]
+        assert pg.evaluate(f"document.querySelectorAll('{res} table.pp-cmp details').length") == 2
+        txt = pg.evaluate(f"document.querySelector('{res} table.pp-cmp').innerText")
+        head = pg.evaluate(f"document.querySelector('{res} .pp-res-head').innerText")
+        if lang == "ja":
+            assert "B 側が A 側へ動くので止めた" in txt and "上げても良くならないので止めた" in txt and "倍率を上げる前" in txt
+            assert "どれも目標に届かないので" in head
+        _step(pg, "chips", "alloc")
+        pg.click(f"{res} table.pp-cmp [data-load='s1']")
+        assert pg.evaluate("window.gne.recipe.specs()") == ["12:H5:s1@ppw81", "14:N100:s1@ppw81", "13:N7:s1@ppw81", "12:H3:s1@ppw81"]
         if lang == "en":
             assert pg.evaluate("[...window.gneI18n.missing]") == []
         assert not errors, errors

@@ -3032,6 +3032,8 @@ def heads_pipeline(c: Common, holder: dict,
 
 
 KIND_JA = {"attn": "注意", "linear": "線形注意", "neuron": "ニューロン"}
+WRITES_STOP = {"target": "全部 1", "raised": "全体を上げた", "s_max": "上限で止めた", "drift": "B 側の直交成分のずれで止めた",
+               "b_move": "B 側が A 側へ動くので止めた", "no_gain": "上げても良くならないので止めた"}
 
 
 def _verify_corr_line(sp: dict) -> str:
@@ -3057,17 +3059,28 @@ def _pipeline_writes_lines(d: dict) -> list[str]:
              f"4. 上位 {ve['n']} 個を 1 個ずつ{'、s=1 で射影して' if ve['mode'] == 'proj' else '止めて'}確かめた("
              + "・".join(f"{KIND_JA[k]} {n}" for k, n in ve["kinds"].items() if n) + f"、{ve['seconds']:.0f} 秒)。"
              f"点数と、測った A−B の差の縮みの順位相関: " + _verify_corr_line(ve["spearman"]),
-             f"5. s=1 から組を作る(目標 {d['target']:.2f} = {d['target_from']}、候補 {al['pool']} 個):"]
-    for r in al["table"]:
+             f"5. s=1 から組を作る(目標 {d['target']:.2f} = {d['target_from']}、候補 {al['pool']} 個。"
+             f"A 側の平均は無介入で {al['base_a_mean']:.2f}):"]
+    for r in ([dict(al["s1"], s1=True)] if al.get("s1") else []) + al["table"]:
         if r.get("skipped"):
             lines.append(f"   上限 {r['n_heads']} 個: {r['skipped']}")
             continue
         kk = "・".join(f"{KIND_JA[k]} {n}" for k, n in r["kinds"].items() if n)
-        lines.append(f"   上限 {r['n_heads']} 個: {r['n_used']} 個({kk})、強さ 最大 {r['s_max']:.2f}・中央値 {r['s_median']:.2f}"
-                     f"({'全部 1' if r['stop'] == 'target' else {'raised': '全体を上げた', 's_max': '上限で止まった', 'drift': 'B 側のずれで止めた'}.get(r['stop'], r['stop'])})、"
-                     f"残る {r['remain']}/{al['n_a']}、B 直交 {r['b_drift_orth']:.4f}" + ("  ← 推す" if r["recommended"] else "")
-                     + ("" if r["reached"] else "(目標に届かない)"))
+        head = f"   s=1(上げる前): {r['n_used']} 個({kk})" if r.get("s1") else \
+            f"   上限 {r['n_heads']} 個: {r['n_used']} 個({kk})、強さ {r['s_max']:.2f}({WRITES_STOP.get(r['stop'], r['stop'])})"
+        lines.append(head + f"、A 平均 {r['a_mean']:.2f}、B Δ {r['b_side_delta']:+.2f}、B 直交 {r['b_drift_orth']:.4f}、"
+                     f"残る {r['remain']}/{al['n_a']}" + ("" if r.get("effect") is None else f"、効き {r['effect']:.2f}")
+                     + ("  ← 推す" if r.get("recommended") else "") + ("" if r["reached"] else "(目標に届かない)"))
         lines.append("      " + " ".join(r["units"]))
+        if len(r.get("raise") or []) > 1:           # 倍率ごとの A 平均・B Δ・B 直交(格子の点と、上限の手前を詰めた点)
+            pts = sorted((p for p in r["raise"] if p.get("phase") in ("s1", "grid", "edge")), key=lambda p: p["alpha"])
+            lines.append("      倍率ごと: " + " | ".join(f"×{p['alpha']:.2f} A {p['a_mean']:.1f} BΔ {p['b_delta']:+.1f} B⊥ {p['b_orth']:.2f}"
+                                                   + ("" if p["feasible"] else " 超") for p in pts))
+    if d.get("recommended") and not d["recommended"].get("reached", True):
+        lines.append("   どの組も目標に届かないので、上限の中で組の効き(A 側の下がり − B 側の動きの大きさ)がいちばん大きい組を推す")
+    if d.get("no_recommend"):
+        lines.append(f"   推す組なし: {d['no_recommend']['reason']}。次の手: --rank causal(v0.7.0 までの選び方)、"
+                     "--unit-kinds で部品の種類を変える、heads refine(残りの質問から部品を足す)")
     ck = d.get("check")
     if ck:
         def cell(x):

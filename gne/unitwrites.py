@@ -14,9 +14,12 @@
    後ろの層での変換は見ない一次の見方(direct logit attribution と同じ)。後ろの書き手を動かしているだけの部品は見落とす。
 2. 確かめ(verify_units): 点数の上位を 1 個ずつ s=1 で射影して(mode ablate なら出力を 0 にして)流し直し、因果スクリーニングと
    同じ物差し(S での A 側の下がり方・B 側の変化・B 側の直交成分のずれ)で測る。点数との順位相関も出す。
-3. 配分(allocate_units): 確かめた部品を、測った「A と B の差の縮み」の大きい順に s=1 で 1 個ずつ組に足す(組全体を流し直して、
-   A 側の平均が下がり、B 側の直交成分のずれが drift_max 以下のときだけ採る)。目標に届けば強さは全部 1。届かなければ、組の
-   全部の s を同じ倍率 α(1 ≤ α ≤ s_max)で上げ、目標に届く最小の α を二分探索する(ずれが drift_max を超えるなら、超えない最大の α)。
+3. 配分(allocate_units): 確かめた部品を「A 側の下がり − B 側の動きの大きさ」の大きい順に s=1 で 1 個ずつ組に足す(組全体を
+   流し直して、A 側の平均が下がり、組の効き = A 側の下がり − |B 側の変化| が増え、B 側の直交成分のずれが drift_max 以下で、
+   B 側が A 側へ動く量が A と B の差の b_move_max 倍以下のときだけ採る)。目標に届けば強さは全部 1。届かなければ、組の全部の s を
+   同じ倍率 α(1 ≤ α ≤ s_max)で上げる(_raise)。s > 1 の射影は成分を反転させるので、B 側の書き込みも反転して B 側が A 側へ動く
+   ことがある。α ごとに A 側の平均・B 側の変化・直交成分のずれ・組の効きを記録し、目標に届けば届く最小の α、届かなければ
+   上の 2 つの上限の中で組の効きがいちばん大きい α を使う(いちばん大きい α ではない)。
 """
 
 from __future__ import annotations
@@ -471,10 +474,34 @@ def verify_units(session, st, rows: list[dict], *, mode: str = "proj", progress=
 
 # --- 3. 配分(s=1 から)-----------------------------------------------------------------------------------
 
+B_MOVE_MAX = 0.10        # B 側が A 側へ動いてよい量(A と B の差に対する割合)。公開のひな形での値から決めた(docs §3.9)
+GAIN_TOL = 0.01          # 倍率を上げて「組の効きが良くなった」とみなす最小の増え方(A と B の差に対する割合)
+GAIN_PATIENCE = 2        # 良くならない格子の点がこの数だけ続いたら、それ以上は上げない
+
+
+class SetScore:
+    """組の物差し(A 側の下がり・B 側の変化・直交成分のずれ → 組の効きと上限)。base_* は無介入の値。"""
+
+    def __init__(self, base_a: float, base_b: float, drift_max: float, b_move_max: float):
+        self.base_a, self.base_b = float(base_a), float(base_b)
+        self.gap = abs(self.base_a - self.base_b) or 1.0
+        self.sign = 1.0 if self.base_a >= self.base_b else -1.0
+        self.drift_max, self.b_move_max = float(drift_max), float(b_move_max)
+
+    def point(self, alpha: float, a_mean: float, b_mean: float, b_orth: float) -> dict:
+        b_delta = float(b_mean) - self.base_b
+        toward = self.sign * b_delta / self.gap                     # B 側が A 側へ動いた量(差に対する割合。正 = A 側へ)
+        why = "b_move" if toward > self.b_move_max else "drift" if b_orth > self.drift_max else None
+        return {"alpha": float(alpha), "a_mean": float(a_mean), "b_delta": b_delta, "b_toward": toward,
+                "b_orth": float(b_orth), "effect": (self.base_a - float(a_mean)) * self.sign - abs(b_delta),
+                "feasible": why is None, "over": why}
+
+
 def allocate_units(session, st, verified: list[dict], *, target: float, n_units=(24, 12, 6), s_max: float = 30.0,
-                   drift_max: float = 0.5, name: str, direction_layer: str = "own", remain_threshold: float | None = None,
-                   max_examples: int | None = None, progress=None) -> dict:
-    """確かめた部品で組を作る(モジュールの説明の 3)。表の形は heads allocate と同じ(n_heads = 組の部品の数の上限)。"""
+                   drift_max: float = 0.5, b_move_max: float = B_MOVE_MAX, name: str, direction_layer: str = "own",
+                   remain_threshold: float | None = None, max_examples: int | None = None, progress=None) -> dict:
+    """確かめた部品で組を作る(モジュールの説明の 3)。表の形は heads allocate と同じ(n_heads = 組の部品の数の上限)。
+    表とは別に、倍率を上げる前の組(採った部品を全部 s=1)を s1 に入れる。"""
     from .direction import drift
     t_all = time.perf_counter()
     S = st.primary
@@ -483,6 +510,7 @@ def allocate_units(session, st, verified: list[dict], *, target: float, n_units=
     thr = float(target) if remain_threshold is None else float(remain_threshold)
     base_a = float(st.base["A"][S].mean())
     b_base = st.scorer.run(None, sides="B")["B"]["values"]
+    sc = SetScore(base_a, float(st.base["B"][S].mean()), drift_max, b_move_max)
     steps = [0]
 
     def tick(msg):
@@ -490,37 +518,64 @@ def allocate_units(session, st, verified: list[dict], *, target: float, n_units=
         if progress:
             progress(steps[0], max(steps[0], est), msg)
 
-    def run(units: list[ProjHead], *, b: bool = True) -> dict:
+    def run(units: list[ProjHead], alpha: float = 1.0) -> dict:
         with st.tmp.use(st.builder.tensors([u for u in units if u.s])) as lora:
             got = st.scorer.run(lora, sides="A", which={"A": a_all})
-            out = {"A": got["A"]["values"]}
-            if b:
-                gb = st.scorer.run(lora, sides="B", which={"B": st.b_idx}, keep=True)
-                out["drift"] = drift(st.base["B_resid"][S], gb["B"]["resid"][S], st.scorer.r[S])
-                out["B_sub"] = gb["B"]["values"]
+            gb = st.scorer.run(lora, sides="B", which={"B": st.b_idx}, keep=True)
         tick("allocate")
-        return out
+        orth = drift(st.base["B_resid"][S], gb["B"]["resid"][S], st.scorer.r[S])[1]
+        return sc.point(alpha, float(got["A"]["values"][S].mean()), float(gb["B"]["values"][S].mean()), orth)
     pool = sorted([r for r in verified if not r.get("excluded") and (r.get("effect") or 0) > 0],
                   key=lambda r: -r["effect"])
     nmax = max(int(x) for x in n_units)
-    est = len(pool) + len(n_units) * 16
-    # s=1 で 1 個ずつ足す
+    est = len(pool) + len(n_units) * 16 + 1
+    # s=1 で 1 個ずつ足す(A 側の平均が下がり、組の効きが増え、上限の中のときだけ)
     chosen: list[ProjHead] = []
     trace = []
-    cur = base_a
+    at1: list[dict] = []                         # 採った i+1 個の組の s=1 での点
+    cur = sc.point(1.0, base_a, sc.base_b, 0.0)
     for r in pool:
-        if len(chosen) >= nmax or cur <= target:
+        if len(chosen) >= nmax or cur["a_mean"] <= target:
             break
         u = unit_of(r, 1.0, ds.name)
         g = run(chosen + [u])
-        a_mean = float(g["A"][S].mean())
-        ok = a_mean < cur - 1e-6 and g["drift"][1] <= drift_max
-        trace.append({"label": r["label"], "kind": r["kind"], "accepted": bool(ok), "a_mean": a_mean,
-                      "b_drift_orth": g["drift"][1]})
+        ok = g["a_mean"] < cur["a_mean"] - 1e-6 and g["effect"] > cur["effect"] and g["feasible"]
+        trace.append({"label": r["label"], "kind": r["kind"], "accepted": bool(ok), "a_mean": g["a_mean"],
+                      "b_delta": g["b_delta"], "b_drift_orth": g["b_orth"], "effect": g["effect"],
+                      **({"over": g["over"]} if g["over"] else {})})
         if ok:
             chosen.append(u)
-            cur = a_mean
-    acc_means = [t["a_mean"] for t in trace if t["accepted"]]
+            cur = g
+            at1.append(g)
+
+    def finish(units: list[ProjHead], alpha: float, label: str) -> dict:
+        heads = [ProjHead(u.layer, u.head, alpha, u.direction, u.kind) for u in units]
+        with st.tmp.use(st.builder.tensors(heads)) as lora:
+            got = st.scorer.run(lora, sides="AB", which={"A": a_all})
+            gb = st.scorer.run(lora, sides="B", which={"B": st.b_idx}, keep=True)
+        va = got["A"]["values"][S]
+        par, orth = drift(st.base["B_resid"][S], gb["B"]["resid"][S], st.scorer.r[S])
+        rec = Recipe(heads_to_units(heads, ds.name), session.meta.model_id, name=f"{name}-{label}", default_direction=ds.name,
+                     direction_layer=direction_layer)
+        rpath = session.store.heads_dir(session.meta.model_id) / f"{name}.alloc-{label}.yaml"
+        rec.save(rpath)
+        ss = [p.s for p in heads]
+        bm = float(got["B"]["values"][S].mean())
+        pt = SetScore(base_a, float(b_base[S].mean()), drift_max, b_move_max).point(alpha, float(va.mean()), bm, orth)
+        return {"n_used": len(heads),
+                "heads": [{"layer": p.layer, "head": p.head, "kind": p.kind if p.kind == "neuron" else
+                           kind_of_layer(session, p.layer), "s": p.s} for p in heads],
+                "kinds": {k: sum(1 for p in heads if (p.kind == "neuron" and k == "neuron") or
+                                 (p.kind == "head" and kind_of_layer(session, p.layer) == k)) for k in KINDS},
+                "units": [p.spec() for p in heads], "s_max": max(ss), "s_median": float(np.median(ss)), "alpha": alpha,
+                "hard_mean": float(va.mean()), "remain": int((va > thr).sum()), "a_max": float(va.max()),
+                "a_mean": float(va.mean()), "b_mean": bm, "b_side_delta": pt["b_delta"], "b_toward": pt["b_toward"],
+                "effect": pt["effect"], "feasible": pt["feasible"],
+                "closed": (base_a - float(va.mean())) / (base_a - target) if abs(base_a - target) > 1e-9 else None,
+                "b_drift_par": par, "b_drift_orth": orth, "recipe": str(rpath),
+                "by_layer": {str(L): {"A": float(got["A"]["values"][L].mean()), "B": float(got["B"]["values"][L].mean())}
+                             for L in st.score_layers}}
+
     table = []
     for n in sorted({int(x) for x in n_units}, reverse=True):
         t0 = time.perf_counter()
@@ -533,57 +588,34 @@ def allocate_units(session, st, verified: list[dict], *, target: float, n_units=
             table.append({"n_heads": n, "n_units": n, "skipped": f"{prev['n_heads']} 個の上限の組と同じ({len(units)} 個)",
                           "same_as": prev["n_heads"]})
             continue
-        at1 = acc_means[len(units) - 1]
-        alpha, stop, n_iter = 1.0, "target", 0
-        if at1 > target:
-            alpha, stop, n_iter = _raise(lambda a, units=units: run([ProjHead(u.layer, u.head, a, u.direction, u.kind)
-                                                                      for u in units]),
-                                         S, target, s_max, drift_max)
-        heads = [ProjHead(u.layer, u.head, alpha, u.direction, u.kind) for u in units]
-        with st.tmp.use(st.builder.tensors(heads)) as lora:
-            got = st.scorer.run(lora, sides="AB", which={"A": a_all})
-            gb = st.scorer.run(lora, sides="B", which={"B": st.b_idx}, keep=True)
-        va = got["A"]["values"][S]
-        par, orth = drift(st.base["B_resid"][S], gb["B"]["resid"][S], st.scorer.r[S])
-        rec = Recipe(heads_to_units(heads, ds.name), session.meta.model_id, name=f"{name}-n{n}", default_direction=ds.name,
-                     direction_layer=direction_layer)
-        rpath = session.store.heads_dir(session.meta.model_id) / f"{name}.alloc-n{n}.yaml"
-        rec.save(rpath)
-        ss = [p.s for p in heads]
-        table.append({"n_heads": n, "n_units": n, "n_used": len(heads),
-                      "heads": [{"layer": p.layer, "head": p.head, "kind": p.kind if p.kind == "neuron" else
-                                 kind_of_layer(session, p.layer), "s": p.s} for p in heads],
-                      "kinds": {k: sum(1 for p in heads if (p.kind == "neuron" and k == "neuron") or
-                                       (p.kind == "head" and kind_of_layer(session, p.layer) == k)) for k in KINDS},
-                      "units": [p.spec() for p in heads], "s_max": max(ss), "s_median": float(np.median(ss)), "alpha": alpha,
-                      "hard_mean": float(va.mean()), "reached": bool(float(va.mean()) <= target + 1e-6 or stop in ("target", "raised")),
-                      "iterations": n_iter, "stop": stop, "capped": None,
-                      "remain": int((va > thr).sum()), "a_max": float(va.max()), "a_mean": float(va.mean()),
-                      "b_mean": float(got["B"]["values"][S].mean()),
-                      "b_side_delta": float(got["B"]["values"][S].mean() - b_base[S].mean()),
-                      "b_drift_par": par, "b_drift_orth": orth, "recipe": str(rpath), "seconds": time.perf_counter() - t0,
-                      "by_layer": {str(L): {"A": float(got["A"]["values"][L].mean()), "B": float(got["B"]["values"][L].mean())}
-                                   for L in st.score_layers}})
-    # 推す組: heads allocate と同じ規則(届いた組のうち、残る数が最少から A 側の 5% 以内、B 側のずれが最小の 1.25 倍以内で、数が最少)
-    ok = [r for r in table if r.get("reached")]
-    rec_n = None
-    if ok:
-        r_min = min(r["remain"] for r in ok)
-        tol_n = max(1, int(np.ceil(0.05 * len(a_all))))
-        near = [r for r in ok if r["remain"] <= r_min + tol_n]
-        d_min = min(r["b_drift_orth"] for r in near)
-        same = [r for r in near if r["b_drift_orth"] <= d_min * 1.25 + 1e-4]
-        rec_n = min(r["n_heads"] for r in same)
+        p1 = at1[len(units) - 1]
+        alpha, stop, n_iter, rtrace = 1.0, "target", 0, [dict(p1, phase="s1")]
+        if p1["a_mean"] > target:
+            alpha, stop, rtrace = _raise(lambda a, units=units: run([ProjHead(u.layer, u.head, a, u.direction, u.kind)
+                                                                     for u in units], a),
+                                         p1, target, s_max, sc)
+            n_iter = len(rtrace) - 1
+        row = finish(units, alpha, f"n{n}")
+        table.append({"n_heads": n, "n_units": n, **row,
+                      "reached": bool(row["a_mean"] <= target + 1e-6 or stop in ("target", "raised")),
+                      "iterations": n_iter, "stop": stop, "capped": None, "raise": rtrace,
+                      "seconds": time.perf_counter() - t0})
+    s1 = None
+    if chosen:                                      # 倍率を上げる前の組(取り除くだけでどこまで届くか)
+        t0 = time.perf_counter()
+        s1 = {"n_heads": len(chosen), **finish(chosen, 1.0, "s1"), "seconds": time.perf_counter() - t0}
+        s1["reached"] = bool(s1["a_mean"] <= target + 1e-6)
+    rec_n, why, no_rec = _recommend(table, len(a_all), sc)
     for r in table:
         r["recommended"] = r.get("n_heads") == rec_n and rec_n is not None
     out = {"name": name, "direction": ds.name, "contrast_sha": st.cs.sha, "score_layer": S, "score_layers": st.score_layers,
-           "max_examples": max_examples, "drift_max": drift_max, "target": float(target),
+           "max_examples": max_examples, "drift_max": drift_max, "b_move_max": b_move_max, "target": float(target),
            "positions": st.scorer.positions, "subset": st.scorer.subset, "direction_layer": direction_layer,
            "method": "unit1", "s_max": s_max, "remain_threshold": thr, "n_a": len(a_all), "n_b": len(st.b_idx),
-           "base_a_mean": base_a, "base_b_mean": float(st.base["B"][S].mean()),
+           "base_a_mean": base_a, "base_b_mean": float(st.base["B"][S].mean()), "gap": sc.gap,
            "base_by_layer": {str(L): {"A": float(st.base["A"][L].mean()), "B": float(b_base[L].mean())} for L in st.score_layers},
-           "initial": None, "pool": len(pool), "trace": trace, "table": table, "recommended": rec_n,
-           "seconds": time.perf_counter() - t_all}
+           "initial": None, "pool": len(pool), "trace": trace, "table": table, "s1": s1, "recommended": rec_n,
+           "recommended_by": why, "no_recommend": no_rec, "seconds": time.perf_counter() - t_all}
     if progress:
         progress(steps[0], steps[0], "allocate")
     p = session.store.heads_dir(session.meta.model_id) / f"{name}.alloc.json"
@@ -592,52 +624,95 @@ def allocate_units(session, st, verified: list[dict], *, target: float, n_units=
     return out
 
 
-def _raise(run_at, S: int, target: float, s_max: float, drift_max: float, *, n_grid: int = 10,
-           iters: int = 8) -> tuple[float, str, int]:
-    """組の全部の s を同じ倍率 α で上げて、A 側の平均が目標に届く最小の α を探す。α は 1 から s_max まで等比の格子で上に
-    たどる(α と射影の値の関係は単調とは限らないので、上限だけを見て決めない)。B 側の直交成分のずれが drift_max を超えたら、
-    そこで止めて、超えない最大の α を二分探索する。目標に届いた格子の点の手前とのあいだは二分探索で詰める。
-    戻り値 (α, 止まった理由 raised / drift / s_max, 測った回数)。"""
+def _recommend(table: list[dict], n_a: int, sc: SetScore) -> tuple[int | None, str | None, dict | None]:
+    """推す組の上限の数・推した理由(reached / best_effect)・推さないときの理由。
+    1. 届いた組があれば heads allocate と同じ規則(残る数が最少から A 側の 5% 以内、B 側のずれが最小の 1.25 倍以内で、数が最少)。
+    2. どれも届かなければ、上限の中で組の効き(A 側の下がり − |B 側の変化|)が正の組のうち、効きが最大から差の 5% 以内で数が最少。
+    3. どちらも無ければ推さない(理由を返す)。"""
+    rows = [r for r in table if not r.get("skipped")]
+    ok = [r for r in rows if r.get("reached")]
+    if ok:
+        r_min = min(r["remain"] for r in ok)
+        tol_n = max(1, int(np.ceil(0.05 * n_a)))
+        near = [r for r in ok if r["remain"] <= r_min + tol_n]
+        d_min = min(r["b_drift_orth"] for r in near)
+        same = [r for r in near if r["b_drift_orth"] <= d_min * 1.25 + 1e-4]
+        return min(r["n_heads"] for r in same), "reached", None
+    good = [r for r in rows if r.get("feasible", True) and (r.get("effect") or 0) > 0]
+    if good:
+        e_max = max(r["effect"] for r in good)
+        same = [r for r in good if r["effect"] >= e_max - 0.05 * sc.gap]
+        return min(r["n_heads"] for r in same), "best_effect", None
+    if not rows:
+        reason = "s=1 で A 側の射影の値を下げる部品がない"
+    else:
+        reason = "どの組も、A 側の下がりが B 側の動きより小さいか、B 側の動き・直交成分のずれの上限を超える"
+    return None, None, {"reason": reason, "next": ["rank causal", "unit_kinds", "refine"]}
+
+
+def _raise(run_at, p1: dict, target: float, s_max: float, sc: SetScore, *, n_grid: int = 10,
+           iters: int = 8) -> tuple[float, str, list[dict]]:
+    """組の全部の s を同じ倍率 α で上げる。α は 1 から s_max まで等比の格子で上にたどり(α と射影の値の関係は単調とは限らない)、
+    点ごとに A 側の平均・B 側の変化・直交成分のずれ・組の効き(SetScore.point)を記録する。
+    - 目標に届き、上限の中 → 手前の点とのあいだを二分探索して、届く最小の α(raised)
+    - 上限を超えた(B 側が A 側へ動く b_move / 直交成分のずれ drift)→ 手前の点とのあいだで上限の中の最大の α を探し、そこで止める
+    - 組の効きが差の GAIN_TOL 倍より増えない点が GAIN_PATIENCE 個続いた → no_gain
+    - 格子の終わり → s_max
+    届かずに止めたときは、測った上限の中の点のうち組の効きがいちばん大きい α を返す(いちばん大きい α ではない。増え方が
+    GAIN_TOL 倍以下なら低い α を残す)。p1 は α=1 の点。戻り値 (α, 止まった理由, 測った点の並び)。"""
+    tol = GAIN_TOL * sc.gap
     pts = [float(x) for x in np.geomspace(1.0, max(s_max, 1.0), n_grid + 1)[1:]]
-    prev, best, n = 1.0, None, 0
+    trace = [dict(p1, phase="s1")]
+    best = p1 if p1["feasible"] else None
+    prev, bad = 1.0, 0
+
+    def better(p):
+        return p["feasible"] and (best is None or p["effect"] > best["effect"] + tol)
+
+    def shrink(lo: float, hi: float) -> float:
+        """[lo, hi] で(hi は目標に届き、上限の中)、届く最小の α を二分探索で詰める。"""
+        for _ in range(iters):
+            mid = 0.5 * (lo + hi)
+            pm = dict(run_at(mid), phase="shrink")
+            trace.append(pm)
+            if pm["a_mean"] <= target and pm["feasible"]:
+                hi = mid
+            else:
+                lo = mid
+            if hi - lo < 0.02 * hi:
+                break
+        return hi
+    stop = "s_max"
     for a in pts:
-        g = run_at(a)
-        n += 1
-        v, dr = float(g["A"][S].mean()), g["drift"][1]
-        if dr > drift_max:                           # ずれが超えた: 前の点とのあいだで、超えない最大の α
+        p = dict(run_at(a), phase="grid")
+        trace.append(p)
+        if not p["feasible"]:                       # 上限を超えた: 手前の点とのあいだで、上限の中の最大の α
             lo, hi = prev, a
             for _ in range(iters):
                 mid = 0.5 * (lo + hi)
-                gm = run_at(mid)
-                n += 1
-                if gm["drift"][1] > drift_max:
+                pm = dict(run_at(mid), phase="edge")
+                trace.append(pm)
+                if not pm["feasible"]:
                     hi = mid
-                else:
-                    lo = mid
-                    if float(gm["A"][S].mean()) <= target:     # ずれの手前で目標に届いたら、届く最小の α を探す
-                        return _shrink(run_at, S, target, prev, lo, iters, n)
-            return lo, "drift", n
-        if best is None or v < best[1]:
-            best = (a, v)
-        if v <= target:
-            return _shrink(run_at, S, target, prev, a, iters, n)
-        prev = a
-    return (best[0] if best else s_max), "s_max", n
-
-
-def _shrink(run_at, S: int, target: float, lo: float, hi: float, iters: int, n: int) -> tuple[float, str, int]:
-    """[lo, hi] で(hi は目標に届く)、目標に届く最小の α を二分探索で詰める。"""
-    for _ in range(iters):
-        mid = 0.5 * (lo + hi)
-        g = run_at(mid)
-        n += 1
-        if float(g["A"][S].mean()) <= target:
-            hi = mid
-        else:
-            lo = mid
-        if hi - lo < 0.02 * hi:
+                    continue
+                lo = mid
+                if pm["a_mean"] <= target:          # 上限の手前で目標に届いたら、届く最小の α を探す
+                    return shrink(prev, mid), "raised", trace
+                if better(pm):
+                    best = pm
+            stop = p["over"]
             break
-    return hi, "raised", n
+        if p["a_mean"] <= target:
+            return shrink(prev, a), "raised", trace
+        if better(p):
+            best, bad = p, 0
+        else:
+            bad += 1
+            if bad >= GAIN_PATIENCE:
+                stop = "no_gain"
+                break
+        prev = a
+    return (best["alpha"] if best else 1.0), stop, trace
 
 
 # --- 保存 -------------------------------------------------------------------------------------------------

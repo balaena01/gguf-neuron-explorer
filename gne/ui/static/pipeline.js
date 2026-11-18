@@ -396,7 +396,7 @@ export class PipelinePanel {
       ${(d.reused || []).length ? `<p class="note muted">${t("同じ JSON・同じ設定で作り済みの{w}を使い回しました(作り直すときは「最初から作り直す」に印を付けて流し直す)",
         { w: d.reused.map((x) => (x === "direction" ? t("方向") : x === "causal" ? t("因果の結果") : x)).join(t("と")) })}</p>` : ""}
       <p class="note">${t("目標: L{L} の A 側の射影の値を {v} まで({src})", { L: (d.causal && (d.causal.score_layers || []).slice(-1)[0]) ?? "—", v: fmt(d.target, 2),
-        src: esc(d.target_from === "settings" ? t("設定") : d.target_from ? t(d.target_from) : "—") })}${d.recommended ? ` · <b>${t("推す組: {n} ヘッド", { n: d.recommended.n_heads })}</b>` : ` · ${t("推す組なし(どの組も目標に届かない)")}`}</p>
+        src: esc(d.target_from === "settings" ? t("設定") : d.target_from ? t(d.target_from) : "—") })}${this.recText(d)}</p>
       <div class="pp-actions"><button class="small" id="pp-showdir" title="${t("上の「方向を見る」で、この方向の層ごとの射影の値と分布を見る")}">${t("方向を見る")}</button>
         ${d.writes ? "" : `<button class="small" id="pp-map" title="${t("地図の板の上辺のヘッドを、止めたときの下がり方で色付けする")}">${t("地図: 効き")}</button>`}
         ${d.spec ? `<button class="small" id="pp-respec" title="${t("この実行に使った JSON を入力欄に戻す(設定を変えて流し直すため)")}">${t("入力欄に戻す")}</button>` : ""}</div>
@@ -431,6 +431,7 @@ export class PipelinePanel {
       b.addEventListener("click", () => {
         const c = crow(b.dataset.load);
         if (c) { this.onLoadProj(`${d.name}-n${c.n_new}-combined`, c.units, d.name); return; }   // 残りから追加: 元の組と合わせて
+        if (b.dataset.load === "s1") { const s1 = (d.allocate || {}).s1; if (s1) this.onLoadProj(`${d.name}-s1`, s1.units, d.name); return; }
         const r = table.find((x) => String(x.n_heads) === b.dataset.load);
         if (r) this.onLoadProj(`${d.name}-n${r.n_heads}`, r.units, d.name);
       });
@@ -444,6 +445,11 @@ export class PipelinePanel {
     if (rf && re) re.addEventListener("click", () => this.onEval({ recipe: rf.recipe, doses: [0, 1], random_controls: 8 }, `${d.name}-combined`));
     for (const b of out.querySelectorAll("[data-eval]")) {
       b.addEventListener("click", () => {
+        if (b.dataset.eval === "s1") {                                   // 倍率を上げる前の組
+          const s1 = (d.allocate || {}).s1;
+          if (s1 && s1.recipe) this.onEval({ recipe: s1.recipe, doses: [0, 1], random_controls: 8 }, `${d.name}-s1`);
+          return;
+        }
         const r = table.find((x) => String(x.n_heads) === b.dataset.eval);
         if (!r || !r.recipe) return;
         const c = crow(b.dataset.eval);
@@ -535,6 +541,16 @@ export class PipelinePanel {
     else this.candStatusSet(j.status === "error" ? `${t("失敗")}: ${(j.error && j.error.message) || ""}` : t("止めました"), j.status === "error");
   }
 
+  // 見出しの「推す組」: rank writes で、どれも届かないときは組の効きがいちばん大きい組、推す組が無いときはその理由と次の手
+  recText(d) {
+    const r = d.recommended;
+    if (r && r.reached === false) return ` · <b>${t("推す組: {n} 個(どれも目標に届かないので、組の効きがいちばん大きい組)", { n: r.n_heads })}</b>`;
+    if (r) return ` · <b>${t("推す組: {n} ヘッド", { n: r.n_heads })}</b>`;
+    if (d.no_recommend) return ` · ${t("推す組なし({r})", { r: t(d.no_recommend.reason) })}<br><span class="muted">${
+      t("次の手: 「止めて選ぶ」(v0.7.0 までの選び方、--rank causal)、部品の種類を変える、組の行の「残りから追加」")}</span>`;
+    return ` · ${t("推す組なし(どの組も目標に届かない)")}`;
+  }
+
   // 1. 方向と基準層
   stage1(d) {
     const sc = d.score || {}, dir = d.direction || {}, nr = dir.n_rows || {};
@@ -555,16 +571,27 @@ export class PipelinePanel {
     const corr = Object.entries(v.spearman || {}).map(([k, x]) => `${k === "all" ? t("部品全体") : t(KIND_LABEL[k] || k)} ${sgn(x.score_vs_gap_drop, 2)}(${t("{n} 個", { n: x.n })})`).join(" · ");
     const vrows = (v.top || []).map((r, i) => `<tr class="${r.excluded ? "rnd" : ""}"><td>${i + 1}</td><td class="l">${unitChip(r)}</td><td>${t(KIND_LABEL[r.kind] || r.kind)}</td>
       <td>${sgn(r.score, 3)}</td><td>${sgn(r.gap_drop, 3)}</td><td>${sgn(r.causal, 3)}</td><td>${sgn(r.b_side_delta, 3)}</td><td>${fmt(r.drift_orth_b, 3)}</td></tr>`).join("");
-    const stop = { target: t("全部 1"), raised: t("全体を上げた"), s_max: t("上限で止まった"), drift: t("B 側のずれで止めた") };
-    const cmp = (a.table || []).slice().sort((x, y) => y.n_heads - x.n_heads).map((r) => {
-      if (r.skipped) return `<tr><td>${r.n_heads}</td><td class="excl" colspan="7">${esc(r.skipped)}</td></tr>`;
-      const chips = (r.heads || []).map((h) => unitChip(h, ` <span class="muted">s${fmt(h.s, 2)}</span>`)).join(" ");
-      return `<tr class="${r.recommended ? "rec" : ""}" data-n="${r.n_heads}"><td>${r.n_heads}${r.recommended ? ` <span class="badge">${t("推奨")}</span>` : ""}</td><td class="units">${chips}<div class="muted note">${kinds(r.kinds)}</div></td>
-        <td>${fmt(r.s_max, 2)} / ${fmt(r.s_median, 2)}<div class="muted note">${esc(stop[r.stop] || r.stop || "")}</div></td><td>${r.remain ?? "—"}${nA ? ` / ${nA}` : ""}</td><td>${fmt(r.a_mean, 2)}</td>
-        <td>${sgn(r.b_side_delta, 2)}</td><td>${fmt(r.b_drift_orth, 3)}</td><td class="${r.reached ? "ok" : "ng"}">${r.reached ? "✓" : "×"}</td>
-        <td class="l"><button class="small" data-load="${r.n_heads}" title="${t("この組(proj のユニット)で今のレシピを置き換える")}">${t("レシピを置き換える")}</button>
-          <button class="small" data-eval="${r.n_heads}" title="${t("この組のレシピを評価の画面へ送る(強さ 0 と 1、ランダムな向きの比べる用 8 本が入る。始める前に変えられる)")}"${r.recipe ? "" : " disabled"}>${t("評価へ送る")}</button>
-          <button class="small" data-refine="${r.n_heads}" title="${t("この組を当てても目標まで下がらない質問(残り)だけで、組を当てたまま方向を作り直し、足す部品を探す。結果は新しい一括の結果(名前 _r1 …)として出る")}"${r.remain > 0 ? "" : " disabled"}>${t("残りから追加")}</button></td></tr>`;
+    const stop = { target: t("全部 1"), raised: t("全体を上げた"), s_max: t("上限で止めた"), drift: t("B 側の直交成分のずれで止めた"),
+      b_move: t("B 側が A 側へ動くので止めた"), no_gain: t("上げても良くならないので止めた") };
+    // 倍率ごとの A 平均・B Δ・B ⊥(格子の点と、上限の手前を詰めた点。超 = 上限を超えた点)
+    const steps = (r) => {
+      const pts = (r.raise || []).filter((p) => ["s1", "grid", "edge"].includes(p.phase)).sort((x, y) => x.alpha - y.alpha);
+      if (pts.length < 2) return "";
+      const tr = pts.map((p) => `<tr class="${p.feasible ? "" : "ng"}"><td>×${fmt(p.alpha, 2)}</td><td>${fmt(p.a_mean, 2)}</td><td>${sgn(p.b_delta, 2)}</td><td>${fmt(p.b_orth, 3)}</td><td>${fmt(p.effect, 2)}</td><td>${p.feasible ? "" : esc(t(p.over === "b_move" ? "B 側が A 側へ動く" : "直交成分のずれ"))}</td></tr>`).join("");
+      return `<details class="note"><summary>${t("倍率ごと({n} 点)", { n: pts.length })}</summary><table class="evx mono"><thead><tr><th>${t("倍率")}</th><th>${t("A 平均")}</th><th>B Δ</th><th>B ⊥</th><th>${t("効き")}</th><th>${t("上限")}</th></tr></thead><tbody>${tr}</tbody></table></details>`;
+    };
+    const btns = (key, r, refine) => `<td class="l"><button class="small" data-load="${key}" title="${t("この組(proj のユニット)で今のレシピを置き換える")}">${t("レシピを置き換える")}</button>
+          <button class="small" data-eval="${key}" title="${t("この組のレシピを評価の画面へ送る(強さ 0 と 1、ランダムな向きの比べる用 8 本が入る。始める前に変えられる)")}"${r.recipe ? "" : " disabled"}>${t("評価へ送る")}</button>
+          ${refine ? `<button class="small" data-refine="${key}" title="${t("この組を当てても目標まで下がらない質問(残り)だけで、組を当てたまま方向を作り直し、足す部品を探す。結果は新しい一括の結果(名前 _r1 …)として出る")}"${r.remain > 0 ? "" : " disabled"}>${t("残りから追加")}</button>` : ""}</td>`;
+    const cells = (r) => `<td>${r.remain ?? "—"}${nA ? ` / ${nA}` : ""}</td><td>${fmt(r.a_mean, 2)}</td>
+        <td>${sgn(r.b_side_delta, 2)}</td><td>${fmt(r.b_drift_orth, 3)}</td><td>${r.effect === undefined ? "—" : fmt(r.effect, 2)}</td><td class="${r.reached ? "ok" : "ng"}">${r.reached ? "✓" : "×"}</td>`;
+    const chipsOf = (r) => (r.heads || []).map((h) => unitChip(h, ` <span class="muted">s${fmt(h.s, 2)}</span>`)).join(" ");
+    const s1 = a.s1 ? `<tr class="pp-s1"><td>s=1</td><td class="units">${chipsOf(a.s1)}<div class="muted note">${kinds(a.s1.kinds)} · ${t("倍率を上げる前(取り除くだけ)")}</div></td>
+        <td>1 / 1</td>${cells(a.s1)}${btns("s1", a.s1, false)}</tr>` : "";
+    const cmp = s1 + (a.table || []).slice().sort((x, y) => y.n_heads - x.n_heads).map((r) => {
+      if (r.skipped) return `<tr><td>${r.n_heads}</td><td class="excl" colspan="8">${esc(r.skipped)}</td></tr>`;
+      return `<tr class="${r.recommended ? "rec" : ""}" data-n="${r.n_heads}"><td>${r.n_heads}${r.recommended ? ` <span class="badge">${t("推奨")}</span>` : ""}</td><td class="units">${chipsOf(r)}<div class="muted note">${kinds(r.kinds)}</div>${steps(r)}</td>
+        <td>${fmt(r.s_max, 2)} / ${fmt(r.s_median, 2)}<div class="muted note">${esc(stop[r.stop] || r.stop || "")}</div></td>${cells(r)}${btns(r.n_heads, r, true)}</tr>`;
     }).join("");
     const ck = d.check;
     const cell = (x) => (x.match_finished !== null && x.match_finished !== undefined ? `${x.match_finished}/${x.finished}` : `${x.finished}/${x.n}`);
@@ -580,10 +607,10 @@ export class PipelinePanel {
       <div class="evx-scroll"><table class="evx mono pp-top"><thead><tr><th>#</th><th class="l">${t("部品")}</th><th>${t("種類")}</th><th title="${t("選ぶ層で s=1 の射影で直接に縮まる A−B の差")}">${t("点数")}</th>
         <th title="${t("流し直して測った A−B の差の縮み")}">${t("測った縮み")}</th><th title="${t("A 側の射影の値の下がり方")}">${t("A の下がり")}</th><th title="${t("B 側の射影の値の変化")}">B Δ</th><th title="${t("B 側の直交成分のずれ")}">B ⊥</th></tr></thead><tbody>${vrows}</tbody></table></div></section>
       <section class="pp-stage"><h4>${t("5. s=1 から組を作る")}</h4>
-      ${noteHTML(t("確かめた部品を、A 側の下がり − B 側の動きの大きい順に、s=1 で 1 個ずつ組に足します(A 側の平均が下がり、B 側のずれが上限以下のときだけ)。目標に届けば強さは全部 1。届かなければ組の全部の強さを同じ倍率で上げます。"), "muted note")}
+      ${noteHTML(t("確かめた部品を、A 側の下がり − B 側の動きの大きい順に、s=1 で 1 個ずつ組に足します(A 側の平均が下がり、組の効きが増え、上限の中のときだけ)。目標に届けば強さは全部 1。届かなければ組の全部の強さを同じ倍率で上げます。s が 1 を超えると成分を反転させるので、B 側(ふつうの入力)が A 側へ動くことがあります。倍率ごとに測り、目標に届けば届く最小の倍率、届かなければ上限の中で組の効きがいちばん大きい倍率を使います。効き = A 側の下がり − B 側の動きの大きさ。上限 = B 側の直交成分のずれ {d}、B 側が A 側へ動く量は A と B の差の {m}%。", { d: fmt(a.drift_max ?? 0.5, 2), m: fmt(100 * (a.b_move_max ?? 0.1), 0) }), "muted note")}
       <div class="evx-scroll"><table class="evx mono pp-cmp"><thead><tr><th>${t("上限")}</th><th class="l">${t("部品と強さ")}</th><th>${t("s 最大 / 中央値")}</th>
         <th title="${t("目標を超えて残った A 側の例の数")}">${t("残り")}</th><th title="${t("A 側の射影の値の平均")}">${t("A 平均")}</th><th title="${t("B 側の射影の値の変化")}">B Δ</th>
-        <th title="${t("B 側の直交成分のずれ(小さいほど他を壊さない)")}">B ⊥</th><th>${t("届いた")}</th><th></th></tr></thead><tbody>${cmp}</tbody></table></div></section>
+        <th title="${t("B 側の直交成分のずれ(小さいほど他を壊さない)")}">B ⊥</th><th title="${t("A 側の下がり − B 側の動きの大きさ")}">${t("効き")}</th><th>${t("届いた")}</th><th></th></tr></thead><tbody>${cmp}</tbody></table></div></section>
       ${ck ? `<section class="pp-stage"><h4>${t("6. 応答での確かめ")}</h4>
         ${noteHTML(t("選んだ組と無介入で応答を書かせ、書き終えた応答のうち validate.match に一致した数を数えます(A 側 / B 側)。射影の値が目標に届いても応答が変わらないことがあるので、その確かめです。"), "muted note")}
         <table class="evx mono"><thead><tr><th></th><th>A</th><th>B</th><th>${t("空")} A / B</th><th>${t("繰り返し")} A / B</th><th>${t("上限で切れた")} A / B</th></tr></thead><tbody>${ckRows}</tbody></table>

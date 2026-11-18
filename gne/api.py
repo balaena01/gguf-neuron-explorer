@@ -2514,7 +2514,11 @@ class Session:
         out["reused"] = reused
         out["target"], out["target_from"] = float(tgt), tgt_from
         rec = next((r for r in a["table"] if r.get("recommended")), None)
-        out["recommended"] = None if rec is None else {"n_heads": rec["n_heads"], "units": rec["units"], "recipe": rec["recipe"]}
+        # reached: 目標に届いた組 / best_effect: どれも届かないので、組の効き(A 側の下がり − |B 側の変化|)がいちばん大きい組
+        out["recommended"] = None if rec is None else {"n_heads": rec["n_heads"], "units": rec["units"], "recipe": rec["recipe"],
+                                                       "reached": bool(rec["reached"]), "by": a.get("recommended_by")}
+        if a.get("no_recommend"):
+            out["no_recommend"] = a["no_recommend"]
         n_check = pipe["check_replies"]
         n_check = 16 if n_check is None else int(n_check)
         ok_rows = [r for r in a["table"] if not r.get("skipped")]

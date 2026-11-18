@@ -235,6 +235,66 @@ def test_rank_fallback_for_hyper_connections():
     assert Session._rank_fallback(one, p, False) is None and p["rank"] == "writes"
 
 
+def _fake_run(a_of, b_of, orth_of, sc):
+    """倍率 α → 組の物差しの点(SetScore.point)を返す、モデルの代わり。"""
+    calls = []
+
+    def run(alpha):
+        calls.append(alpha)
+        return sc.point(alpha, a_of(alpha), b_of(alpha), orth_of(alpha))
+    return run, calls
+
+
+def test_raise_stops_when_b_moves_toward_a():
+    """v0.8.1 の不具合: 倍率を上げると B 側が A 側へ大きく動く(直交成分のずれは上限の中)組で、倍率をいちばん上まで上げない。
+    返す倍率は上限の中で組の効きが最大の点、止めた理由は b_move か no_gain、点ごとの A 平均・B Δ・B ⊥ が残る。"""
+    from gne.unitwrites import SetScore, _raise
+    sc = SetScore(base_a=60.0, base_b=-40.0, drift_max=0.5, b_move_max=0.10)     # 差 100
+    # A は α とともに少しずつ下がり(目標 -40 には届かない)、B は α > 2 から A 側へ大きく上がる。直交成分のずれは小さいまま
+    run, calls = _fake_run(lambda a: 60 - 12 * np.log(a) - 10, lambda a: -40 + 6 * max(0.0, a - 2) ** 1.5, lambda a: 0.1, sc)
+    p1 = run(1.0)
+    alpha, stop, trace = _raise(run, p1, target=-40.0, s_max=30.0, sc=sc)
+    assert stop in ("b_move", "no_gain") and alpha < 5 and max(calls) < 30
+    chosen = next(p for p in trace if p["alpha"] == alpha)
+    best = max(p["effect"] for p in trace if p["feasible"])
+    assert chosen["feasible"] and chosen["b_toward"] <= 0.10 and chosen["effect"] >= best - 0.01 * sc.gap   # 効きが最大(差の 1% 以内)
+    assert all({"alpha", "a_mean", "b_delta", "b_orth", "effect", "feasible", "phase"} <= set(p) for p in trace)
+    # 古い止め方(直交成分のずれだけ)なら、このずれでは止まらずに s_max まで上げていた
+    assert all(p["b_orth"] <= 0.5 for p in trace)
+
+
+def test_raise_keeps_low_alpha_when_raising_does_not_help():
+    """A 側が倍率でほとんど下がらない組は、上げずに α=1 を残す(no_gain)。目標に届けば届く最小の α(raised)。"""
+    from gne.unitwrites import SetScore, _raise
+    sc = SetScore(base_a=60.0, base_b=-40.0, drift_max=0.5, b_move_max=0.10)
+    run, _ = _fake_run(lambda a: 30.0 - 0.1 * a, lambda a: -40.0, lambda a: 0.05, sc)
+    alpha, stop, trace = _raise(run, run(1.0), target=-40.0, s_max=30.0, sc=sc)
+    assert (alpha, stop) == (1.0, "no_gain") and len(trace) == 3
+    run, _ = _fake_run(lambda a: 60.0 - 20.0 * a, lambda a: -40.0 + 0.2 * a, lambda a: 0.05, sc)   # α = 5 で届く
+    alpha, stop, _ = _raise(run, run(1.0), target=-40.0, s_max=30.0, sc=sc)
+    assert stop == "raised" and 5.0 <= alpha < 5.2
+    # 直交成分のずれで止まるときは、上限の中の点を返す
+    run, _ = _fake_run(lambda a: 60.0 - 5.0 * a, lambda a: -40.0, lambda a: 0.05 * a, sc)
+    alpha, stop, _ = _raise(run, run(1.0), target=-40.0, s_max=30.0, sc=sc)
+    assert stop == "drift" and alpha <= 10.0 and alpha > 7.0
+
+
+def test_recommend_when_no_set_reaches():
+    """どれも届かなければ、上限の中で組の効きが最大(差の 5% 以内なら数が少ない組)を推す。どれも満たさなければ推さず、理由と次の手。"""
+    from gne.unitwrites import SetScore, _recommend
+    sc = SetScore(base_a=60.0, base_b=-40.0, drift_max=0.5, b_move_max=0.10)
+    rows = [{"n_heads": 24, "reached": False, "feasible": True, "effect": 50.0, "remain": 10, "b_drift_orth": 0.2},
+            {"n_heads": 12, "reached": False, "feasible": True, "effect": 47.0, "remain": 11, "b_drift_orth": 0.1},
+            {"n_heads": 6, "reached": False, "feasible": True, "effect": 20.0, "remain": 14, "b_drift_orth": 0.1}]
+    assert _recommend(rows, 16, sc)[:2] == (12, "best_effect")
+    rows[0]["reached"] = True
+    assert _recommend(rows, 16, sc)[:2] == (24, "reached")
+    bad = [{"n_heads": 6, "reached": False, "feasible": True, "effect": -3.0, "remain": 16, "b_drift_orth": 0.1}]
+    n, why, no = _recommend(bad, 16, sc)
+    assert n is None and why is None and no["next"] == ["rank causal", "unit_kinds", "refine"] and no["reason"]
+    assert _recommend([{"n_heads": 6, "skipped": "x"}], 16, sc)[2]["reason"].startswith("s=1")
+
+
 # --- モデルを使う ------------------------------------------------------------------------------------
 
 @pytest.fixture(scope="module")
@@ -323,11 +383,16 @@ def test_pipeline_rank_writes_end_to_end(session):
         assert Path(r["recipe"]).exists() and r["n_used"] <= r["n_heads"] and r["s_max"] >= 1.0
         rec = Recipe.load(r["recipe"])
         assert len(rec.proj_units) == r["n_used"] and all(u.k == pytest.approx(r["alpha"]) for u in rec.proj_units)
-        assert r["stop"] in ("target", "raised", "s_max", "drift")
+        assert r["stop"] in ("target", "raised", "s_max", "drift", "b_move", "no_gain")
         if r["stop"] == "target":
             assert r["alpha"] == 1.0
+        # 倍率ごとの点(α=1 から)と、組の効き・上限の中か
+        assert r["raise"][0]["alpha"] == 1.0 and all({"a_mean", "b_delta", "b_orth", "effect", "feasible"} <= set(p) for p in r["raise"])
+        assert r["feasible"] and r["b_toward"] <= al["b_move_max"] + 1e-9
+    assert al["s1"] and all(h["s"] == 1.0 for h in al["s1"]["heads"]) and Path(al["s1"]["recipe"]).exists()
     acc = [t for t in al["trace"] if t["accepted"]]
-    assert all(b["a_mean"] < a["a_mean"] for a, b in zip(acc, acc[1:]))                 # 採った部品ごとに A 側が下がる
+    assert all(b["a_mean"] < a["a_mean"] and b["effect"] > a["effect"] for a, b in zip(acc, acc[1:]))   # 採るたびに A 側が下がり、効きが増える
+    assert (out["recommended"] is None) == bool(out.get("no_recommend"))
     ck = out["check"]
     assert set(ck["rows"]) == {"none", "recipe"} and ck["n"] == {"A": 2, "B": 2}
     assert all(set(x) >= {"finished", "match_finished", "empty", "loop", "at_limit"} for row in ck["rows"].values() for x in row.values())

@@ -492,8 +492,10 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
         同じ対照集合・同じ設定で作り済みの方向と因果の結果を使い回す(止めて流し直したとき、配分からやり直せる)。
         3 段目からは 2 通り。rank="writes"(既定): 全部の部品(注意ヘッド・線形注意のヘッド。unit_kinds="all" で MLP のニューロンも)を
         方向への書き込みの量で順位づけ → 上位を 1 個ずつ s=1 で射影して確かめる → 効き目の大きい順に s=1 で組に足し、足りなければ全体の
-        強さを上げる(n_units が組の部品の数の上限、既定 [24, 12, 6])→ 選んだ組で応答を書かせて validate.match を数える(check_replies 問、
-        既定 16、0 で切る)。rank="causal" は v0.7.0 までの流れ(因果スクリーニング → 効率で配り直す。n_heads はこちらだけ)。
+        強さを上げる(n_units が組の部品の数の上限、既定 [24, 12, 6]。B 側が A 側へ動く量と直交成分のずれに上限があり、倍率ごとの
+        A 平均・B Δ・B ⊥ は allocate.table[].raise、上げる前の組は allocate.s1)→ 選んだ組で応答を書かせて validate.match を数える(check_replies 問、
+        既定 16、0 で切る)。どの組も目標に届かなければ、組の効き(A 側の下がり − B 側の動きの大きさ)がいちばん大きい組を推す
+        (recommended.reached が false)。推す組が無ければ no_recommend に理由と次の手。rank="causal" は v0.7.0 までの流れ(因果スクリーニング → 効率で配り直す。n_heads はこちらだけ)。
         応答での確かめで A 側がほとんど変わらない(check.suggest)ときは、もう一方の rank も試す。結果の rank がどちらで流したか。"""
         try:
             p = {"spec": spec, "target": target, "n_heads": n_heads, "max_examples": max_examples,
