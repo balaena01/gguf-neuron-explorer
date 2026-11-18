@@ -16,12 +16,13 @@ const fmt = (x, d = 2) => (x === null || x === undefined || !Number.isFinite(+x)
 const sgn = (x, d = 2) => (x === null || x === undefined || !Number.isFinite(+x) ? "—" : `${x >= 0 ? "+" : "−"}${Math.abs(x).toFixed(d)}`);
 const short = (s, n = 80) => { const x = String(s ?? ""); return x.length > n ? `${x.slice(0, n - 1)}…` : x; };
 const NAME_RE = /^[\w.-]+$/;
-const PIPE_KEYS = ["positions", "score_positions", "target", "n_heads", "hard", "top_layers", "max_examples", "s_max", "direction_layer", "resume", "name"];
+const PIPE_KEYS = ["positions", "score_positions", "target", "n_heads", "hard", "top_layers", "max_examples", "s_max", "direction_layer", "resume", "name",
+                   "rank", "unit_kinds", "verify_top", "verify_sample", "verify_mode", "n_units", "check_replies", "check_tokens"];
 const DRAFT = "gne.pipeline.draft";               // 入力欄の下書き(このブラウザだけ)
 // 設定の欄 → ジョブの引数(spec の pipeline に値があれば、読み込んだときに欄に入れる)
 const FIELDS = [["target", "#pp-target"], ["n_heads", "#pp-nheads"], ["max_examples", "#pp-mx"], ["positions", "#pp-pos"],
-                ["top_layers", "#pp-tl"], ["hard", "#pp-hard"]];
-const DEFAULTS = { target: "", n_heads: "6,5,4", max_examples: 64, positions: "last", top_layers: 4, hard: 16 };
+                ["top_layers", "#pp-tl"], ["hard", "#pp-hard"], ["rank", "#pp-rank"], ["unit_kinds", "#pp-kinds"]];
+const DEFAULTS = { target: "", n_heads: "6,5,4", max_examples: 64, positions: "last", top_layers: 4, hard: 16, rank: "causal", unit_kinds: "all" };
 const ETA_SHOWN = 12;                             // η の表で最初に出す行の数(残りはボタンで)
 
 // 「ひな形」で入れる小さな例(system で A / B を作る。レシピで作るときは recipe_a: ["14:8949:+1.0"] など)
@@ -156,6 +157,8 @@ export class PipelinePanel {
         <label class="muted" title="${t("方向を作る位置。last = 質問の最後のトークン、response = 応答を書かせてその位置(遅い)")}">${t("方向を作る位置")} <select id="pp-pos"><option value="last">${t("質問の最後")}</option><option value="response">${t("応答(遅い)")}</option></select></label>
         <label class="muted" title="${t("層ごとのスクリーニングのあと、ヘッドを 1 個ずつ止めて測る層の数")}">${t("ヘッドを測る層の数")} <input id="pp-tl" type="number" min="1" max="64" value="${DEFAULTS.top_layers}"></label>
         <label class="muted" title="${t("効率を測るときの、射影の値が残りやすい質問の数")}">${t("残りやすい質問の数")} <input id="pp-hard" type="number" min="1" max="1024" value="${DEFAULTS.hard}"></label>
+        <label class="muted" title="${t("候補の探し方。止めて選ぶ = 層ごとに止めた効き目の上位の層のヘッドを 1 個ずつ止め、効率で配り直す(今までの既定)。書き込みの量で全部から = 全部の層の注意ヘッド・線形注意のヘッド・MLP のニューロンを方向への書き込みの量で並べ、上位を s=1 で確かめてから、s=1 で組に足す(足りないときだけ全体の強さを上げる)")}">${t("候補の探し方")} <select id="pp-rank"><option value="causal">${t("止めて選ぶ(既定)")}</option><option value="writes">${t("書き込みの量で全部から")}</option></select></label>
+        <label class="muted" title="${t("書き込みの量で全部から選ぶときの部品の種類")}">${t("部品")} <select id="pp-kinds"><option value="all">${t("ヘッド・線形注意・ニューロン")}</option><option value="heads">${t("ヘッドだけ")}</option></select></label>
         <label class="muted" title="${t("同じ JSON・同じ設定で作り済みの方向と因果の結果があっても使い回さず、最初から作り直す(止めて流し直すときは外したままにすると配分からやり直せる)")}"><input type="checkbox" id="pp-fresh"> ${t("最初から作り直す")}</label></div>
       </div>
       <div class="pp-go" id="pp-run"><button class="main" id="pp-go" disabled>${t("方向とヘッドを作る")}</button> <span class="muted note" id="pp-status"></span></div>
@@ -272,6 +275,7 @@ export class PipelinePanel {
     if (mx === null || tl === null || hard === null) { this.status(t("max_examples・top_layers・hard は整数で(max_examples は 4 以上)"), true); return null; }
     const p = { spec: c.spec, n_heads: nh, max_examples: mx, positions: this.$("#pp-pos").value, top_layers: tl, hard };
     if (this.$("#pp-fresh").checked) p.resume = false;
+    if (this.$("#pp-rank").value === "writes") { p.rank = "writes"; p.unit_kinds = this.$("#pp-kinds").value; }
     const tg = this.$("#pp-target").value.trim();
     if (tg) {
       if (/^b$/i.test(tg)) p.target = "B";
@@ -392,20 +396,23 @@ export class PipelinePanel {
       <p class="note">${t("目標: L{L} の A 側の射影の値を {v} まで({src})", { L: (d.causal && (d.causal.score_layers || []).slice(-1)[0]) ?? "—", v: fmt(d.target, 2),
         src: esc(d.target_from === "settings" ? t("設定") : d.target_from ? t(d.target_from) : "—") })}${d.recommended ? ` · <b>${t("推す組: {n} ヘッド", { n: d.recommended.n_heads })}</b>` : ` · ${t("推す組なし(どの組も目標に届かない)")}`}</p>
       <div class="pp-actions"><button class="small" id="pp-showdir" title="${t("上の「方向を見る」で、この方向の層ごとの射影の値と分布を見る")}">${t("方向を見る")}</button>
-        <button class="small" id="pp-map" title="${t("地図の板の上辺のヘッドを、止めたときの下がり方で色付けする")}">${t("地図: 効き")}</button>
+        ${d.writes ? "" : `<button class="small" id="pp-map" title="${t("地図の板の上辺のヘッドを、止めたときの下がり方で色付けする")}">${t("地図: 効き")}</button>`}
         ${d.spec ? `<button class="small" id="pp-respec" title="${t("この実行に使った JSON を入力欄に戻す(設定を変えて流し直すため)")}">${t("入力欄に戻す")}</button>` : ""}</div>
       </div>${this.stage1(d)}${d.writes ? this.writesStage(d) : `${this.stage2(d)}${this.stage3(d)}${this.stage4(d)}`}
       ${this.candForm(d) || `<div class="pp-cand"><p class="muted note">${t("この実行には、候補を作れる組がありません(4. の組がどれも作れていない)。")}</p></div>`}</div>`;
     const $ = (s) => out.querySelector(s);
     $("#pp-showdir").addEventListener("click", () => this.onShowDirection(d.name));
-    $("#pp-map").addEventListener("click", () => this.onOverlay(`causal:${d.name}`));
+    if ($("#pp-map")) $("#pp-map").addEventListener("click", () => this.onOverlay(`causal:${d.name}`));
     const rs = $("#pp-respec");
     if (rs) {
       rs.addEventListener("click", () => {                              // JSON と、その実行の設定を欄に戻す
         this.$("#pp-text").value = JSON.stringify({ ...d.spec, pipeline: undefined }, null, 2);
         this.check();
         const st = d.settings || {};
-        for (const [k, sel] of FIELDS) if (st[k] !== undefined) this.$(sel).value = st[k] === null ? "" : Array.isArray(st[k]) ? st[k].join(",") : String(st[k]);
+        for (const [k, sel] of FIELDS) {                                // rank・unit_kinds は、今までの流れの結果には無い(既定に戻す)
+          const v = st[k] !== undefined ? st[k] : (k === "rank" || k === "unit_kinds" ? DEFAULTS[k] : undefined);
+          if (v !== undefined) this.$(sel).value = v === null ? "" : Array.isArray(v) ? v.join(",") : String(v);
+        }
         this.$("#pp-text").scrollIntoView({ block: "center" });
       });
     }
