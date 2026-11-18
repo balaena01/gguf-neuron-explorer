@@ -29,7 +29,7 @@
         {
           "h": "確かめた範囲と数",
           "body": [
-            "- このひな形の流れは、まだ確かめていません。",
+            "- 試した範囲: Qwen3.5-4B(Q8_0)で 1 回。組になる CHiPS のひな形で作った 8 個の組(層 7・11)を使い、場面のキーと定数キーを層 7・11 に作って、この段を回しました(221 秒)。取り除く量の R² は層 7 で 0.92、層 11 で 0.94 でした。注意書きが減ったかは測っていません。",
             "- 同じ題材(Qwen3.5-4B、システムプロンプトなし)の確かめでは、取り除く量の R² は層 6・7・11・12 で 0.84・0.89・0.88・0.97、CHiPS との一致は cos 0.89・大きさの比 0.99、残したい場面での大きさの比は 0.08 でした(docs/verification.md §23)。",
             "- 評価用 180 問で、深刻な相談の注意書きは 61% → 24%、軽い質問は 27% → 22%(有意でない)でした(実験用のスクリプトでの評価)。"
           ]
@@ -74,7 +74,7 @@
         {
           "h": "Checked range and numbers",
           "body": [
-            "- This template's flow has not been checked yet.",
+            "- Tried on: Qwen3.5-4B (Q8_0), one run. With the group of 8 (layers 7, 11) from the paired CHiPS template, a scene key and a constant key at layers 7 and 11, this step ran through (221 s). The R² of the amount to remove was 0.92 at layer 7 and 0.94 at layer 11. Whether disclaimers dropped was not measured.",
             "- In the check on the same subject (Qwen3.5-4B, no system prompt), the R² of the amount to remove was 0.84, 0.89, 0.88 and 0.97 at layers 6, 7, 11 and 12, the agreement with CHiPS was cosine 0.89 with size ratio 0.99, and the size ratio in the scenes to keep was 0.08 (docs/verification.md §23).",
             "- On 180 evaluation questions, disclaimers on serious consultations went from 61% to 24%, and on light questions from 27% to 22% (not significant) (evaluated with the experiment scripts)."
           ]

@@ -30,7 +30,7 @@
         {
           "h": "確かめた範囲と数",
           "body": [
-            "- このひな形の流れは、まだ確かめていません。",
+            "- 試した範囲: Qwen3.5-4B(Q8_0)で 1 回(131 秒)。このひな形の 16 問ずつでは、目標に届いた組が無く推奨の組は出ませんでした。いちばん大きい 8 個の組は、層 7・11 のヘッドでした。注意書きが減ったかは測っていません。",
             "- 同じ題材(健康・法律・お金の深刻な相談、Qwen3.5-4B)で gne の heads pipeline が選んだ組は 6 個(層 6・7・11・12)でした(docs/verification.md §23)。"
           ]
         },
@@ -72,7 +72,7 @@
         {
           "h": "Checked range and numbers",
           "body": [
-            "- This template's flow has not been checked yet.",
+            "- Tried on: Qwen3.5-4B (Q8_0), one run (131 s). With 16 questions each, no group reached the target, so no group was recommended; the largest group of 8 used heads at layers 7 and 11. Whether disclaimers dropped was not measured.",
             "- On the same subject (serious health, legal and money consultations, Qwen3.5-4B), gne heads pipeline picked 6 heads (layers 6, 7, 11, 12) (docs/verification.md §23)."
           ]
         },

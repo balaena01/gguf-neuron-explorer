@@ -30,7 +30,9 @@
         {
           "h": "確かめた範囲と数",
           "body": [
-            "- このひな形の流れは、まだ確かめていません。"
+            "- 試した範囲: Qwen3.5-4B(Q8_0)で 1 回。層 11-23・強さ 1 で 39 ユニット。式どおりかは合格です。",
+            "- このモデルは、計算の質問(作成に使った 12 問・新しい 6 問)でも、ふつうの質問 8 問でも、指示しなければ締めの一言を添えませんでした(validate.match の正規表現で数えて 0)。そのため、取り除く前も後も 0 で、効き目は確かめられていません。",
+            "- 一方で、応答の文面は、計算の質問 18 問中 15 問、ふつうの質問 8 問中 8 問で変わりました(greedy、上限 256。中身は読んでいません)。"
           ]
         },
         {
@@ -73,7 +75,9 @@
         {
           "h": "Checked range and numbers",
           "body": [
-            "- This template's flow has not been checked yet."
+            "- Tried on: Qwen3.5-4B (Q8_0), one run, layers 11-23, strength 1, 39 units. The formula check passed.",
+            "- This model did not add a closing remark on its own, neither to calculation questions (12 used for building, 6 new) nor to 8 ordinary questions (0 by the validate.match regex). So the count was 0 before and after, and the effect could not be checked.",
+            "- The wording of the responses still changed in 15 of 18 calculation questions and in all 8 ordinary questions (greedy, up to 256 tokens; the content was not read)."
           ]
         },
         {
