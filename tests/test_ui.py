@@ -2993,7 +2993,7 @@ def test_pipeline_api_and_panel(pipe_server, browser):
         assert not pg.evaluate("document.querySelector('#pp-go').disabled") and pg.evaluate("document.querySelectorAll('#pp-check .err').length") == 0
         assert "pirate" in pg.evaluate("document.querySelector('#pp-check').textContent")
         # 用途別のひな形: 選ぶと入る(説明つき)。書き換えた入力欄は、確かめて断れば残る。小さな例に戻せる
-        pg.wait_for_function("document.querySelectorAll('#pp-tpl-sel option').length === 7", timeout=10000)   # (ひな形を選ぶ)・小さな例・5 つ
+        pg.wait_for_function("document.querySelectorAll('#pp-tpl-sel option').length === 8", timeout=10000)   # (ひな形を選ぶ)・小さな例・6 つ
         _step(pg, "chips", "input")
         pg.select_option("#pp-tpl-sel", "question_kinds.json")
         assert pg.evaluate("JSON.parse(document.querySelector('#pp-text').value).name") == "ja_vs_en"
