@@ -384,7 +384,16 @@ gne nw check  --recipe R --contrast C                  # 位置と場面の種�
 gne nw export --recipe R -o R-nw.lora.gguf             # LoRA だけ(焼き込みは無い)。proj・keyed と一緒なら gne headproj export で 1 つのファイルに
 gne nw pipeline --contrast C --layers 11-23 --alpha 1,1,0.8 --save R.yaml   # 作るところまでを 1 回で。--save で、上のコマンドに渡せるレシピを書く
 gne nw pipeline --contrast C --layers 11-23 --alpha 1,1,0.8 --key-fit ridge --save R.yaml   # 同じことを、位置の鍵を最小二乗の鍵にして(下)
+gne nw prior --contrast C                               # content: null と書いた前のやり取りの応答を埋める(キーの作成は自動で埋める)
+gne direction key --contrast C --target mlpin --layers 22 --positions pos:0 --key-fit ridge --key-conv-cells   # セルに会話の形も入れる
+gne direction key --contrast C --target mlpin --layers 16 --key-fit ridge --positions 'after:[。！？\n]' --key-crit 10 --key-fp-max 0.02   # 文の終わりの次の位置で開くキー
+gne direction token-scan --token '<|im_end|>' --contrast C   # 層ごとに、位置 0 でそのトークンが 1 位になるロジットの上がり
+gne nw pipeline --contrast C --layers 22 --segments 0 --alpha 1 --key-fit ridge --token '<|im_end|>' --token-delta 32 --save R.yaml   # 入力の振り分け: 応答しない
+gne steer --recipe R --prompt "..." --first-token '◇'  # 応答の最初のトークンを決めて、続きを読む
+gne nw check --recipe R --contrast C --max-tokens 2048 --pos-bins 0,1-3,4-15,16-63,64-   # 長い応答の全部の位置でのキーの出力
 ```
+
+**会話の形を混ぜたキー、トークンの行の方向、入力の振り分け。** 対照集合の 1 問を、複数ターンの会話や、その問だけのシステムプロンプト(先頭の `{role: system}`)つきで書けます。前のやり取りのアシスタントの応答を `content: null` と書くと、キーの作成と `gne nw check` が読む前に無介入のモデルで埋めます(`gne nw prior` で埋めた対照集合を書けます)。`--key-conv-cells` で最小二乗のキーのセルに会話の形も入れ、`gne nw check` は形ごとの数を出します。最小二乗のキーは、返事のトークンが一致した直後の位置(`--positions after:<正規表現>`)でも作れ、`target_reply`(一致した応答だけを対象の場面に)、`--key-crit`(決め手のセルの重み)、`--key-fp-max`(交差検証の誤検出が上限を超えればキーを縮める)を使えます。`gne direction token` は出力層の行列の行から方向を作り(長さは目標のロジットの上がりから決める)、`gne direction token-scan` は層を走査します。`gne nw pipeline --token … --token-delta …` でその方向から FiSH のユニットを作れるので、入力の振り分け(マーカー無し = 応答、終了トークン = 応答しない、マーカー = 相づち)を gne のコマンドだけで作れます。既定はどれも変えていません。**分かっている限界(Qwen3.5-4B、1 回ずつ)**: 1 ターン目・システムプロンプトなしだけで作ったキーは、2 ターン目以降やシステムプロンプトのある会話で 69〜78% に落ちました。会話の形を混ぜて作り直すと 2 ターン目以降は 240 中 170 → 198 に上がりましたが、複数ターンで応答しないはずの入力は 80 中 46 しか当たりませんでした。文の終わりに終了トークンを足す形は、応答すべき応答の一部を途中で切りました。詳しくは [docs/fish.md](docs/fish.md) §3・§5・§6。
 
 `gne nw pipeline` は短い要約(式どおりか、ユニットとニューロンの数、足した量、レシピの保存先)を出します(`gne nw verify` と同じく、式どおりかが不合格なら終了コード 1。そのときもレシピは書かれます)。`--direction NAME` を付けると、すでにある方向を作り直さずに使います(区切りや層が合わなければ、はっきりしたエラーで止まります)。`--cap 0.4-0.8,0.3-0.7,0.3-0.7` で、上限つきの形のしきい値を区切りごとに決められます(強さの `--alpha` と同じ書き方。1 つだけなら全部の区切りに同じ値で、既定は今までどおり 0.4-0.8)。
 

@@ -312,3 +312,19 @@ def test_pipeline_token_direction(sess):
     assert p["direction"]["unsegmented"] and p["direction"]["token"]["tokens"]
     with pytest.raises(GneError):
         fish.pipeline(s, str(c), name="cf_rt2", layers=[10], segments="0", token="<|im_end|>")     # Δ が要る
+
+
+def test_jobs_and_mcp_entries(sess):
+    import inspect
+
+    from gne import jobs, mcp_server
+    k = jobs.standard_kinds()
+    assert {"direction_token", "direction_token_scan", "nw_prior"} <= set(k)
+    s, c = sess["s"], sess["contrast"]
+    d = k["direction_token"](s, tokens=["<|im_end|>"], layers=[10], delta=8, name="cf_job", rbar=1.0)
+    assert d["name"] == "cf_job" and np.isclose(d["beta"], 8 / d["gdot"])
+    p = k["nw_prior"](s, contrast=str(c), max_tokens=16)
+    assert p["filled"] == 3
+    src = inspect.getsource(mcp_server)
+    for name in ("async def direction_token(", "async def direction_token_scan(", "async def nw_prior(", "first_token: str | None"):
+        assert name in src
