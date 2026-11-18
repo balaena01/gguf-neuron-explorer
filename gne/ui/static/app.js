@@ -834,7 +834,7 @@ async function onJobFinished(j) {
   updateStatus();
   if (j.kind === "fieldtest" && evalView) evalView.ft.jobEnded(j);        // 実地テスト: eval ビューに結果を出す
   if (j.kind === "headproj_export" && recipePanel) recipePanel.lxDone(j);   // レシピのタブの LoRA・焼き込み
-  if ((String(j.kind).startsWith("fish_") || j.kind === "nw_neurons") && directionView) directionView.jobEnded(j);   // FiSH のタブ
+  if ((String(j.kind).startsWith("fish_") || j.kind === "nw_neurons" || j.kind === "direction_token_scan") && directionView) directionView.jobEnded(j);   // FiSH のタブ(層の走査も)
   if (String(j.kind).startsWith("direction_key") && directionView) directionView.jobEnded(j);   // CHANGE-07: 鍵の作成・確認・専門家・key-verify・一括
   if (j.kind === "head_pipeline" || j.kind === "heads_candidates" || j.kind === "heads_refine") {    // 一括・強さの候補・残りから追加: direction ビューに結果を出す
     if (j.status === "done") {

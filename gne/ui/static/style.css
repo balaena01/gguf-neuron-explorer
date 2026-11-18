@@ -810,3 +810,10 @@ dialog#ask .ask-btns { display: flex; justify-content: flex-end; gap: var(--sp-4
 input.layers { width: 10em; }
 .fx-part { border-left: 2px solid var(--line-mid); padding-left: var(--sp-4); margin: 0 0 var(--sp-4); }
 .fx-part-h { flex-basis: 100%; }
+/* 選ぶ欄をまとめた fieldset(方向のもと): 見た目はほかの欄のまとまりと同じ。legend は float にして、1 行目の見出しにする */
+fieldset.fx-part { border-width: 0 0 0 2px; border-style: solid; border-color: var(--line-mid); min-inline-size: 0; padding-block: 0; padding-inline-end: 0; }
+fieldset.fx-part > legend { float: left; padding: 0; }
+/* 層の走査の表: 押せる行(その層と Δ を欄に入れる)と、倍率ごとの列のまとまり */
+table.fx-tab tr.fx-pick { cursor: pointer; }
+table.fx-tab tr.fx-pick:hover :is(td, th) { background: var(--hover); }
+table.fx-tab th.fx-scan-g { text-align: center; border-bottom: 1px solid var(--line-mid); }

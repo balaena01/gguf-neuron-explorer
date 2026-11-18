@@ -797,7 +797,8 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
     @srv.tool()
     async def direction_token_scan(tokens: list[str] | str, contrast: str, layers: list[int] | str | None = None,
                                    minus: list[str] | str | None = None, deltas: list[float] | None = None, need: float = 0.95,
-                                   leaks: list[float] | None = None, rbar: float | None = None) -> dict:
+                                   leaks: list[float] | None = None, rbar: float | None = None,
+                                   prior_max_tokens: int | None = None) -> dict:
         """層の走査のジョブを投げる(job_status で結果。gne direction token-scan。生成しない)。層ごとに、対照集合の user_prompts の
         入力の位置 0 にだけトークンの行の方向を足し、トークンが 1 位になった入力が need 以上になる最小の Δ(rows.need_delta)と β を
         探す。その Δ の leaks 倍(既定 0.2・0.5)を dont_touch の入力の位置 0 に足したときの、1 位になった数・KL・1 位が変わった数
@@ -807,7 +808,7 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
             p = {"tokens": [tokens] if isinstance(tokens, str) else list(tokens),
                  "contrast": str(_contrast_path(session, contrast, None, None, None, None)),
                  "layers": _layers(layers) if layers is not None else None, "minus": ([minus] if isinstance(minus, str) else minus) or None,
-                 "deltas": deltas, "need": need, "leaks": leaks, "rbar": rbar}
+                 "deltas": deltas, "need": need, "leaks": leaks, "rbar": rbar, "prior_max_tokens": prior_max_tokens}
             return jobs.start("direction_token_scan", {k: v for k, v in p.items() if v is not None}).view()
         except Exception as e:  # noqa: BLE001
             return _err(e)

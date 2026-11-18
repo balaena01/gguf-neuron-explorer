@@ -478,6 +478,17 @@ def create_app(session, *, warm: bool = True, openai: bool = False) -> FastAPI:
         return {"specs": specs, "units": fish.unit_rows(session, specs), "needed": fish.needed(len(segs), form),
                 "names": fish.key_names(base, len(segs), form)}
 
+    @app.post("/api/fish/contrast")
+    def fish_contrast(spec: dict = Body(..., embed=True)):
+        """FiSH のタブの入力欄の表(対照集合)を <root>/contrasts/<name>.yaml に書き、そのパスを返す(fish の設定は入れない。
+        モデルは使わない)。パスしか受けないジョブ(direction_token_scan)に渡すため。content: null の応答は、そのジョブが読む前に埋める。"""
+        from ..keyed_pipeline import save_spec
+        if not isinstance(spec, dict):
+            raise GneError("BAD_ARGS", "spec は対照集合の表です(name・system_a・user_prompts・dont_touch など)")
+        d = {k: v for k, v in spec.items() if k != "fish"}
+        path, _ = save_spec(session, d)
+        return {"path": str(path), "name": d.get("name")}
+
     @app.post("/api/nw/export")
     def nw_export(units: list[str] = Body(...), name: str = Body(...)):
         """計算で作るニューロン(mode: nw)の LoRA の書き出し(焼き込みは無い)。"""

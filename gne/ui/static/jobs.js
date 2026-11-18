@@ -17,7 +17,8 @@ export const KIND = { embed: tr("埋め込み"), connections: "connections", lay
                fish_pipeline: tr("FiSH をまとめて作る"), fish_direction: tr("FiSH の方向を作る"), fish_try: tr("FiSH を重みに入れる前に試す"),
                nw_neurons: tr("FiSH のニューロンを選ぶ"), fish_keys: tr("FiSH の鍵を作る"), fish_verify: tr("FiSH が式どおりか確かめる"),
                fish_check: tr("FiSH の漏れを確かめる"), fish_behave: tr("FiSH の返事を読む"), fish_heads: tr("CHiPS のヘッドの分を場面で取り除く"),
-               nw_check: tr("FiSH のユニットを確かめる(nw check)") };
+               nw_check: tr("FiSH のユニットを確かめる(nw check)"), direction_token: tr("トークンの行の方向"),
+               direction_token_scan: tr("トークンの行の層を走査する"), nw_prior: tr("前のやり取りの応答を埋める") };
 
 function eta(s) {
   if (s === null || s === undefined || !Number.isFinite(s)) return "";

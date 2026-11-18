@@ -88,12 +88,12 @@ def _out_rows(weights, ids: Sequence[int]) -> np.ndarray:
     return out
 
 
-def _prompt_ids(session, contrast) -> tuple[list[list[int]], list[list[int]], str]:
+def _prompt_ids(session, contrast, prior_max_tokens=None) -> tuple[list[list[int]], list[list[int]], str]:
     """対照集合 → (狙う側の入力のトークン列, dont_touch の入力のトークン列, 名前)。狙う側は system_b の文脈(推論時と同じ)。"""
     from .keyed_build import _as_spec
     from .prior import ensure_filled
     from .reverse import _conv
-    spec = _as_spec(ensure_filled(session, contrast))
+    spec = _as_spec(ensure_filled(session, contrast, max_tokens=prior_max_tokens))
     cs = spec.contrast
     e = session.engine
     ids = lambda c: e.tokenize_prompt(e.render_chat(c))
@@ -137,7 +137,7 @@ def check_name(name: str) -> str:
 
 
 def token_direction(session, tokens, *, layers, delta: float, name: str, minus=None, down: bool = False, contrast=None,
-                    rbar: float | None = None) -> dict:
+                    rbar: float | None = None, prior_max_tokens: int | None = None) -> dict:
     """トークンの行から方向を作り、層ごとに ±β·û を書いた方向のファイルを保存する(<root>/directions/<model_id>/<name>.npz)。
     tokens・minus はトークンの指定のリスト(resolve_token)。delta は目標のロジットの上がり Δ。r̄ は contrast の入力
     (狙う側と dont_touch の全部)の位置 0 で測る(省くと configs/prompts/default.yaml の質問)。rbar を渡すとその値を使う。"""
@@ -162,7 +162,8 @@ def token_direction(session, tokens, *, layers, delta: float, name: str, minus=N
     d = direction_of(w, plus, mns)
     src = "rbar"
     if rbar is None:
-        seqs = _default_seqs(session) if contrast is None else [x for part in _prompt_ids(session, contrast)[:2] for x in part]
+        seqs = _default_seqs(session) if contrast is None else [x for part in _prompt_ids(session, contrast, prior_max_tokens)[:2]
+                                                                 for x in part]
         rbar = final_rms(session, seqs)
         src = "contrast" if contrast is not None else "default_prompts"
     rbar = float(rbar)
@@ -234,7 +235,7 @@ class _LastTokenReader:
 
 
 def token_scan(session, tokens, contrast, *, layers=None, minus=None, deltas: Sequence[float] = DELTAS, need: float = NEED,
-               leaks: Sequence[float] = LEAKS, rbar: float | None = None,
+               leaks: Sequence[float] = LEAKS, rbar: float | None = None, prior_max_tokens: int | None = None,
                progress: Callable[[int, int, str], None] | None = None) -> dict:
     """層ごとに、狙う側の入力の位置 0 で足すトークンが 1 位になる最小の Δ と、dont_touch の入力への影響を測る(生成しない)。
     layers を省くと、最終層を除く全部の層。結果の rows は層ごとに {layer, need_delta, beta, open_hit(その Δ で 1 位になった数),
@@ -253,7 +254,7 @@ def token_scan(session, tokens, contrast, *, layers=None, minus=None, deltas: Se
         raise GneError("BAD_ARGS", "deltas は 0 より大きい数のリストです")
     if not 0 < float(need) <= 1:
         raise GneError("BAD_ARGS", f"need は 0 より大きく 1 以下の割合です({need!r})")
-    open_, close, cname = _prompt_ids(session, contrast)
+    open_, close, cname = _prompt_ids(session, contrast, prior_max_tokens)
     if not open_:
         raise GneError("BAD_CONTRAST", "狙う側の入力(user_prompts)がありません")
     d = direction_of(w, plus, mns)
