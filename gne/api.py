@@ -52,16 +52,19 @@ def refine_verdicts(rows: list[dict], *, n_a: int, gap: float, sign: float, thre
     """残りから追加の合わせたレシピの行に、良くなるか(verdict: better / worse / no_gain と理由 why)を付け、推す順に並べた良くなる行を返す。
     数はどれも元の方向・元の目標で、前 = 土台だけ、後 = 土台 + 足した組。
     - worse: 残りが増える(remain_up)、組の効きが差の 1% より下がる(effect_down)、B 側が A 側へ差の 10% より動く(b_move)、
-      B 側の直交成分のずれが 0.5 を超える(drift)。推さない。
+      B 側の直交成分のずれが 0.5 を超える(drift)。B 側の 2 つは、土台だけのときより悪くなったときだけ(土台がもう超えていることがある)。推さない。
     - better: worse でなく、残りが減るか、組の効きが差の 1% より上がる。それ以外は no_gain。
     - 推す順: 目標に届く行があれば、残りが最少から A 側の 5% 以内 → B ⊥ が最小の 1.25 倍以内 → 足した部品が少ない → 全体が少ない。
       届く行が無ければ、組の効きが最大から差の 5% 以内 → 足した部品が少ない。"""
     tol_e, tol_n = 0.01 * gap, max(1, int(np.ceil(0.05 * n_a)))
     for c in rows:
         toward = sign * float(c.get("b_delta") or 0.0) / gap
+        toward0 = sign * float(c.get("b_delta_base") or 0.0) / gap
+        # B 側の上限: 合わせると上限を超え、しかも土台だけのときより悪くなる(土台がもう超えていても、足して悪くならなければ足した組のせいではない)
         why = [k for k, bad in (("remain_up", c["remain_after"] > c["remain_before"]),
                                 ("effect_down", c["effect"] < c["effect_base"] - tol_e),
-                                ("b_move", toward > b_move_max), ("drift", c["b_drift_orth"] > drift_max)) if bad]
+                                ("b_move", toward > b_move_max and toward > toward0 + 0.01),
+                                ("drift", c["b_drift_orth"] > drift_max and c["b_drift_orth"] > float(c.get("b_drift_orth_base") or 0.0) + 0.01)) if bad]
         good = not why and (c["remain_after"] < c["remain_before"] or c["effect"] > c["effect_base"] + tol_e)
         c.update(verdict="worse" if why else "better" if good else "no_gain", why=why, b_toward=toward)
     ok = [c for c in rows if c["verdict"] == "better"]
@@ -355,8 +358,9 @@ class Session:
         if r.model_id and r.model_id != self.meta.model_id:
             self.warn(f"レシピの model_id {r.model_id!r} が読み込んだモデル {self.meta.model_id!r} と違います")
         for u in r.units:
-            if not 0 <= u.layer < self.meta.n_layer:
-                raise GneError("BAD_RECIPE", f"層 {u.layer} は範囲外です(0..{self.meta.n_layer - 1})")
+            if not 0 <= u.layer < self.weights.n_main:     # MTP の層は本流で実行されず、LoRA にも入れられない
+                raise GneError("BAD_RECIPE", f"層 {u.layer} は範囲外です(0..{self.weights.n_main - 1}"
+                               + ("。MTP の層は本流で実行されません)" if self.weights.n_main < self.meta.n_layer else ")"))
             if u.mode in ("keyed", "nw"):                           # CHANGE-07: まとめて _check_keyed で確かめる(nw は nw_plan)
                 continue
             if u.kind == "neuron" and self.weights.is_moe(u.layer):
@@ -1250,8 +1254,9 @@ class Session:
                                seconds, lambda ids: [self.vocab.text(int(i)) for i in ids])
 
     def _check_layer(self, L: int, *, cvec: bool = False) -> None:
-        if not 0 <= L < self.meta.n_layer:
-            raise GneError("BAD_ARGS", f"層 {L} は範囲外です(0..{self.meta.n_layer - 1})")
+        if not 0 <= L < self.weights.n_main:           # MTP の層は本流で実行されない(押しても何も起きない)
+            raise GneError("BAD_ARGS", f"層 {L} は範囲外です(0..{self.weights.n_main - 1}"
+                           + (f"。層 {self.weights.n_main}〜{self.meta.n_layer - 1} は MTP の層で、本流では実行されません)" if self.weights.n_main < self.meta.n_layer else ")"))
         if cvec and L == 0:
             raise GneError("BAD_ARGS", "層 0 は control vector で押せません(llama.cpp の仕様)")
         if not self.weights.has_tensor(f"blk.{L}.ffn_down.weight") and not self.weights.has_tensor(f"blk.{L}.ffn_down_exps.weight"):
@@ -2642,12 +2647,52 @@ class Session:
         if n_check > 0 and chk is not None:                        # 5. 応答での確かめ(書き終えた応答の validate.match の一致数)
             out["check"] = self.reply_check(cs_chk, val_chk, chk["recipe"], n=n_check, max_tokens=int(pipe["check_tokens"]))
             out["check"].update(n_heads=chk["n_heads"], recommended=rec is not None)
+            if rec is not None and out["check"].get("break_warning"):
+                self._recommend_without_broken(out, a, rec, cs_chk, val_chk, n_check, int(pipe["check_tokens"]))
         out["seconds"] = time.perf_counter() - t0
         out["updated"] = time.strftime("%Y-%m-%dT%H:%M:%S")
         p = self.store.heads_dir(self.meta.model_id) / f"{name}.pipeline.json"
         p.write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
         out["path"] = str(p)
         return out
+
+    def _recommend_without_broken(self, out: dict, a: dict, rec: dict, cs, val, n: int, max_tokens: int, tries: int = 3) -> None:
+        """推す組を当てると応答が壊れる(繰り返し・空が増える)とき、同じ規則で次の組を推し、応答での確かめを流し直す(tries 組まで)。
+        壊れた組には replies_break を付ける。どれも壊れれば推さない(no_recommend)。配分の JSON の推す組も書き直す。"""
+        from types import SimpleNamespace
+
+        from .unitwrites import _recommend
+        tried = [{"n_heads": rec["n_heads"], "break_warning": out["check"]["break_warning"]}]
+        rec["replies_break"] = True
+        new, by, chk = None, None, out["check"]
+        for _ in range(tries - 1):
+            rest = [r for r in a["table"] if not r.get("replies_break")]
+            n_, by_, _no = _recommend(rest, int(a.get("n_a") or 1), SimpleNamespace(gap=float(a.get("gap") or 1.0)))
+            row = next((r for r in rest if n_ is not None and r.get("n_heads") == n_ and not r.get("skipped")), None)
+            if row is None:
+                break
+            ck = self.reply_check(cs, val, row["recipe"], n=n, max_tokens=max_tokens)
+            ck.update(n_heads=row["n_heads"], recommended=True)
+            tried.append({"n_heads": row["n_heads"], "break_warning": ck.get("break_warning")})
+            chk = ck
+            if ck.get("break_warning"):
+                row["replies_break"] = True
+                continue
+            new, by = row, by_
+            break
+        for r in a["table"]:
+            r["recommended"] = new is not None and r is new
+        a["recommended"], a["recommended_by"] = (new["n_heads"], by) if new is not None else (None, None)
+        out["check"] = {**chk, "tried": tried}
+        if new is None:
+            out["recommended"] = None
+            out["no_recommend"] = a["no_recommend"] = {
+                "reason": "推す組を当てると応答が壊れる(繰り返し・空が増える)", "next": ["rank causal", "unit_kinds", "refine"]}
+        else:
+            out["recommended"] = {"n_heads": new["n_heads"], "units": new["units"], "recipe": new["recipe"],
+                                  "reached": bool(new["reached"]), "by": by, "after_replies_break": [t_["n_heads"] for t_ in tried[:-1]]}
+        p_ = Path(a["path"])
+        p_.write_text(json.dumps({k: v for k, v in a.items() if k != "path"}, ensure_ascii=False, indent=1), encoding="utf-8")
 
     def reply_check(self, cs, val, recipe: str | Path | Recipe | None, *, n: int = 16, max_tokens: int = 512,
                     prompts: dict | None = None) -> dict:
@@ -2865,6 +2910,28 @@ class Session:
         a, b_prior = measure(prior_r)
         before = summary(a, b_prior)
         a = a[S]
+        # 元の一括が選ぶ質問と測る質問を分けていたら、合わせたレシピの数を選ぶのに使っていない質問(測る側)でも測る(元の表と同じ並べ方)
+        ho_root = ral.get("holdout") or {}
+        hmeasure = hsum = None
+        if ho_root.get("contrast") and Path(ho_root["contrast"]).exists():
+            cs_h, _ = load_contrast(ho_root["contrast"])
+            sch = Scorer(self, ds, cs_h, layers=[S], positions=pos)
+            schb = Scorer(self, ds, cs_h, layers=[S], positions=pos, max_examples=ral.get("max_examples") or 64)
+
+            def hmeasure(rec):
+                lora = self.lora_for(rec) if rec is not None else None
+                vecs = self.vectors(rec)[0] if rec is not None and rec.add_units else None
+                return sch.run(lora, vecs, sides="A")["A"]["values"][S], schb.run(lora, vecs, sides="B", keep=True)["B"]
+            ha0, hb0 = hmeasure(None)
+            ha0m, hb0m, thr_h = float(ha0.mean()), float(hb0["values"][S].mean()), float(ho_root.get("target", thr))
+
+            def hsum(va, b) -> dict:
+                bm = float(b["values"][S].mean())
+                return {"remain": int((va > thr_h).sum()), "a_mean": float(va.mean()), "b_delta": bm - hb0m,
+                        "b_drift_orth": drift(hb0["resid"][S], b["resid"][S], sch.r[S])[1],
+                        "effect": (1.0 if ha0m >= hb0m else -1.0) * (ha0m - float(va.mean())) - abs(bm - hb0m),
+                        "reached": bool(float(va.mean()) <= thr_h + 1e-6)}
+            hbefore = hsum(*hmeasure(prior_r))
         order = [int(i) for i in np.argsort(-a)]
         rem = [i for i in order if a[i] > thr]
         what = f"{row['n_heads']} 個の組" + (f"(元の組 + {rnd - 1} 回分の追加)" if rnd > 1 else "")
@@ -2947,6 +3014,23 @@ class Session:
                              "kind": kind, "s": float(u.k), "direction": u.direction, "round": int(r_)})
             return out_
 
+        plan_ = getattr(self.weights, "loop", None)
+        shared_ = plan_ is not None and not getattr(self.weights, "per_visit_names", False)
+
+        def cross_of(parts) -> list[dict]:
+            """同じ層を 2 回実行するモデルで、土台の部品と今回足した部品が、同じ重み(保存されている層・同じ行列)を別の回の段で使う組。
+            探したときは土台と足した組を別々の LoRA で足し合わせたが、合わせたレシピでは 2 つの射影を続けて掛ける(headproj の _build)ので、
+            効き方が違う(強さが 1 を超えると大きく違うことがある)。表の数は合わせたレシピで測った値。"""
+            if not shared_:
+                return []
+            mat = lambda q: "neuron" if q["kind"] == "neuron" else ("ffn" if q["kind"] == "layer_mlp" else "attn")   # noqa: E731
+            out_ = []
+            for b_ in [q for q in parts if q["round"] < rnd]:
+                for a_ in [q for q in parts if q["round"] == rnd]:
+                    if plan_.stored(b_["layer"]) == plan_.stored(a_["layer"]) and b_["layer"] != a_["layer"] and mat(b_) == mat(a_):
+                        out_.append({"base": b_["spec"], "added": a_["spec"], "stored": int(plan_.stored(a_["layer"]))})
+            return out_
+
         def dups_of(parts) -> list[dict]:           # 同じ部品(層・種類・番号)が 2 つ以上の方向で入っている
             g: dict[tuple, list[dict]] = {}
             for q in parts:
@@ -2965,9 +3049,16 @@ class Session:
             cr.save(cpath)
             a2, b2 = measure(cr)
             after = summary(a2, b2)
+            hrow = None
+            if hmeasure is not None:
+                hafter = hsum(*hmeasure(cr))
+                hrow = {"n_a": int(len(ha0)), "target": thr_h, "remain_before": hbefore["remain"], "remain_after": hafter["remain"],
+                        "a_mean_before": hbefore["a_mean"], "a_mean_after": hafter["a_mean"], "b_delta_base": hbefore["b_delta"],
+                        "b_delta": hafter["b_delta"], "b_drift_orth_base": hbefore["b_drift_orth"], "b_drift_orth": hafter["b_drift_orth"],
+                        "effect_base": hbefore["effect"], "effect": hafter["effect"], "reached": hafter["reached"]}
             parts = parts_of(prior_units, rounds0) + parts_of(new_units, [rnd] * len(new_units))
             comb_rows.append({"key": key, "n_new": n_new, "s1": n_new is None, "recipe": str(cpath),
-                              "units": [q["spec"] for q in parts], "parts": parts, "dups": dups_of(parts),
+                              "units": [q["spec"] for q in parts], "parts": parts, "dups": dups_of(parts), "cross_visit": cross_of(parts),
                               "n_heads": len(parts), "n_base": len(prior_units), "n_added": len(new_units),
                               "recommended_added": bool(r.get("recommended")), "recommended": False, "reached": bool(r.get("reached")),
                               "reached_combined": after["reached"],
@@ -2979,7 +3070,8 @@ class Session:
                               "b_drift_orth_base": before["b_drift_orth"], "b_drift_orth": after["b_drift_orth"],
                               "effect_base": before["effect"], "effect": after["effect"],
                               **({"exit_before": before["exit"], "exit_after": after["exit"]} if X is not None else {}),
-                              "added_only": {k_: r.get(k_) for k_ in ("remain", "a_mean", "b_side_delta", "b_drift_orth", "effect", "reached")}})
+                              "added_only": {k_: r.get(k_) for k_ in ("remain", "a_mean", "b_side_delta", "b_drift_orth", "effect", "reached")},
+                              **({"holdout": hrow} if hrow is not None else {})})
         # 推す行: 使うのは合わせたレシピなので、元の方向・元の目標で測った合わせたレシピの数で選ぶ(規則は refine_verdicts)
         order = refine_verdicts(comb_rows, n_a=int(len(a)), gap=abs(a0m - b0m) or 1.0, sign=sign, threshold=thr)
         n_chk = check_replies if check_replies is not None else st.get("check_replies")

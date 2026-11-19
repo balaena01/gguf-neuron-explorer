@@ -2831,7 +2831,7 @@ def headproj_ablate(c: Common, holder: dict,
     from .steer import Recipe, Unit
     s = holder["session"] = c.session()
     arch = s.weights.arch
-    Ls = parse_layers(layers) or list(range(s.meta.n_layer))
+    Ls = parse_layers(layers) or list(range(s.weights.n_main))           # MTP の層は本流で実行されないので含めない
     units = [Unit(L, None, 0.0, "head", mode="proj", k=float(scale), head=h, direction=direction)
              for L in Ls if arch.layers[L].head_dim and arch.layers[L].head_writer for h in range(arch.layers[L].n_head)]
     if not units:
@@ -3392,10 +3392,17 @@ def _refine_text(d: dict) -> str:
                          + {"worse": f"  [悪くなる: {'・'.join(why_ja.get(k, k) for k in c.get('why') or [])}]", "no_gain": "  [良くならない]",
                             "replies_break": "  [応答が壊れる]"}.get(c.get("verdict"), ""))
             lines.append(f"      {c['recipe']}")
+            h = c.get("holdout")
+            if h:
+                lines.append(f"      選ぶのに使っていない質問: 残り {h['remain_before']} → {h['remain_after']} / {h['n_a']}、A 平均 {h['a_mean_before']:.2f} → "
+                             f"{h['a_mean_after']:.2f}、B Δ {h['b_delta']:+.2f}、B ⊥ {h['b_drift_orth']:.3f}" + ("" if h["reached"] else "(目標に届かない)"))
             for x in c.get("dups") or []:
                 who = {"layer_attn": "attn", "layer_mlp": "ffn", "neuron": f"N{x['head']}"}.get(x["kind"], f"H{x['head']}")
                 lines.append(f"      同じ部品が 2 つの方向で入っている: L{x['layer']} {who}"
                              f"({'、'.join(f'{rname(k)} s{sv:.2f} @{dn}' for k, sv, dn in zip(x['rounds'], x['s'], x['directions']))})。両方の射影を当てる")
+            for x in c.get("cross_visit") or []:
+                lines.append(f"      ループの同じ重み(保存されている層 {x['stored']})を土台 {x['base']} と足した {x['added']} が別の回で使う"
+                             "(探したときは別々に当て、合わせたレシピでは続けて掛ける。表の数は合わせたレシピの値)")
             if ao:
                 lines.append(f"      (参考: 足した組だけ、新しい方向で 残り {ao.get('remain')}、A 平均 {ao.get('a_mean') or float('nan'):.2f}"
                              + ("" if ao.get("reached") else "、目標に届かない") + ")")

@@ -748,6 +748,38 @@ def test_refine_old_stacked_result_is_refused(tmp_path):
         Session._refine_chain(fake, "x_r1", {"n_heads": 3, "recipe": "c.yaml"})
 
 
+@pytest.mark.model
+def test_pipeline_skips_set_whose_replies_break(session, monkeypatch):
+    """推す組を当てると応答が壊れる(繰り返し・空が増える)なら、同じ規則で次の組を推して確かめ直す。どれも壊れれば推さない。"""
+    d = yaml.safe_load(EVIL.read_text(encoding="utf-8"))
+    spec = {"name": "pbrk", "system_a": d["system_a"], "system_b": d["system_b"], "user_prompts": d["user_prompts"], "validate": d["validate"],
+            "pipeline": {"verify_top": 6, "verify_sample": 0, "n_units": [4, 2, 1], "max_examples": 8, "check_replies": 1, "check_tokens": 8,
+                         "target": "B"}}
+    calls = []
+    real = session.reply_check
+
+    def fake(cs, val, recipe, **kw):                        # 最初に確かめた組だけ壊れたことにする
+        out = real(cs, val, recipe, **kw)
+        calls.append(str(recipe))
+        if len(calls) == 1:
+            out["break_warning"] = {"A": {"loop": 1, "empty": 0, "n": 1, "loop_none": 0, "empty_none": 0}}
+        return out
+    monkeypatch.setattr(session, "reply_check", fake)
+    out = session.heads_pipeline(spec)
+    tab = out["allocate"]["table"]
+    if not out.get("recommended") and len(calls) <= 1:
+        pytest.skip("推す組が 1 つも無い(この題材では確かめられない)")
+    broken = [r for r in tab if r.get("replies_break")]
+    assert len(broken) >= 1 and not any(r.get("recommended") for r in broken)
+    assert out["check"]["tried"][0]["break_warning"] and len(calls) == len(out["check"]["tried"])
+    if out.get("recommended"):
+        assert out["recommended"]["after_replies_break"] == [broken[0]["n_heads"]] and out["check"]["n_heads"] == out["recommended"]["n_heads"]
+        al = json.loads(Path(out["allocate"]["path"]).read_text(encoding="utf-8"))
+        assert al["recommended"] == out["recommended"]["n_heads"]
+    else:
+        assert out["no_recommend"]["reason"].startswith("推す組を当てると応答が壊れる")
+
+
 def test_n_main_skips_mtp_layers():
     """MTP(nextn)の層は block_count に入るが本流では実行されないので、本流の層の数から除く(nextn_predict_layers か nextn のテンソル)。"""
     from gne.weights import Weights

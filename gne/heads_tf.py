@@ -167,7 +167,7 @@ def screen(session, contrast, *, direction: str, target: str, layers=None, layer
     t0 = time.perf_counter()
     tick = progress or (lambda *_: None)
     w = session.weights
-    n_layer = w.meta.n_layer
+    n_layer = w.n_main                               # MTP の層は本流で実行されないので数えない(最終層も本流の最後)
     Ls = sorted({int(L) for L in (parse_layers(layers) if layers is not None else range(1, n_layer - 1))})
     Ls = [L for L in Ls if w.arch.layers[L].head_writer is not None and w.arch.layers[L].n_head]
     if not Ls:

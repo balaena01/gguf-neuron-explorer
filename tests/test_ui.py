@@ -3198,11 +3198,15 @@ def _seed_pipeline_writes_refine(s, root: str = "ppw81") -> dict:
                      "parts": parts, "dups": dups, "n_heads": len(parts), "n_base": 5, "n_added": len(us), "recommended": key == "2",
                      "recommended_added": key == "3", "verdict": {"3": "worse", "2": "better", "s1": "no_gain"}[key],
                      "why": ["b_move"] if key == "3" else [],
+                     "cross_visit": [{"base": f"16:ffn:s1.5@{mid}", "added": f"40:ffn:s1@{name}", "stored": 16}] if key == "3" else [],
                      "reached": True, "reached_combined": key != "s1", "remain_before": 3, "remain_after": {"3": 0, "2": 1, "s1": 2}[key],
                      "a_mean_before": 4.0, "a_mean_after": -9.5, "a_max_before": 12.0, "a_max_after": 1.0, "b_mean": -10.0,
                      "b_mean_base": -9.8, "b_mean_after": -9.6, "b_delta_base": 0.2, "b_delta": 0.4, "b_drift_orth_base": 0.06,
                      "b_drift_orth": 0.08, "effect_base": 25.8, "effect": 39.1,
-                     "added_only": {"remain": 2, "a_mean": -9.0, "b_side_delta": 0.2, "b_drift_orth": 0.05, "effect": 30.0, "reached": True}})
+                     "added_only": {"remain": 2, "a_mean": -9.0, "b_side_delta": 0.2, "b_drift_orth": 0.05, "effect": 30.0, "reached": True},
+                     **({"holdout": {"n_a": 3, "target": -9.5, "remain_before": 2, "remain_after": 1, "a_mean_before": 3.0, "a_mean_after": -9.1,
+                                     "b_delta_base": 0.1, "b_delta": 0.3, "b_drift_orth_base": 0.05, "b_drift_orth": 0.07, "effect_base": 26.0,
+                                     "effect": 38.0, "reached": True}} if key == "2" else {})})
     chk = {"n": {"A": 6, "B": 6}, "max_tokens": 512, "match": "arr", "held_out": {"A": False, "B": False}, "a_changed": 3, "note": None,
            "rows": {k: {side: {"n": 6, "finished": 6, "match_finished": (4 if k == "none" else 1) if side == "A" else 0, "empty": 0, "loop": 0,
                                "at_limit": 0} for side in "AB"} for k in ("none", "recipe")},
@@ -3271,6 +3275,8 @@ def test_pipeline_writes_refine_rows_are_combined(pipe_writes_server, browser):
         assert badges == [False, False, True, False]
         assert "合わせると悪くなる: B 側が A 側へ動く" in rows[1]["text"] and "足した組だけの値では推していた" in rows[1]["text"]
         assert "合わせても良くならない" in rows[0]["text"]
+        assert "選ぶのに使っていない質問(合わせたレシピ): 残り 2 → 1 / 3" in rows[2]["text"]
+        assert "ループの同じ重みを、土台と足した組が別の回の段で使っています" in rows[1]["text"]
         assert "推す行(合わせたレシピ): 上限 2" in pg.evaluate(f"document.querySelector('{res} .pp-res-head').innerText")
         assert "強さの決め方(部品ごとの効率、1 回)" in rows[1]["text"]                    # 回ごとの質問と部品ごとの効率の表
         assert "外した: B 側の直交成分のずれ" in pg.evaluate(f"document.querySelector('{res} table.pp-top').innerText")
