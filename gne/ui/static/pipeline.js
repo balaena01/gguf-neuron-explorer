@@ -117,6 +117,12 @@ const unitChip = (u, extra = "") => (u.kind === "neuron" ? `<span class="mono">L
   : headChip(u.layer, u.head ?? u.index, extra));
 const KIND_LABEL = { attn: "注意ヘッド", linear: "線形注意のヘッド", neuron: "ニューロン", layer_attn: "層の注意全体", layer_mlp: "層の MLP 全体" };
 const headChip = (L, h, extra = "") => `<a href="#" class="pp-head mono" data-head="${L}:${h}" title="${t("HEAD パネルで開く")}">L${L} H${h}${extra}</a>`;
+// 残りから追加の結果: 表の行(上限の数か "s1")の、土台と合わせたレシピ。v0.8.3 までの結果は key が無く n_new で引く
+const combinedRow = (d, key) => ((d.refine && d.refine.combined_rows) || []).find((c) => String(c.key ?? c.n_new) === String(key)) || null;
+// レシピの欄に読み込むときの名前: 土台(元の組 + それまでの回)と足した組を合わせたもの
+const combinedName = (d, c) => `${d.name}-${String(c.key ?? c.n_new) === "s1" ? "s1" : `n${c.key ?? c.n_new}`}-base-plus-added`;
+const roundsUpTo = (k) => (k <= 1 ? t("1 回目") : t("1〜{k} 回目", { k }));
+const partName = (q) => (q.kind === "neuron" ? `L${q.layer} N${q.head}` : q.kind === "layer_attn" ? `L${q.layer} attn` : q.kind === "layer_mlp" ? `L${q.layer} ffn` : `L${q.layer} H${q.head}`);
 
 // 層ごとの cohen_d の小さな棒グラフ(SVG)。基準層は白、cohen_d 最大の層は緑。棒にマウスを当てると値
 function dChart(layers, base, best) {
@@ -229,7 +235,7 @@ export class PipelinePanel {
       steps: [{ key: "input", label: t("1. 対照の文"), els: () => [this.$("#pp-input"), this.$("#pp-run")], shared: true },
               { key: "dir", label: t("2. 方向と基準層"), els: res("section.pp-stage:nth-of-type(1)") },
               { key: "causal", label: t("3. 効くヘッドを探す"), els: res("section.pp-stage:nth-of-type(2)") },
-              { key: "alloc", label: t("4. 配り方を決める"), els: res("section.pp-stage:nth-of-type(3), section.pp-stage:nth-of-type(4)") },
+              { key: "alloc", label: t("4. 配り方を決める"), els: res("section.pp-stage:nth-of-type(3), section.pp-stage:nth-of-type(4), section.pp-stage:nth-of-type(5)") },
               { key: "cand", label: t("5. 強さの候補を作る"), els: res(".pp-cand") },
               { key: "past", label: t("これまでの実行"), els: () => [this.$("#pp-past-wrap")], sep: true }],
     });
@@ -378,15 +384,30 @@ export class PipelinePanel {
   refineNote(d) {
     const r = d.refine;
     if (!r) return "";
-    const rm = r.remaining || {}, c = r.combined;
-    return `<div class="pp-refine note"><p>${t("{base} の {n} ヘッドの組で目標まで下がらなかった {k} 問(A 側 {nA} 問のうち)から作った、追加のヘッドの結果です。A と B の両側に元の組を当てたまま、方向を作り直しています。",
-      { base: esc(r.base), n: r.n_heads, k: rm.n ?? "—", nA: rm.n_a ?? "—" })}${rm.padded ? ` ${t("(残りが少ないので、射影の値の高い順に {u} 問で作りました)", { u: rm.used })}` : ""}</p>
-      ${c ? `<p><b>${t("元の組と合わせた組({m} ヘッド)", { m: c.n_heads })}</b>${c.chosen_by === "fewest_remaining" ? ` <span class="muted">${t("(目標に届いた組が無いので、合わせた残りが最も少ない組)")}</span>` : ""}: ${t("残り {a} → {b} 問", { a: c.remain_before, b: c.remain_after })} ·
-        ${t("A 平均 {a} → {b}", { a: fmt(c.a_mean_before, 2), b: fmt(c.a_mean_after, 2) })} · ${t("B ⊥ {a} → {b}", { a: fmt(c.b_drift_orth_base, 3), b: fmt(c.b_drift_orth, 3) })}
-        <button class="small" id="pp-rf-load" title="${t("元の組と追加の組を合わせたユニットで今のレシピを置き換える")}">${t("合わせた組でレシピを置き換える")}</button>
+    const rm = r.remaining || {}, c = r.combined, rnd = r.round || 1;
+    const base = rnd > 1 ? t("{base} の {n} 個の行の合わせたレシピ(元の組 + {r}の追加)", { base: esc(r.base), n: r.n_heads, r: roundsUpTo(rnd - 1) })
+      : t("{base} の {n} 個の組", { base: esc(r.base), n: r.n_heads });
+    const byRound = Object.entries(r.units_by_round || {}).map(([k, n]) => (k === "0" ? t("元の組 {n} 個", { n }) : t("{k} 回目 {n} 個", { k, n }))).join(" + ");
+    return `<div class="pp-refine note"><p>${t("残りから追加の結果({k} 回目、元の一括 {root})です。土台 = {base}。土台を当てても元の方向・元の目標まで下がらなかった {m} 問(A 側 {nA} 問のうち)だけで、A と B の両側に土台を当てたまま方向を作り直し、土台に足す部品を探しました。",
+      { k: rnd, root: esc(r.root || r.base), base, m: rm.n ?? "—", nA: rm.n_a ?? "—" })}${rm.padded ? ` ${t("(残りが少ないので、射影の値の高い順に {u} 問で作りました)", { u: rm.used })}` : ""}</p>
+      ${c ? `<p><b>${t("代表の合わせたレシピ({m} 個 = {parts})", { m: c.n_heads, parts: byRound || "—" })}</b>${c.chosen_by === "fewest_remaining" ? ` <span class="muted">${t("(足した組に推す組が無いので、合わせた残りが最も少ない組)")}</span>` : ""}: ${t("残り {a} → {b} 問", { a: c.remain_before, b: c.remain_after })} ·
+        ${t("A 平均 {a} → {b}", { a: fmt(c.a_mean_before, 2), b: fmt(c.a_mean_after, 2) })} · B Δ ${sgn(c.b_delta, 2)} · ${t("B ⊥ {a} → {b}", { a: fmt(c.b_drift_orth_base, 3), b: fmt(c.b_drift_orth, 3) })}
+        <button class="small" id="pp-rf-load" title="${t("元の組と足した組を合わせたユニット(全部の回)で今のレシピを置き換える")}">${t("合わせた組でレシピを置き換える")}</button>
         <button class="small" id="pp-rf-eval" title="${t("合わせた組のレシピを評価の画面へ送る(強さ 0 と 1、ランダムな向きの比べる用 8 本が入る。始める前に変えられる)")}">${t("合わせた組を評価へ送る")}</button></p>`
-        : `<p class="muted">${t("追加の組を作れなかったので、合わせた組はありません。")}</p>`}
-      <p class="muted">${t("下の比較表の「元の組と合わせて読み込む」「合わせて eval する」は、どの行も元の組とその行の組を合わせて使います(追加の組は元の組を当てた状態で探したので、単独では使いません)。")}</p></div>`;
+        : `<p class="muted">${t("足す組を作れなかったので、合わせた組はありません。")}</p>`}
+      ${r.check && !d.writes ? this.refineCheck(r.check) : ""}
+      <p class="muted">${t("下の表のどの行も、元の組に足した組です。「レシピを置き換える」「評価へ送る」は、どの行も土台と足した組を合わせたレシピを使います(足した組は土台を当てた状態で探したので、単独では使いません)。強さを上げるのは足した組だけで、土台の部品の強さはそのままです。")}</p></div>`;
+  }
+
+  // 止めて選ぶ(rank causal)の残りから追加の結果: 代表の合わせたレシピでの応答での確かめ(rank writes は 6. の段に出す)
+  refineCheck(ck) {
+    const x0 = ck.rows.none, x1 = ck.rows.recipe;
+    const cell = (x) => (x.match_finished !== null && x.match_finished !== undefined ? `${x.match_finished}/${x.finished}` : `${x.finished}/${x.n}`);
+    const warn = [ck.match_warning, ck.note && t(ck.note), ...Object.entries(ck.break_warning || {}).map(([side, x]) =>
+      t("組を当てると {s} 側の応答が壊れています(繰り返し {l}・空 {e} / {n} 問、無介入では {l0}・{e0})。強さを下げるか、別の組・別の部品の種類を試してください", { s: side, l: x.loop, e: x.empty, n: x.n, l0: x.loop_none, e0: x.empty_none }))].filter(Boolean);
+    return `<p class="note">${t("応答での確かめ(代表の合わせたレシピ、validate.match の一致 A / B): 無介入 {a0} / {b0} → 合わせたレシピ {a1} / {b1} · 空 {e1}(無介入 {e0}) · 繰り返し {l1}(無介入 {l0})", {
+      a0: cell(x0.A), b0: cell(x0.B), a1: cell(x1.A), b1: cell(x1.B), e1: `${x1.A.empty}/${x1.B.empty}`, e0: `${x0.A.empty}/${x0.B.empty}`, l1: `${x1.A.loop}/${x1.B.loop}`, l0: `${x0.A.loop}/${x0.B.loop}` })}</p>${
+      warn.map((w) => `<p class="note ng">${esc(w)}</p>`).join("")}`;
   }
 
   // app.js の onJobFinished から(このパネルで投げたものでなくても一覧は取り直す)
@@ -454,7 +475,8 @@ export class PipelinePanel {
       ${(d.reused || []).length ? `<p class="note muted">${t("同じ JSON・同じ設定で作り済みの{w}を使い回しました(作り直すときは「最初から作り直す」に印を付けて流し直す)",
         { w: d.reused.map((x) => (x === "direction" ? t("方向") : x === "causal" ? t("因果の結果") : x)).join(t("と")) })}</p>` : ""}
       <p class="note">${t("目標: L{L} の A 側の射影の値を {v} まで({src})", { L: (d.causal && (d.causal.score_layers || []).slice(-1)[0]) ?? "—", v: fmt(d.target, 2),
-        src: esc(d.target_from === "settings" ? t("設定") : d.target_from ? t(d.target_from) : "—") })}${this.recText(d)}</p>
+        src: esc(d.target_from === "settings" ? t("設定") : d.target_from ? t(d.target_from) : "—") })}${this.recText(d)}${d.refine
+        ? `<br><span class="muted">${t("(これは足す組を探したときの、新しい方向での目標と推す組です。表の合わせたレシピの数は、元の方向 {dir} の目標 {thr} で測っています)", { dir: esc(d.refine.direction || d.refine.root || d.refine.base), thr: fmt(d.refine.threshold, 2) })}</span>` : ""}</p>
       <div class="pp-actions"><button class="small" id="pp-showdir" title="${t("上の「方向を見る」で、この方向の層ごとの射影の値と分布を見る")}">${t("方向を見る")}</button>
         ${d.writes ? "" : `<button class="small" id="pp-map" title="${t("地図の板の上辺のヘッドを、止めたときの下がり方で色付けする")}">${t("地図: 効き")}</button>`}
         ${d.spec ? `<button class="small" id="pp-respec" title="${t("この実行に使った JSON を入力欄に戻す(設定を変えて流し直すため)")}">${t("入力欄に戻す")}</button>` : ""}</div>
@@ -482,12 +504,14 @@ export class PipelinePanel {
     const more = $("#pp-eta-more");
     if (more) more.addEventListener("click", () => { for (const tr of out.querySelectorAll("table.pp-eta tr.pp-more")) tr.classList.remove("hidden"); more.remove(); });
     const table = (d.allocate && d.allocate.table) || [];
-    const crows = (d.refine && d.refine.combined_rows) || [];
-    const crow = (n) => crows.find((c) => String(c.n_new) === String(n));
+    const crow = (key) => combinedRow(d, key);
     for (const b of out.querySelectorAll("[data-load]")) {
       b.addEventListener("click", () => {
-        const c = crow(b.dataset.load);
-        if (c) { this.onLoadProj(`${d.name}-n${c.n_new}-combined`, c.units, d.name); return; }   // 残りから追加: 元の組と合わせて
+        if (d.refine) {                                                  // 残りから追加の結果: どの行も土台と合わせたレシピだけ
+          const c = crow(b.dataset.load);
+          if (c) this.onLoadProj(combinedName(d, c), c.units, d.name);
+          return;
+        }
         if (b.dataset.load === "s1") { const s1 = (d.allocate || {}).s1; if (s1) this.onLoadProj(`${d.name}-s1`, s1.units, d.name); return; }
         const r = table.find((x) => String(x.n_heads) === b.dataset.load);
         if (r) this.onLoadProj(`${d.name}-n${r.n_heads}`, r.units, d.name);
@@ -498,19 +522,22 @@ export class PipelinePanel {
     }
     const rf = d.refine && d.refine.combined;
     const rl = $("#pp-rf-load"), re = $("#pp-rf-eval");
-    if (rf && rl) rl.addEventListener("click", () => this.onLoadProj(`${d.name}-combined`, rf.units, d.name));
-    if (rf && re) re.addEventListener("click", () => this.onEval({ recipe: rf.recipe, doses: [0, 1], random_controls: 8 }, `${d.name}-combined`));
+    if (rf && rl) rl.addEventListener("click", () => this.onLoadProj(combinedName(d, rf), rf.units, d.name));
+    if (rf && re) re.addEventListener("click", () => this.onEval({ recipe: rf.recipe, doses: [0, 1], random_controls: 8 }, combinedName(d, rf)));
     for (const b of out.querySelectorAll("[data-eval]")) {
       b.addEventListener("click", () => {
+        if (d.refine) {                                                  // 残りから追加の結果: どの行も土台と合わせたレシピだけ
+          const c = crow(b.dataset.eval);
+          if (c && c.recipe) this.onEval({ recipe: c.recipe, doses: [0, 1], random_controls: 8 }, combinedName(d, c));
+          return;
+        }
         if (b.dataset.eval === "s1") {                                   // 倍率を上げる前の組
           const s1 = (d.allocate || {}).s1;
           if (s1 && s1.recipe) this.onEval({ recipe: s1.recipe, doses: [0, 1], random_controls: 8 }, `${d.name}-s1`);
           return;
         }
         const r = table.find((x) => String(x.n_heads) === b.dataset.eval);
-        if (!r || !r.recipe) return;
-        const c = crow(b.dataset.eval);
-        this.onEval({ recipe: c ? c.recipe : r.recipe, doses: [0, 1], random_controls: 8 }, c ? `${d.name}-n${c.n_new}-combined` : `${d.name}-n${r.n_heads}`);
+        if (r && r.recipe) this.onEval({ recipe: r.recipe, doses: [0, 1], random_controls: 8 }, `${d.name}-n${r.n_heads}`);
       });
     }
   }
@@ -521,6 +548,7 @@ export class PipelinePanel {
     if (!ok) return "";
     const sp = [["llama_server", t("llama-server の既定")], ["common", t("よく使う設定")], ["greedy", "greedy"]];
     return `<div class="pp-cand"><h4 class="pp-sub">${t("強さの候補を作る(名前を伏せて採点する)")}</h4>
+      ${d.refine ? `<p class="note">${t("残りから追加の結果なので、候補は各行の合わせたレシピ(土台 + 足した組)に倍率を掛けたもので、元の一括の対照集合の質問で作ります(足した組だけでは作りません)。")}</p>` : ""}
       ${noteHTML(t("比較表の組それぞれに全体の倍率を何段か掛けて、A 側(振る舞いが出ている状態)と B 側(ふつうの状態)で応答を作ります。正の倍率は A 側で振る舞いを消す向き(A 側の応答を採点)、負の倍率は符号を返して B 側で強める向き(B 側の応答を採点)。無介入(base)は必ず入ります。どの候補の応答か伏せて採点し、候補ごとに集計します。調整に使っていない質問で作ると、強さを決めるのに使えます。"), "muted note")}
       <div class="pp-set">
         <label class="muted" title="${t("カンマ区切り。正 = A 側で消す向き、負 = B 側で強める向き。0 は使えない(無介入は base)")}">${t("強さ")} <input id="pc-scales" size="16" value="${esc(f.scales)}" spellcheck="false"></label>
@@ -659,20 +687,63 @@ export class PipelinePanel {
       if (X === null || X === undefined || !bl || !b0) return "";
       return `<div class="muted note">${t("段 {L}(1 回目の出口): A {a0} → {a1}、B Δ {bd}、B ⊥ {bo}", { L: X, a0: fmt(b0.A, 2), a1: fmt(bl.A, 2), bd: sgn(bl.B - b0.B, 2), bo: bl.b_orth === undefined ? "—" : fmt(bl.b_orth, 3) })}</div>`;
     };
-    const btns = (key, r, refine) => `<td class="l"><button class="small" data-load="${key}" title="${t("この組(proj のユニット)で今のレシピを置き換える")}">${t("レシピを置き換える")}</button>
-          <button class="small" data-eval="${key}" title="${t("この組のレシピを評価の画面へ送る(強さ 0 と 1、ランダムな向きの比べる用 8 本が入る。始める前に変えられる)")}"${r.recipe ? "" : " disabled"}>${t("評価へ送る")}</button>
-          ${refine ? `<button class="small" data-refine="${key}" title="${t("この組を当てても目標まで下がらない質問(残り)だけで、組を当てたまま方向を作り直し、足す部品を探す。結果は新しい一括の結果(名前 _r1 …)として出る")}"${r.remain > 0 ? "" : " disabled"}>${t("残りから追加")}</button>` : ""}</td>`;
-    const cells = (r) => `<td>${r.remain ?? "—"}${nA ? ` / ${nA}` : ""}</td><td>${fmt(r.a_mean, 2)}</td>
+    const R = d.refine, rnd = (R && R.round) || 1;                      // 残りから追加の結果: 行は「土台 + 足した組」
+    const nAroot = R ? (R.remaining || {}).n_a : null;
+    const btns = (key, r, refine) => {
+      const c = R ? combinedRow(d, key) : null, off = R && !c ? ` disabled` : "";
+      const ttl = (x, y) => (R ? (c ? x : t("この行には土台と合わせたレシピがありません")) : y);
+      return `<td class="l"><button class="small" data-load="${key}" title="${ttl(t("土台(元の組とそれまでの回の追加)と、この行の足した組を合わせたレシピで、今のレシピを置き換える(足した組は単独では使わない)"), t("この組(proj のユニット)で今のレシピを置き換える"))}"${off}>${R ? t("合わせてレシピを置き換える") : t("レシピを置き換える")}</button>
+          <button class="small" data-eval="${key}" title="${ttl(t("土台と、この行の足した組を合わせたレシピを評価の画面へ送る(強さ 0 と 1、ランダムな向きの比べる用 8 本が入る。始める前に変えられる)"), t("この組のレシピを評価の画面へ送る(強さ 0 と 1、ランダムな向きの比べる用 8 本が入る。始める前に変えられる)"))}"${r.recipe && !off ? "" : " disabled"}>${R ? t("合わせて評価へ送る") : t("評価へ送る")}</button>
+          ${refine ? `<button class="small" data-refine="${key}" title="${R ? t("この行の合わせたレシピ(土台 + この組)を当てても元の目標まで下がらない質問だけで、もう一度足す部品を探す(重ねる)。結果は新しい一括の結果(名前 _r1 …)として出る") : t("この組を当てても目標まで下がらない質問(残り)だけで、組を当てたまま方向を作り直し、足す部品を探す。結果は新しい一括の結果(名前 _r1 …)として出る")}"${(R ? c && c.remain_after > 0 : r.remain > 0) ? "" : " disabled"}>${t("残りから追加")}</button>` : ""}</td>`;
+    };
+    const cells = (r) => `<td>${r.remain ?? "—"}${nA ? ` / ${nA}` : ""}</td><td title="${t("A 側の射影の値の最大 {v}", { v: fmt(r.a_max, 2) })}">${fmt(r.a_mean, 2)}</td>
         <td>${sgn(r.b_side_delta, 2)}</td><td>${fmt(r.b_drift_orth, 3)}</td><td>${r.effect === undefined ? "—" : fmt(r.effect, 2)}</td><td class="${r.reached ? "ok" : "ng"}">${r.reached ? "✓" : "×"}</td>`;
+    // 合わせたレシピの数(元の方向・元の目標で。前 = 土台だけ、後 = 合わせたもの)
+    const ccells = (c) => {
+      if (!c) return `<td colspan="6" class="ng">${t("合わせたレシピがありません")}</td>`;
+      const rc = c.reached_combined;
+      return `<td title="${t("前 = 土台だけ、後 = 合わせたレシピ。元の方向・元の目標で、A 側の全部の質問")}">${c.remain_before} → <b>${c.remain_after}</b>${nAroot ? ` / ${nAroot}` : ""}</td>
+        <td title="${t("A 側の射影の値の最大 {a} → {b}", { a: fmt(c.a_max_before, 2), b: fmt(c.a_max_after, 2) })}">${fmt(c.a_mean_before, 2)} → <b>${fmt(c.a_mean_after, 2)}</b></td>
+        <td title="${t("土台だけ {v}", { v: sgn(c.b_delta_base, 2) })}">${sgn(c.b_delta, 2)}</td><td title="${t("土台だけ {v}", { v: fmt(c.b_drift_orth_base, 3) })}">${fmt(c.b_drift_orth, 3)}</td>
+        <td title="${t("土台だけ {v}", { v: fmt(c.effect_base, 2) })}">${fmt(c.effect, 2)}</td><td class="${rc === undefined ? "" : rc ? "ok" : "ng"}">${rc === undefined ? "—" : rc ? "✓" : "×"}</td>`;
+    };
+    const roundName = (k) => (+k === 0 ? t("元の組") : t("{k} 回目", { k }));
+    const baseChips = (c, r) => {                                        // 土台の部品(薄く、回ごと。数が多いので畳む)
+      if (!c) return "";
+      if (!c.parts) {
+        const us = c.units.slice(0, c.units.length - (r.units || []).length);
+        return `<details class="pp-base"><summary>${t("土台 {n} 個(元の組)", { n: us.length })}</summary><div class="pp-base-r"><span class="pp-round">${t("元の組")}(${us.length})</span> <span class="mono">${esc(us.join(" "))}</span></div></details>`;
+      }
+      const by = new Map();
+      for (const q of c.parts.filter((x) => x.round < rnd)) { if (!by.has(q.round)) by.set(q.round, []); by.get(q.round).push(q); }
+      const sum = [...by.entries()].map(([k, qs]) => `${roundName(k)} ${qs.length}`).join(" + ");
+      return `<details class="pp-base"><summary>${t("土台 {n} 個({parts})", { n: [...by.values()].reduce((x, qs) => x + qs.length, 0), parts: sum })}</summary>${
+        [...by.entries()].map(([k, qs]) => `<div class="pp-base-r"><span class="pp-round">${roundName(k)}(${qs.length})</span> ${qs.map((q) => unitChip(q, ` s${fmt(q.s, 2)}`)).join(" ")}</div>`).join("")}</details>`;
+    };
+    const dupNote = (c) => (c && (c.dups || []).length ? `<div class="note pp-dup" title="${t("射影を両方当てます(どちらも元の重みから作って足し合わせる。探したときと同じ当て方)。方向: {d}", {
+      d: esc(c.dups.map((x) => `${partName(x)}: ${x.directions.join(" / ")}`).join(" · ")) })}">${t("同じ部品が 2 つの方向で入っています: {u}", {
+      u: c.dups.map((x) => `${partName(x)}(${x.rounds.map((k, i) => `${roundName(k)} s${fmt(x.s[i], 2)}`).join("、")})`).join(" · ") })}</div>` : "");
+    const cExit = (c) => {                                               // ループのモデル: 合わせたレシピの、1 回目の出口の段
+      const e0 = c && c.exit_before, e1 = c && c.exit_after;
+      if (!e0 || !e1) return "";
+      return `<div class="muted note">${t("段 {L}(1 回目の出口、合わせたレシピ): A {a0} → {a1}、B Δ {bd}、B ⊥ {bo}", { L: e1.layer, a0: fmt(e0.a_mean, 2), a1: fmt(e1.a_mean, 2), bd: sgn(e1.b_delta, 2), bo: fmt(e1.b_drift_orth, 3) })}</div>`;
+    };
+    const addedNote = (r) => `<div class="muted note" title="${t("新しい方向 {dir} で、残りの {k} 問を、土台を当てた状態で測った値。足した組は単独では使いません", { dir: esc(d.name), k: nA ?? "—" })}">${
+      t("足した組だけ(参考、新しい方向で): 残り {rm} / {k}、A 平均 {am}、B Δ {bd}、B ⊥ {bo}", { k: nA ?? "—", rm: r.remain ?? "—", am: fmt(r.a_mean, 2), bd: sgn(r.b_side_delta, 2), bo: fmt(r.b_drift_orth, 3) })}</div>`;
     const chipsOf = (r) => (r.heads || []).map((h) => unitChip(h, ` <span class="muted">s${fmt(h.s, 2)}</span>`)).join(" ");
-    const s1 = a.s1 ? `<tr class="pp-s1"><td>s=1</td><td class="units">${chipsOf(a.s1)}<div class="muted note">${kinds(a.s1.kinds)} · ${t("倍率を上げる前(取り除くだけ)")}</div>${hoNote(a.s1)}${exitNote(a.s1)}</td>
-        <td>1 / 1 / 1</td>${cells(a.s1)}${btns("s1", a.s1, false)}</tr>` : "";
+    const unitsCell = (key, r, extra) => {
+      if (!R) return `<td class="units">${chipsOf(r)}${extra}</td>`;
+      const c = combinedRow(d, key);
+      return `<td class="units">${baseChips(c, r)}<div class="pp-added"><span class="pp-round">${t("足した組({k} 回目)", { k: rnd })}</span> ${chipsOf(r)}</div>${dupNote(c)}${cExit(c)}${extra}${addedNote(r)}</td>`;
+    };
+    const s1 = a.s1 ? `<tr class="pp-s1"><td>s=1</td>${unitsCell("s1", a.s1, `<div class="muted note">${kinds(a.s1.kinds)} · ${t("倍率を上げる前(取り除くだけ)")}</div>${R ? "" : hoNote(a.s1) + exitNote(a.s1)}`)}
+        <td>1 / 1 / 1</td>${R ? ccells(combinedRow(d, "s1")) : cells(a.s1)}${btns("s1", a.s1, false)}</tr>` : "";
     const cmp = s1 + (a.table || []).slice().sort((x, y) => y.n_heads - x.n_heads).map((r) => {
       if (r.skipped) return `<tr><td>${r.n_heads}</td><td class="excl" colspan="8">${esc(r.skipped)}</td></tr>`;
-      return `<tr class="${r.recommended ? "rec" : ""}" data-n="${r.n_heads}"><td>${r.n_heads}${r.recommended ? ` <span class="badge">${t("推奨")}</span>` : ""}</td><td class="units">${chipsOf(r)}<div class="muted note">${kinds(r.kinds)}</div>${hoNote(r)}${exitNote(r)}${steps(r)}</td>
-        <td>${fmt(r.s_max, 2)} / ${fmt(r.s_median, 2)} / ${fmt(r.s_min ?? Math.min(...(r.heads || []).map((h) => h.s)), 2)}<div class="muted note">${esc(stop[r.stop] || r.stop || "")}</div></td>${cells(r)}${btns(r.n_heads, r, true)}</tr>`;
+      return `<tr class="${r.recommended ? "rec" : ""}" data-n="${r.n_heads}"><td>${r.n_heads}${r.recommended ? ` <span class="badge">${t("推奨")}</span>` : ""}</td>${unitsCell(r.n_heads, r, `<div class="muted note">${kinds(r.kinds)}</div>${R ? "" : hoNote(r) + exitNote(r)}${steps(r)}`)}
+        <td>${fmt(r.s_max, 2)} / ${fmt(r.s_median, 2)} / ${fmt(r.s_min ?? Math.min(...(r.heads || []).map((h) => h.s)), 2)}<div class="muted note">${esc(stop[r.stop] || r.stop || "")}</div>${R ? `<div class="muted note">${t("足した組の強さ(土台はそのまま)")}</div>` : ""}</td>${R ? ccells(combinedRow(d, r.n_heads)) : cells(r)}${btns(r.n_heads, r, true)}</tr>`;
     }).join("");
-    const ck = d.check;
+    const ck = d.check || (R && R.check);
     const cell = (x) => (x.match_finished !== null && x.match_finished !== undefined ? `${x.match_finished}/${x.finished}` : `${x.finished}/${x.n}`);
     const ckRows = ck ? ["none", "recipe"].map((k) => { const x = ck.rows[k]; return `<tr><td class="l">${k === "none" ? t("無介入") : t("組")}</td><td>${cell(x.A)}</td><td>${cell(x.B)}</td>
       <td>${x.A.empty} / ${x.B.empty}</td><td>${x.A.loop} / ${x.B.loop}</td><td>${x.A.at_limit} / ${x.B.at_limit}</td></tr>`; }).join("") : "";
@@ -690,15 +761,19 @@ export class PipelinePanel {
       ${noteHTML(t("確かめた部品を、A 側の下がり − B 側の動きの大きい順に、s=1 で 1 個ずつ組に足します(A 側の平均が下がり、組の効きが増え、上限の中のときだけ)。目標に届けば強さは全部 1。届かなければ強さを上げます。部品ごと(既定)では、部品ごとに s を 1.5 倍にしてみて、射影の値が残りやすい質問での組の効きの増え方(効率)を測り、効率に比例して上げ幅を配ることを繰り返します(効く部品は高く、B 側を押す部品は低く。どの部品も 1 より下げず、組から外さない)。s が 1 を超えると成分を反転させるので、B 側(ふつうの入力)が A 側へ動くことがあります。目標に届けば届く最小の上げ幅、届かなければ上限の中で組の効きがいちばん大きい点を使います。効き = A 側の下がり − B 側の動きの大きさ。上限 = B 側の直交成分のずれ {d}、B 側が A 側へ動く量は A と B の差の {m}%。", { d: fmt(a.drift_max ?? 0.5, 2), m: fmt(100 * (a.b_move_max ?? 0.1), 0) }), "muted note")}
       <p class="note">${t("届かないときの強さの決め方")}: <b>${esc(STRENGTH[a.strength || "uniform"] || a.strength || "")}</b>${a.strength ? "" : ` <span class="muted">${t("(v0.8.2 までの結果は全部を同じ倍率)")}</span>`}</p>
       ${a.holdout ? `<p class="note">${t("質問を半分に分けました: 偶数番目で選び、奇数番目(選ぶのに使っていない質問、A {a} 問・B {b} 問)で各行の数と応答の確かめを測り直しています(目標 {t})", { a: a.holdout.n_a, b: a.holdout.n_b, t: fmt(a.holdout.target, 2) })}</p>` : ""}
-      <div class="evx-scroll"><table class="evx mono pp-cmp"><thead><tr><th>${t("上限")}</th><th class="l">${t("部品と強さ")}</th><th>${t("s 最大 / 中央値 / 最小")}</th>
-        <th title="${t("目標を超えて残った A 側の例の数")}">${t("残り")}</th><th title="${t("A 側の射影の値の平均")}">${t("A 平均")}</th><th title="${t("B 側の射影の値の変化")}">B Δ</th>
-        <th title="${t("B 側の直交成分のずれ(小さいほど他を壊さない)")}">B ⊥</th><th title="${t("A 側の下がり − B 側の動きの大きさ")}">${t("効き")}</th><th>${t("届いた")}</th><th></th></tr></thead><tbody>${cmp}</tbody></table></div>
+      ${R ? `<p class="note pp-refine-h">${t("残りから追加の結果なので、表の数は、土台(元の組とそれまでの回の追加)とその行の足した組を合わせたレシピを、元の方向 {dir}・元の目標 {thr} で測った値です(前 = 土台だけ、後 = 合わせたもの)。足した組だけの値は、各行の補足に参考として出します。",
+        { dir: esc(R.direction || R.root || R.base), thr: fmt(R.threshold, 2) })}</p>` : ""}
+      <div class="evx-scroll"><table class="evx mono pp-cmp"><thead><tr><th title="${t("組の部品の数の上限")}">${t("上限")}</th><th class="l" title="${R ? t("薄い字 = 土台の部品(何回目に入ったか)、ふつうの字 = この行で足した部品") : t("組の部品と強さ s")}">${t("部品と強さ")}</th><th title="${t("部品ごとの強さ s の最大・中央値・最小")}">${t("s 最大 / 中央値 / 最小")}</th>
+        <th title="${t("目標を超えて残った A 側の例の数")}">${R ? t("残り(前 → 後)") : t("残り")}</th><th title="${t("A 側の射影の値の平均")}">${R ? t("A 平均(前 → 後)") : t("A 平均")}</th><th title="${t("B 側の射影の値の変化")}">B Δ</th>
+        <th title="${t("B 側の直交成分のずれ(小さいほど他を壊さない)")}">B ⊥</th><th title="${t("A 側の下がり − B 側の動きの大きさ")}">${t("効き")}</th><th title="${t("A 側の射影の値の平均が目標に届いたか")}">${t("届いた")}</th><th></th></tr></thead><tbody>${cmp}</tbody></table></div>
+      ${noteHTML(t("推奨 = 目標に届いた組のうち、残る例の数が最も少ない組と同程度(A 側の 5% まで)で、B 側のずれが最小の 1.25 倍までの組の中で、部品が最も少ない組。どれも届かなければ、上限の中で組の効きがいちばん大きい組と同程度(差の 5% まで)で部品が最も少ない組。") + (R ? " " + t("残りから追加の結果では、推奨は足した組を新しい方向で測った値で決めています(合わせたレシピの数では決めていません)。") : ""), "muted note")}
       ${(a.notes || []).map((x) => `<p class="note ng">${x.code === "s1_low"
         ? t("倍率を上げる前の組(取り除くだけ)は、目標までの差の {p}% しか縮めません。直接書き込む部品の成分を取り除くだけでは届かない題材で、強さを上げて(成分を反転させて)届かせています", { p: fmt(100 * x.closed, 0) })
         : x.code === "loop_inner" ? t("組にループの中の部品(段 {a}〜{b} の重み)が入っています。重みは 2 回とも使われるので、1 回目(段 {c}〜{d})にも効きます", { a: x.lo, b: x.hi, c: x.first[0], d: x.first[1] })
         : esc(x.text || "")}</p>`).join("")}</section>
-      ${ck ? `<section class="pp-stage"><h4>${t("6. 応答での確かめ")}</h4>
+      ${ck ? `<section class="pp-stage"><h4>${R ? t("6. 応答での確かめ(代表の合わせたレシピ)") : t("6. 応答での確かめ")}</h4>
         ${noteHTML(t("選んだ組と無介入で応答を書かせ、書き終えた応答のうち validate.match に一致した数を数えます(A 側 / B 側)。射影の値が目標に届いても応答が変わらないことがあるので、その確かめです。"), "muted note")}
+        ${R ? `<p class="note">${t("残りから追加の結果では、代表の行({k})の合わせたレシピ(土台 + 足した組、{n} 個)で、元の一括と同じ質問・同じ長さで確かめています{h}。", { k: ck.key === "s1" ? "s=1" : ck.key ?? "—", n: ck.n_heads ?? "—", h: ck.held_out_contrast ? t("(元の一括が分けた、選ぶのに使っていない質問)") : "" })}</p>` : ""}
         <table class="evx mono"><thead><tr><th></th><th>A</th><th>B</th><th>${t("空")} A / B</th><th>${t("繰り返し")} A / B</th><th>${t("上限で切れた")} A / B</th></tr></thead><tbody>${ckRows}</tbody></table>
         ${ck.match_warning ? `<p class="note ng">${t("無介入の A 側で validate.match に一致したのは {m}/{f} だけです。正規表現が応答に合っていないか、モデルが A 側の振る舞いをしていない疑いがあり、この確かめの数は当てになりません", { m: ck.rows.none.A.match_finished ?? 0, f: ck.rows.none.A.finished })}</p>` : ""}
         ${Object.entries(ck.break_warning || {}).map(([side, x]) => `<p class="note ng">${t("組を当てると {s} 側の応答が壊れています(繰り返し {l}・空 {e} / {n} 問、無介入では {l0}・{e0})。強さを下げるか、別の組・別の部品の種類を試してください", { s: side, l: x.loop, e: x.empty, n: x.n, l0: x.loop_none, e0: x.empty_none })}</p>`).join("")}
@@ -765,18 +840,20 @@ export class PipelinePanel {
         <td>${r.in_base ? "✓" : ""}</td><td class="l">${r.excluded ? `<span class="pp-ex">${t("外した: 中立の残差が大きく動く")}</span>` : ""}</td></tr>`;
     }).join("");
     const nA = a.n_a;
-    const crows = (d.refine && d.refine.combined_rows) || [];             // 残りから追加の結果: 行は「元の組 + この組」で使う
-    const crow = (n) => crows.find((c) => String(c.n_new) === String(n));
+    const R = d.refine;                                                  // 残りから追加の結果: 行は「土台 + この組」で使う
+    const crow = (n) => combinedRow(d, n);
     const cmp = (a.table || []).slice().sort((x, y) => y.n_heads - x.n_heads).map((r) => {
       if (r.skipped) return `<tr><td>${r.n_heads}</td><td class="excl" colspan="9">${esc(r.skipped)}</td></tr>`;
       const chips = (r.heads || []).map((h) => headChip(h.layer, h.head, ` <span class="muted">s${fmt(h.s, 1)}</span>`)).join(" ");
-      return `<tr class="${r.recommended ? "rec" : ""}" data-n="${r.n_heads}"><td>${r.n_heads}${r.recommended ? ` <span class="badge">${t("推奨")}</span>` : ""}</td><td class="units">${chips}</td>
+      const c = crow(r.n_heads), off = R && !c ? " disabled" : "";
+      const nb = c ? (c.n_base ?? (c.units.length - (r.units || []).length)) : 0;
+      return `<tr class="${r.recommended ? "rec" : ""}" data-n="${r.n_heads}"><td>${r.n_heads}${r.recommended ? ` <span class="badge">${t("推奨")}</span>` : ""}</td><td class="units">${R && c ? `<div class="pp-base">${t("土台 {n} 個(元の組{k})", { n: nb, k: (R.round || 1) > 1 ? t(" + {r}の追加", { r: roundsUpTo(R.round - 1) }) : "" })}</div><div class="pp-added">` : ""}${chips}${R && c ? "</div>" : ""}</td>
         <td>${fmt(r.s_max, 2)}</td><td>${r.remain ?? "—"}${nA ? ` / ${nA}` : ""}</td><td>${fmt(r.a_max, 2)}</td><td>${fmt(r.a_mean, 2)}</td><td>${sgn(r.b_side_delta, 2)}</td><td>${fmt(r.b_drift_orth, 3)}</td>
         <td class="${r.reached ? "ok" : "ng"}">${r.reached ? "✓" : "×"}</td>
-        <td class="l">${crow(r.n_heads) ? `<div class="muted note">${t("元の組と合わせると: 残り {a} → {b} 問 · B ⊥ {c}", { a: crow(r.n_heads).remain_before, b: crow(r.n_heads).remain_after, c: fmt(crow(r.n_heads).b_drift_orth, 3) })}</div>` : ""}
-          <button class="small" data-load="${r.n_heads}" title="${crow(r.n_heads) ? t("元の組とこの組を合わせたユニットで今のレシピを置き換える(この組は元の組を当てた状態で探したので、単独では使わない)") : t("この組(proj のユニット)で今のレシピを置き換える")}">${crow(r.n_heads) ? t("元の組と合わせてレシピを置き換える") : t("レシピを置き換える")}</button>
-          <button class="small" data-eval="${r.n_heads}" title="${crow(r.n_heads) ? t("元の組とこの組を合わせたレシピを評価の画面へ送る(強さ 0 と 1、ランダムな向きの比べる用 8 本が入る。始める前に変えられる)") : t("この組のレシピを評価の画面へ送る(強さ 0 と 1、ランダムな向きの比べる用 8 本が入る。始める前に変えられる)")}"${r.recipe ? "" : " disabled"}>${crow(r.n_heads) ? t("合わせて評価へ送る") : t("評価へ送る")}</button>
-          <button class="small" data-refine="${r.n_heads}" title="${t("この組を当てても目標まで下がらない質問(残り)だけで、組を当てたまま方向を作り直し、因果 → 配分で足すヘッドを探す。結果は新しい一括の結果(名前 _r1 …)として出る")}"${r.remain > 0 ? "" : " disabled"}>${t("残りから追加")}</button></td></tr>`;
+        <td class="l">${c ? `<div class="note">${t("元の組と合わせると(元の方向・元の目標で): 残り {a} → {b} 問 · A 平均 {ma} → {mb} · B Δ {bd} · B ⊥ {c}", { a: c.remain_before, b: c.remain_after, ma: fmt(c.a_mean_before, 2), mb: fmt(c.a_mean_after, 2), bd: sgn(c.b_delta, 2), c: fmt(c.b_drift_orth, 3) })}</div>` : R ? `<div class="note ng">${t("この行には土台と合わせたレシピがありません")}</div>` : ""}
+          <button class="small" data-load="${r.n_heads}" title="${R ? t("土台(元の組とそれまでの回の追加)とこの組を合わせたユニットで今のレシピを置き換える(この組は土台を当てた状態で探したので、単独では使わない)") : t("この組(proj のユニット)で今のレシピを置き換える")}"${off}>${R ? t("元の組と合わせてレシピを置き換える") : t("レシピを置き換える")}</button>
+          <button class="small" data-eval="${r.n_heads}" title="${R ? t("土台とこの組を合わせたレシピを評価の画面へ送る(強さ 0 と 1、ランダムな向きの比べる用 8 本が入る。始める前に変えられる)") : t("この組のレシピを評価の画面へ送る(強さ 0 と 1、ランダムな向きの比べる用 8 本が入る。始める前に変えられる)")}"${r.recipe && !off ? "" : " disabled"}>${R ? t("合わせて評価へ送る") : t("評価へ送る")}</button>
+          <button class="small" data-refine="${r.n_heads}" title="${R ? t("この行の合わせたレシピ(土台 + この組)を当てても元の目標まで下がらない質問だけで、もう一度足すヘッドを探す(重ねる)。結果は新しい一括の結果(名前 _r1 …)として出る") : t("この組を当てても目標まで下がらない質問(残り)だけで、組を当てたまま方向を作り直し、因果 → 配分で足すヘッドを探す。結果は新しい一括の結果(名前 _r1 …)として出る")}"${(R ? c && c.remain_after > 0 : r.remain > 0) ? "" : " disabled"}>${t("残りから追加")}</button></td></tr>`;
     }).join("");
     const hp = hard.prompts || [], hs = hard.scores || [];
     return `<section class="pp-stage"><h4>${t("4. 効率での配り直し")}</h4>

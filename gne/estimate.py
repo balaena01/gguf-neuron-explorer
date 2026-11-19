@@ -313,8 +313,19 @@ def estimate(session, kind: str, params: dict) -> dict:
         spec = {"user_prompts": ["q"] * max(4, n_a // 3), "prompts_b": ["q"] * n_b,
                 "pipeline": {"rank": rank, **({"n_heads": nh} if rank == "causal" else {"n_units": nh, "check_replies": 0})}}
         sub = estimate(session, "head_pipeline", {"spec": spec})
-        sec = (sub.get("seconds") or 0.0) + (2 * n_a + 3 * min(64, n_b)) * sp.setprefill / 1000 * 1.2
-        detail = {"prompts_a": n_a, "remaining_guess": max(4, n_a // 3), "pipeline": sub.get("detail")}
+        n_rows = len(nh) + (1 if rank == "writes" else 0) + 2             # 合わせた組(s1 も)+ 無介入 + 土台だけ
+        sec = (sub.get("seconds") or 0.0) + n_rows * (n_a + min(64, n_b)) * sp.setprefill / 1000 * 1.2
+        rf = hd / f"{name}.refine.json"                         # 重ねるときの応答での確かめは、元の一括の設定
+        root = (json.loads(rf.read_text(encoding="utf-8")).get("root") or name) if rf.exists() else name
+        rpj = hd / f"{root}.pipeline.json"
+        st = (json.loads(rpj.read_text(encoding="utf-8")).get("settings") or {}) if rpj.exists() else {}
+        n_chk = p.get("check_replies")
+        if n_chk is None:
+            n_chk = st.get("check_replies")
+        n_chk = 16 if n_chk is None else int(n_chk)
+        if n_chk > 0:                                          # 代表の合わせたレシピでの応答での確かめ(無介入と、両側)
+            sec += 4 * sp.gen(n_chk, int(p.get("check_tokens") or st.get("check_tokens") or 512))
+        detail = {"prompts_a": n_a, "remaining_guess": max(4, n_a // 3), "pipeline": sub.get("detail"), "check_replies": n_chk}
     elif kind == "fieldtest":                                  # 1 ファイルあたり: 長い作業 + ツール(2 往復)+ 質問集。多めに見る
         import yaml
         from .fieldtest import LONG_TASKS, TOOL_TASKS

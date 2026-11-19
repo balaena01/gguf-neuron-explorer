@@ -1018,6 +1018,18 @@ def test_refine_adds_heads_from_remaining_questions(session, tmp_path):
         assert pd["refine"]["combined_rows"] == out["combined_rows"]
     again = session.heads_refine("rf", n_heads=2, new_heads=[1])
     assert again["name"] == "rf_r1" and again["pipeline"]["reused"] == ["direction", "causal"]
+    # 重ねる(残りから追加の結果の行から、もう一度): 土台は元の組 + 1 回目の合わせたレシピ。測るのは元の方向・元の目標
+    if out["combined_rows"]:
+        n1 = out["pipeline"]["table"][0]["n_heads"]
+        c1 = next(c for c in out["combined_rows"] if c["key"] == str(n1))
+        two = session.heads_refine("rf_r1", n_heads=n1, new_heads=[1])
+        assert two["root"] == "rf" and two["round"] == 2 and two["base_units"] == c1["units"] and two["direction"] == "rf"
+        assert two["remaining"]["n"] == c1["remain_after"]
+        for c in two["combined_rows"]:
+            rr = Recipe.load(c["recipe"])
+            assert len(rr.units) == len(c1["units"]) + c["n_added"] and c["units"][:len(c1["units"])] == c1["units"]
+            assert {u.direction for u in rr.units} <= {"rf", "rf_r1", "rf_r1_r1"} and "rf" in {u.direction for u in rr.units}
+            assert [q["round"] for q in c["parts"]] == [0] * len(base_u) + [1] * (len(c1["units"]) - len(base_u)) + [2] * c["n_added"]
     from gne.schemas import SCHEMA_VERSION, HeadsRefineOut
     HeadsRefineOut.model_validate({"schema_version": SCHEMA_VERSION, "command": "heads refine", "model_id": "x",
                                    "llama_cpp_version": "x", "seed": 0, "generated_at": "x", **out})

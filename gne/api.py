@@ -2706,24 +2706,65 @@ class Session:
         return {**{k: v for k, v in summ.items() if k != "rows"}, "rows": summ["rows"][:200], "verify": ver, "name": name,
                 "path": str(pj), "npz": str(pz), "seconds": time.perf_counter() - t0}
 
+    def _refine_chain(self, name: str, row: dict) -> dict:
+        """残りから追加の土台。name が一括の結果なら土台はその行の組(0 回目 = 元の組)。name が残りから追加の結果なら、
+        土台はその行の「元の組と合わせたレシピ」(元の組 + それまでの回の追加の全部)。戻り値 {root, round, recipe, rounds}
+        (root = 元の一括の名前、round = 今回の回の番号、recipe = 土台のレシピのパス、rounds = 土台の部品ごとの何回目に入ったか)。"""
+        hd = self.store.heads_dir(self.meta.model_id)
+        rp = hd / f"{name}.refine.json"
+        if not rp.exists():
+            r0 = Recipe.load(row["recipe"])
+            return {"root": name, "round": 1, "recipe": row["recipe"], "rounds": [0] * len(r0.units), "chain": [name]}
+        ref = json.loads(rp.read_text(encoding="utf-8"))
+        key = "s1" if row.get("s1") else str(row["n_heads"])
+        c = next((x for x in ref.get("combined_rows") or [] if str(x.get("key") or x.get("n_new")) == key), None)
+        if c is None:
+            raise GneError("BAD_ARGS", f"{name} の {key} の行には、元の組と合わせたレシピがありません",
+                           "元の一括の結果の行から、残りから追加をやり直してください")
+        if "round" not in ref:                     # v0.8.3 までの結果: 1 回目(土台が一括の結果)の合わせたレシピだけが正しい
+            base = ref.get("base") or ""
+            if (hd / f"{base}.refine.json").exists():
+                root = base
+                for _ in range(64):                 # 元の一括の結果までたどる
+                    f_ = hd / f"{root}.refine.json"
+                    nxt = json.loads(f_.read_text(encoding="utf-8")).get("base") if f_.exists() else None
+                    if not nxt or nxt == root:
+                        break
+                    root = nxt
+                raise GneError("BAD_ARGS", f"{name} は v0.8.3 までに残りから追加を重ねた結果で、合わせたレシピに前の回の部品が入っていません",
+                               f"元の一括の結果 {root} の行から、残りから追加をやり直してください")
+            nb = len(ref.get("base_units") or [])
+            return {"root": base, "round": 2, "recipe": c["recipe"], "chain": [base, name],
+                    "rounds": [0] * nb + [1] * (len(Recipe.load(c["recipe"]).units) - nb)}
+        return {"root": ref["root"], "round": int(ref["round"]) + 1, "recipe": c["recipe"], "chain": list(ref.get("chain") or [ref["root"]]) + [name],
+                "rounds": [int(p_["round"]) for p_ in c.get("parts") or []] or [0] * len(Recipe.load(c["recipe"]).units)}
+
     def heads_refine(self, name: str, *, n_heads: int | None = None, new_heads=(3, 2, 1), out_name: str | None = None,
-                     min_questions: int = 4, resume: bool = True, rank: str | None = None, unit_kinds: str | None = None) -> dict:
-        """配分の組を当てても目標まで下がらない A 側の質問(「残り」)だけで、追加のヘッドを探す。
-        1. 組を当てて A 側の全部の質問を測り、射影の値を測る層での射影の値が閾値(配分の remain_threshold)を超える質問を残りとする。
-        2. 新しい対照集合を作る: A = 残りの質問、B = 元の B 側の質問。両側に元の側の作り方(system・レシピ)と組を当てる
-           (組を当てたうえでまだ残っている違いを方向にする)。validate と一括の設定は元のものを使う。
-        3. それを heads pipeline に流す(方向 <name>_rK → 基準層 → 因果 → 配分)。見つかるのは、組に足すヘッドと強さ。
-        4. 比較表のどの組も、元の組と合わせたレシピ(<name>_rK.combined-n<N>.yaml)を作り、元の方向で残りと B 側のずれを
-           測り直す(追加の組は元の組を当てた状態で探したので、単独では使わない)。代表(推す組、無ければ合わせた残りが
-           最も少ない組)は <name>_rK.combined.yaml にも置く。
+                     min_questions: int = 4, resume: bool = True, rank: str | None = None, unit_kinds: str | None = None,
+                     check_replies: int | None = None, check_tokens: int | None = None) -> dict:
+        """配分の組を当てても目標まで下がらない A 側の質問(「残り」)だけで、組に足す部品を探す。
+        土台: name が一括の結果ならその行の組。name が残りから追加の結果なら、その行の「元の組と合わせたレシピ」(元の組 + それまでの
+        回の追加の全部)。どの回も、元の一括の方向・対照集合・目標(配分の remain_threshold)に戻って測る。
+        1. 土台を当てて元の A 側の全部の質問を測り、射影の値を測る層での射影の値が目標を超える質問を残りとする。
+        2. 新しい対照集合を作る: A = 残りの質問、B = 元の B 側の質問。両側に元の側の作り方(system・レシピ)と土台の全部を当てる
+           (土台を当てたうえでまだ残っている違いを方向にする)。validate は元のもの、一括の設定は元の一括のもの。
+        3. それを heads pipeline に流す(方向 <name>_rK → 基準層 → 因果 → 配分)。見つかるのは、土台に足す部品と強さ
+           (rank writes の部品ごとの強さは、足す組だけに効く。土台の強さはそのまま)。
+        4. 比較表のどの組も(rank writes なら倍率を上げる前の組 s1 も)、土台と合わせたレシピ(<name>_rK.combined-n<N>.yaml・
+           .combined-s1.yaml)を作り、元の方向・元の目標で、残り・A 平均・B Δ・B ⊥・組の効き(ループのモデルは 1 回目の出口の段も)を、
+           土台だけのとき(前)と合わせたとき(後)で測る。足した組は土台を当てた状態で探したので、単独では使わない。
+           代表(推す組、無ければ合わせた残りが最も少ない組)は <name>_rK.combined.yaml にも置く。
+        5. 代表の合わせたレシピで、元の一括と同じ応答での確かめ(check_replies 問、既定は元の一括の設定、0 で行わない)。
         残りが min_questions 個より少なければ、射影の値の高い順に min_questions 個まで足して方向を作る(残りの数はそのまま報告)。
-        rank・unit_kinds は追加の部品の探し方(省くと元の一括の設定: 元が rank writes なら同じ流れで、ニューロンも足せる。
-        rank writes では new_heads は組の部品の数の上限 n_units になる)。元の組にニューロンがあっても、そのまま合わせる。"""
+        rank・unit_kinds は足す部品の探し方(省くと前の回の設定: 元が rank writes なら同じ流れで、ニューロンも足せる。
+        rank writes では new_heads は組の部品の数の上限 n_units になる)。"""
         import dataclasses
+        import shutil
 
         import yaml
 
-        from .direction import Scorer, drift
+        from .direction import Scorer, drift, load_contrast
+        from .unitwrites import kind_of_layer
         t0 = time.perf_counter()
         hd = self.store.heads_dir(self.meta.model_id)
         ap = hd / f"{name}.alloc.json"
@@ -2739,22 +2780,55 @@ class Session:
             row = next((r for r in rows if int(r["n_heads"]) == int(n_heads)), None)
             if row is None:
                 raise GneError("BAD_ARGS", f"{n_heads} ヘッドの組がありません({', '.join(str(r['n_heads']) for r in rows)})")
-        base_r = Recipe.load(row["recipe"])
+        ch = self._refine_chain(name, row)
+        root, rnd = ch["root"], ch["round"]
+        rap = hd / f"{root}.alloc.json"
+        if not rap.exists():
+            raise GneError("FILE_NOT_FOUND", f"元の一括の配分の結果 {root} がありません")
+        ral = al if root == name else json.loads(rap.read_text(encoding="utf-8"))
+        prior_r = Recipe.load(ch["recipe"])
         explicit = lambda r: [dataclasses.replace(u, direction=u.direction or r.default_direction) if u.mode == "proj" else u
                               for u in r.units]
-        base_units = explicit(base_r)
-        ds, cs, _ = self._direction_contrast(al["direction"], None)
-        S, thr, pos = int(al["score_layer"]), float(al.get("remain_threshold") or 0.0), al.get("positions") or "last"
+        prior_units = explicit(prior_r)
+        rounds0 = list(ch["rounds"])
+        if len(rounds0) != len(prior_units):
+            rounds0 = (rounds0 + [rnd - 1] * len(prior_units))[:len(prior_units)]
+        ds, cs, val = self._direction_contrast(ral["direction"], None)   # 元の方向・元の対照集合
+        S, thr, pos = int(ral["score_layer"]), float(ral.get("remain_threshold") or 0.0), ral.get("positions") or "last"
+        X = ral.get("loop_exit")
+        X = int(X) if X is not None and int(X) != S else None
+        Ls = sorted({S} | ({X} if X is not None else set()))
         self.engine.free_steer()
-        sc = Scorer(self, ds, cs, layers=[S], positions=pos)          # A 側は間引かずに全部の質問
-        vecs = self.vectors(base_r)[0] if base_r.add_units else None
-        base_lora = self.lora_for(base_r)
-        a = sc.run(base_lora, vecs, sides="A")["A"]["values"][S]
+        sc = Scorer(self, ds, cs, layers=Ls, positions=pos)          # A 側は間引かずに全部の質問
+        scb = Scorer(self, ds, cs, layers=Ls, positions=pos, max_examples=ral.get("max_examples") or 64)
+
+        def measure(rec):
+            lora = self.lora_for(rec) if rec is not None else None
+            vecs = self.vectors(rec)[0] if rec is not None and rec.add_units else None
+            return sc.run(lora, vecs, sides="A")["A"]["values"], scb.run(lora, vecs, sides="B", keep=True)["B"]
+        a0, b0 = measure(None)
+        a0m, b0m = float(a0[S].mean()), float(b0["values"][S].mean())
+        sign = 1.0 if a0m >= b0m else -1.0
+
+        def summary(a, b) -> dict:
+            va, bm = a[S], float(b["values"][S].mean())
+            out_ = {"remain": int((va > thr).sum()), "a_mean": float(va.mean()), "a_max": float(va.max()), "b_mean": bm,
+                    "b_delta": bm - b0m, "b_drift_orth": drift(b0["resid"][S], b["resid"][S], sc.r[S])[1],
+                    "effect": sign * (a0m - float(va.mean())) - abs(bm - b0m), "reached": bool(float(va.mean()) <= thr + 1e-6)}
+            if X is not None:
+                out_["exit"] = {"layer": X, "a_mean": float(a[X].mean()), "a_mean_none": float(a0[X].mean()),
+                                "b_delta": float(b["values"][X].mean()) - float(b0["values"][X].mean()),
+                                "b_drift_orth": drift(b0["resid"][X], b["resid"][X], sc.r[X])[1]}
+            return out_
+        a, b_prior = measure(prior_r)
+        before = summary(a, b_prior)
+        a = a[S]
         order = [int(i) for i in np.argsort(-a)]
         rem = [i for i in order if a[i] > thr]
+        what = f"{row['n_heads']} 個の組" + (f"(元の組 + {rnd - 1} 回分の追加)" if rnd > 1 else "")
         if not rem:
-            raise GneError("NOTHING_LEFT", f"{row['n_heads']} ヘッドの組で、A 側の全部の質問({len(a)} 問)が目標 {thr:.2f} まで下がっています",
-                           "追加のヘッドは要りません")
+            raise GneError("NOTHING_LEFT", f"{what}で、A 側の全部の質問({len(a)} 問)が目標 {thr:.2f} まで下がっています",
+                           "追加の部品は要りません")
         pick = rem if len(rem) >= min_questions else order[:max(min_questions, len(rem))]
         qa = [sc.prompts_side["A"][i] for i in pick]
         k = 1
@@ -2772,9 +2846,9 @@ class Session:
             raise GneError("BAD_ARGS", f"名前 {out_name!r} は英数字・_・-・. だけにしてください")
 
         def side_recipe(side: str) -> dict:
-            r0 = cs.recipe(self, side)
-            merged = (r0.like(list(r0.units) + base_units, name=f"{out_name}-{side}") if r0 is not None
-                      else base_r.like(base_units, name=f"{out_name}-{side}"))
+            r0 = cs.recipe(self, side)                                  # 元の対照集合の側のレシピ(土台とは重ならない)
+            merged = (r0.like(list(r0.units) + prior_units, name=f"{out_name}-{side}") if r0 is not None
+                      else prior_r.like(prior_units, name=f"{out_name}-{side}"))
             tmp = hd / f".{out_name}-{side}.tmp.yaml"
             merged.save(tmp)
             d = yaml.safe_load(tmp.read_text(encoding="utf-8"))
@@ -2782,22 +2856,29 @@ class Session:
             d.pop("name", None)
             return d
         raw = yaml.safe_load(Path(str(ds.meta.get("source"))).read_text(encoding="utf-8")) or {}
-        pj = hd / f"{name}.pipeline.json"
-        st = (json.loads(pj.read_text(encoding="utf-8")).get("settings") or {}) if pj.exists() else {}
-        pipe = {k_: st[k_] for k_ in ("positions", "score_positions", "top_layers", "max_examples", "s_max", "direction_layer")
-                if st.get(k_) is not None}
+
+        def settings_of(n: str) -> dict:
+            pj_ = hd / f"{n}.pipeline.json"
+            return (json.loads(pj_.read_text(encoding="utf-8")).get("settings") or {}) if pj_.exists() else {}
+        st, st_prev = settings_of(root), settings_of(name)
+        pipe = {k_: st[k_] for k_ in ("positions", "score_positions", "top_layers", "max_examples", "s_max", "direction_layer",
+                                      "loop_direction") if st.get(k_) is not None}
         pipe.setdefault("score_positions", pos)
         if isinstance(st.get("target"), str):                           # B / mid は、残りの一括でも同じ意味
             pipe["target"] = st["target"]
-        rk = rank or st.get("rank") or "causal"
+        rk = rank or st_prev.get("rank") or st.get("rank") or "causal"
         if rk == "writes":                                              # 新しい選び方で足す部品を探す(ニューロンも選べる)
             pipe.pop("top_layers", None)
-            pipe.update(rank="writes", unit_kinds=unit_kinds or st.get("unit_kinds") or "heads",
+            pipe.update(rank="writes", unit_kinds=unit_kinds or st_prev.get("unit_kinds") or st.get("unit_kinds") or "heads",
                         n_units=[int(x) for x in new_heads], check_replies=0,
-                        **{k_: st[k_] for k_ in ("verify_top", "verify_sample", "verify_mode", "select_layer") if st.get(k_) is not None})
+                        **{k_: st[k_] for k_ in ("verify_top", "verify_sample", "verify_mode", "select_layer", "strength")
+                           if st.get(k_) is not None})
+            if st.get("hard") is not None:
+                pipe["hard"] = max(1, min(int(st["hard"]), len(qa)))
         elif rk == "causal":                                            # 元が v0.7.0 までの流れ(rank の記録が無い古い結果も)
             if unit_kinds not in (None, "heads"):
                 raise GneError("BAD_ARGS", "ニューロンも足すには rank writes にしてください(rank causal はヘッドだけ)")
+            pipe.pop("loop_direction", None)
             pipe.update(rank="causal", n_heads=[int(x) for x in new_heads], hard=max(1, min(int(st.get("hard") or 16), len(qa))))
         else:
             raise GneError("BAD_ARGS", f"rank は causal か writes です({rk!r})")
@@ -2806,52 +2887,96 @@ class Session:
                 "recipe_a": side_recipe("A"), "recipe_b": side_recipe("B"), "prompts_a": qa, "prompts_b": cs.prompts("B"),
                 **({"validate": raw["validate"]} if raw.get("validate") else {}), "pipeline": pipe}
         p = self.heads_pipeline(spec, resume=resume)
-        # 4. 元の組 + 追加の組(比較表のどの行も)。追加の組は元の組を当てた状態で探したので、単独では使わない
-        scb = Scorer(self, ds, cs, layers=[S], positions=pos, max_examples=al.get("max_examples") or 64)
-        b0 = scb.run(None, None, sides="B", keep=True)["B"]
-        b_base = scb.run(base_lora, vecs, sides="B", keep=True)["B"]
-        drift_base = drift(b0["resid"][S], b_base["resid"][S], sc.r[S])[1]
+
+        def proj_spec(u) -> str:                    # レシピの欄・UI の部品の書き方(L:Hh:sS@方向 など)
+            who = {"neuron": f"N{u.neuron}", "attn": "attn", "ffn": "ffn"}.get(u.kind, f"H{u.head}")
+            return f"{u.layer}:{who}:s{float(u.k):.4g}@{u.direction}"
+
+        def parts_of(units, rounds) -> list[dict]:
+            out_ = []
+            for u, r_ in zip(units, rounds, strict=True):
+                kind = {"neuron": "neuron", "attn": "layer_attn", "ffn": "layer_mlp"}.get(u.kind)
+                if kind is None:
+                    try:
+                        kind = kind_of_layer(self, u.layer)
+                    except (AttributeError, IndexError):
+                        kind = "attn"
+                out_.append({"spec": proj_spec(u), "layer": int(u.layer), "head": u.neuron if u.kind == "neuron" else u.head,
+                             "kind": kind, "s": float(u.k), "direction": u.direction, "round": int(r_)})
+            return out_
+
+        def dups_of(parts) -> list[dict]:           # 同じ部品(層・種類・番号)が 2 つ以上の方向で入っている
+            g: dict[tuple, list[dict]] = {}
+            for q in parts:
+                g.setdefault((q["layer"], q["kind"], q["head"]), []).append(q)
+            return [{"layer": k_[0], "kind": k_[1], "head": k_[2], "rounds": [q["round"] for q in v], "s": [q["s"] for q in v],
+                     "directions": [q["direction"] for q in v]} for k_, v in g.items() if len(v) > 1]
+        alloc = p["allocate"]
+        rows_new = [(str(r["n_heads"]), int(r["n_heads"]), r) for r in alloc["table"] if not r.get("skipped") and r.get("recipe")]
+        if (alloc.get("s1") or {}).get("recipe"):
+            rows_new.append(("s1", None, alloc["s1"]))
         comb_rows = []
-        for r in p["allocate"]["table"]:
-            if r.get("skipped") or not r.get("recipe"):
-                continue
-            new_r = Recipe.load(r["recipe"])
-            cr = base_r.like(base_units + explicit(new_r), name=f"{out_name}-n{r['n_heads']}-combined")
-            cpath = hd / f"{out_name}.combined-n{r['n_heads']}.yaml"
+        for key, n_new, r in rows_new:
+            new_units = explicit(Recipe.load(r["recipe"]))
+            cr = prior_r.like(prior_units + new_units, name=f"{out_name}-{'s1' if n_new is None else f'n{n_new}'}-combined")
+            cpath = hd / f"{out_name}.combined-{'s1' if n_new is None else f'n{n_new}'}.yaml"
             cr.save(cpath)
-            clora = self.lora_for(cr)
-            cvecs = self.vectors(cr)[0] if cr.add_units else None
-            a2 = sc.run(clora, cvecs, sides="A")["A"]["values"][S]
-            b_comb = scb.run(clora, cvecs, sides="B", keep=True)["B"]
-            comb_rows.append({"n_new": int(r["n_heads"]), "recipe": str(cpath), "units": list(row["units"]) + list(r["units"]),
-                              "n_heads": len(row["units"]) + len(r["units"]), "recommended": bool(r.get("recommended")),
-                              "reached": bool(r.get("reached")),
-                              "remain_before": len(rem), "remain_after": int((a2 > thr).sum()),
-                              "a_mean_before": float(a.mean()), "a_mean_after": float(a2.mean()),
-                              "a_max_before": float(a.max()), "a_max_after": float(a2.max()),
-                              "b_mean": float(b0["values"][S].mean()), "b_mean_base": float(b_base["values"][S].mean()),
-                              "b_mean_after": float(b_comb["values"][S].mean()),
-                              "b_drift_orth_base": drift_base, "b_drift_orth": drift(b0["resid"][S], b_comb["resid"][S], sc.r[S])[1]})
+            a2, b2 = measure(cr)
+            after = summary(a2, b2)
+            parts = parts_of(prior_units, rounds0) + parts_of(new_units, [rnd] * len(new_units))
+            comb_rows.append({"key": key, "n_new": n_new, "s1": n_new is None, "recipe": str(cpath),
+                              "units": [q["spec"] for q in parts], "parts": parts, "dups": dups_of(parts),
+                              "n_heads": len(parts), "n_base": len(prior_units), "n_added": len(new_units),
+                              "recommended": bool(r.get("recommended")), "reached": bool(r.get("reached")),
+                              "reached_combined": after["reached"],
+                              "remain_before": before["remain"], "remain_after": after["remain"],
+                              "a_mean_before": before["a_mean"], "a_mean_after": after["a_mean"],
+                              "a_max_before": before["a_max"], "a_max_after": after["a_max"],
+                              "b_mean": b0m, "b_mean_base": before["b_mean"], "b_mean_after": after["b_mean"],
+                              "b_delta_base": before["b_delta"], "b_delta": after["b_delta"],
+                              "b_drift_orth_base": before["b_drift_orth"], "b_drift_orth": after["b_drift_orth"],
+                              "effect_base": before["effect"], "effect": after["effect"],
+                              **({"exit_before": before["exit"], "exit_after": after["exit"]} if X is not None else {}),
+                              "added_only": {k_: r.get(k_) for k_ in ("remain", "a_mean", "b_side_delta", "b_drift_orth", "effect", "reached")}})
         # 代表: 推す組。無ければ(どれも目標に届かない)、合わせた残りが最も少なく、B 側のずれが小さい組
         comb = next((c for c in comb_rows if c["recommended"]), None) or \
             min(comb_rows, key=lambda c: (c["remain_after"], c["b_drift_orth"]), default=None)
+        check = None
         if comb is not None:
             comb = {**comb, "chosen_by": "recommended" if comb["recommended"] else "fewest_remaining"}
-            import shutil
             shutil.copyfile(comb["recipe"], hd / f"{out_name}.combined.yaml")   # 代表は <名前>.combined.yaml にも置く
-        out = {"name": out_name, "base": name, "direction": ds.name, "n_heads": int(row["n_heads"]), "base_units": list(row["units"]),
-               "base_recipe": row["recipe"], "score_layer": S, "threshold": thr,
+            n_chk = check_replies if check_replies is not None else st.get("check_replies")
+            n_chk = 16 if n_chk is None else int(n_chk)
+            if n_chk > 0:                           # 5. 代表の合わせたレシピで、元の一括と同じ応答での確かめ
+                cs_chk, val_chk = cs, val
+                rpj = hd / f"{root}.pipeline.json"
+                ho = (json.loads(rpj.read_text(encoding="utf-8")).get("holdout") or {}) if rpj.exists() else {}
+                if ho.get("contrast") and Path(ho["contrast"]).exists():  # 元の一括が選ぶ質問と測る質問を分けていたら、測る質問で
+                    cs_chk, val_chk = load_contrast(ho["contrast"])
+                check = self.reply_check(cs_chk, val_chk, comb["recipe"], n=n_chk,
+                                         max_tokens=int(check_tokens or st.get("check_tokens") or 512))
+                check.update(key=comb["key"], n_heads=comb["n_heads"], recommended=comb["recommended"], held_out_contrast=bool(ho.get("contrast")))
+        by_round: dict[int, int] = {}
+        for q in (comb or {}).get("parts") or parts_of(prior_units, rounds0):
+            by_round[q["round"]] = by_round.get(q["round"], 0) + 1
+        out = {"name": out_name, "base": name, "root": root, "round": rnd, "chain": ch["chain"] + [out_name],
+               "direction": ds.name, "n_heads": int(row["n_heads"]), "base_units": [proj_spec(u) for u in prior_units],
+               "base_parts": parts_of(prior_units, rounds0), "base_recipe": ch["recipe"], "base_measure": before,
+               "none_measure": {"a_mean": a0m, "b_mean": b0m}, "score_layer": S, "threshold": thr, "loop_exit": X,
+               "rank": rk, "units_by_round": {str(k_): v for k_, v in sorted(by_round.items())},
                "remaining": {"n": len(rem), "n_a": int(len(a)), "used": len(pick),
                              "padded": len(pick) > len(rem), "questions": qa, "scores": [float(a[i]) for i in pick]},
                "pipeline": {"path": p["path"], "direction": out_name, "recommended": p.get("recommended"),
                             "reused": p.get("reused") or [],
                             "table": [{k_: r.get(k_) for k_ in ("n_heads", "units", "s_max", "remain", "reached", "recommended", "skipped")}
-                                      for r in p["allocate"]["table"]]},
-               "combined": comb, "combined_rows": comb_rows,
+                                      for r in alloc["table"]]},
+               "combined": comb, "combined_rows": comb_rows, "check": check,
                "updated": time.strftime("%Y-%m-%dT%H:%M:%S"), "seconds": time.perf_counter() - t0}
         (hd / f"{out_name}.refine.json").write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
         pd = json.loads(Path(p["path"]).read_text(encoding="utf-8"))      # 一括の結果にも、どの組の残りから作ったかを書く
-        pd["refine"] = {k_: out[k_] for k_ in ("base", "n_heads", "base_units", "remaining", "combined", "combined_rows")}
+        pd["refine"] = {k_: out[k_] for k_ in ("base", "root", "round", "chain", "direction", "n_heads", "base_units", "base_parts",
+                                               "base_measure", "none_measure", "threshold", "score_layer", "loop_exit", "units_by_round",
+                                               "remaining", "combined", "combined_rows", "check")}
         Path(p["path"]).write_text(json.dumps(pd, ensure_ascii=False, indent=1), encoding="utf-8")
         out["path"] = str(hd / f"{out_name}.refine.json")
         return out
@@ -3015,7 +3140,24 @@ round_01.scores.txt に「番号 P C」を 1 行ずつ書く(例: 17 3 4)。全�
         rows = [r for r in al["table"] if not r.get("skipped") and (n_heads is None or r["n_heads"] in set(n_heads))]
         if not rows:
             raise GneError("BAD_ARGS", f"配分の結果に使える組がありません(n_heads={n_heads})")
-        ds, cs, val = self._direction_contrast(al["direction"], contrast)
+        direction, combined_from = al["direction"], None
+        rf = ap.with_name(ap.name[:-len(".alloc.json")] + ".refine.json") if ap.name.endswith(".alloc.json") else None
+        if rf is not None and rf.exists():
+            # 残りから追加の結果: 候補は土台と足した組を合わせたレシピで、元の一括の方向・対照集合の質問で作る(足した組は単独では使わない)
+            ref = json.loads(rf.read_text(encoding="utf-8"))
+            if "round" not in ref and (rf.with_name(f"{ref.get('base')}.refine.json")).exists():
+                raise GneError("BAD_ARGS", f"{al['name']} は v0.8.3 までに残りから追加を重ねた結果で、合わせたレシピに前の回の部品が入っていません",
+                               "元の一括の結果の行から、残りから追加をやり直してください")
+            comb = {str(c.get("key") or c.get("n_new")): c for c in ref.get("combined_rows") or []}
+            rows = [{**r, "units": comb[str(r["n_heads"])]["units"], "recipe": comb[str(r["n_heads"])]["recipe"]}
+                    for r in rows if str(r["n_heads"]) in comb]
+            if not rows:
+                raise GneError("BAD_ARGS", f"{al['name']} の組には、元の組と合わせたレシピがありません")
+            root = ref.get("root") or ref.get("base")
+            rap = self.store.heads_dir(self.meta.model_id) / f"{root}.alloc.json"
+            direction = json.loads(rap.read_text(encoding="utf-8"))["direction"] if rap.exists() else (ref.get("direction") or direction)
+            combined_from = al["name"]
+        ds, cs, val = self._direction_contrast(direction, contrast)
         out_name = name or f"{al['name']}"
         if not re.fullmatch(r"[\w.\-]+", out_name):
             raise GneError("BAD_ARGS", f"名前 {out_name!r} は英数字・_・-・. だけにしてください")
@@ -3140,6 +3282,7 @@ round_01.scores.txt に「番号 P C」を 1 行ずつ書く(例: 17 3 4)。全�
             rub_text = self.CANDIDATE_RUBRIC.format(target=target, max_tokens=max_tokens)
         rub.write_text(rub_text, encoding="utf-8")
         out = {"name": out_name, "alloc": str(ap), "direction": ds.name, "contrast": cs.name, "held_out": held_out,
+               **({"combined_from": combined_from} if combined_from else {}),
                "with_recipe": None if wr is None else str(self.recipe_path(with_recipe)), "when": when,
                "sampling": None if sp is None else sp.to_dict(), "max_tokens": max_tokens, "scales": [float(x) for x in scales],
                "prompts": {"A": pa, "B": pb}, "match": val.match, "target": target, "candidates": cands,

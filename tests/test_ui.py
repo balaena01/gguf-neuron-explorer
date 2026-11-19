@@ -3155,6 +3155,63 @@ def _seed_pipeline_writes_081(s, name: str = "ppw81") -> dict:
     return out
 
 
+def _seed_pipeline_writes_refine(s, root: str = "ppw81") -> dict:
+    """rank writes の結果に残りから追加を 2 回重ねた結果 ppw81_r1_r1(v0.8.4 の形)。土台 = 元の組 4 個(ヘッド・ニューロン・層全体)+ 1 回目の
+    1 個。足した組は 3・2・1(1 は合わせたレシピが無い行)と s1。同じ部品(L12 H5)が元の方向と 2 回目の方向で入る行がある。"""
+    import yaml
+    name, mid = f"{root}_r1_r1", f"{root}_r1"
+    out = _seed_pipeline_writes(s, name)
+    hd = s.store.heads_dir(s.meta.model_id)
+    base = [f"12:H5:s2@{root}", f"14:N100:s2@{root}", f"13:attn:s2@{root}", f"12:H3:s2@{root}", f"16:ffn:s1.5@{mid}"]
+    kinds = {"H": "attn", "N": "neuron", "attn": "layer_attn", "ffn": "layer_mlp"}
+
+    def part(u, rnd):
+        L, who, sv = int(u.split(":")[0]), u.split(":")[1], float(u.split(":s")[1].split("@")[0])
+        k = kinds.get(who) or kinds[who[0]]
+        return {"spec": u, "layer": L, "head": None if who in ("attn", "ffn") else int(who[1:]), "kind": k, "s": sv,
+                "direction": u.split("@")[1], "round": rnd}
+    added = {3: [f"12:H5:s3@{name}", f"17:H1:s1.5@{name}", f"18:N9:s1@{name}"], 2: [f"17:H1:s2@{name}", f"18:N9:s1.2@{name}"],
+             1: [f"17:H1:s2.5@{name}"], "s1": [f"12:H5:s1@{name}", f"17:H1:s1@{name}", f"18:N9:s1@{name}"]}
+    al = out["allocate"]
+    hof = lambda us: [{"layer": p["layer"], "head": p["head"], "kind": p["kind"], "s": p["s"]} for p in (part(u, 2) for u in us)]  # noqa: E731
+    al["table"] = [{"n_heads": n, "n_units": n, "n_used": len(us), "units": us, "heads": hof(us), "kinds": {"attn": 1, "neuron": len(us) - 1},
+                    "s_max": 3.0, "s_median": 1.5, "s_min": 1.0, "stop": "raised", "reached": True, "remain": 2, "a_max": 2.0, "a_mean": -9.0,
+                    "b_side_delta": 0.2, "b_drift_orth": 0.05, "effect": 30.0, "recipe": str(hd / f"{name}.alloc-n{n}.yaml"), "recommended": n == 2,
+                    "strength": "per_unit"} for n, us in added.items() if n != "s1"]
+    al["s1"] = {"n_heads": 3, "n_used": 3, "units": added["s1"], "heads": hof(added["s1"]), "kinds": {"attn": 1, "neuron": 2}, "s_max": 1.0,
+                "s_median": 1.0, "reached": False, "remain": 4, "a_mean": 5.0, "b_side_delta": 0.1, "b_drift_orth": 0.02, "effect": 12.0,
+                "recipe": str(hd / f"{name}.alloc-s1.yaml")}
+    al["recommended"] = 2
+    out.pop("check", None)                                                         # 足した組だけの一括では応答での確かめをしない
+    rows = []
+    for key in ("3", "2", "s1"):
+        us = added[int(key) if key != "s1" else "s1"]
+        parts = [part(u, 0) for u in base[:4]] + [part(base[4], 1)] + [part(u, 2) for u in us]
+        rp = hd / f"{name}.combined-{'s1' if key == 's1' else 'n' + key}.yaml"
+        rp.write_text(yaml.safe_dump({"name": f"{name}-combined", "model_id": s.meta.model_id, "units": []}))
+        dups = [{"layer": 12, "kind": "attn", "head": 5, "rounds": [0, 2], "s": [2.0, 3.0 if key == "3" else 1.0], "directions": [root, name]}] \
+            if any(u.startswith("12:H5") for u in us) else []
+        rows.append({"key": key, "n_new": None if key == "s1" else int(key), "s1": key == "s1", "recipe": str(rp), "units": [p["spec"] for p in parts],
+                     "parts": parts, "dups": dups, "n_heads": len(parts), "n_base": 5, "n_added": len(us), "recommended": key == "2",
+                     "reached": True, "reached_combined": key != "s1", "remain_before": 3, "remain_after": {"3": 0, "2": 1, "s1": 2}[key],
+                     "a_mean_before": 4.0, "a_mean_after": -9.5, "a_max_before": 12.0, "a_max_after": 1.0, "b_mean": -10.0,
+                     "b_mean_base": -9.8, "b_mean_after": -9.6, "b_delta_base": 0.2, "b_delta": 0.4, "b_drift_orth_base": 0.06,
+                     "b_drift_orth": 0.08, "effect_base": 25.8, "effect": 39.1,
+                     "added_only": {"remain": 2, "a_mean": -9.0, "b_side_delta": 0.2, "b_drift_orth": 0.05, "effect": 30.0, "reached": True}})
+    chk = {"n": {"A": 6, "B": 6}, "max_tokens": 512, "match": "arr", "held_out": {"A": False, "B": False}, "a_changed": 3, "note": None,
+           "rows": {k: {side: {"n": 6, "finished": 6, "match_finished": (4 if k == "none" else 1) if side == "A" else 0, "empty": 0, "loop": 0,
+                               "at_limit": 0} for side in "AB"} for k in ("none", "recipe")},
+           "key": "2", "n_heads": 7, "recommended": True, "held_out_contrast": True}
+    out["refine"] = {"base": mid, "root": root, "round": 2, "chain": [root, mid, name], "direction": root, "n_heads": 4,
+                     "base_units": base, "base_parts": [part(u, 0) for u in base[:4]] + [part(base[4], 1)],
+                     "base_measure": {"remain": 3, "a_mean": 4.0}, "none_measure": {"a_mean": 30.0, "b_mean": -10.0}, "threshold": -10.0,
+                     "score_layer": 20, "loop_exit": None, "units_by_round": {"0": 4, "1": 1, "2": 2},
+                     "remaining": {"n": 3, "n_a": 6, "used": 4, "padded": True, "questions": ["Q1", "Q2", "Q3", "Q4"], "scores": [9, 8, 7, 6]},
+                     "combined": {**rows[1], "chosen_by": "recommended"}, "combined_rows": rows, "check": chk}
+    (hd / f"{name}.pipeline.json").write_text(json.dumps(out, ensure_ascii=False))
+    return out
+
+
 @pytest.fixture(scope="module")
 def pipe_writes_server(tmp_path_factory):
     """rank writes の一括の結果を開くテスト用のサーバ(CPU)。"""
@@ -3164,7 +3221,83 @@ def pipe_writes_server(tmp_path_factory):
     s = Session(MODEL, root=tmp_path_factory.mktemp("ui_pipe_w"), n_ctx=2048, n_seq_max=4, n_gpu_layers=0)
     _seed_pipeline_writes(s)
     _seed_pipeline_writes_081(s)
+    _seed_pipeline_writes_refine(s)
     yield from _serve(s)
+
+
+@pytest.mark.model
+def test_pipeline_writes_refine_rows_are_combined(pipe_writes_server, browser):
+    """rank writes の残りから追加の結果(2 回重ねたもの): どの行も「土台(元の組 + 1 回目)+ 足した組」と分かり(土台は薄く、回ごと)、
+    表の数は合わせたレシピの前 → 後。「合わせてレシピを置き換える」「合わせて評価へ送る」は s=1 の行も含めて合わせたレシピだけを使い、
+    合わせたレシピが無い行は押せない。同じ部品が 2 つの方向で入る行には注が出る。応答での確かめは代表の合わせたレシピのもの。"""
+    url = pipe_writes_server
+    name = "ppw81_r1_r1"
+    for lang in ("ja", "en"):
+        pg = browser.new_page(viewport={"width": 1600, "height": 1000})
+        errors, posts = [], []
+        pg.on("pageerror", lambda e: errors.append(str(e)))
+        _dialogs(pg)
+        pg.goto(url + f"/?lang={lang}")
+        pg.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
+        pg.evaluate("window.gne.recipe.clear(); try { localStorage.removeItem('gne.pipeline.draft') } catch {}")
+        pg.click("#views button[data-view=chips]")
+        pg.wait_for_function("window.gne.directionView && window.gne.directionView.mode === 'pipe'", timeout=60000)
+        _step(pg, "chips", "past")
+        pg.wait_for_selector(f"#pp-past tr[data-pp={name}]", timeout=30000)
+        pg.click(f"#pp-past tr[data-pp={name}]")
+        _step(pg, "chips", "alloc")
+        pg.wait_for_selector("#pp-result table.pp-cmp", timeout=30000)
+        res = "#pp-result"
+        if lang == "en":
+            assert pg.evaluate("[...window.gneI18n.missing]") == []
+            assert not errors, errors
+            pg.close()
+            continue
+        note = pg.evaluate(f"document.querySelector('{res} .pp-refine').textContent")
+        assert "2 回目" in note and "ppw81" in note and "元の組 4 個 + 1 回目 1 個 + 2 回目 2 個" in note
+        rows = pg.evaluate(f"""[...document.querySelectorAll('{res} table.pp-cmp tbody tr')].map(tr => ({{
+            base: [...tr.querySelectorAll('.pp-base .pp-round')].map(x => x.textContent),
+            added: !!tr.querySelector('.pp-added'), text: tr.innerText}}))""")
+        assert len(rows) == 4                                                       # s=1、3、2、1
+        assert [r["base"] for r in rows] == [["元の組(4)", "1 回目(1)"]] * 3 + [[]] and all(r["added"] for r in rows)
+        assert "3 → 0" in rows[1]["text"] and "4.00 → -9.50" in rows[1]["text"]
+        assert "2 つの方向" in rows[1]["text"] and "2 つの方向" not in rows[2]["text"]
+        assert "合わせたレシピがありません" in rows[3]["text"]
+        assert pg.evaluate(f"document.querySelector(\"{res} table.pp-cmp [data-load='1']\").disabled")
+        assert pg.evaluate(f"document.querySelector(\"{res} table.pp-cmp [data-eval='1']\").disabled")
+        d = pg.evaluate(f"fetch('/api/pipelines/{name}').then(r => r.json())")
+        comb = {c["key"]: c for c in d["refine"]["combined_rows"]}
+        for key in ("3", "2", "s1"):
+            _step(pg, "chips", "alloc")
+            pg.click(f"{res} table.pp-cmp [data-load='{key}']")
+            assert pg.evaluate("window.gne.recipe.specs()") == comb[key]["units"]
+            assert pg.evaluate("window.gne.recipe.name").endswith("-base-plus-added")
+            assert pg.evaluate("window.gne.recipe.skipped") == 0
+        specs = pg.evaluate("window.gne.recipe.specs()")
+        assert specs[:5] == d["refine"]["base_units"] and len(specs) == 8                  # 元の組 4 + 1 回目 1 + 2 回目 3(s=1 の行)
+
+        def on_jobs(route, req):
+            if req.method != "POST":
+                route.continue_()
+                return
+            body = json.loads(req.post_data)
+            posts.append(body)
+            route.fulfill(status=200, content_type="application/json", body=json.dumps({
+                "id": "fake-ev", "kind": body["kind"], "params": body["params"], "status": "queued", "done": 0, "total": 0, "stage": "",
+                "eta_s": None, "yields": 0, "seconds": None, "result": None, "error": None}))
+        pg.route("**/api/jobs", on_jobs)
+        _step(pg, "chips", "alloc")
+        pg.click(f"{res} table.pp-cmp [data-eval='s1']")
+        pg.wait_for_selector("#evx-unsend", timeout=10000)
+        pg.click("#evx-go")
+        pg.wait_for_function("!document.querySelector('#evx-unsend')", timeout=10000)
+        assert [b for b in posts if b["kind"] == "eval"][-1]["params"]["recipe"].endswith(f"{name}.combined-s1.yaml")
+        pg.click("#views button[data-view=chips]")
+        _step(pg, "chips", "alloc")
+        heads = pg.evaluate(f"[...document.querySelectorAll('{res} section.pp-stage h4')].map(h => h.textContent)")
+        assert any("代表の合わせたレシピ" in h for h in heads)
+        assert not errors, errors
+        pg.close()
 
 
 @pytest.mark.model
@@ -3714,7 +3847,11 @@ def refine_server(tmp_path_factory):
                                         "n_heads": 2 + len(us), "recommended": n == 2, "remain_before": 3, "remain_after": 4 - n,
                                         "a_mean_before": 20.0, "a_mean_after": 8.0, "b_drift_orth_base": 0.1, "b_drift_orth": 0.1 + 0.01 * n}
                                        for n, us in ((3, ["16:H2:s4@ppx_r1", "16:H5:s2@ppx_r1", "17:H1:s1@ppx_r1"]),
-                                                     (2, ["16:H2:s4@ppx_r1", "16:H5:s2@ppx_r1"]))]}}
+                                                     (2, ["16:H2:s4@ppx_r1", "16:H5:s2@ppx_r1"]))],
+                     "check": {"n": {"A": 4, "B": 4}, "max_tokens": 64, "match": "arr", "a_changed": 2, "note": None, "key": "2", "n_heads": 4,
+                               "rows": {k: {sd: {"n": 4, "finished": 4, "match_finished": (3 if k == "none" else 1) if sd == "A" else 0,
+                                                 "empty": 0, "loop": 1 if k == "recipe" and sd == "B" else 0, "at_limit": 0} for sd in "AB"}
+                                        for k in ("none", "recipe")}}}}
     (hd / "ppx_r1.pipeline.json").write_text(json.dumps(r1, ensure_ascii=False))
     yield from _serve(s)
 
@@ -3762,6 +3899,7 @@ def test_pipeline_refine_button_and_note(refine_server, browser):
     pg.wait_for_selector("#pp-result .pp-refine", timeout=10000)
     note = pg.evaluate("document.querySelector('#pp-result .pp-refine').textContent")
     assert "ppx" in note and "3 問" in note and "残り 3 → 1 問" in note and "4 問で作りました" in note
+    assert "無介入 3/4 / 0/4 → 合わせたレシピ 1/4 / 0/4" in note                      # 代表の合わせたレシピでの応答での確かめ
     _step(pg, "chips", "alloc")
     pg.click("#pp-rf-load")
     assert pg.evaluate("window.gne.recipe.specs()") == ["12:H5:s10@ppx", "12:H3:s7@ppx", "16:H2:s4@ppx_r1"]

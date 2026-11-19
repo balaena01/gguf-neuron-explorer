@@ -3339,47 +3339,85 @@ def heads_candidates(c: Common, holder: dict,
 
 @gne_command(heads_app, "refine", "heads refine")
 def heads_refine(c: Common, holder: dict,
-                 name: str = typer.Option(..., "--name", help="配分の結果(一括の名前か heads allocate の保存名)"),
-                 n_heads: Optional[int] = typer.Option(None, "--n-heads", help="残りを測る組のヘッド数(既定は推す組)"),
+                 name: str = typer.Option(..., "--name", help="配分の結果(一括の名前か heads allocate の保存名。残りから追加の結果を渡すと重ねる)"),
+                 n_heads: Optional[int] = typer.Option(None, "--n-heads", help="残りを測る組(表の行の上限の数。既定は推す組)"),
                  new_heads: str = typer.Option("3,2,1", "--new-heads", help="追加する組のヘッド数(カンマ区切り)"),
                  out_name: Optional[str] = typer.Option(None, "--out-name", help="保存名(既定 <name>_r1、別の組なら _r2 …)"),
                  fresh: bool = typer.Option(False, "--fresh", help="作り済みの方向と因果の結果を使い回さない"),
-                 rank: Optional[str] = typer.Option(None, "--rank", help="追加の部品の探し方: causal(ヘッドを止めて測る)/ writes(全部の部品を書き込みの量で順位づけ。ニューロンも足せる)。既定は元の一括の設定"),
+                 rank: Optional[str] = typer.Option(None, "--rank", help="追加の部品の探し方: causal(ヘッドを止めて測る)/ writes(全部の部品を書き込みの量で順位づけ。ニューロンも足せる)。既定は前の回の設定"),
                  unit_kinds: Optional[str] = typer.Option(None, "--unit-kinds", help="--rank writes で足す部品の種類: all(ヘッド・線形注意・ニューロン)/ heads / neurons / layers(層全体)。カンマで足せる"),
+                 check_replies: Optional[int] = typer.Option(None, "--check-replies", help="代表の合わせたレシピでの応答での確かめの質問の数(側ごと。既定は元の一括の設定、0 で行わない)"),
+                 check_tokens: Optional[int] = typer.Option(None, "--check-tokens", help="応答での確かめで書かせる長さの上限(既定は元の一括の設定)"),
                  yes: bool = _YES):
-    """組を当てても目標まで下がらない A 側の質問(残り)だけで、追加のヘッドを探す。残りの質問と B 側の質問で、組を当てたまま
-    方向を作り直し、一括(基準層 → 因果 → 配分)で足すヘッドと強さを決め、元の組と合わせたレシピを作って残りを測り直す。
+    """組を当てても目標まで下がらない A 側の質問(残り)だけで、組に足す部品を探す。残りの質問と B 側の質問で、組を当てたまま
+    方向を作り直し、一括(基準層 → 因果 → 配分)で足す部品と強さを決め、元の組と合わせたレシピを作って、元の方向・元の目標で
+    残りを測り直す。残りから追加の結果を --name に渡すと重ねる(土台はその行の合わせたレシピ = 元の組 + それまでの回の追加の全部)。
     --rank writes(か元の一括が writes)なら、足す部品にニューロンも選べ、--new-heads は組の部品の数の上限になる。"""
     s = holder["session"] = c.session()
     nh = _ints(new_heads) or [3, 2, 1]
     _gate(s, "heads_refine", {"name": name, "new_heads": nh, **({"rank": rank} if rank else {}),
-                              **({"unit_kinds": unit_kinds} if unit_kinds else {})}, yes, None)
-    d = s.heads_refine(name, n_heads=n_heads, new_heads=nh, out_name=out_name, resume=not fresh, rank=rank, unit_kinds=unit_kinds)
+                              **({"unit_kinds": unit_kinds} if unit_kinds else {}),
+                              **({"check_replies": check_replies} if check_replies is not None else {})}, yes, None)
+    d = s.heads_refine(name, n_heads=n_heads, new_heads=nh, out_name=out_name, resume=not fresh, rank=rank, unit_kinds=unit_kinds,
+                       check_replies=check_replies, check_tokens=check_tokens)
+    return d, _refine_text(d), 0
+
+
+def _refine_text(d: dict) -> str:
+    """heads refine の出力: 合わせたレシピ(土台 + 足した組)が主、足した組だけの値は補足。"""
     rm, cb, pp = d["remaining"], d["combined"], d["pipeline"]
+    rnd = d.get("round") or 1
+    rname = lambda k: "元の組" if int(k) == 0 else f"{k} 回目"            # noqa: E731
+    byr = " + ".join(f"{rname(k)} {n} 個" for k, n in (d.get("units_by_round") or {}).items())
     lines = [f"{d['path']}({d['seconds']:.0f} 秒)",
-             f"1. {d['n_heads']} ヘッドの組 " + " ".join(d["base_units"]) + f" で、L{d['score_layer']} の射影の値が {d['threshold']:.2f} を超える"
+             f"残りから追加 {rnd} 回目(元の一括 {d.get('root') or d['base']})。土台 = {d['base']} の {d['n_heads']} 個の行"
+             + (f"の合わせたレシピ(元の組 + {'1' if rnd == 2 else f'1〜{rnd - 1}'} 回目の追加、{len(d['base_units'])} 個)" if rnd > 1 else f"の組({len(d['base_units'])} 個)"),
+             f"1. 土台を当てて、元の方向 {d.get('direction')} の L{d['score_layer']} の射影の値が目標 {d['threshold']:.2f} を超える"
              f" A 側の質問: {rm['n']}/{rm['n_a']} 問" + (f"(少ないので射影の値の高い順に {rm['used']} 問で方向を作った)" if rm["padded"] else ""),
-             f"2. 残りの質問で一括 → 方向 {pp['direction']}" + (f"(作り済みの{'・'.join({'direction': '方向', 'causal': '因果'}[x] for x in pp['reused'])}を使い回した)" if pp["reused"] else "")]
-    for r in pp["table"]:
-        if r.get("skipped"):
-            lines.append(f"   {r['n_heads']} 個: {r['skipped']}")
-            continue
-        lines.append(f"   {r['n_heads']} 個: 最大 s {r['s_max']:.2f}、残る {r['remain']}  " + " ".join(r["units"])
-                     + ("  ← 推す" if r["recommended"] else "") + ("" if r["reached"] else "(目標に届かない)"))
+             f"2. 残りの質問で一括 → 新しい方向 {pp['direction']}" + (f"(作り済みの{'・'.join({'direction': '方向', 'causal': '因果'}[x] for x in pp['reused'])}を使い回した)" if pp["reused"] else "")]
     rows = d.get("combined_rows") or []
     if rows:
-        lines.append(f"3. 元の組と合わせた組(元の方向 L{d['score_layer']} で測り直す。合わせる前: 残り {rm['n']}/{rm['n_a']} 問、"
-                     f"B 側の直交成分のずれ {rows[0]['b_drift_orth_base']:.4f})")
+        lines.append(f"3. 土台と足した組を合わせたレシピ(元の方向・元の目標で測る。前 = 土台だけ、後 = 合わせたもの。強さを上げたのは足した組だけ)")
         for c in rows:
-            lines.append(f"   + {c['n_new']} 個(計 {c['n_heads']} ヘッド): 残り {c['remain_after']} 問、A の平均 {c['a_mean_before']:.2f} → "
-                         f"{c['a_mean_after']:.2f}、B のずれ {c['b_drift_orth']:.4f}  {c['recipe']}"
+            lab = "s=1 の組" if c.get("key") == "s1" else f"上限 {c.get('key') or c['n_new']}"
+            ao = c.get("added_only") or {}
+            lines.append(f"   {lab}: 計 {c['n_heads']} 個(土台 {c.get('n_base', '?')} + 足した {c.get('n_added', '?')})  残り {c['remain_before']} → {c['remain_after']} 問、"
+                         f"A 平均 {c['a_mean_before']:.2f} → {c['a_mean_after']:.2f}、B Δ {c.get('b_delta', float('nan')):+.2f}、"
+                         f"B ⊥ {c['b_drift_orth_base']:.3f} → {c['b_drift_orth']:.3f}"
+                         + (f"、段 {c['exit_after']['layer']} の A {c['exit_before']['a_mean']:.2f} → {c['exit_after']['a_mean']:.2f}" if c.get("exit_after") else "")
                          + ("  ← 代表" if cb and c["recipe"] == cb["recipe"] else ""))
-        lines.append(f"代表は {Path(cb['recipe']).with_name(d['name'] + '.combined.yaml')} にも置いた"
-                     + ("(推す組)" if cb["chosen_by"] == "recommended" else "(目標に届いた組が無いので、合わせた残りが最も少ない組)"))
+            lines.append(f"      {c['recipe']}")
+            for x in c.get("dups") or []:
+                who = {"layer_attn": "attn", "layer_mlp": "ffn", "neuron": f"N{x['head']}"}.get(x["kind"], f"H{x['head']}")
+                lines.append(f"      同じ部品が 2 つの方向で入っている: L{x['layer']} {who}"
+                             f"({'、'.join(f'{rname(k)} s{sv:.2f} @{dn}' for k, sv, dn in zip(x['rounds'], x['s'], x['directions']))})。両方の射影を当てる")
+            if ao:
+                lines.append(f"      (参考: 足した組だけ、新しい方向で 残り {ao.get('remain')}、A 平均 {ao.get('a_mean') or float('nan'):.2f}"
+                             + ("" if ao.get("reached") else "、目標に届かない") + ")")
+        lines.append(f"代表は {Path(cb['recipe']).with_name(d['name'] + '.combined.yaml')} にも置いた({byr})"
+                     + ("(推す組)" if cb["chosen_by"] == "recommended" else "(推す組が無いので、合わせた残りが最も少ない組)"))
+        ck = d.get("check")
+        if ck:
+            r0, r1 = ck["rows"]["none"], ck["rows"]["recipe"]
+            cell = lambda x: f"{x['match_finished']}/{x['finished']}" if x.get("match_finished") is not None else f"{x['finished']}/{x['n']}"   # noqa: E731
+            lines.append(f"4. 代表の合わせたレシピで応答での確かめ(validate.match の一致、A / B): 無介入 {cell(r0['A'])} / {cell(r0['B'])}、"
+                         f"合わせたレシピ {cell(r1['A'])} / {cell(r1['B'])}。空 {r1['A']['empty']}/{r1['B']['empty']}(無介入 {r0['A']['empty']}/{r0['B']['empty']})、"
+                         f"繰り返し {r1['A']['loop']}/{r1['B']['loop']}(無介入 {r0['A']['loop']}/{r0['B']['loop']})")
+            for w in [ck.get("match_warning"), ck.get("note")] + [f"{sd} 側の応答が壊れている(繰り返し {x['loop']}・空 {x['empty']} / {x['n']})"
+                                                              for sd, x in (ck.get("break_warning") or {}).items()]:
+                if w:
+                    lines.append(f"   注意: {w}")
         lines.append(f"確かめる: gne eval --recipe {cb['recipe']} --random-controls 16")
+        lines.append("足した組だけの表(新しい方向、参考。単独では使わない):")
+        for r in pp["table"]:
+            if r.get("skipped"):
+                lines.append(f"   {r['n_heads']} 個: {r['skipped']}")
+                continue
+            lines.append(f"   {r['n_heads']} 個: 最大 s {r['s_max']:.2f}、残る {r['remain']}  " + " ".join(r["units"])
+                         + ("  ← 推す" if r["recommended"] else "") + ("" if r["reached"] else "(目標に届かない)"))
     else:
-        lines.append("3. 追加の組を作れなかったので、合わせたレシピはありません")
-    return d, "\n".join(lines), 0
+        lines.append("3. 足す組を作れなかったので、合わせたレシピはありません")
+    return "\n".join(lines)
 
 
 def _fieldtest_text(d: dict) -> str:

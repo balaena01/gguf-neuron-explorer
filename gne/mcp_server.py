@@ -532,15 +532,20 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
 
     @srv.tool()
     async def heads_refine(name: str, n_heads: int | None = None, new_heads: list[int] | None = None, resume: bool = True,
-                           rank: str | None = None, unit_kinds: str | None = None) -> dict:
-        """組を当てても目標まで下がらない A 側の質問(残り)だけで、追加のヘッドを探すジョブを投げる(job_status で結果)。
-        name は一括(heads_pipeline)か heads_allocate の名前、n_heads は残りを測る組(既定は推す組)。残りの質問と B 側の質問で、
-        組を当てたまま方向を作り直し(方向 <name>_rK)、基準層 → 因果 → 配分で足すヘッドと強さ(new_heads、既定 [3, 2, 1])を決め、
-        元の組と合わせたレシピ(combined.recipe)を作って、元の方向で残りの数(remain_before → remain_after)と B 側のずれを測り直す。
+                           rank: str | None = None, unit_kinds: str | None = None, check_replies: int | None = None,
+                           check_tokens: int | None = None) -> dict:
+        """組を当てても目標まで下がらない A 側の質問(残り)だけで、組に足す部品を探すジョブを投げる(job_status で結果)。
+        name は一括(heads_pipeline)か heads_allocate の名前、n_heads は残りを測る組(表の行の上限の数、既定は推す組)。残りから追加の
+        結果を name に渡すと重ねる(土台はその行の合わせたレシピ = 元の組 + それまでの回の追加の全部)。残りの質問と B 側の質問で、
+        土台を当てたまま方向を作り直し(方向 <name>_rK)、足す部品と強さ(new_heads、既定 [3, 2, 1])を決める。使うのは
+        合わせたレシピ(combined.recipe、combined_rows[].recipe。rank writes なら s1 の行も): 元の方向・元の目標で、残りの数
+        (remain_before → remain_after)・A 平均・B Δ・B ⊥ を測り直したもの。parts に部品ごとの何回目(0 = 元の組)、dups に 2 つの
+        方向で入った同じ部品。足した組だけの値(added_only、pipeline.table)は新しい方向での参考で、単独では使わない。
+        代表の合わせたレシピで応答での確かめ(check、check_replies 問。既定は元の一括の設定、0 で行わない)。
         rank="writes"(元の一括が writes なら既定でも)は、足す部品にニューロンも選べる(unit_kinds、new_heads は部品の数の上限)。"""
         try:
             p = {"name": name, "n_heads": n_heads, "new_heads": new_heads, "resume": None if resume else False,
-                 "rank": rank, "unit_kinds": unit_kinds}
+                 "rank": rank, "unit_kinds": unit_kinds, "check_replies": check_replies, "check_tokens": check_tokens}
             return jobs.start("heads_refine", {k: v for k, v in p.items() if v is not None}).view()
         except Exception as e:  # noqa: BLE001
             return _err(e)

@@ -644,6 +644,79 @@ def test_pipeline_rank_writes_end_to_end(session):
 
 
 @pytest.mark.model
+def test_refine_stacked_keeps_every_round(session):
+    """残りから追加を 3 回重ねる(rank writes、ヘッド・ニューロン・層全体): どの回の合わせたレシピも「元の組 + 1 回目 + … + その回」で、
+    回ごとに方向が違い、部品ごとに何回目かが残る。残りの数は前の回の合わせたレシピで測った数と同じ(元の方向・元の目標で測る)。
+    倍率を上げる前の組(s1)にも合わせたレシピがある。代表の合わせたレシピで応答での確かめを流す(0 で行わない)。"""
+    d = yaml.safe_load(EVIL.read_text(encoding="utf-8"))
+    spec = {"name": "pst", "system_a": d["system_a"], "system_b": d["system_b"], "user_prompts": d["user_prompts"],
+            "validate": d["validate"],
+            "pipeline": {"verify_top": 8, "verify_sample": 0, "n_units": [4, 2], "max_examples": 8, "unit_kinds": "all,layers",
+                         "check_replies": 0, "target": "B"}}
+    out = session.heads_pipeline(spec)
+    hd = session.store.heads_dir(session.meta.model_id)
+    ap = hd / "pst.alloc.json"
+    al = json.loads(ap.read_text(encoding="utf-8"))
+    al["remain_threshold"] = -1e9                                              # 全部残る(仕組みを確かめるため)
+    ap.write_text(json.dumps(al), encoding="utf-8")
+    row0 = next((r for r in al["table"] if r.get("recommended")), next(r for r in al["table"] if not r.get("skipped")))
+    prev_units, prev_remain, name = list(row0["units"]), None, "pst"
+    for rnd in (1, 2, 3):
+        rf = session.heads_refine(name, new_heads=[2], check_replies=1 if rnd == 1 else 0, check_tokens=8)
+        assert rf["root"] == "pst" and rf["round"] == rnd and rf["direction"] == "pst" and rf["base_units"] == prev_units
+        assert prev_remain is None or rf["remaining"]["n"] == prev_remain
+        assert (rf["check"] is not None) == (rnd == 1)
+        if rnd == 1:
+            assert set(rf["check"]["rows"]) == {"none", "recipe"} and rf["check"]["n"] == {"A": 1, "B": 1}
+        pd = json.loads(Path(rf["pipeline"]["path"]).read_text(encoding="utf-8"))
+        assert pd["refine"]["round"] == rnd and pd["refine"]["combined_rows"] == rf["combined_rows"]
+        assert pd["settings"]["unit_kinds"] == "all,layers" and pd["settings"].get("strength") in (None, "per_unit")
+        keys = [c["key"] for c in rf["combined_rows"]]
+        assert "s1" in keys and keys[:-1] == [str(r["n_heads"]) for r in pd["allocate"]["table"] if not r.get("skipped")]
+        for c in rf["combined_rows"]:
+            rr = Recipe.load(c["recipe"])
+            specs = [q["spec"] for q in c["parts"]]
+            assert c["units"] == specs and specs[:len(prev_units)] == prev_units and len(rr.units) == len(specs)
+            assert len(specs) == len(prev_units) + c["n_added"] and c["n_base"] == len(prev_units)
+            assert [q["round"] for q in c["parts"]][len(prev_units):] == [rnd] * c["n_added"]
+            assert {q["direction"] for q in c["parts"] if q["round"] == rnd} == {rf["name"]}
+            assert {u.direction for u in rr.units} == {q["direction"] for q in c["parts"]}
+            assert [u.k for u in rr.units] == pytest.approx([q["s"] for q in c["parts"]], rel=1e-3)
+            assert c["remain_before"] == rf["remaining"]["n"] and set(c["added_only"]) >= {"remain", "a_mean", "b_side_delta"}
+            for dp in c["dups"]:
+                assert len(dp["directions"]) >= 2 and len(set(dp["directions"])) == len(dp["directions"])
+        parent = next(c for c in rf["combined_rows"] if c["key"] != "s1")
+        if not any(c["recommended"] for c in rf["combined_rows"]):        # 推す組が無ければ、次の回は表の先頭の行から
+            parent = next(c for c in rf["combined_rows"] if c["key"] == str(next(r for r in pd["allocate"]["table"] if not r.get("skipped"))["n_heads"]))
+        else:
+            parent = next(c for c in rf["combined_rows"] if c["recommended"])
+        prev_units, prev_remain, name = parent["units"], parent["remain_after"], rf["name"]
+    kinds = {q["kind"] for q in parent["parts"]}
+    assert kinds & {"layer_attn", "layer_mlp", "neuron"} or kinds          # 部品の種類が残る(どれが選ばれるかはモデル次第)
+    # 強さの候補も、残りから追加の結果では合わせたレシピで、元の一括の方向・対照集合で作る
+    cd = session.heads_candidates(rf["name"], scales=[1.0], max_prompts=1, max_tokens=4)
+    comb = {c["key"]: c for c in rf["combined_rows"]}
+    assert cd["combined_from"] == rf["name"] and cd["direction"] == "pst" and len(cd["candidates"]) > 1
+    for c in cd["candidates"][1:]:
+        assert c["recipe"] == comb[str(c["n_heads"])]["recipe"] and c["units"] == comb[str(c["n_heads"])]["units"]
+
+
+def test_refine_old_stacked_result_is_refused(tmp_path):
+    """v0.8.3 までに重ねた結果(合わせたレシピに前の回の部品が入っていない)は、土台にせず、元の結果からやり直すよう断る。"""
+    from gne.api import Session
+    hd = tmp_path / "heads"
+    hd.mkdir()
+    (hd / "x_r1.refine.json").write_text(json.dumps({"base": "x", "combined_rows": [{"n_new": 2, "recipe": "a.yaml"}]}), encoding="utf-8")
+    (hd / "x_r1_r1.refine.json").write_text(json.dumps({"base": "x_r1", "combined_rows": [{"n_new": 2, "recipe": "b.yaml"}]}), encoding="utf-8")
+    fake = SimpleNamespace(store=SimpleNamespace(heads_dir=lambda m: hd), meta=SimpleNamespace(model_id="m"))
+    with pytest.raises(GneError) as e:
+        Session._refine_chain(fake, "x_r1_r1", {"n_heads": 2, "recipe": "c.yaml"})
+    assert "x" in e.value.hint and "v0.8.3" in str(e.value)
+    with pytest.raises(GneError):                                             # 合わせたレシピが無い行
+        Session._refine_chain(fake, "x_r1", {"n_heads": 3, "recipe": "c.yaml"})
+
+
+@pytest.mark.model
 def test_pipeline_causal_settings_unchanged(session):
     """rank causal(v0.7.0 までの選び方)の一括の結果の settings は、今までの項目に rank だけが増える(writes の設定は載らない)。"""
     from gne.api import Session

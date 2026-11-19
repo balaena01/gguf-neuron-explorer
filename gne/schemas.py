@@ -1167,7 +1167,17 @@ class HeadsRefineOut(Envelope):                 # gne heads refine(残りの質�
     remaining: dict[str, Any]                   # n(残り)・n_a・used(方向に使った数)・padded・questions・scores
     pipeline: dict[str, Any]                    # 一括の結果のパス・方向・推す組・使い回した段・組の表
     combined: dict[str, Any] | None             # 代表の合わせたレシピと、元の方向での残り・A の平均・B 側のずれ(前 → 後)
-    combined_rows: list[dict[str, Any]] = []    # 比較表のどの組も、元の組と合わせたもの(同じ項目)
+    combined_rows: list[dict[str, Any]] = []    # 比較表のどの組も(rank writes は s1 も)、元の組と合わせたもの(同じ項目。parts に部品ごとの何回目)
+    root: str | None = None                     # 元の一括の名前(重ねても、測るのはいつも元の方向・元の目標)
+    round: int | None = None                    # 何回目の追加か(元の一括から 1)
+    chain: list[str] = []                       # 元の一括から今回までの名前
+    base_parts: list[dict[str, Any]] = []       # 土台(元の組 + それまでの回の追加)の部品・強さ・方向・何回目
+    base_measure: dict[str, Any] | None = None  # 土台だけのときの、元の方向での残り・A 平均・B Δ・B ⊥・効き
+    check: dict[str, Any] | None = None         # 代表の合わせたレシピでの応答での確かめ(check_replies 0 なら無い)
+    none_measure: dict[str, Any] | None = None  # 無介入の A 平均・B 平均(元の方向)
+    loop_exit: int | None = None                # ループのモデルで、1 回目の出口の段(合わせたレシピの行の exit_before / exit_after)
+    rank: str | None = None                     # 足す部品の探し方
+    units_by_round: dict[str, int] = {}         # 代表の合わせたレシピの、何回目に入った部品が何個か("0" = 元の組)
     updated: str
     seconds: float
 
@@ -1193,6 +1203,7 @@ class HeadsCandidatesOut(Envelope):             # gne heads candidates(強さの
     name: str
     path: str
     alloc: str
+    combined_from: str | None = None            # 残りから追加の結果なら、その名前(候補は元の組と合わせたレシピ、元の対照集合の質問)
     direction: str
     contrast: str
     held_out: dict[str, bool]
