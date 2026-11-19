@@ -384,6 +384,7 @@ export class ChatPanel {
     };
     const cell = (ci) => this.el && this.el.querySelector(`.ch-cell[data-t="${this.turns.length - 1}"][data-c="${ci}"]`);
     const paint = (ci) => { const c = cell(ci); if (c) c.innerHTML = this.cellHTML(turn, ci); };
+    this.lastWarn = null;
     try {
       await postSSE("/api/steer", body, (ev) => {
         if (ev.type === "start") this.sid = ev.id;
@@ -396,11 +397,12 @@ export class ChatPanel {
           if (ev.text !== null) turn.replies[ev.col] = ev.text;
           turn.finish[ev.col] = ev.finish;
           paint(ev.col);
-        } else if (ev.type === "warn") this.setStatus(ev.warnings.join(" / "));
+        } else if (ev.type === "warn") { this.lastWarn = ev.warnings; this.setStatus(ev.warnings.join(" / ")); }
         else if (ev.type === "error") { this.status = `${tr("エラー")}: ${ev.error.message}`; this.failed = true; }
         else if (ev.type === "done") {
           if (!this.failed) {
-            this.status = tr("{s} 秒で {n} 列を生成(うち GPU 待ち {w} 秒)", { s: fmt(ev.seconds, 1), n: cols.length, w: fmt(this.waited, 1) });
+            this.status = tr("{s} 秒で {n} 列を生成(うち GPU 待ち {w} 秒)", { s: fmt(ev.seconds, 1), n: cols.length, w: fmt(this.waited, 1) })
+              + (this.lastWarn && this.lastWarn.length ? ` · ${tr("警告")}: ${this.lastWarn.join(" / ")}` : "");      // 警告は生成のあとも残す
             this.speakReply(turn.replies[turn.replies.length - 1]);
           }
         }

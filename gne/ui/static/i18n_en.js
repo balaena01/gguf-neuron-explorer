@@ -2450,4 +2450,11 @@ export const EN = {
   "倍率 0 は反映できません(全部のユニットが無介入になる)": "Dose 0 cannot be applied (every unit would do nothing)",
   "この倍率でレシピに読み込む": "Load into the recipe at this dose",
   "倍率 {d} は負なので、読み込むと各ユニットの向きが反対になります(射影の強さ・dose・α の符号が変わり、gain は 1 の反対側になる)。読み込みますか?": "Dose {d} is negative, so loading flips every unit’s direction (projection strengths, doses and α change sign; gains move to the other side of 1). Load it?",
+  "選び方を切り替えました": "Switched the selection method",
+  "組のヘッド・層全体の射影のうち、層 {l} は": "Head / whole-layer projections in the set, layers {l}: ",
+  "畳み込み": "conv",
+  "警告": "warning",
+  "畳み込み(細い縁)": "conv (thin edge)",
+  "このモデルでは残差の大きさが少数の次元に偏っているので、強さ 1 は偏りを除いた大きさの約 {x} 倍にあたります(偏りの少ないモデルでは約 1.3 倍)。弱めの強さ(例 0.1〜0.2)から試してください。": "In this model the residual norm is concentrated in a few dimensions, so a strength of 1 is about {x} times the norm without them (about 1.3 times in models without this concentration). Start with a weak strength (for example 0.1 to 0.2).",
+  "このモデルでは注意の層 {n} 個で出力のあとに正規化があるので、書き込みの量での順位づけは実行しません(点数が残差での寄与を表さないため)。止めて選ぶ流れで実行し、切り替えたことを結果に出します。正規化を補正した点数が次の版で入るまでの扱いです。": "In this model {n} attention layers normalize their output, so ranking by write does not run (the score does not reflect the contribution to the residual). The pipeline runs the stop-and-pick flow and says so in the result. This holds until a score corrected for the norm arrives in a later version.",
 };

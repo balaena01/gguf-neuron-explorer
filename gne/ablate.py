@@ -78,8 +78,11 @@ def writer_info(weights) -> dict:
     warn = []
     if m.n_expert:
         warn.append("MoE の ffn_down_exps は bake でだけ射影できます(LoRA は未対応)")
-    if m.arch in t.get("post_norm", []) or m.has_post_ffn_norm:
-        warn.append(f"{m.arch} は post-norm(ライターの出力が norm を通ってから残差に足される)ので、射影消去は近似です")
+    pn = any(li.post_norm_mixer or li.post_norm_ffn for li in weights.arch.layers)
+    if m.arch in t.get("post_norm", []) or pn:
+        warn.append(f"{m.arch} は書き込み行列の出力を正規化してから残差に足すので、射影消去は実行しますが、方向 r の成分は完全には"
+                    "消えません(LFM3-1.7B・Gemma 3 1B で測った値: 層全体の書き込みから r を引いても、残差に入る値には r の成分が"
+                    "中央値で 1〜5 割残る)")
     if m.arch not in t.get("verified", []):
         warn.append(f"{m.arch} の残差ライターはグラフを読んで確かめていません(テンソル名で推定)")
     if biases:

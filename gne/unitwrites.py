@@ -69,7 +69,7 @@ def unit_layers(session, up_to: int, kinds, loop_direction: str = "first") -> tu
         if ("attn" in kinds or "linear" in kinds or "layer_attn" in kinds) and li.head_dim and li.head_writer:
             if kind_of_layer(session, L) in kinds or "layer_attn" in kinds:
                 hl.append(rep)
-        if ("neuron" in kinds or "layer_mlp" in kinds) and li.ffn == "dense" and not li.has_post_ffn_norm \
+        if ("neuron" in kinds or "layer_mlp" in kinds) and li.ffn == "dense" and not li.post_norm_ffn \
                 and w.has_tensor(f"blk.{w.stored(L)}.ffn_down.weight"):
             nl.append(rep)
     return sorted(hl), sorted(nl)
@@ -130,6 +130,16 @@ def measure_writes(session, ds, cs, *, select_layer: int, positions: str = "last
     builder = ProjBuilder(w, session.direction_set, direction_layer=direction_layer, keep_w=4)
     rS = ds.unit(S).astype(np.float64)
     hl, nl = unit_layers(session, S - 1, kinds, loop_direction)
+    pn = [L for L in hl if w.arch.layers[w.stored(L)].post_norm_mixer not in ("", "?")]
+    if pn:                                           # 出力のあとの正規化: 書き込みの量の点数が残差での寄与を表さない(B3 の補正までは実行しない)
+        raise GneError("ARCH_UNSUPPORTED", f"層 {', '.join(map(str, pn[:6]))}{' …' if len(pn) > 6 else ''} は注意(混ぜる層)の出力のあとに正規化が"
+                       "あるので、書き込みの量での順位づけは実行しません。理由: 点数(正規化の前の書き込み)が残差での寄与を表さない"
+                       "ためです(LFM3-1.7B・Gemma 3 1B で測った、正規化のあとの寄与との順位相関は中央値 0.85、最小 −0.12)",
+                       "代わりに --rank causal(止めて選ぶ)を使ってください。正規化を補正した点数が次の版で入るまでの扱いです")
+    pu = [L for L in hl if w.arch.layers[w.stored(L)].post_norm_mixer == "?"]
+    if pu:                                           # 表に無い arch の post_attention_norm(MLP の手前か、出力のあとか、確かめていない)
+        session.warn(f"層 {', '.join(map(str, pu[:6]))} の post_attention_norm が、注意の出力のあとの正規化か MLP の手前の正規化か、"
+                     "この arch では確かめていません。出力のあとなら、書き込みの量の点数は残差での寄与を表しません")
     if candidate_layers is not None:                  # 重みを 2 回使うモデルでは、どちらの回の段で書いても同じ重みを指す
         keep = {int(x) for x in candidate_layers}
         if shared:

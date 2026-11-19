@@ -351,6 +351,11 @@ def info(c: Common, holder: dict,
     if sp:
         rows.append(("GPU / CPU の層", f"GPU {sp['gpu_layers']} / CPU {sp['cpu_layers']}、推定の生成 {sp['decode_tok_s']:.0f} tok/s(1 本)"
                      + ("、gne bench の実測から" if sp["source"] == "bench" else "、既定の係数から")))
+    ds = (d.get("stats") or {}).get("dose_spread")
+    if ds:
+        rows.append(("残差の偏り", "統計が v0.8.6 より前のものなので入っていません(gne stats resid で作り直すと出ます)" if ds.get("old")
+                     else f"rel の強さ 1 = 大きい {ds['top']} 成分を除いた大きさの約 {ds['median']:.1f} 倍(層 3 以降の中央値。最大 "
+                          f"{ds['max']:.1f} 倍、層 {ds['max_layer']})"))
     text = _table(rows)
     text += "".join(f"\n警告: {w}" for w in d["arch_warnings"]) or "\n警告なし: dense FFN、ニューロン押しは control vector と等価です"
     if d.get("workflow"):
@@ -516,10 +521,19 @@ def stats_resid(c: Common, holder: dict, corpus: Optional[Path] = _CORPUS, token
     d = s.stats_resid(corpus=corpus, tokens=tokens, layers=parse_layers(layers),
                       include_last_layer=include_last_layer, chunk_tokens=chunk_tokens)
     st = d["stats"]
-    rows = [f"  L{L:<3} p10 {a:8.2f}  p50 {b:8.2f}  p90 {q:8.2f}"
-            for L, a, b, q in zip(st["layers"], st["p10"], st["p50"], st["p90"], strict=True)]
+    rest = st.get("p50_rest") or [None] * len(st["layers"])
+    rows = [f"  L{L:<3} p10 {a:8.2f}  p50 {b:8.2f}  p90 {q:8.2f}" + (f"  偏り {b / r:5.2f} 倍" if r else "")
+            for L, a, b, q, r in zip(st["layers"], st["p10"], st["p50"], st["p90"], rest, strict=True)]
     text = (f"{d['path']}({st['n_tokens']} トークン/層、コーパス {d['corpus']['sha']}、{d['seconds']:.1f} 秒)\n"
-            + "\n".join(rows))
+            + "\n".join(rows)
+            + "\n偏り = p50 ÷ 大きい 8 成分を除いた大きさの中央値(rel の強さ 1 が、偏りを除いた大きさの何倍にあたるか)")
+    for w in s.warnings:
+        if "偏って" in w:
+            text += f"\n警告: {w}"
+    ds = s.dose_spread()
+    if ds and ds.get("warn"):
+        text += (f"\n警告: このモデルでは強さ(rel)1 は、偏りを除いた大きさの約 {ds['median']:.1f} 倍にあたります(偏りの少ないモデルでは"
+                 "約 1.3 倍)。弱めの強さから試してください")
     return d, text, 0
 
 
@@ -3027,16 +3041,19 @@ def heads_pipeline(c: Common, holder: dict,
             "holdout": True if holdout else None, "loop_direction": loop_direction, "strength": strength}
     _gate(s, "head_pipeline", {"spec": str(spec), **{k: v for k, v in over.items() if v is not None}}, yes, None)
     d = s.heads_pipeline(spec, **over)
+    pn = d.get("postnorm")
+    pn_line = ([f"注意: 組のヘッド・層全体の射影のうち、層 {', '.join(map(str, (pn['layers'] + pn['unsure_layers'])[:8]))} は"
+                + pn["note"]] if pn else [])
     if d.get("writes"):
-        return d, "\n".join(_pipeline_writes_lines(d)), 0
+        return d, "\n".join(_pipeline_writes_lines(d) + pn_line), 0
     rank_line = ("選び方: v0.7.0 までの選び方(--rank causal。層ごとに止める → 上位の層のヘッドを 1 個ずつ止める → 効率で配り直す)"
-                 + (f"。{d['rank_note']}" if d.get("rank_note") else ""))
+                 + (f"\n注意(選び方を切り替えた): {d['rank_note']}" if d.get("rank_note") else ""))
     sc, ca, al = d["score"], d["causal"], d["allocate"]
     ck = "causal" if (d.get("settings") or {}).get("select_layer") not in (None, "") else "causal_max"
     lines = [f"{d['path']}({d['n_prompts']} 問、{d['seconds']:.0f} 秒"
              + (f"、作り済みの{'・'.join({'direction': '方向', 'causal': '因果'}[x] for x in d['reused'])}を使い回した" if d.get("reused") else "")
              + ")",
-             rank_line,
+             rank_line, *pn_line,
              f"1. 方向 {d['name']}({d['direction']['positions']}、{d['direction']['seconds']:.0f} 秒)",
              f"2. 基準層 L{sc['base_layer']}(cohen_d 最大、止めて測る段階は {sc['n'].get('A')} 問)",
              f"3. 因果: 測る層 L{','.join(map(str, ca['score_layers']))}、{ca['n_rows']} ヘッド、上位 " +
@@ -3395,6 +3412,9 @@ def _refine_text(d: dict) -> str:
     rname = lambda k: "元の組" if int(k) == 0 else f"{k} 回目"            # noqa: E731
     byr = " + ".join(f"{rname(k)} {n} 個" for k, n in (d.get("units_by_round") or {}).items())
     lines = [f"{d['path']}({d['seconds']:.0f} 秒)",
+             *([f"注意(選び方を切り替えた): {d['rank_note']}"] if d.get("rank_note") else []),
+             *([f"注意: 足した組のヘッド・層全体の射影のうち、層 {', '.join(map(str, (d['postnorm']['layers'] + d['postnorm']['unsure_layers'])[:8]))} は"
+                + d["postnorm"]["note"]] if d.get("postnorm") else []),
              f"残りから追加 {rnd} 回目(元の一括 {d.get('root') or d['base']})。土台 = {d['base']} の {d['n_heads']} 個の行"
              + (f"の合わせたレシピ(元の組 + {'1' if rnd == 2 else f'1〜{rnd - 1}'} 回目の追加、{len(d['base_units'])} 個)" if rnd > 1 else f"の組({len(d['base_units'])} 個)"),
              f"1. 土台を当てて、元の方向 {d.get('direction')} の L{d['score_layer']} の射影の値が目標 {d['threshold']:.2f} を超える"

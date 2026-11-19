@@ -200,8 +200,23 @@ class Weights:
     def check_arch(self) -> list[str]:
         """警告メッセージ一覧(§12 のマトリクスに対応)。"""
         m, out = self.meta, []
-        if m.has_post_ffn_norm:
-            out.append("post_ffw_norm があります(Gemma 系): 方向加算としては働くが「ニューロン n を押した」とは等価ではありません(§2.1)")
+        pf = [li.index for li in self.arch.layers if li.post_norm_ffn or li.has_post_ffn_norm]
+        pm = [li.index for li in self.arch.layers if li.post_norm_mixer not in ("", "?")]
+        pu = [li.index for li in self.arch.layers if li.post_norm_mixer == "?"]
+        if pf:
+            nm = sorted({li.post_norm_ffn if li.post_norm_ffn not in ("", "?") else "post_ffw_norm" for li in self.arch.layers
+                         if li.post_norm_ffn or li.has_post_ffn_norm})
+            out.append(f"MLP の出力のあとに正規化({', '.join(nm)})があります({len(pf)} 層): ニューロンの add は方向を足す働きはしますが、残差には正規化を"
+                       "通った分が入るので「ニューロン n を押した」とは等価ではありません。ニューロン・MLP 全体の射影は実行しません"
+                       "(正規化を補正した射影は次の版で入れます)")
+        if pm:
+            nm = sorted({li.post_norm_mixer for li in self.arch.layers if li.post_norm_mixer not in ("", "?")})
+            out.append(f"注意(混ぜる層)の出力のあとに正規化({', '.join(nm)})があります({len(pm)} 層): ヘッド・注意全体の射影は実行しますが、方向の成分は"
+                       "完全には消えません。書き込みの量での順位づけ(--rank writes・heads writes)は実行しません。代わりに --rank causal "
+                       "を使ってください(どちらも、正規化を補正する次の版までの扱いです)")
+        if pu:
+            out.append(f"層 {', '.join(map(str, pu[:6]))}{' …' if len(pu) > 6 else ''} の post_attention_norm が、注意の出力のあとの正規化か"
+                       "MLP の手前の正規化か、この arch では確かめていません(configs/arch/residual_writers.yaml の output_norm に無い)")
         if m.n_expert or any(n.endswith("ffn_down_exps.weight") for n in self._tensors):
             out.append(f"MoE(n_expert={m.n_expert}): 専門家のニューロンは L:Ee:Nn の形。add は「書き込み方向の押し」で、"
                        "専門家が選ばれたときだけ効く本当のニューロン押しは gain(CHANGE-05 §C)")

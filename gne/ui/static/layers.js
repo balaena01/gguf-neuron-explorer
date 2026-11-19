@@ -70,7 +70,7 @@ export class LayersView {
     if (L !== this.hoverL) { this.hoverL = L; this.draw(); }
     if (L === null) return;
     const d = this.data.layers[L], li = this.arch.layers[L];
-    const kind = { attention: "attention", linear_attention: t("線形注意"), recurrent: t("回帰"), none: t("mixer なし") }[li.mixer];
+    const kind = { attention: "attention", linear_attention: t("線形注意"), recurrent: t("回帰"), conv: t("畳み込み"), none: t("mixer なし") }[li.mixer];
     const nd = t("—(データ無し)");
     const dd = this.dir ? d.directions[this.dir] : null;
     const lines = [

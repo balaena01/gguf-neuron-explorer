@@ -115,9 +115,59 @@ def neuron_layer_ok(weights, L: int) -> None:
     li = weights.arch.layers[int(L)]
     if li.ffn != "dense" or not weights.has_tensor(f"blk.{weights.stored(L)}.ffn_down.weight"):
         raise GneError("ARCH_UNSUPPORTED", f"層 {L}({li.ffn})にはニューロンの射影を当てられません(dense の MLP の ffn_down だけ。MoE の層は未対応)")
-    if li.has_post_ffn_norm:
-        raise GneError("ARCH_UNSUPPORTED", f"層 {L} は MLP の出力の後に正規化(post-FFN norm)があるので、ffn_down の列の方向成分が"
-                                           "そのまま残差の方向成分になりません(未対応)")
+    if li.post_norm_ffn:
+        raise GneError("ARCH_UNSUPPORTED", f"層 {L} は MLP の出力のあとに正規化({li.post_norm_ffn if li.post_norm_ffn != '?' else '構造を確かめていない'})"
+                                           "があるので、ニューロン・MLP 全体の射影は実行しません。理由: ffn_down の列の方向成分が、そのまま残差の"
+                                           "方向成分にならないためです",
+                       "正規化を補正した射影は次の版で入れます")
+
+
+# 出力のあとに正規化がある層のヘッド・層全体(attn)の射影は、B の補正が入るまで式どおりでない。段階 1 の測定(LFM3-1.7B・
+# Gemma 3 1B、公開のひな形、最後のトークン)の値を知らせに添える
+POSTNORM_MIXER_NOTE = ("注意(混ぜる層)の出力のあとに正規化があるので、射影は実行しますが、方向 r の成分は残差から完全には"
+                       "消えません。理由: 射影は正規化の前の書き込みから r の成分を引くだけで、残差に入るのは正規化した値だからです"
+                       "(LFM3-1.7B・Gemma 3 1B で測った値: 層全体を s=1 で射影すると r の成分が中央値で約 5 割残り、ヘッド 1 個では"
+                       "消える割合が 0〜100% とばらつく。強さを上げても比例しない)。組の効きの数は残差で測ったものなので、そのまま"
+                       "使えます。正規化を補正した射影は次の版で入れます")
+
+
+def postnorm_mixer_layers(weights, heads) -> tuple[list[int], list[int]]:
+    """ヘッド・層全体(attn)の射影のうち、注意の出力のあとに正規化がある層 (確かめた構造, 構造を確かめていない) の番号。"""
+    sure, unsure = set(), set()
+    for p in heads:
+        if p.kind in ("neuron", "ffn"):
+            continue
+        pn = weights.arch.layers[weights.stored(p.layer)].post_norm_mixer
+        if pn == "?":
+            unsure.add(int(p.layer))
+        elif pn:
+            sure.add(int(p.layer))
+    return sorted(sure), sorted(unsure)
+
+
+def postnorm_mixer_warning(weights, heads) -> str | None:
+    """postnorm_mixer_layers の知らせの文(無ければ None)。"""
+    sure, unsure = postnorm_mixer_layers(weights, heads)
+    out = []
+    if sure:
+        out.append(f"層 {', '.join(map(str, sure[:8]))}{' …' if len(sure) > 8 else ''} は{POSTNORM_MIXER_NOTE}")
+    if unsure:
+        out.append(f"層 {', '.join(map(str, unsure[:8]))} には post_attention_norm がありますが、arch {weights.meta.arch} では"
+                   "それが注意の出力のあとの正規化か(そうなら方向の成分は残差から完全には消えない)、MLP の手前の正規化か"
+                   "(そうなら射影は式どおり)を確かめていません")
+    return "。".join(out) or None
+
+
+def _refuse_postnorm_check(weights, L: int, side: str) -> None:
+    """V24・V25 は書き込み行列の出力(正規化の前)で測るので、出力のあとに正規化がある層では残差での効きを表さない。実行しない。"""
+    li = weights.arch.layers[weights.stored(L)]
+    pn = li.post_norm_mixer if side == "mixer" else li.post_norm_ffn
+    if pn:
+        what = "注意(混ぜる層)" if side == "mixer" else "MLP"
+        raise GneError("ARCH_UNSUPPORTED", f"層 {L} は{what}の出力のあとに正規化({pn if pn != '?' else '構造を確かめていない post_attention_norm'})"
+                                           "があるので、この検算は実行しません。理由: この検算は書き込み行列の出力(正規化の前)で測るので、"
+                                           "残差での効きを表さないためです",
+                       "正規化を補正した射影と、正規化のあとの出力で測る検算は次の版で入れます")
 
 
 def head_direction(ds, L: int, direction_layer: str = "own") -> tuple[np.ndarray, int]:
@@ -585,7 +635,7 @@ def neuron_control_pool(weights, recipe: Recipe, *, pool: str = "before",
         Ls = sorted({L for L, _ in used})
     elif pool == "before":
         top = max(score_layers) if score_layers else max(p.layer for p in ps)
-        Ls = [li.index for li in weights.arch.layers if li.ffn == "dense" and not li.has_post_ffn_norm and li.index <= top
+        Ls = [li.index for li in weights.arch.layers if li.ffn == "dense" and not (li.has_post_ffn_norm or li.post_norm_ffn) and li.index <= top
               and weights.has_tensor(f"blk.{weights.stored(li.index)}.ffn_down.weight") and not (shared and plan.second(li.index))]
         if shared:
             used = used | {(plan.stored(L), n) for L, n in used}
@@ -615,7 +665,7 @@ def whole_control_pool(weights, recipe: Recipe, *, pool: str = "before", score_l
                 continue
             if k == "attn" and li.head_dim and li.head_writer:
                 Ls.append(L)
-            if k == "ffn" and li.ffn == "dense" and not li.has_post_ffn_norm and weights.has_tensor(f"blk.{weights.stored(L)}.ffn_down.weight"):
+            if k == "ffn" and li.ffn == "dense" and not (li.has_post_ffn_norm or li.post_norm_ffn) and weights.has_tensor(f"blk.{weights.stored(L)}.ffn_down.weight"):
                 Ls.append(L)
         out[k] = Ls
     return out
@@ -768,6 +818,9 @@ def check_whole_proj(session, L: int, kind: str, direction: str, *, ss=(1.0, 2.0
         raise GneError("BAD_ARGS", f"kind は attn(注意の出力全体)か ffn(MLP の出力全体)です({kind!r})")
     text = text or "Tell me a short story about a lighthouse keeper and the sea. 灯台守の話をして。"
     e, w = session.engine, session.weights
+    if kind == "ffn":
+        neuron_layer_ok(w, L)
+    _refuse_postnorm_check(w, L, "mixer" if kind == "attn" else "ffn")
     probe, ctx = _probe(e)
     names = _names(e, probe, ctx, e.tokenize(text, add_special=True, parse_special=False)[:16])
     if kind == "attn":
@@ -840,11 +893,13 @@ def check_head_proj(session, L: int, h: int, direction: str, *, ss=(1.0, 2.0, 6.
     text = text or "Tell me a short story about a lighthouse keeper and the sea. 灯台守の話をして。"
     e, w = session.engine, session.weights
     _, lo, hi = w.head_block(L, h)
+    _refuse_postnorm_check(w, L, "mixer")
     probe, ctx = _probe(e)
     names = _names(e, probe, ctx, e.tokenize(text, add_special=True, parse_special=False)[:16])
     out_name = writer_out_name(session, names, L)
     if out_name is None:
-        raise GneError("ARCH_UNSUPPORTED", f"層 {L} の、残差に書き込む重み行列の出力が捕捉できません")
+        raise GneError("ARCH_UNSUPPORTED", f"層 {L} の、残差に書き込む重み行列の出力(attn_output / ffn_inp)がグラフの名前に見つかりません"
+                                           f"(arch {w.meta.arch} のテンソルの名前の対応を確かめていません)")
     ds = session.direction_set(direction)
     r, src = head_direction(ds, L, direction_layer)
     r = r.astype(np.float64)

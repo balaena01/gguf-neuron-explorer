@@ -486,6 +486,7 @@ table.dv-ex th:first-child { text-align: left; }
 #pp-check { margin: var(--sp-2) 0; line-height: 1.6; }
 .pp-sum { color: var(--text); }
 .pp-warn { color: var(--warn); }
+.rc-spread-warn { color: var(--warn); }
 #pp-status.err, #pp-check .err { color: var(--ng); }
 table.pp-past tbody tr.on td { background: var(--row-on); }
 .pp-res { border-top: 1px solid var(--line-soft); margin-top: var(--sp-6); padding-top: var(--sp-2); }

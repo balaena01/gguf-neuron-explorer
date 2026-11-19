@@ -291,7 +291,7 @@ def check_layer_ok(weights, L: int, kind: str = "ffn", expert: int | None = None
 @lru_cache(maxsize=1)
 def _post_norm_archs() -> frozenset[str]:
     from .ablate import writers_table
-    return frozenset(writers_table().get("post_norm", []) or [])
+    return frozenset(writers_table().get("post_norm", []) or [])          # v0.8.6 でも広げない(LFM3 などの attn の keyed は警告で知らせる)
 
 
 def post_norm_gamma(weights, L: int, kind: str = "ffn") -> np.ndarray | None:
@@ -892,6 +892,11 @@ def keyed_plan(weights, units, key_of: KeySource, dir_of: DirSource, *, directio
                          gamma=gamma, kind=u.kind, expert=u.expert, gate=gate, info=info)
         if gamma is not None:
             note("post-norm の arch です。keyed の書き込みは d = rms̄_A·(r ⊘ γ) の一次近似です(rms の変化を無視)")
+        li = weights.arch.layers[weights.stored(u.layer)] if u.kind == "attn" else None
+        if li is not None and li.post_norm_mixer not in ("", "?"):    # 構造で見た注意の出力のあとの正規化(v0.8.6)
+            note(f"層 {u.layer} は注意(混ぜる層)の出力のあとに正規化({li.post_norm_mixer})があるので、attn の keyed は実行しますが、"
+                 "書き込みの大きさと向きは正規化の分を補正していません(残差に入るのは γ ⊙ y / rms(y))。補正するのは FFN の keyed"
+                 "(kind: ffn)だけです")
         if ks.kn.get(u.layer, 1.0) < KN_WARN:
             note(f"L{u.layer}: 鍵 {ks.spec} の kn={ks.kn[u.layer]:.3f} が小さいです(書き込みたくない位置への漏れが最大 {ks.gain[u.layer]:.1f} 倍)")
         info.update({"kn": float(ks.kn[u.layer]), "gain": float(ks.gain[u.layer]),

@@ -3939,6 +3939,8 @@ def refine_server(tmp_path_factory):
                                "rows": {k: {sd: {"n": 4, "finished": 4, "match_finished": (3 if k == "none" else 1) if sd == "A" else 0,
                                                  "empty": 0, "loop": 1 if k == "recipe" and sd == "B" else 0, "at_limit": 0} for sd in "AB"}
                                         for k in ("none", "recipe")}}}}
+    r1["rank_note"] = "書き込みの順位づけに未対応(テスト)なので rank causal で流した"           # 選び方を切り替えた知らせ(v0.8.6)
+    r1["postnorm"] = {"layers": [12], "unsure_layers": [], "note": "テストの知らせ"}                 # 出力のあとの正規化の知らせ
     (hd / "ppx_r1.pipeline.json").write_text(json.dumps(r1, ensure_ascii=False))
     yield from _serve(s)
 
@@ -3987,6 +3989,8 @@ def test_pipeline_refine_button_and_note(refine_server, browser):
     note = pg.evaluate("document.querySelector('#pp-result .pp-refine').textContent")
     assert "ppx" in note and "3 問" in note and "残り 3 → 1 問" in note and "4 問で作りました" in note
     assert "無介入 3/4 / 0/4 → 合わせたレシピ 1/4 / 0/4" in note                      # 代表の合わせたレシピでの応答での確かめ
+    warns = pg.evaluate("[...document.querySelectorAll('#pp-result .pp-res-head .pp-warn')].map(e => e.textContent)")
+    assert any("選び方を切り替えました" in w for w in warns) and any("層 12 は" in w and "テストの知らせ" in w for w in warns)
     _step(pg, "chips", "alloc")
     pg.click("#pp-rf-load")
     assert pg.evaluate("window.gne.recipe.specs()") == ["12:H5:s10@ppx", "12:H3:s7@ppx", "16:H2:s4@ppx_r1"]

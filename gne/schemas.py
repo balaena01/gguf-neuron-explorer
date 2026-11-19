@@ -144,6 +144,7 @@ class ResidModel(_Strict):
     corpus_sha: str
     chunk_tokens: int
     exclude_pos0: bool
+    p50_rest: list[float | None] | None = None        # v0.8.6: 大きい 8 成分を除いた大きさの中央値(残差の偏り)
 
 
 class StatsResidOut(Envelope):
@@ -1112,6 +1113,7 @@ class HeadsPipelineOut(Envelope):               # gne heads pipeline(方向 → 
     arch_defaults: dict[str, Any] | None = None  # この arch だけの既定を使ったとき、その中身(sensenova_loop の測る層など)
     rank: str | None = None                      # どちらの選び方で流したか: writes(v0.8.0 からの既定)/ causal(v0.7.0 まで)
     rank_note: str | None = None                 # 既定の rank writes に未対応のモデルで causal に切り替えたときの理由
+    postnorm: dict[str, Any] | None = None       # v0.8.6: 組の射影が注意の出力のあとに正規化がある層に当たるとき(layers・unsure_layers・note)
     unused_settings: list[str] | None = None     # rank writes で使わない、rank causal だけの設定を渡したとき(n_heads・hard など)
     writes: dict[str, Any] | None = None         # rank writes: 書き込みの順位づけのまとめ(選ぶ層・A−B の差・種類ごとの数と和・保存先)
     verify: dict[str, Any] | None = None         # rank writes: 上位を 1 個ずつ確かめた結果(順位相関・上位の行)
@@ -1177,6 +1179,8 @@ class HeadsRefineOut(Envelope):                 # gne heads refine(残りの質�
     none_measure: dict[str, Any] | None = None  # 無介入の A 平均・B 平均(元の方向)
     loop_exit: int | None = None                # ループのモデルで、1 回目の出口の段(合わせたレシピの行の exit_before / exit_after)
     rank: str | None = None                     # 足す部品の探し方
+    rank_note: str | None = None                # v0.8.6: 前の回が writes でも、注意の出力のあとに正規化があるモデルで causal にしたときの理由
+    postnorm: dict[str, Any] | None = None      # v0.8.6: 足した組の射影が、注意の出力のあとに正規化がある層に当たるとき
     units_by_round: dict[str, int] = {}         # 代表の合わせたレシピの、何回目に入った部品が何個か("0" = 元の組)
     no_recommend: str | None = None             # 推す行が無い理由: no_better(どの行も合わせると良くならない)/ replies_break(応答が壊れる)
     updated: str

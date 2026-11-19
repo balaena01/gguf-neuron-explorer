@@ -7,7 +7,12 @@ GGUF のメタデータとテンソル名だけから組み立てる(重みは�
 2. `blk.L.ssm_*` があれば、ssm_alpha / ssm_beta(Gated DeltaNet: Qwen3.5 / Qwen3-Next)は linear_attention、
    それ以外(Mamba 系)は recurrent。Qwen3.5 の線形注意の層は attn_qkv も持つので、attn_* より先に見る。
 3. attn_q / attn_qkv / attn_q_a(MLA)があれば attention。time_mix_*(RWKV)は recurrent。
-4. どれも無ければ none。
+4. `blk.L.shortconv.*`(LFM2・LFM3 の短い畳み込み)は conv。
+5. どれも無ければ none。
+
+出力のあとの正規化(post-norm): 混ぜる層・MLP の出力が、残差に足される前に正規化を通るか。テンソルの名前だけでは
+決められない(qwen35 の post_attention_norm は MLP の手前の正規化)ので、configs/arch/residual_writers.yaml の output_norm の表
+(llama.cpp のグラフを読んで書いたもの)で決める(post_norms)。
 """
 
 from __future__ import annotations
@@ -16,7 +21,7 @@ import math
 from dataclasses import asdict, dataclass
 from typing import Literal
 
-Mixer = Literal["attention", "linear_attention", "recurrent", "none"]
+Mixer = Literal["attention", "linear_attention", "recurrent", "conv", "none"]
 Ffn = Literal["dense", "moe", "moe+shared", "none"]
 
 
@@ -47,6 +52,11 @@ class LayerInfo:
     # 同じ層を 2 回実行する arch(sensenova_loop): 何回目か(0 = 繰り返しの外)と、重みを持つ層の番号(loop.py)
     visit: int = 0
     stored: int = -1
+    # 出力のあとの正規化(post_norms): γ のテンソル名(blk.L. の後、.weight を除く)。"" = 無い、"?" = 構造を確かめていない
+    # (output_norm の表に無い arch に post_attention_norm がある)。post_norm_kind は rms(RMS で割る)か scale(γ を掛けるだけ)
+    post_norm_mixer: str = ""
+    post_norm_ffn: str = ""
+    post_norm_kind: str = ""
 
 
 @dataclass
@@ -85,6 +95,22 @@ def sheet_side(li: LayerInfo) -> int:
     return 0
 
 
+def post_norms(arch: str, names: set[str], table: dict | None = None) -> tuple[str, str, str]:
+    """層のテンソル名(blk.L. の後)から、出力のあとの正規化の γ の名前 (混ぜる層, MLP, kind)。表(output_norm)にある arch は表で、
+    無い arch は: post_ffw_norm は確かめた範囲ではどれも MLP の出力のあとなので MLP の正規化とみなす。post_attention_norm は
+    MLP の手前の正規化の arch(pre_ffn_post_attention)では拾わず、どちらの表にも無ければ "?"(構造を確かめていない)。"""
+    if table is None:
+        from .ablate import writers_table
+        table = writers_table()
+    ent = (table.get("output_norm") or {}).get(arch)
+    pick = lambda xs: next((x for x in xs if f"{x}.weight" in names), "")   # noqa: E731
+    if ent:
+        return pick(ent.get("mixer") or []), pick(ent.get("ffn") or []), ent.get("kind") or "rms"
+    ffn = pick(["post_ffw_norm", "post_ffw_norm_1"])
+    mixer = "" if arch in (table.get("pre_ffn_post_attention") or []) else ("?" if "post_attention_norm.weight" in names else "")
+    return mixer, ffn, ("rms" if ffn or mixer else "")
+
+
 def arch_info(weights) -> ArchInfo:
     m = weights.meta
     arch = m.arch
@@ -114,6 +140,8 @@ def arch_info(weights) -> ArchInfo:
             mixer = "attention"
         elif has("time_mix_"):
             mixer = "recurrent"
+        elif has("shortconv."):
+            mixer = "conv"
         else:
             mixer = "none"
         if interval and mixer in ("attention", "linear_attention"):
@@ -148,11 +176,13 @@ def arch_info(weights) -> ArchInfo:
                 "sigmoid_topk" if gating == 2 else "softmax_topk"
         norm = get(f"{arch}.expert_weights_norm")
         lp = getattr(weights, "loop", None)
+        pn_mix, pn_ffn, pn_kind = post_norms(arch, names)
         layers.append(LayerInfo(L, mixer, nh, nkv, ffn, n_ff, n_exp, used, n_shexp,
                                 "post_ffw_norm.weight" in ts, hd, writer if wt is not None else None, outs,
                                 bias, routing, None if norm is None or not ffn.startswith("moe") else bool(norm),
                                 top_k if mixer == "attention" and _per_layer(compress, L) else 0, has("ple_"),
-                                lp.visit(L) if lp is not None else 0, lp.stored(L) if lp is not None else L))
+                                lp.visit(L) if lp is not None else 0, lp.stored(L) if lp is not None else L,
+                                pn_mix, pn_ffn, pn_kind))
     side = max([sheet_side(li) for li in layers] + [1])
     lp = getattr(weights, "loop", None)
     return ArchInfo(arch, m.n_layer, m.n_embd, m.n_vocab, layers, side, int(get(f"{arch}.hyper_connection.count", 0) or 0),

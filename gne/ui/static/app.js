@@ -42,7 +42,7 @@ const state = {
 };
 window.gne = state;                       // 自動テスト(playwright)と開発用
 
-const MIXER = { attention: "attention", linear_attention: t("線形注意"), recurrent: t("回帰"), none: t("mixer なし") };
+const MIXER = { attention: "attention", linear_attention: t("線形注意"), recurrent: t("回帰"), conv: t("畳み込み"), none: t("mixer なし") };
 const mixerLabel = (li) => MIXER[li.mixer];
 const isMoE = () => state.arch.layers.some((li) => li.ffn.startsWith("moe"));
 const moeLayer = (L) => { const li = state.arch.layers[L]; return li && li.ffn.startsWith("moe") ? li : null; };
@@ -235,6 +235,7 @@ function legend() {
   if (kinds.has("attention")) parts.push(it(sw("#9fb3cf"), t("attention(太い縁)")));
   if (kinds.has("linear_attention")) parts.push(it(sw("#3a4656"), t("線形注意(細い縁)")));
   if (kinds.has("recurrent")) parts.push(it(sw("#3a4656"), t("回帰(細い縁)")));
+  if (kinds.has("conv")) parts.push(it(sw("#3a4656"), t("畳み込み(細い縁)")));
   const floors = [...o.metas.values()].map((m) => m.floor);
   const color = o.field === "none" ? it(sw("#10141b"), t("データ無し"))
     : `<b>${esc(fieldLabel(o.field))}</b> ${legendHTML(o.field, o.scale || {}, { threshold: o.threshold, nHits: o.hits ? o.hits.length : 0, floors })}`;
@@ -958,6 +959,8 @@ async function setView(v) {
           onEval: (params, label) => sendToEval(params, label),           // 評価へ送る(評価の画面で確かめてから始める)
           onOverlay: (field) => { setView("map"); applyOverlay(field); },
           isLoop: () => !!(state.arch && state.arch.loop),               // 同じ層を 2 回実行するモデル(ループの中の部品の方向の欄)
+          // 注意の出力のあとに正規化がある層の数(v0.8.6: 書き込みの量での順位づけは実行しない。既定は止めて選ぶ流れ)
+          postNormAttn: () => (state.arch ? state.arch.layers.filter((li) => li.mixer === "attention" && li.post_norm_mixer && li.post_norm_mixer !== "?").length : 0),
         },
         candidates: {                                                     // 強さの候補(heads_candidates)の候補を使う
           onLoadCandidate: (c) => loadCandidate(c),
@@ -1234,6 +1237,7 @@ async function main() {
       nLayer: state.arch.n_layer,
       onAdded: () => recipeTouched(true),
       onReplaced: () => showRecipe("units"),
+      doseSpread: () => (state.model ? state.model.dose_spread : null),
     });
     headPanel = new HeadPanel($("#head-body"), {
       onRecipe: (L, h, k) => {

@@ -946,12 +946,16 @@ def bake_bias_gguf(weights, vectors: dict[int, np.ndarray], src: str | Path, dst
                    recipe: Recipe | None = None) -> BakeReport:
     """v を blk.L.ffn_down.bias として書き込んだ派生 GGUF を作る。他のテンソルとメタデータは生バイトのまま写す。"""
     m = weights.meta
+    pn = [li.index for li in weights.arch.layers if li.post_norm_ffn or li.has_post_ffn_norm]
+    if pn:
+        raise GneError("ARCH_UNSUPPORTED", f"arch {m.arch!r} は MLP の出力のあとに正規化があるので(層 {', '.join(map(str, pn[:6]))}{' …' if len(pn) > 6 else ''})、"
+                       "bake は実行しません。理由: ffn_down.bias は正規化の前に足されるので、残差に足す control vector と等価にならないためです",
+                       "代わりに control vector GGUF(gne export-cvec)を llama-cli / llama-server の --control-vector で使ってください")
     mode, reason, checked = bias_support(m.arch)
     if mode is None:
-        raise GneError("ARCH_UNSUPPORTED", f"arch {m.arch!r} には bake できません: {reason}(確認した llama.cpp: {checked})",
+        raise GneError("ARCH_UNSUPPORTED", f"arch {m.arch!r} には bake できません: {reason}(表は llama.cpp {checked} のソースを読んで作った。"
+                       "いま使っている llama.cpp が別の版なら、違うことがあります)",
                        "control vector GGUF(gne export-cvec)を llama-cli / llama-server の --control-vector で使ってください")
-    if m.has_post_ffn_norm:
-        raise GneError("ARCH_UNSUPPORTED", "post_ffw_norm がある arch では bias と control vector が等価になりません")
     if m.n_expert:
         raise GneError("ARCH_UNSUPPORTED", "MoE の専門家別 bias には対応していません")
     if Path(src).resolve() == Path(dst).resolve():

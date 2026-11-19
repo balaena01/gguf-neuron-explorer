@@ -233,9 +233,15 @@ class Session:
         sp = Speed(self)
         speed = {**sp.to_dict(), "cpu_layers": m.n_layer - sp.gpu_layers,
                  "decode_tok_s": 1000.0 / sp.step1, "large": is_large(self)}
-        return {"meta": meta, "arch_warnings": self.weights.check_arch(), "llama_cpp": llama,
+        aw = self.weights.check_arch()
+        ds = self.dose_spread()
+        if ds and ds.get("warn"):
+            aw = [*aw, f"このモデルでは、残差の大きさが少数の次元に偏っています(大きい {ds['top']} 成分を除くと、残差の大きさの中央値は"
+                       f"約 1/{ds['median']:.1f})。そのため強さ(rel)1 は、偏りを除いた大きさの約 {ds['median']:.1f} 倍にあたります"
+                       "(偏りの少ないモデルでは約 1.3 倍)。弱めの強さから試してください"]
+        return {"meta": meta, "arch_warnings": aw, "llama_cpp": llama,
                 "bake": {"supported": mode is not None, "mode": mode, "reason": reason, "checked_llama_cpp": checked},
-                "stats": {"resid": str(rp) if rp.exists() else None, "act_layers": acts},
+                "stats": {"resid": str(rp) if rp.exists() else None, "act_layers": acts, "dose_spread": ds},
                 "residual_writers": writer_info(self.weights), "speed": speed,
                 "workflow": recommended_workflow(self) if speed["large"] else None}
 
@@ -456,8 +462,28 @@ class Session:
         sv = self.stats_view(Recipe(recipe.add_units, recipe.model_id, recipe.dose_unit, recipe.name))
         if keyed:
             sv = self._keyed_stats(recipe, sv)
+        if recipe.dose_unit == "rel" and sv.resid is not None:
+            self._warn_spread(sv.resid, sorted({u.layer for u in recipe.add_units}))
         return (recipe_vectors(self.weights, sv, recipe, self.direction_vec),
                 unit_details(self.weights, sv, recipe, self.direction_vec))
+
+    def _warn_spread(self, resid: ResidStats, layers: list[int]) -> None:
+        """rel の強さを使う層で、残差の大きさが少数の次元に偏っていれば(偏りの量 ≥ SPREAD_WARN)知らせる(v0.8.6)。"""
+        from .stats import SPREAD_WARN
+        hit = [(L, x) for L in layers if (x := resid.spread(L)) is not None and x >= SPREAD_WARN]
+        if hit:
+            x = max(v for _, v in hit)
+            self._warn_once(f"層 {', '.join(str(L) for L, _ in hit[:6])}{' …' if len(hit) > 6 else ''} では、残差の大きさが少数の次元に"
+                            f"偏っているので、強さ(rel)1 は偏りを除いた残差の大きさの約 {x:.1f} 倍にあたります(偏りの少ないモデルでは"
+                            "約 1.3 倍)。弱めの強さ(例 0.1〜0.2)から試してください")
+
+    def dose_spread(self) -> dict | None:
+        """残差の大きさの偏り(info・画面用)。統計が無ければ None、v0.8.6 より前の統計なら {"old": True}。"""
+        rs = self.resid_stats()
+        if rs is None:
+            return None
+        sm = rs.spread_summary()
+        return sm if sm is not None else ({"old": True} if rs.p50_rest is None else None)
 
     def _keyed_stats(self, recipe: Recipe, sv: StatsView | None = None) -> StatsView:
         """keyed の行に要る ρ_L(残差ノルム統計)。α は raw なので書き込みには要らず、統計が無い層は計算せずに注意だけ出す。"""
@@ -675,8 +701,11 @@ class Session:
     def proj_lora(self, recipe: Recipe) -> Path:
         """レシピの proj のユニット → LoRA(<root>/heads/<model_id>/proj-<鍵>.lora.gguf に作って使い回す)。鍵は
         ヘッド・s・方向の中身(作り直したら LoRA も作り直す)・direction_layer で決まる。"""
-        from .headproj import ProjBuilder, export_proj_lora, proj_cache_key, proj_heads
+        from .headproj import ProjBuilder, export_proj_lora, postnorm_mixer_warning, proj_cache_key, proj_heads
         heads = [p for p in proj_heads(recipe) if p.s]
+        pw = postnorm_mixer_warning(self.weights, heads)            # 出力のあとに正規化がある層(B の補正が入るまで式どおりでない)
+        if pw:
+            self._warn_once(pw)
         b = ProjBuilder(self.weights, self.direction_set, direction_layer=recipe.direction_layer)
         path = self._pv_path(self.store.heads_dir(self.meta.model_id) / f"proj-{proj_cache_key(heads, b)}.lora.gguf")
         if not path.exists():
@@ -2335,10 +2364,18 @@ class Session:
     def _rank_fallback(self, pipe: dict, rank_given: bool) -> str | None:
         """rank を指定していない(既定の writes)のに、書き込みの順位づけに未対応のモデル(残差が複数本の流れ = hyper-connections)なら、
         pipe の rank を causal にして理由を返す(モデルは読み込まず、GGUF のメタデータで決める)。指定したときは何もしない。"""
+        if pipe.get("rank") != "writes" or rank_given:
+            return None
         hc = int(self.weights.field(f"{self.meta.arch}.hyper_connection.count", 0) or 0)
-        if pipe.get("rank") == "writes" and not rank_given and hc:
+        if hc:
             pipe["rank"] = "causal"
             return "残差が複数本の流れのモデル(hyper-connections)は書き込みの順位づけに未対応なので、rank causal で流した"
+        pn = [li.index for li in self.weights.arch.layers[:self.weights.n_main]
+              if li.mixer == "attention" and li.post_norm_mixer not in ("", "?")]
+        if pn:                                                         # 出力のあとの正規化(v0.8.6。補正した点数は次の版)
+            pipe["rank"] = "causal"
+            return (f"注意の層 {len(pn)} 個で出力のあとに正規化があり、書き込みの量の点数(正規化の前)が残差での寄与を表さないので、"
+                    "既定の選び方を rank causal(止めて選ぶ)に切り替えて実行しました(正規化を補正した点数が次の版で入るまでの扱い)")
         return None
 
     @staticmethod
@@ -2531,6 +2568,7 @@ class Session:
         out["target"], out["target_from"] = float(tgt), tgt_from
         rec = next((r for r in a["table"] if r.get("recommended")), None)
         out["recommended"] = None if rec is None else {"n_heads": rec["n_heads"], "units": rec["units"], "recipe": rec["recipe"]}
+        self._postnorm_pipeline_note(out)
         out["seconds"] = time.perf_counter() - t0
         out["updated"] = time.strftime("%Y-%m-%dT%H:%M:%S")
         p = self.store.heads_dir(self.meta.model_id) / f"{name}.pipeline.json"
@@ -2649,6 +2687,7 @@ class Session:
             out["check"].update(n_heads=chk["n_heads"], recommended=rec is not None)
             if rec is not None and out["check"].get("break_warning"):
                 self._recommend_without_broken(out, a, rec, cs_chk, val_chk, n_check, int(pipe["check_tokens"]))
+        self._postnorm_pipeline_note(out)
         out["seconds"] = time.perf_counter() - t0
         out["updated"] = time.strftime("%Y-%m-%dT%H:%M:%S")
         p = self.store.heads_dir(self.meta.model_id) / f"{name}.pipeline.json"
@@ -2693,6 +2732,25 @@ class Session:
                                   "reached": bool(new["reached"]), "by": by, "after_replies_break": [t_["n_heads"] for t_ in tried[:-1]]}
         p_ = Path(a["path"])
         p_.write_text(json.dumps({k: v for k, v in a.items() if k != "path"}, ensure_ascii=False, indent=1), encoding="utf-8")
+
+    def _postnorm_pipeline_note(self, out: dict) -> None:
+        """組にヘッド・層全体(attn)の射影が入り、その層の注意の出力のあとに正規化があれば、結果に知らせ(postnorm)を入れる
+        (B の補正が入るまで、射影は式どおりでない。組の数は残差で測ったものなので本物)。警告にも入れる。"""
+        from .headproj import POSTNORM_MIXER_NOTE, postnorm_mixer_layers, proj_heads
+        rows = [r for r in (out.get("allocate") or {}).get("table") or [] if not r.get("skipped") and r.get("recipe")]
+        s1 = (out.get("allocate") or {}).get("s1")
+        sure, unsure = set(), set()
+        for r in rows + ([s1] if s1 and s1.get("recipe") else []):
+            try:
+                a_, b_ = postnorm_mixer_layers(self.weights, proj_heads(Recipe.load(r["recipe"])))
+            except (GneError, OSError):
+                continue
+            sure |= set(a_)
+            unsure |= set(b_)
+        if not sure and not unsure:
+            return
+        out["postnorm"] = {"layers": sorted(sure), "unsure_layers": sorted(unsure), "note": POSTNORM_MIXER_NOTE}
+        self._warn_once(f"組のヘッド・層全体(attn)の射影のうち、層 {', '.join(map(str, sorted(sure | unsure)[:8]))} は{POSTNORM_MIXER_NOTE}")
 
     def reply_check(self, cs, val, recipe: str | Path | Recipe | None, *, n: int = 16, max_tokens: int = 512,
                     prompts: dict | None = None) -> dict:
@@ -2976,6 +3034,13 @@ class Session:
         if isinstance(st.get("target"), str):                           # B / mid は、残りの一括でも同じ意味
             pipe["target"] = st["target"]
         rk = rank or st_prev.get("rank") or st.get("rank") or "causal"
+        rank_note = None
+        if rank is None and rk == "writes":                             # 前の回が writes でも、出力のあとに正規化があるモデルでは止めて選ぶ
+            probe = {"rank": "writes"}
+            rank_note = self._rank_fallback(probe, False)
+            if rank_note:
+                rk = "causal"
+                self._warn_once(rank_note)
         if rk == "writes":                                              # 新しい選び方で足す部品を探す(ニューロンも選べる)
             pipe.pop("top_layers", None)
             pipe.update(rank="writes", unit_kinds=unit_kinds or st_prev.get("unit_kinds") or st.get("unit_kinds") or "heads",
@@ -3114,7 +3179,8 @@ class Session:
                "direction": ds.name, "n_heads": int(row["n_heads"]), "base_units": [proj_spec(u) for u in prior_units],
                "base_parts": parts_of(prior_units, rounds0), "base_recipe": ch["recipe"], "base_measure": before,
                "none_measure": {"a_mean": a0m, "b_mean": b0m}, "score_layer": S, "threshold": thr, "loop_exit": X,
-               "rank": rk, "units_by_round": {str(k_): v for k_, v in sorted(by_round.items())},
+               "rank": rk, **({"rank_note": rank_note} if rank_note else {}), **({"postnorm": p["postnorm"]} if p.get("postnorm") else {}),
+               "units_by_round": {str(k_): v for k_, v in sorted(by_round.items())},
                "remaining": {"n": len(rem), "n_a": int(len(a)), "used": len(pick),
                              "padded": len(pick) > len(rem), "questions": qa, "scores": [float(a[i]) for i in pick]},
                "pipeline": {"path": p["path"], "direction": out_name, "recommended": p.get("recommended"),
@@ -3561,6 +3627,11 @@ round_01.scores.txt に「番号 P C」を 1 行ずつ書く(例: 17 3 4)。全�
         name は LoRA の名前の欄(general.name。省くと「<元のモデルの名前> gain <レシピの名前>」、strip_meta では "adapter")。"""
         recipe = self._as_recipe(recipe)
         self._no_nw(recipe, bake=bake)                   # nw は焼き込めない(LoRA には入る)
+        if recipe.proj_units:                            # 出力のあとに正規化がある層のヘッド・attn の射影(式どおりでない)
+            from .headproj import postnorm_mixer_warning, proj_heads
+            pw = postnorm_mixer_warning(self.weights, proj_heads(recipe))
+            if pw:
+                self._warn_once(pw)
         if name is not None and bake:
             raise GneError("BAD_ARGS", "名前の欄の指定(name)は LoRA の書き出しだけです(焼き込みは元のモデルのメタデータをそのまま写す)")
         if not recipe.proj_units and not recipe.gain_units and not recipe.keyed_units and not recipe.nw_units:
@@ -3963,9 +4034,13 @@ def _merge_resid(old: ResidStats, new: ResidStats) -> ResidStats:
     keep = [i for i, L in enumerate(old.layers) if L not in set(new.layers.tolist())]
     cat = lambda a, b: np.concatenate([a[keep], b])  # noqa: E731
     order = np.argsort(cat(old.layers, new.layers))
+    nan = lambda st: (st.p50_rest if st.p50_rest is not None                       # noqa: E731  古い統計(偏りの量が無い)は NaN
+                      else np.full(len(st.layers), np.nan, dtype=np.float32))
+    rest = cat(nan(old), nan(new))[order]
     return ResidStats(cat(old.layers, new.layers)[order], cat(old.p10, new.p10)[order],
                       cat(old.p50, new.p50)[order], cat(old.p90, new.p90)[order], cat(old.mean, new.mean)[order],
-                      new.n_tokens, new.corpus_sha, new.chunk_tokens)
+                      new.n_tokens, new.corpus_sha, new.chunk_tokens,
+                      p50_rest=None if old.p50_rest is None and new.p50_rest is None else rest)
 
 
 def _version() -> str:

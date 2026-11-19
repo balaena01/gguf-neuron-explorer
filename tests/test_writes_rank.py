@@ -301,13 +301,27 @@ def test_rank_fallback_for_hyper_connections():
     from gne.api import Session
     hc = SimpleNamespace(weights=SimpleNamespace(field=lambda k, d=None: 4 if k.endswith("hyper_connection.count") else d),
                          meta=SimpleNamespace(arch="qwen4exp"))
-    one = SimpleNamespace(weights=SimpleNamespace(field=lambda k, d=None: d), meta=SimpleNamespace(arch="qwen35"))
+    li = lambda m, pn: SimpleNamespace(index=0, mixer=m, post_norm_mixer=pn)  # noqa: E731
+    one = SimpleNamespace(weights=SimpleNamespace(field=lambda k, d=None: d, arch=SimpleNamespace(layers=[li("attention", "")]), n_main=1),
+                          meta=SimpleNamespace(arch="qwen35"))
     p = {"rank": "writes"}
     assert Session._rank_fallback(hc, p, False) and p["rank"] == "causal"
     p = {"rank": "writes"}
     assert Session._rank_fallback(hc, p, True) is None and p["rank"] == "writes"      # 指定したときは切り替えない
     p = {"rank": "writes"}
     assert Session._rank_fallback(one, p, False) is None and p["rank"] == "writes"
+    # v0.8.6: 注意の出力のあとに正規化がある層があれば、既定は causal に切り替える(「確かめていない」? の層だけなら切り替えない)
+    pn = SimpleNamespace(weights=SimpleNamespace(field=lambda k, d=None: d, arch=SimpleNamespace(layers=[li("conv", "post_attention_norm"),
+                                                                                                        li("attention", "post_attention_norm")]),
+                                                 n_main=2), meta=SimpleNamespace(arch="lfm3"))
+    p = {"rank": "writes"}
+    assert "正規化" in Session._rank_fallback(pn, p, False) and p["rank"] == "causal"
+    p = {"rank": "writes"}
+    assert Session._rank_fallback(pn, p, True) is None and p["rank"] == "writes"
+    unsure = SimpleNamespace(weights=SimpleNamespace(field=lambda k, d=None: d, arch=SimpleNamespace(layers=[li("attention", "?")]), n_main=1),
+                             meta=SimpleNamespace(arch="new"))
+    p = {"rank": "writes"}
+    assert Session._rank_fallback(unsure, p, False) is None and p["rank"] == "writes"
 
 
 def _fake_run(a_of, b_of, orth_of, sc):

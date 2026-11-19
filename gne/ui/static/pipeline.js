@@ -151,8 +151,10 @@ function dChart(layers, base, best) {
 }
 
 export class PipelinePanel {
-  constructor(root, { onRun, onShowDirection, onOpenHead, onOpenNeuron, onLoadProj, onEval, onOverlay, onOpenCandidates, isLoop } = {}) {
+  constructor(root, { onRun, onShowDirection, onOpenHead, onOpenNeuron, onLoadProj, onEval, onOverlay, onOpenCandidates, isLoop, postNormAttn } = {}) {
     this.isLoop = isLoop || (() => false);       // 同じ層を 2 回実行するモデル(ループの中の部品の方向の欄を出す)
+    this.postNormAttn = postNormAttn || (() => 0);   // 注意の出力のあとに正規化がある層の数(書き込みの量での順位づけは実行しない、v0.8.6)
+    this.rankForced = false;                     // 欄の既定(書き込みの量)を、そのモデルでは実行しないので止めて選ぶに替えたか
     this.root = root;
     this.onRun = onRun;                          // (kind, params) → Promise<ジョブ | null>(jobs.js の start。見積もりの確認つき)
     this.onShowDirection = onShowDirection || (() => {});   // (名前) → 上の「方向を見る」でその方向を開く
@@ -188,7 +190,7 @@ export class PipelinePanel {
         <label class="muted" title="${t("配分で A 側の射影の値をここまで下げる(射影の値を測る最後の層)。数か、B(B 側の平均まで = 消し切る)。空なら A と B の平均の真ん中(半分ほど消す)")}">${t("射影の目標")} <input id="pp-target" size="7" placeholder="${t("真ん中")}" spellcheck="false"></label>
         <label class="muted" title="${t("射影の値を測る段(基準層・因果・配分)で使う質問の数(等間隔に間引く)。方向づくりには全部使う")}">${t("測る質問の数")} <input id="pp-mx" type="number" min="4" max="4096" value="${DEFAULTS.max_examples}"></label>
         <label class="muted" title="${t("方向を作る位置。last = 質問の最後のトークン、response = 応答を書かせてその位置(遅い)")}">${t("方向を作る位置")} <select id="pp-pos"><option value="last">${t("質問の最後")}</option><option value="response">${t("応答(遅い)")}</option></select></label>
-        <label class="muted" title="${t("候補の探し方。書き込みの量で全部から(既定) = 全部の層の注意ヘッド・線形注意のヘッド(部品で選べばニューロンも)を方向への書き込みの量で並べ、上位を s=1 で確かめてから、s=1 で組に足す(足りないときだけ全体の強さを上げる)。止めて選ぶ = v0.7.0 までの選び方(層ごとに止めた効き目の上位の層のヘッドを 1 個ずつ止め、効率で配り直す)。応答が変わらないときは、もう一方も試す")}">${t("候補の探し方")} <select id="pp-rank"><option value="writes">${t("書き込みの量で全部から(既定)")}</option><option value="causal">${t("止めて選ぶ(v0.7.0 まで)")}</option></select></label>
+        <label class="muted" title="${t("候補の探し方。書き込みの量で全部から(既定) = 全部の層の注意ヘッド・線形注意のヘッド(部品で選べばニューロンも)を方向への書き込みの量で並べ、上位を s=1 で確かめてから、s=1 で組に足す(足りないときだけ全体の強さを上げる)。止めて選ぶ = v0.7.0 までの選び方(層ごとに止めた効き目の上位の層のヘッドを 1 個ずつ止め、効率で配り直す)。応答が変わらないときは、もう一方も試す")}">${t("候補の探し方")} <select id="pp-rank"><option value="writes">${t("書き込みの量で全部から(既定)")}</option><option value="causal">${t("止めて選ぶ(v0.7.0 まで)")}</option></select></label><span id="pp-rank-blocked" class="note pp-warn" hidden></span>
         <label class="muted" title="${t("効率を測るときの、射影の値が残りやすい質問(目標を超えたまま残っている A 側の質問)の数。どちらの探し方でも、強さを部品ごとに配るときに使う")}">${t("残りやすい質問の数")} <input id="pp-hard" type="number" min="1" max="1024" value="${DEFAULTS.hard}"></label>
         <label class="muted" title="${t("同じ JSON・同じ設定で作り済みの方向と因果の結果があっても使い回さず、最初から作り直す(止めて流し直すときは外したままにすると配分からやり直せる)")}"><input type="checkbox" id="pp-fresh"> ${t("最初から作り直す")}</label></div>
       <fieldset class="pp-set fx-part" id="pp-fs-writes" aria-describedby="pp-fs-writes-off"><legend class="muted note fx-part-h">${t("書き込みの量で全部から選ぶときの設定")} <span class="pp-fs-off" id="pp-fs-writes-off" hidden>${t("(「止めて選ぶ」では使いません)")}</span></legend>
@@ -238,7 +240,7 @@ export class PipelinePanel {
       }
     }).catch(() => { /* テンプレートが無くても小さな例は使える */ });
     this.$("#pp-go").addEventListener("click", () => this.run());
-    this.$("#pp-rank").addEventListener("change", () => this.rankFields());
+    this.$("#pp-rank").addEventListener("change", () => { this.rankForced = false; this.rankFields(); });
     this.rankFields();
     // 左に手順、右に選んだ手順。結果は 1 回のジョブ(方向とヘッドを作る)の段ごとに分けて見せる
     const res = (sel) => () => (this.data ? [this.$("#pp-result .pp-res-head"), ...this.$$(`#pp-result ${sel}`)] : [this.$("#pp-nores")]);
@@ -315,6 +317,13 @@ export class PipelinePanel {
   // 候補の探し方に合わせて、使わない設定のまとまりを無効にする(値は残すが、ジョブには渡さない)。ループの中の部品の方向は、
   // 同じ層を 2 回実行するモデルのときだけ選べる
   rankFields() {
+    const pn = this.postNormAttn(), opt = this.$("#pp-rank option[value=writes]"), note = this.$("#pp-rank-blocked");
+    opt.disabled = pn > 0;
+    note.hidden = pn === 0;
+    if (pn > 0) {                                  // このモデルでは書き込みの量での順位づけは実行しない(既定は止めて選ぶ)
+      if (this.$("#pp-rank").value === "writes") { this.$("#pp-rank").value = "causal"; this.rankForced = true; }
+      note.textContent = t("このモデルでは注意の層 {n} 個で出力のあとに正規化があるので、書き込みの量での順位づけは実行しません(点数が残差での寄与を表さないため)。止めて選ぶ流れで実行し、切り替えたことを結果に出します。正規化を補正した点数が次の版で入るまでの扱いです。", { n: pn });
+    }
     const writes = this.$("#pp-rank").value === "writes";
     this.$("#pp-fs-writes").disabled = !writes;
     this.$("#pp-fs-causal").disabled = writes;
@@ -338,6 +347,11 @@ export class PipelinePanel {
     const p = { spec: c.spec, max_examples: mx, positions: this.$("#pp-pos").value, hard };
     if (this.$("#pp-fresh").checked) p.resume = false;
     p.rank = this.$("#pp-rank").value;                                   // writes(既定)/ causal(v0.7.0 まで)
+    if (this.rankForced) {                       // 既定のまま: サーバーが止めて選ぶ流れに切り替え、結果に rank_note を入れる
+      delete p.rank;
+      const sp = c.spec.pipeline;
+      if (sp && typeof sp === "object" && "rank" in sp) { const { rank: _r, ...rest } = sp; p.spec = { ...c.spec, pipeline: rest }; }
+    }
     if (p.rank === "writes") {
       const nu = ints("#pp-nunits");
       if (!nu.length || !nu.every((x) => Number.isInteger(x) && x >= 1)) { this.status(t("組の大きさの上限は 1 以上の整数をカンマ区切りで(例 24,12,6)"), true); return null; }
@@ -402,6 +416,8 @@ export class PipelinePanel {
     const byRound = Object.entries(r.units_by_round || {}).map(([k, n]) => (k === "0" ? t("元の組 {n} 個", { n }) : t("{k} 回目 {n} 個", { k, n }))).join(" + ");
     return `<div class="pp-refine note"><p>${t("残りから追加の結果({k} 回目、元の一括 {root})です。土台 = {base}。土台を当てても元の方向・元の目標まで下がらなかった {m} 問(A 側 {nA} 問のうち)だけで、A と B の両側に土台を当てたまま方向を作り直し、土台に足す部品を探しました。",
       { k: rnd, root: esc(r.root || r.base), base, m: rm.n ?? "—", nA: rm.n_a ?? "—" })}${rm.padded ? ` ${t("(残りが少ないので、射影の値の高い順に {u} 問で作りました)", { u: rm.used })}` : ""}</p>
+      ${r.rank_note ? `<p class="pp-warn">${t("選び方を切り替えました")}: ${esc(r.rank_note)}</p>` : ""}${r.postnorm
+        ? `<p class="pp-warn">${t("組のヘッド・層全体の射影のうち、層 {l} は", { l: esc([...(r.postnorm.layers || []), ...(r.postnorm.unsure_layers || [])].slice(0, 8).join(", ")) })}${esc(r.postnorm.note || "")}</p>` : ""}
       ${c ? `<p><b>${t("代表の合わせたレシピ({m} 個 = {parts})", { m: c.n_heads, parts: byRound || "—" })}</b>${c.chosen_by === "fewest_remaining" ? ` <span class="muted">${t("(足した組に推す組が無いので、合わせた残りが最も少ない組)")}</span>` : ""}: ${t("残り {a} → {b} 問", { a: c.remain_before, b: c.remain_after })} ·
         ${t("A 平均 {a} → {b}", { a: fmt(c.a_mean_before, 2), b: fmt(c.a_mean_after, 2) })} · B Δ ${sgn(c.b_delta, 2)} · ${t("B ⊥ {a} → {b}", { a: fmt(c.b_drift_orth_base, 3), b: fmt(c.b_drift_orth, 3) })}
         <button class="small" id="pp-rf-load" title="${t("元の組と足した組を合わせたユニット(全部の回)で今のレシピを置き換える")}">${t("合わせた組でレシピを置き換える")}</button>
@@ -483,7 +499,8 @@ export class PipelinePanel {
       <div class="pp-res"><div class="pp-res-head">
       <h3>${t("{name} の結果", { name: esc(d.name) })} <span class="muted note mono">${esc((d.updated || "").replace("T", " ").slice(0, 16))} · ${t("{n} 秒", { n: Math.round(d.seconds || 0) })}</span></h3>
       <p class="note">${t("質問 {n} 個", { n: d.n_prompts ?? "—" })} · A: ${esc(side(sides.A))} · B: ${esc(side(sides.B))}</p>
-      <p class="note">${d.writes ? t("選び方: 書き込みの量で全部の部品から(--rank writes、既定)") : t("選び方: 止めて選ぶ(v0.7.0 までの選び方、--rank causal)")}${d.rank_note ? ` <span class="muted">${esc(d.rank_note)}</span>` : ""}</p>
+      <p class="note">${d.writes ? t("選び方: 書き込みの量で全部の部品から(--rank writes、既定)") : t("選び方: 止めて選ぶ(v0.7.0 までの選び方、--rank causal)")}</p>${d.rank_note ? `<p class="note pp-warn">${t("選び方を切り替えました")}: ${esc(d.rank_note)}</p>` : ""}${d.postnorm
+        ? `<p class="note pp-warn">${t("組のヘッド・層全体の射影のうち、層 {l} は", { l: esc([...(d.postnorm.layers || []), ...(d.postnorm.unsure_layers || [])].slice(0, 8).join(", ")) })}${esc(d.postnorm.note || "")}</p>` : ""}
       ${this.refineNote(d)}
       ${(d.reused || []).length ? `<p class="note muted">${t("同じ JSON・同じ設定で作り済みの{w}を使い回しました(作り直すときは「最初から作り直す」に印を付けて流し直す)",
         { w: d.reused.map((x) => (x === "direction" ? t("方向") : x === "causal" ? t("因果の結果") : x)).join(t("と")) })}</p>` : ""}

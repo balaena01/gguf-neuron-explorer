@@ -21,3 +21,36 @@ verified: [qwen35, qwen3, llama, qwen4exp, sensenova_loop]
 post_norm: [gemma2, gemma3, gemma3n, gemma4, gemma-embedding, olmo2, glm4, exaone4, grok, plamo2, plamo3, afmoe]
 
 # MoE の ffn_down_exps / ffn_down_shexp はまだ扱わない(CHANGE-02 B で 3 次元の軸 1 に射影する)
+
+# 出力のあとの正規化(post-norm)を、副層ごとに書いた表。テンソルの名前だけでは決められない(qwen35 などの
+# post_attention_norm は MLP の手前の正規化で、出力のあとではない)ので、llama.cpp のグラフ(src/models/<arch>.cpp)を
+# 読んで書く。確かめた llama.cpp: 8642541(2026-10-28、LFM3 用の環境の llama-cpp-python 0.3.36 同梱)。
+#   mixer: 混ぜる層(注意・畳み込み・線形注意)の出力を残差に足す前の正規化の γ のテンソル(blk.L. の後、.weight を除く)
+#   ffn:   MLP の出力を残差に足す前の正規化の γ のテンソル(候補を並べてよい。層にあるものを使う)
+#   kind:  rms = RMS で割ってから γ を掛ける / scale = γ を掛けるだけ(RMS で割らない)
+# 層にそのテンソルが無ければ、その層のその副層は正規化なし(lfm3・dflash はモデルによって両方とも無い)。
+output_norm:
+  gemma2:           {mixer: [post_attention_norm], ffn: [post_ffw_norm], kind: rms}
+  gemma3:           {mixer: [post_attention_norm], ffn: [post_ffw_norm], kind: rms}
+  gemma3n:          {mixer: [post_attention_norm], ffn: [post_ffw_norm], kind: rms}
+  gemma4:           {mixer: [post_attention_norm], ffn: [post_ffw_norm, post_ffw_norm_1, post_ffw_norm_2], kind: rms}
+  gemma4-assistant: {mixer: [post_attention_norm], ffn: [post_ffw_norm], kind: rms}
+  gemma-embedding:  {mixer: [post_attention_norm], ffn: [post_ffw_norm], kind: rms}
+  gemma-embedding2: {mixer: [post_attention_norm], ffn: [post_ffw_norm], kind: rms}
+  lfm3:             {mixer: [post_attention_norm], ffn: [post_ffw_norm], kind: rms}     # 畳み込みの層・注意の層の両方
+  olmo2:            {mixer: [post_attention_norm], ffn: [post_ffw_norm], kind: rms}     # 手前の正規化は無い
+  exaone4:          {mixer: [post_attention_norm], ffn: [post_ffw_norm], kind: rms}
+  glm4:             {mixer: [post_attention_norm], ffn: [post_ffw_norm], kind: rms}
+  plamo2:           {mixer: [post_attention_norm], ffn: [post_ffw_norm], kind: rms}
+  plamo3:           {mixer: [post_attention_norm], ffn: [post_ffw_norm], kind: rms}
+  afmoe:            {mixer: [post_attention_norm], ffn: [post_ffw_norm], kind: rms}
+  kolibri1:         {mixer: [post_attention_norm], ffn: [post_ffw_norm], kind: rms}
+  beam:             {mixer: [post_attention_norm], ffn: [post_ffw_norm], kind: rms}
+  maion-coder:      {mixer: [post_attention_norm], ffn: [post_ffw_norm], kind: rms}
+  dflash:           {mixer: [post_attention_norm], ffn: [post_ffw_norm], kind: rms}
+  grok:             {mixer: [attn_output_norm], ffn: [layer_output_norm, post_ffw_norm], kind: rms}
+  muse-spark:       {mixer: [post_attention_norm], ffn: [post_ffw_norm], kind: scale}
+  muse-glimmer:     {mixer: [post_attention_norm], ffn: [post_ffw_norm], kind: scale}
+
+# post_attention_norm という名前のテンソルを持つが、それが MLP の手前の正規化(出力のあとではない)arch
+pre_ffn_post_attention: [qwen35, qwen35moe, qwen3next, sensenova_loop, glm4moe, gpt-oss, seed_oss, clef, nemotron_h, nemotron_h_moe]

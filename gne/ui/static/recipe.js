@@ -386,8 +386,9 @@ export const samplingLabel = (sp) => (sp ? `${t("温度")} ${+sp.temperature} ·
 
 export class RecipePanel {
   constructor(root, recipe, { onOpen, onOpenHead, onOpenExpert, onChat, unitWords, directions, projDirections, headKind, nFF, onRunJob, keys, nLayer,
-                               onAdded, onReplaced }) {
+                               onAdded, onReplaced, doseSpread }) {
     this.root = root;
+    this.doseSpread = doseSpread || (() => null);   // 残差の大きさの偏り(/api/model の dose_spread、v0.8.6)
     this.r = recipe;
     this.tab = "units";                           // いまのタブ: units 中身 / try 試す / out 書き出す
     this.onAdded = onAdded || (() => this.render());          // このパネルの中で足したとき(app.js がパネルを開いて描き直す)
@@ -485,6 +486,7 @@ export class RecipePanel {
       ${this.ablateHTML()}
       ${r.sampling ? `<div class="rc-sampling muted note" title="${t("このレシピを試すときのサンプリング。チャットの「レシピの設定」で使い、保存するとレシピのファイルに入る(OpenAI 互換 API の既定にもなる)")}">${t("サンプリング")}: <span class="mono">${esc(samplingLabel(r.sampling))}</span><button class="small" id="rc-sp-rm" title="${t("レシピから外す")}">×</button></div>` : ""}
       <p class="muted note">${t("ニューロンの強さは rel(その層の残差ノルムの中央値に対する大きさ)。マップに + は黄、− は赤紫の輪で出ます。")}</p>
+      ${(() => { const ds = this.doseSpread(); return ds && ds.warn ? `<p class="note rc-spread-warn">${t("このモデルでは残差の大きさが少数の次元に偏っているので、強さ 1 は偏りを除いた大きさの約 {x} 倍にあたります(偏りの少ないモデルでは約 1.3 倍)。弱めの強さ(例 0.1〜0.2)から試してください。", { x: ds.median.toFixed(1) })}</p>` : ""; })()}
       ${r.units.length ? `<div class="rc-actions"><button class="small quiet" id="rc-clear" title="${t("すべてのユニットを外す")}">${t("レシピを空にする")}</button></div>` : ""}
       </div>
       <div ${panel("try")}>

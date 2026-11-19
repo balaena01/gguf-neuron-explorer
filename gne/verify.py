@@ -165,20 +165,37 @@ class Verifier:
         act = pick_act_name(names, L)
         if act is None:
             return VResult("V2", "FFN 線形性", "fail", f"ffn_down の入力テンソルが見つかりません: {sorted(names)}")
-        caps = [self.capture({act, f"ffn_out-{L}"}, [ids]) for ids in self.prompt_ids]
+        # MLP の出力: ffn_out-L。名前の無い arch(LFM3)で MLP の出力のあとに正規化があれば、その出力(post_ffn_norm)と
+        # γ ⊙ y / rms(y) で比べる(正規化の掛かり方も同時に確かめる)
+        li = self.w.arch.layers[L]
+        out_name, post = f"ffn_out-{L}", None
+        if out_name not in names:
+            cand = [n for n in (f"model.layers.{{}}.post_ffn_norm-{L}", f"ffn_post_norm-{L}") if n in names]
+            if not cand or li.post_norm_ffn in ("", "?"):
+                return VResult("V2", "FFN 線形性", "skip", f"L{L} の MLP の出力のテンソル(ffn_out-{L})がグラフの名前にありません"
+                               "(この arch の名前の対応が未確認)。W_down の向きは V11(gain)で確かめられます")
+            out_name, post = cand[0], li.post_norm_ffn
+        caps = [self.capture({act, out_name}, [ids]) for ids in self.prompt_ids]
         a = np.concatenate([c[act] for c in caps])
-        out = np.concatenate([c[f"ffn_out-{L}"] for c in caps])
+        out = np.concatenate([c[out_name] for c in caps])
         W = self.w.down_matrix(L)
         s = (self.w.meta.ffn_down_scale or {}).get(L, 1.0)
         pred = s * (a @ W.T)
+        if post:
+            from .weights import tensor_to_f32
+            g = np.asarray(tensor_to_f32(self.w.tensor(f"blk.{L}.{post}.weight")), dtype=np.float32).reshape(-1)
+            eps = float(self.w.field(f"{self.w.meta.arch}.attention.layer_norm_rms_epsilon", 1e-6) or 1e-6)
+            norm = lambda y: g * y / np.sqrt((y * y).mean(axis=1, keepdims=True) + eps)   # noqa: E731
+            pred = norm(pred)
         rel = np.linalg.norm(pred - out, axis=1) / np.linalg.norm(out, axis=1)
         # 対照: ニューロン添字をずらすと一致しないこと(テストが添字の違いを見分けられる)
-        rel_shift = np.linalg.norm(s * (np.roll(a, 1, axis=1) @ W.T) - out, axis=1) / np.linalg.norm(out, axis=1)
+        shifted = s * (np.roll(a, 1, axis=1) @ W.T)
+        rel_shift = np.linalg.norm((norm(shifted) if post else shifted) - out, axis=1) / np.linalg.norm(out, axis=1)
         tol_med, tol_max = V2_TOL.get(self.w.meta.ffn_down_qtype, V2_TOL_DEFAULT)
         med, mx = float(np.median(rel)), float(rel.max())
         ok = med < tol_med and mx < tol_max and float(np.median(rel_shift)) > 0.5
         return VResult("V2", "FFN 線形性(W_down の向き・添字、down の後に変換なし)", "pass" if ok else "fail",
-                       f"L{L} `{act}` → W_down@a vs `ffn_out-{L}`: 相対誤差 中央値 {med:.4f} / 最大 {mx:.4f}"
+                       f"L{L} `{act}` → {'γ ⊙ y / rms(y)、y = W_down@a' if post else 'W_down@a'} vs `{out_name}`: 相対誤差 中央値 {med:.4f} / 最大 {mx:.4f}"
                        f"(許容 {tol_med}/{tol_max}, {len(rel)} トークン)。添字を 1 ずらすと中央値 {np.median(rel_shift):.2f}",
                        {"act_name": act, "median": med, "max": mx, "shift_median": float(np.median(rel_shift)),
                         "n_tokens": int(len(rel))})
@@ -463,22 +480,27 @@ class Verifier:
             data_out = {"neuron": n, "same_buf": bool(same_buf), "same_capture": bool(same_cap)}
             ok = same_buf and same_cap
             if llama_completion:
-                prompt = self.e.render_chat([{"role": "user", "content": PROMPTS[0]}])
-                ctx = self.e.steer_ctx()
-                gen = {}
-                for tag, vec in (("base", None), ("steer", {L: v})):
-                    self.e.set_cvec(ctx, vec)
-                    r = self.e.generate_greedy(ctx, [self.prompt_ids[0]], max_tokens=n_tokens)[0]
-                    ours = self.e.detokenize(r.token_ids[:-1] if r.finish == "eog" else r.token_ids)
-                    theirs = run_llama_completion(llama_completion, self.e, prompt, n_tokens,
-                                                  path if tag == "steer" else None)
-                    gen[tag] = {"ours": ours, "llama": theirs, "match": ours == theirs}
-                self.e.set_cvec(ctx, None)
-                differs = gen["steer"]["ours"] != gen["base"]["ours"]
-                ok = ok and gen["base"]["match"] and gen["steer"]["match"] and differs
-                detail += (f"。llama-completion --control-vector の greedy {n_tokens} トークン: 無介入 一致 {gen['base']['match']}、"
-                           f"介入 一致 {gen['steer']['match']}(介入で出力が変わる: {differs})")
-                data_out["generation"] = gen
+                try:
+                    prompt = self.e.render_chat([{"role": "user", "content": PROMPTS[0]}])
+                    ctx = self.e.steer_ctx()
+                    gen = {}
+                    for tag, vec in (("base", None), ("steer", {L: v})):
+                        self.e.set_cvec(ctx, vec)
+                        r = self.e.generate_greedy(ctx, [self.prompt_ids[0]], max_tokens=n_tokens)[0]
+                        ours = self.e.detokenize(r.token_ids[:-1] if r.finish == "eog" else r.token_ids)
+                        theirs = run_llama_completion(llama_completion, self.e, prompt, n_tokens,
+                                                      path if tag == "steer" else None)
+                        gen[tag] = {"ours": ours, "llama": theirs, "match": ours == theirs}
+                    self.e.set_cvec(ctx, None)
+                    differs = gen["steer"]["ours"] != gen["base"]["ours"]
+                    ok = ok and gen["base"]["match"] and gen["steer"]["match"] and differs
+                    detail += (f"。llama-completion --control-vector の greedy {n_tokens} トークン: 無介入 一致 {gen['base']['match']}、"
+                               f"介入 一致 {gen['steer']['match']}(介入で出力が変わる: {differs})")
+                    data_out["generation"] = gen
+                except RuntimeError as ex:                   # llama-completion を実行できない(この arch を読めない版など)
+                    self.e.set_cvec(self.e.steer_ctx(), None)
+                    detail += f"。生成の比較は省略: {ex}"
+                    data_out["generation_error"] = str(ex)[:500]
             else:
                 detail += "。llama-completion が無いので生成の比較は省略"
         return VResult("V4", "direction.N 対応(GGUF 書き出し → 本家ローダ)", "pass" if ok else "fail", detail, data_out)
@@ -595,7 +617,10 @@ def run_llama_completion(binary: str, engine: Engine, prompt: str, n_tokens: int
     env = dict(os.environ)
     p = subprocess.run(cmd, capture_output=True, text=True, timeout=300, env=env)
     if p.returncode != 0:
-        raise RuntimeError(f"llama-completion が失敗しました: {p.stderr[-2000:]}")
+        tail = (p.stderr or p.stdout or "").strip()[-800:]
+        raise RuntimeError(f"llama-completion({binary})が終了コード {p.returncode} で失敗しました"
+                           + (f": {tail}" if tail else "(ログは出ていません。この llama-completion の llama.cpp がこの arch を読めない可能性があります。"
+                              "--llama-completion で、このモデルを読める llama-completion を渡してください)"))
     # completion.cpp は生成の後に必ず "\n\n" を、EOG で止まったときはその前に " [end of text]\n" を出す
     out = p.stdout.removesuffix("\n\n")
     return out.removesuffix(" [end of text]\n")

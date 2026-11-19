@@ -109,7 +109,8 @@ def create_app(session, *, warm: bool = True, openai: bool = False) -> FastAPI:
                 "connections": data.connections().meta if data.connections() is not None else None,
                 "heads": data.heads_list(), "writers": data.writers_list(),
                 "causal": data.causal_list(), "direction_sets": data.directions_list(),       # CHANGE-06 G
-                "keys": data.keys_list()}                                                     # CHANGE-07 G: 鍵つきの書き込みの鍵
+                "keys": data.keys_list(),                                                     # CHANGE-07 G: 鍵つきの書き込みの鍵
+                "dose_spread": session.dose_spread()}                                         # 残差の大きさの偏り(v0.8.6)
 
     @app.get("/api/vocab")
     def vocab():
