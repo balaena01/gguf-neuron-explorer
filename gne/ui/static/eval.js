@@ -11,7 +11,7 @@ import { t } from "./i18n.js";
 import { FieldtestPanel } from "./fieldtest.js";
 import { esc } from "./panels.js";
 import { Steps } from "./steps.js";
-import { noteHTML, useContrastList } from "./ui.js";
+import { askConfirm, noteHTML, useContrastList } from "./ui.js";
 
 const C = { text: "#aeb9c8", muted: "#6b7686", grid: "#1a212b", amber: "#e8b04a", minus: "#c94fa7", ppl: "#7c8796", judge: "#9fb3cf", ok: "#6fcf8f",
             react: "#5fd0c0" };
@@ -348,7 +348,10 @@ export class EvalView {
     const s = d.samples[String(this.dose)];                        // キーは Python の f"{dose:g}"
     if (!r || !s) { el.innerHTML = ""; return; }
     const words = r.persona.top_words.map(([w, n]) => `${esc(w)}(${n})`).join(" · ");
-    el.innerHTML = `<h4 class="note">${t("倍率 {d} の出力の例", { d: fmt(this.dose, 2) })}</h4>
+    const canApply = this.dose !== 0 && d.recipe && (d.recipe.units || []).length;
+    el.innerHTML = `<h4 class="note">${t("倍率 {d} の出力の例", { d: fmt(this.dose, 2) })}${d.recipe && (d.recipe.units || []).length ? ` <button class="small" id="evx-apply" aria-disabled="${canApply ? "false" : "true"}" title="${canApply
+      ? t("評価したレシピを、各ユニットの強さに倍率 {d} を掛け込んだ形でレシピに読み込む(全体の倍率は 1。名前は倍率が分かる語尾つき。保存はレシピの「保存」で)", { d: fmt(this.dose, 2) })
+      : t("倍率 0 は反映できません(全部のユニットが無介入になる)")}">${t("この倍率でレシピに読み込む")}</button>` : ""}</h4>
       ${words ? `<p class="muted note">${t("複数のプロンプトに新しく出た語")}: <span class="mono">${words}</span></p>` : ""}
       ${s.persona.map((x) => `<p class="note"><span class="muted mono">${esc(x.id)}</span> ${esc(x.text)}</p>`).join("")}
       ${s.failed.length ? `<details><summary class="muted note">${t("落ちたタスク({n})", { n: r.failed.exact.length + r.failed.format.length })}</summary>${
@@ -359,6 +362,15 @@ export class EvalView {
           `<tr><td>L${esc(L)}</td><td>${fmt(x.score_a, 2)}</td><td>${fmt(x.score_b, 2)}</td><td>${fmt(x.drop_a, 2)}</td><td>${fmt(x.delta_b, 2)}</td><td>${fmt(x.drift_par_a, 3)}</td><td>${fmt(x.drift_orth_a, 3)}</td><td>${fmt(x.drift_par_b, 3)}</td><td>${fmt(x.drift_orth_b, 3)}</td></tr>`).join("")}</tbody></table></details>` : ""}
       ${r.reactivity && r.reactivity.samples && r.reactivity.samples.length ? `<details><summary class="muted note">${t("反応性の例(トリガーあり / なし)")}</summary>${
         r.reactivity.samples.map((x) => `<p class="note"><span class="muted mono">${t("あり")}</span> ${esc(x.with)}<br><span class="muted mono">${t("なし")}</span> ${esc(x.without)}</p>`).join("")}</details>` : ""}`;
+    const ap = el.querySelector("#evx-apply");
+    if (ap) {
+      ap.addEventListener("click", async () => {
+        if (ap.getAttribute("aria-disabled") === "true") return;
+        const dose = this.dose;
+        if (dose < 0 && !(await askConfirm(t("倍率 {d} は負なので、読み込むと各ユニットの向きが反対になります(射影の強さ・dose・α の符号が変わり、gain は 1 の反対側になる)。読み込みますか?", { d: fmt(dose, 2) })))) return;
+        this.onLoadRecipe(d.recipe, { scale: dose });
+      });
+    }
   }
 
   // --- 方式の比較(CHANGE-06 F.3): 効果(A 側の射影の値)をそろえたときの副作用。外した方式は理由を出す -----------------------

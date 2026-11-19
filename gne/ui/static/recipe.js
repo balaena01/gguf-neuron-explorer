@@ -34,7 +34,7 @@ export const isKeyed = (u) => u.mode === "keyed";                // 鍵つきの
 export const isNw = (u) => u.mode === "nw";
 const REMOVE_TAG = { part: "!rm", excess: "!rmbase" };
 export function nwSpec(u, s = 1) {
-  return `${u.layer}:N${u.neuron}${u.pair !== null && u.pair !== undefined ? `+N${u.pair}` : ""}:nw:a${+(u.alpha * s).toFixed(4)}`
+  return `${u.layer}:N${u.neuron}${u.pair !== null && u.pair !== undefined ? `+N${u.pair}` : ""}:nw:a${+scaleUnit(u, s).alpha.toFixed(4)}`
     + `${u.direction ? `@${u.direction}` : ""}${u.key ? `#${u.key}${u.key2 ? `&${u.key2}` : ""}` : ""}`
     + `${u.s !== null && u.s !== undefined ? `!s${+u.s}` : ""}${u.cap ? `!cap${u.cap}` : ""}`
     + `${u.kscale ? `!k${u.kscale}` : ""}${REMOVE_TAG[u.remove] || ""}${u.take ? `!take${u.take}` : ""}`;
@@ -109,7 +109,7 @@ const aLabel = (a) => `a${a >= 0 ? "+" : "−"}${fmt(Math.abs(a), 2)}`;
 const PROJ_RE = /^(\d+):([HhNn])(\d+):s([+-]?[\d.]+(?:e[+-]?\d+)?)(?:@([\w.\-]+))?$/i;
 const PROJW_RE = /^(\d+):(attn|ffn):s([+-]?[\d.]+(?:e[+-]?\d+)?)(?:@([\w.\-]+))?$/i;
 // 射影のユニット → 文字列(s に倍率 scale を掛ける)
-export const projSpec = (u, scale = 1) => `${u.layer}:${isProjW(u) ? u.kind : isProjN(u) ? `N${u.neuron}` : `H${u.head}`}:s${+(u.s * scale).toFixed(4)}${u.direction ? `@${u.direction}` : ""}`;
+export const projSpec = (u, scale = 1) => `${u.layer}:${isProjW(u) ? u.kind : isProjN(u) ? `N${u.neuron}` : `H${u.head}`}:s${+scaleUnit(u, scale).s.toFixed(4)}${u.direction ? `@${u.direction}` : ""}`;
 export function parseProj(spec, defaultDirection = null) {
   const w = String(spec).trim().match(PROJW_RE);
   if (w) return { layer: +w[1], kind: w[2].toLowerCase(), mode: "proj", s: +w[3], direction: w[4] || defaultDirection };
@@ -122,11 +122,25 @@ export function parseProj(spec, defaultDirection = null) {
 // 全体に掛ける倍率 s でのヘッドの倍率(1 が無介入。s = −1 なら 1 の反対側: ×0 → ×2)
 const gainAt = (k, s) => +(1 + (k - 1) * s).toFixed(4);
 
+// レシピ全体の倍率 s を、ユニット 1 つの強さに掛けた形(元のユニットは変えない)。送るとき(specs(s))と、倍率をレシピに
+// 反映するとき(Recipe.applyScale(s))の両方がこれを通すので、反映の後の specs(1) は反映の前の specs(s) と同じ文字列になる。
+// 射影(ヘッド・ニューロン・層全体)は s を、keyed と計算で作るニューロン(nw)は α を s 倍、gain(ヘッド・MoE)は 1 + (k − 1)·s、
+// add・route・方向の押しは dose を s 倍(サーバの Recipe.scaled と同じ式)
+export function scaleUnit(u, s = 1) {
+  if (s === 1) return u;
+  if (isNw(u) || isKeyed(u)) return { ...u, alpha: u.alpha * s };
+  if (isProj(u)) return { ...u, s: u.s * s };
+  if (isGain(u)) return { ...u, k: gainAt(u.k, s) };
+  return { ...u, dose: u.dose * s };
+}
+// 倍率を反映したレシピの名前の案(元の名前を上書きしないよう、倍率が分かる語尾を付ける。名前に使える文字だけ)
+export const scaledName = (name, s) => `${(name || "recipe").replace(/-x-?[\d.]+$/, "")}-x${+(+s).toFixed(3)}`;
+
 // 鍵つきの書き込みの指定(L:ffn:keyed:aα@方向#鍵)。方向・鍵が無ければ defaults({ direction, key })、それも無ければ省く
 // (サーバでレシピの default_direction・default_key を使う)
 export function keyedSpec(u, s = 1, defaults = {}) {
   const dir = u.direction || defaults.direction || "", key = u.key || defaults.key || "";
-  return `${u.layer}:${keyedWho(u)}:keyed:a${+(u.alpha * s).toFixed(4)}${dir ? `@${dir}` : ""}${key ? `#${key}` : ""}`;
+  return `${u.layer}:${keyedWho(u)}:keyed:a${+scaleUnit(u, s).alpha.toFixed(4)}${dir ? `@${dir}` : ""}${key ? `#${key}` : ""}`;
 }
 
 // ユニット 1 つのサーバ向けの指定(gne/steer.py の parse_unit の形)。s はレシピ全体に掛ける倍率
@@ -136,8 +150,8 @@ export function unitSpec(u, s = 1) {
   if (isProj(u)) return projSpec(u, s);
   const who = isHead(u) ? `H${u.head}` : isDir(u) ? `dir:${u.direction}` : u.kind === "expert_neuron" ? `E${u.expert}:N${u.neuron}`
     : u.kind === "shared" ? `S:N${u.neuron}` : u.kind === "expert" ? `E${u.expert}${isRoute(u) ? ":route" : ""}` : `${u.neuron}`;
-  if (isGain(u)) return `${u.layer}:${who}:x${gainAt(u.k, s)}`;
-  const d = u.dose * s;
+  if (isGain(u)) return `${u.layer}:${who}:x${+(+scaleUnit(u, s).k).toFixed(4)}`;
+  const d = scaleUnit(u, s).dose;
   return `${u.layer}:${who}:${d >= 0 ? "+" : ""}${+d.toFixed(4)}`;
 }
 
@@ -183,6 +197,26 @@ export class Recipe {
   // ablate を倍率 s で(− の列は s < 0 = その方向を強める)。無ければ undefined
   ablateAt(s = 1) { return this.ablate ? { ...this.ablate, scale: +(this.ablate.scale * s).toFixed(4) } : undefined; }
   setAblate(a) { this.ablate = a && a.direction ? a : null; this._save(); }
+  // 倍率 s をユニットの強さに掛け込み、全体の倍率を 1 に戻せるようにする(scaleUnit・ablateAt と同じ式なので、反映の後の specs(1)・
+  // ablateAt(1) は反映の前の specs(s)・ablateAt(s) と同じ)。名前は倍率が分かる語尾の案にする(保存はしない)。
+  // 戻り値は取り消し用の元の状態(undoScale に渡す)。s が 0 か数でなければ何もしない(全部のユニットが無介入になるので)
+  applyScale(s) {
+    s = +s;
+    if (!Number.isFinite(s) || s === 0 || !this.units.length && !this.ablate) return null;
+    const prev = { units: this.units.map((u) => ({ ...u })), ablate: this.ablate ? { ...this.ablate } : null, name: this.name, scale: s };
+    this.units = this.units.map((u) => scaleUnit(u, s));
+    if (this.ablate) this.ablate = this.ablateAt(s);
+    this.name = scaledName(this.name, s);
+    this._save();
+    return prev;
+  }
+  undoScale(prev) {
+    if (!prev) return;
+    this.units = prev.units.map((u) => ({ ...u }));
+    this.ablate = prev.ablate ? { ...prev.ablate } : null;
+    this.name = prev.name;
+    this._save();
+  }
   setSampling(sp) { this.sampling = sp ? { ...sp } : null; this._save(); }
 
   // サーバに送るユニット指定。scale はレシピ全体に掛ける倍率(3 列チャットの ± 列、eval の倍率と同じ意味)。

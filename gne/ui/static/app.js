@@ -1006,11 +1006,15 @@ async function setView(v) {
     if (!evalView) {
       evalView = new EvalView(xv, { recipe: state.recipe, onRun: (p) => jobsBar.start("eval", p).catch((e) => { state.note = `${t("エラー")}: ${e.message}`; updateStatus(); return null; }), onRunJob: (kind, params) => jobsBar.start(kind, params),          // 組・方式のレシピを読み込む
                                     onLoadProj: (name, specs) => replaceRecipe(name, () => state.recipe.loadProj(name, specs)),
-                                    onLoadRecipe: (rd) => {
+                                    onLoadRecipe: async (rd, { scale = 1 } = {}) => {
                                       const us = (rd.units || []).map((u) => (u.mode === "proj" && !u.direction ? { ...u, direction: rd.default_direction } : u));
-                                      return replaceRecipe(rd.name || "", () => state.recipe.load(rd.name || "", us, rd.ablate, rd.sampling, rd.direction_layer,
-                                                                                                 { default_direction: rd.default_direction, default_key: rd.default_key,
-                                                                                                   loop_edits: rd.loop_edits }));   // keyed の既定・2 回実行するモデルの当て方
+                                      // scale: 評価の倍率をユニットの強さに掛け込んで読み込む(チャットの「この強さをレシピに反映」と同じ式)
+                                      return replaceRecipe(rd.name || "", () => {
+                                        state.recipe.load(rd.name || "", us, rd.ablate, rd.sampling, rd.direction_layer,
+                                                          { default_direction: rd.default_direction, default_key: rd.default_key,
+                                                            loop_edits: rd.loop_edits });   // keyed の既定・2 回実行するモデルの当て方
+                                        if (scale !== 1) state.recipe.applyScale(scale);
+                                      });
                                     } });
       state.evalView = evalView;                                         // 自動テスト用
     }

@@ -1104,6 +1104,65 @@ def test_chat_single_column_in_browser(server, browser):
     pg.close()
 
 
+def test_chat_apply_scale_to_recipe(server, browser):
+    """チャットの「この強さをレシピに反映」: いまの強さを各ユニットの強さに掛け込み、全体の強さを 1 に戻す。反映の後の specs(1)(と
+    ablateAt(1))は反映の前の specs(s) と同じ文字列(送る指定が変わらない)。どの種類のユニットも。名前は倍率の語尾つきの案、取り消しは 1 回。
+    − 列の強さは確かめてから反映(向きが反対)。強さ 1 では押せない。掛け込み方はサーバの Recipe.scaled と同じ。"""
+    from gne.steer import Recipe, parse_unit
+    pg = browser.new_page(viewport={"width": 1500, "height": 900})
+    errors = []
+    pg.on("pageerror", lambda e: errors.append(str(e)))
+    _dialogs(pg)
+    pg.goto(server + "/")
+    pg.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
+    units = [{"layer": 6, "neuron": 100, "dose": 0.8}, {"layer": 6, "kind": "direction", "direction": "evil", "dose": 0.5},
+             {"layer": 5, "kind": "head", "mode": "gain", "head": 2, "k": 0.5}, {"layer": 6, "kind": "head", "mode": "proj", "head": 1, "s": 2, "direction": "evil"},
+             {"layer": 6, "kind": "neuron", "mode": "proj", "neuron": 7, "s": 1.5, "direction": "evil"},
+             {"layer": 6, "kind": "ffn", "mode": "proj", "s": 1.2, "direction": "evil"},
+             {"layer": 6, "kind": "ffn", "mode": "keyed", "alpha": 1.25, "direction": "evil", "key": "k1"},
+             {"layer": 7, "neuron": 9, "mode": "nw", "alpha": 0.7, "direction": "evil", "key": "k1"},
+             {"layer": 6, "kind": "expert", "expert": 3, "mode": "route", "dose": 0.2},
+             {"layer": 6, "kind": "expert_neuron", "expert": 2, "neuron": 5, "mode": "gain", "k": 1.5}]
+    pg.evaluate("([u]) => window.gne.recipe.load('mix', u, {direction: 'evil', scale: 0.8, layers: 'all', from_layer: null})", [units])
+    n = pg.evaluate("window.gne.recipe.units.length")
+    assert n == len(units), pg.evaluate("window.gne.recipe.skipped")
+    orig = pg.evaluate("window.gne.recipe.specs(1)")
+    _recipe_tab(pg)
+    _recipe_tab(pg, "try")
+    pg.click("#rc-chat")
+    pg.wait_for_selector("#ch-text", timeout=30000)
+    if pg.evaluate("!!document.querySelector('[data-target=recipe]') && !document.querySelector('[data-target=recipe]').classList.contains('on')"):
+        pg.click("[data-target=recipe]")
+    if pg.evaluate("document.querySelectorAll('.ch-head > div').length") == 1:
+        pg.click("[data-cols='3']")
+    assert pg.evaluate("document.querySelector('#ch-apply').getAttribute('aria-disabled')") == "true"   # 強さ 1: 押せない
+    pg.evaluate("document.querySelector('#ch-apply').click()")                     # 押しても何もしない(選べるまま、理由は説明に)
+    assert pg.evaluate("window.gne.recipe.specs(1)") == orig
+    pg.fill("#ch-dose", "1.5")
+    pg.dispatch_event("#ch-dose", "change")
+    before, abl = pg.evaluate("[window.gne.recipe.specs(1.5), window.gne.recipe.ablateAt(1.5)]")
+    minus = pg.evaluate("window.gne.recipe.specs(-1.5)")
+    pg.click("#ch-apply")
+    pg.wait_for_function("document.querySelector('#ch-dose').value === '1'", timeout=5000)
+    assert pg.evaluate("[window.gne.recipe.specs(1), window.gne.recipe.ablateAt(1)]") == [before, abl]
+    assert pg.evaluate("window.gne.recipe.name") == "mix-x1.5" and "反映" in pg.evaluate("document.querySelector('#ch-status').textContent")
+    assert pg.evaluate("document.querySelector('#ch-status').getAttribute('role')") == "status"
+    pg.click("#ch-undo")                                                           # 取り消し: 元のレシピと強さ 1.5
+    pg.wait_for_function("document.querySelector('#ch-dose').value === '1.5'", timeout=5000)
+    assert pg.evaluate("window.gne.recipe.specs(1)") == orig and pg.evaluate("window.gne.recipe.name") == "mix"
+    assert not pg.evaluate("!!document.querySelector('#ch-undo')")
+    _asked(pg, clear=True)
+    pg.click("#ch-apply-minus")                                                    # − 列: 確かめてから(向きが反対)
+    pg.wait_for_function("document.querySelector('#ch-dose').value === '1'", timeout=5000)
+    assert _asked(pg) and pg.evaluate("window.gne.recipe.specs(1)") == minus and pg.evaluate("window.gne.recipe.name") == "mix-x-1.5"
+    assert not errors, errors
+    pg.close()
+    # 掛け込み方はサーバの Recipe.scaled と同じ(画面の specs(s) とサーバで倍率を掛けたものが同じ強さ)
+    base = Recipe([parse_unit(x) for x in orig], "x").scaled(1.5)
+    for u, v in zip(base.units, [parse_unit(x) for x in before], strict=True):
+        assert (u.dose, u.k) == pytest.approx((v.dose, v.k), abs=1e-4), (u, v)
+
+
 def test_chat_new_conversation_button(server, browser):
     """入力欄の横の「新しい会話」: 会話があれば確かめてから消し(断れば残す)、入力欄に戻る。1 列のまま。
     生成はブラウザの中で差し替える(GPU を使わずに速く確かめるため)。"""
@@ -1567,6 +1626,15 @@ def test_eval_view_and_job(server, browser, tmp_path):
     assert pg.evaluate("document.querySelector('#evx-go').disabled")                      # レシピが空なら押せない
     pg.click("table.evx tbody tr[data-dose='0.5']")
     assert "0.50" in pg.evaluate("document.querySelector('#evx-sample h4').textContent")
+    # 「この倍率でレシピに読み込む」: 評価したレシピ(14:100:+1.5)を、強さに倍率 0.5 を掛け込んだ形で読み込む(名前は倍率の語尾つき)
+    _dialogs(pg)
+    pg.evaluate("window.gne.recipe.clear()")
+    pg.click("#evx-apply")
+    pg.wait_for_function("window.gne.recipe.units.length === 1", timeout=10000)
+    assert pg.evaluate("window.gne.recipe.specs(1)") == ["14:100:+0.75"] and pg.evaluate("window.gne.recipe.name").endswith("-x0.5")
+    pg.evaluate("window.gne.recipe.clear()")
+    pg.click("#views button[data-view=eval]")
+    pg.wait_for_function("window.gne.evalView && window.gne.evalView.data", timeout=30000)
     # 今のレシピで投げる(既定のタスク集、倍率 0 と 1)
     pg.evaluate("window.gne.recipe.add(14, 100, 1.0); window.gne.recipe.name = 'ui-run'; window.gne.evalView.refresh()")
     pg.wait_for_function("!document.querySelector('#evx-go').disabled", timeout=10000)

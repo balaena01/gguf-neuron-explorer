@@ -513,6 +513,7 @@ SenseNova-Loop-9B(Q4_K_M、選ぶ層 段 54。表は docs/sensenova_loop.md)で�
 | 3.4 止めたときの効き目で絞る | `gne heads causal --name <方向>`(層単位 → ヘッド単位、`heads_causal`) | なし |
 | 振る舞いを数える(応答を作り、正規表現の一致と judge の判定を数える) | `gne behave --prompts q.json --recipe R --match <正規表現> --judge <文面> --max-tokens 1024`(複数の `--recipe` は重ねる。`--thinking`・`--temperature`・`--seeds`) | 応答ごと |
 | 方向の違う組を 1 つのレシピにする | `gne recipe-combine a.yaml b.yaml -o ab.yaml` | なし |
+| 試した全体の倍率を強さに掛け込んだレシピを作る | `gne recipe-scale a.yaml --scale 1.5`(既定の出力 `a-x1.5.yaml`。UI ではチャットの「この強さをレシピに反映」、評価の「この倍率でレシピに読み込む」。どれも `Recipe.scaled` と同じ式) | なし |
 | attention の出力だけから方向を消す(全ヘッドの射影、MoE でも LoRA) | `gne headproj ablate --direction <方向> --per-layer`(`--bake` でマージ) | なし |
 | どこを探すかを決める(方向の差を attention・専門家・共有の専門家に分ける) | `gne heads writers --name <方向>`(`--expert-layers` で専門家ごとにも) | なし |
 | 3.5〜3.6 組を作り、効率で配り直す・ヘッド数を減らす | `gne heads allocate --name <方向> --target <射影の値>`(`heads_allocate`)。比を固定しないなら `--method greedy` | なし |

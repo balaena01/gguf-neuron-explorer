@@ -4,7 +4,7 @@
 import { postJSON, postSSE } from "./api.js";
 import { t as tr, tl } from "./i18n.js";             // t は会話のターンの変数名に使っているので tr
 import { esc, tokHTML } from "./panels.js";
-import { samplingLabel } from "./recipe.js";
+import { samplingLabel, scaledName } from "./recipe.js";
 import { Mic } from "./mic.js";
 import { askConfirm } from "./ui.js";
 
@@ -46,6 +46,7 @@ export class ChatPanel {
     this.target = "neuron";
     this.dose = 0.8;
     this.scale = 1.0;
+    this.applied = null;               // 強さをレシピに反映した直後の取り消し用 { prev(元のレシピ), scale(元の強さ), after(反映の後の指定) }
     this.maxTokens = 128;
     this.spPreset = "greedy";          // greedy / llama_server / common / recipe / custom。列はどれも同じ seed で引く
     this.sp = { ...SP_PRESETS.common };  // custom の値
@@ -177,7 +178,7 @@ export class ChatPanel {
   writesHTML() {
     const cols = this.columns();
     const amount = this.target === "recipe"
-      ? `${tr("強さ")} <button class="small" data-step="-0.25" title="${tr("小さく")}">▼</button><input id="ch-dose" type="number" step="0.25" value="${this.scale}"><button class="small" data-step="0.25" title="${tr("大きく")}">▲</button>`
+      ? `${tr("強さ")} <button class="small" data-step="-0.25" title="${tr("小さく")}">▼</button><input id="ch-dose" type="number" step="0.25" value="${this.scale}"><button class="small" data-step="0.25" title="${tr("大きく")}">▲</button>${this.applyHTML()}`
       : `${tr("強さ")} <button class="small" data-step="-0.1" title="${tr("小さく")}">▼</button><input id="ch-dose" type="number" step="0.1" value="${this.dose}"><button class="small" data-step="0.1" title="${tr("大きく")}">▲</button>
          <span class="seg"><button class="on" title="${tr("rel(残差ノルムの中央値に対する大きさ)で足す")}">${tr("足す")}</button><button disabled title="${tr("活性を何倍にするやり方は、まだ使えません")}">×</button></span>${
           this.detail && this.detail.expert !== undefined && this.detail.expert !== null
@@ -203,7 +204,46 @@ export class ChatPanel {
       </div>
       <div class="ch-input"><textarea id="ch-text" rows="2" placeholder="${tr("メッセージ(Ctrl+Enter で送る)")}"${this.busy ? " disabled" : ""}>${esc(this.draft)}</textarea>
         <button class="main" id="ch-send"${this.busy ? " disabled" : ""}>${tr("送る")}</button><button id="ch-mic" class="${this.mic.recording ? "rec" : ""}" title="${tr("音声で話しかける(押して話し、もう一度押すと送る。入力欄の文も一緒に送る)")}"${this.busy ? " disabled" : ""}>${this.mic.recording ? `■ ${tr("止めて送る")}` : `🎤 ${tr("話す")}`}</button><button id="ch-stop"${this.busy ? "" : " disabled"}>${tr("止める")}</button><button id="ch-reset" title="${tr("会話を消して、最初から話す(どの列も)")}"${this.busy ? " disabled" : ""}>${tr("新しい会話")}</button></div>
-      <div class="ch-status muted note" id="ch-status">${esc(this.status || "")}</div>`;
+      <div class="ch-status muted note" id="ch-status" role="status">${esc(this.status || "")}</div>`;
+  }
+
+  // 「この強さをレシピに反映」: いまの強さを各ユニットの強さに掛け込み、全体の強さを 1 に戻す(+ 列と同じレシピになる)。
+  // 3 列のときは − 列の強さ(向きが反対)も反映できる。0 と 1 は反映しない(押せない理由を説明に出す。aria-disabled で選べるまま)
+  applyHTML() {
+    const s = this.scale, can = s > 0 && s !== 1, name = scaledName(this.recipe.name, s);
+    const why = s === 0 ? tr("強さ 0 は反映できません(全部のユニットが無介入になる)") : tr("強さが 1 なので、反映しても変わりません");
+    return ` <button class="small" id="ch-apply" aria-disabled="${can ? "false" : "true"}" title="${can
+      ? tr("強さ ×{s} を各ユニットの強さに掛け込み、全体の強さを 1 に戻す(+ 列の応答と同じレシピになる)。レシピの名前は {name} にする(保存はレシピの「保存」で)", { s: +s.toFixed(3), name })
+      : why}">${tr("この強さをレシピに反映")}</button>${!this.single && can
+      ? ` <button class="small" id="ch-apply-minus" title="${tr("− 列の強さ ×−{s} を各ユニットの強さに掛け込む(向きが反対になる。− 列の応答と同じレシピになる)", { s: +s.toFixed(3) })}">${tr("− 列の強さを反映")}</button>` : ""}${this.applied
+      ? ` <button class="small" id="ch-undo" title="${tr("反映する前のレシピと強さ ×{s} に戻す(1 回だけ)", { s: +this.applied.scale.toFixed(3) })}">${tr("反映を取り消す")}</button>` : ""}`;
+  }
+
+  async applyScale(sign) {
+    const s = this.scale * sign;
+    if (!(this.scale > 0) || this.scale === 1 || this.target !== "recipe") return;
+    if (sign < 0 && !(await askConfirm(tr("− 列の強さ ×−{s} を反映すると、各ユニットの向きが反対になります(射影の強さ・dose・α の符号が変わり、gain は 1 の反対側になる)。反映しますか?", { s: +this.scale.toFixed(3) })))) return;
+    const prev = this.recipe.applyScale(s);
+    if (!prev) return;
+    this.applied = { prev, scale: this.scale, after: JSON.stringify(this.recipe.specs(1, false)) };
+    this.scale = 1;
+    this.render();
+    this.setStatus(tr("強さ ×{s} をレシピのユニット {n} 個に反映し、全体の強さを 1 に戻しました。名前を {name} にしました(変えてから「保存」で保存できます)", {
+      s: +s.toFixed(3), n: this.recipe.units.length + (this.recipe.ablate ? 1 : 0), name: this.recipe.name }));
+    this.onAdded();
+  }
+
+  async undoApply() {
+    const a = this.applied;
+    if (!a) return;
+    if (JSON.stringify(this.recipe.specs(1, false)) !== a.after
+        && !(await askConfirm(tr("反映の後にレシピが変わっています。取り消すと、その変更も消えます。取り消しますか?")))) return;
+    this.recipe.undoScale(a.prev);
+    this.scale = a.scale;
+    this.applied = null;
+    this.render();
+    this.setStatus(tr("反映を取り消しました(強さ ×{s})", { s: +a.scale.toFixed(3) }));
+    this.onAdded();
   }
 
   cellHTML(t, ci) {
@@ -227,6 +267,10 @@ export class ChatPanel {
       if (Number.isFinite(v)) { if (this.target === "recipe") this.scale = v; else this.dose = v; }
       this.render();
     });
+    const ap = $("#ch-apply"), apm = $("#ch-apply-minus"), un = $("#ch-undo");
+    if (ap) ap.addEventListener("click", () => { if (ap.getAttribute("aria-disabled") !== "true") this.applyScale(1); });
+    if (apm) apm.addEventListener("click", () => this.applyScale(-1));
+    if (un) un.addEventListener("click", () => this.undoApply());
     for (const b of this.el.querySelectorAll("[data-step]")) {
       b.addEventListener("click", () => {
         const k = this.target === "recipe" ? "scale" : "dose";

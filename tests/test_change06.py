@@ -1036,6 +1036,28 @@ def test_refine_adds_heads_from_remaining_questions(session, tmp_path):
                                    "llama_cpp_version": "x", "seed": 0, "generated_at": "x", **out})
 
 
+def test_recipe_scale_cli(tmp_path):
+    """gne recipe-scale: レシピ全体の倍率を各ユニットの強さに掛け込んだレシピを書き出す(Recipe.scaled と同じ式、元は書き換えない)。
+    倍率 0 と、元と同じファイルへの書き出しは断る。負の倍率は向きが反対になると知らせる。"""
+    from typer.testing import CliRunner
+
+    from gne.cli import app
+    src = tmp_path / "mix.yaml"
+    r = Recipe([parse_unit(x) for x in ["6:100:+0.8", "5:H2:x0.5", "6:H1:s2@evil", "6:ffn:keyed:a1.25@evil#k1", "7:N9:nw:a0.7@evil#k1"]],
+               "x", name="mix")
+    r.save(src)
+    res = CliRunner().invoke(app, ["recipe-scale", str(src), "--scale", "1.5"])
+    assert res.exit_code == 0, res.output
+    out = tmp_path / "mix-x1.5.yaml"
+    got, want = Recipe.load(out), r.scaled(1.5)
+    assert got.name == "mix-x1.5" and [(u.dose, u.k) for u in got.units] == pytest.approx([(u.dose, u.k) for u in want.units])
+    assert [(u.dose, u.k) for u in Recipe.load(src).units] == [(u.dose, u.k) for u in r.units]          # 元はそのまま
+    res = CliRunner().invoke(app, ["recipe-scale", str(out), "--scale", "-2", "-o", str(tmp_path / "neg.yaml"), "--name", "neg"])
+    assert res.exit_code == 0 and "反対" in res.output and Recipe.load(tmp_path / "neg.yaml").name == "neg"
+    assert CliRunner().invoke(app, ["recipe-scale", str(src), "--scale", "0"]).exit_code != 0
+    assert CliRunner().invoke(app, ["recipe-scale", str(src), "--scale", "2", "-o", str(src)]).exit_code != 0
+
+
 def test_pipeline_target_keywords():
     """目標は数、B(B 側の平均)、mid か省略(A と B の真ん中)。ほかは流す前に断る。"""
     from gne.api import Session

@@ -2818,6 +2818,31 @@ def recipe_combine(recipes: list[Path] = typer.Argument(..., exists=True, help="
           + (f"、鍵 {', '.join(keys)}" if keys else "") + ")")
 
 
+@app.command("recipe-scale")
+def recipe_scale(recipe: Path = typer.Argument(..., exists=True, help="倍率を掛けるレシピ"),
+                 scale: float = typer.Option(..., "--scale", help="レシピ全体に掛ける倍率(チャットの強さ・評価の倍率と同じ意味。0 は不可)"),
+                 out: Optional[Path] = typer.Option(None, "--out", "-o", help="書き出すレシピ(既定 <元の名前>-x<倍率>.yaml を元と同じフォルダに)"),
+                 name: Optional[str] = typer.Option(None, "--name", help="レシピの名前(既定は出力のファイル名)")):
+    """レシピ全体の倍率を各ユニットの強さに掛け込んだレシピを書き出す(UI の「この強さをレシピに反映」と同じ式: 射影の s・keyed と
+    計算で作るニューロンの α は倍率倍、gain は 1 + (k − 1)·倍率、add・route の dose は倍率倍、方向の射影消去の強さも倍率倍)。
+    負の倍率は向きが反対になる。元のレシピは書き換えない。"""
+    from .steer import GneError, Recipe
+    if scale == 0:
+        raise typer.BadParameter("倍率 0 は全部のユニットを無介入にするので書き出しません", param_hint="--scale")
+    r = Recipe.load(recipe)
+    tag = f"{scale:g}"
+    out = out or recipe.with_name(f"{re.sub(r'-x-?[0-9.]+$', '', recipe.stem)}-x{tag}.yaml")
+    if out.resolve() == recipe.resolve():
+        raise typer.BadParameter("元のレシピと同じファイルには書き出しません", param_hint="--out")
+    sc = r.scaled(scale)
+    sr = sc.like(sc.units, name=name or out.stem)
+    try:
+        sr.save(out)
+    except GneError as e:
+        raise typer.BadParameter(e.message, param_hint="--out") from e
+    print(f"{out}({len(sr.units)} ユニット、倍率 ×{tag} を掛け込んだ)" + ("。負の倍率なので、各ユニットの向きは元と反対" if scale < 0 else ""))
+
+
 @gne_command(headproj_app, "ablate", "headproj export")
 def headproj_ablate(c: Common, holder: dict,
                     direction: str = typer.Option(..., "--direction", help="gne direction で作った方向の名前"),
