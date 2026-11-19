@@ -405,6 +405,25 @@ def test_tune_stops_at_limits():
     assert (sv, stop) == ([1.0], "no_gain")
 
 
+def test_tune_raises_when_single_probes_are_too_small():
+    """部品が多く、1 個ずつ 1.5 倍にしても組がほとんど変わらない(s が小さいうちは効かない)組でも、全部を同じ割合で上げる向きを
+    試すので上がる(SenseNova の disclaimer の 20 個の組で、効率の試しだけでは s=1 のまま止まった)。"""
+    from gne.unitwrites import SetScore, _tune
+    sc = SetScore(base_a=60.0, base_b=-40.0, drift_max=0.5, b_move_max=0.10)
+    n = 20
+
+    def run_s(sv, a_idx=None):
+        drop = sum(0.08 * (x - 1.0) ** 1.5 for x in sv)                            # 1 個ずつでは小さく、s が小さいうちは効きが弱い
+        vals = [50.0 - drop, 48.0 - drop]
+        idx = range(2) if a_idx is None else a_idx
+        pt = sc.point(max(sv), float(np.mean([vals[q] for q in idx])), -40.0, 0.05)
+        if a_idx is None:
+            pt["a_vals"] = vals
+        return pt
+    sv, stop, trace = _tune(run_s, [1.0] * n, run_s([1.0] * n), target=-40.0, s_max=30.0, sc=sc)
+    assert stop == "raised" and min(sv) > 1.0 and run_s(sv)["a_mean"] <= -40.0 + 1e-6
+
+
 def test_tune_beats_uniform_when_one_unit_pushes_b():
     """一律では B 側を押す部品も一緒に上がるので上限で止まり届かない題材で、部品ごとなら届く(同じ部品の組)。"""
     from gne.unitwrites import SetScore, _raise, _tune

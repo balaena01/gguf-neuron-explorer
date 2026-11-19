@@ -858,7 +858,7 @@ def _raise(run_at, p1: dict, target: float, s_max: float, sc: SetScore, *, n_gri
 STRENGTHS = ("per_unit", "uniform")   # 組の強さの決め方(v0.8.3 から per_unit が既定。v0.8.0〜0.8.2 は uniform だけ)
 TUNE_ITERS = 6           # per_unit: 効率を測り直して上げる回数の上限
 PROBE_UP = 1.5           # 効率を測るとき、その部品の s を何倍にしてみるか
-LINE_T = (0.25, 0.5, 1.0, 2.0, 4.0)   # 上げ幅の線探索(いちばん効く部品の s が 1 + t 倍になる)
+LINE_T = (0.5, 1.0, 2.0, 4.0, 8.0)    # 上げ幅の線探索(いちばん効く部品の s が 1 + t 倍。_raise の格子と同じくらいの刻みから)
 
 
 def s_summary(sv) -> dict:
@@ -876,13 +876,15 @@ def hard_of(a_vals, target: float, hard: int) -> list[int]:
 def _tune(run_s, s0: list[float], p1: dict, target: float, s_max: float, sc: SetScore, *, hard: int = 16,
           iters: int = TUNE_ITERS) -> tuple[list[float], str, list[dict]]:
     """部品ごとの強さ(v0.8.3 からの既定)。s0(全部 1)から、毎回
-    1. 射影の値が残りやすい A 側の質問(目標を超えたまま残っている質問、hard 個まで)を選び、部品ごとに s を PROBE_UP 倍にして
-       みて(ほかはそのまま)、その質問での A 側の下がり − B 側の動きの大きさの増え方 g_i と、強さ 1 あたりの効率
-       e_i = g_i / Δs_i を出す。上限(B 側が A 側へ動く・直交成分のずれ)を超える試しは e_i = −∞(その部品は上げない)。
+    1. 射影の値が残りやすい A 側の質問(目標を超えたまま残っている質問、hard 個まで。回ごとに選び直す)で、部品ごとに s を PROBE_UP
+       倍にしてみて(ほかはそのまま)、A 側の下がり − B 側の動きの大きさの増え方 g_i と、強さ 1 あたりの効率 e_i = g_i / Δs_i を出す。
+       上限(B 側が A 側へ動く・直交成分のずれ)を超える試しは e_i = −∞(その部品は上げない)。
     2. 上げ幅を効率に比例して配る: d_i = s_i · max(e_i, 0) / max_j e_j(いちばん効く部品の s が 1 + t 倍。効かない部品はそのまま)。
-    3. s + t·d を t = LINE_T で、全部の A 側の質問で試し、_raise と同じ規則(目標に届けば届く最小の t、上限を超えたら手前、
+    3. s + t·d を t = LINE_T(0.5〜8)で、全部の A 側の質問で試し、_raise と同じ規則(目標に届けば届く最小の t、上限を超えたら手前、
        組の効きが差の GAIN_TOL 倍より増えない点が GAIN_PATIENCE 個続いたら止める)で、組の効きがいちばん良い点を採る。
-    正の g_i の和が差の GAIN_TOL 倍以下か、採れる点が無ければ止める(no_gain)。部品は外さず、s は 1 以上・s_max 以下。
+       1 部品ずつの試しは小さく(部品が多いと 1 個を 1.5 倍にしても組はほとんど変わらない)、s が小さいうちは効かない部品もあるので、
+       効率の向きで組の効きが増えないときだけ、全部を同じ割合で上げる向き(d_i = s_i)で線探索する。
+    どちらの向きでも組の効きが増えなければ止める(no_gain。上限を超えたためなら b_move / drift)。部品は外さず、s は 1 以上・s_max 以下。
     run_s(sv, a_idx) は強さ sv の組を、A 側は a_idx の質問(None で全部)で測る(a_vals に質問ごとの値)。p1 は s0 の点(a_vals つき)。
     戻り値 (部品ごとの s, 止まった理由 raised / no_gain / iters / b_move / drift, 測った点の並び)。"""
     tol = GAIN_TOL * sc.gap
@@ -894,38 +896,21 @@ def _tune(run_s, s0: list[float], p1: dict, target: float, s_max: float, sc: Set
 
     def clip(v):
         return min(s_max, max(1.0, v))
-    for it in range(iters):
-        hq = hard_of(cur["a_vals"], target, hard)   # 1. 残りやすい質問で、部品ごとの効率
-        a_h = float(np.mean([cur["a_vals"][i] for i in hq]))
-        e = [float("-inf")] * n
-        gains = []
-        for i in range(n):
-            up = clip(s[i] * PROBE_UP)
-            if up <= s[i] + 1e-9:
-                continue
-            sv = list(s)
-            sv[i] = up
-            pr = run_s(sv, hq)
-            if pr["feasible"]:
-                g = (a_h - pr["a_mean"]) * sc.sign - (abs(pr["b_delta"]) - abs(cur["b_delta"]))
-                e[i] = g / (up - s[i])
-                gains.append(max(g, 0.0))
-        top = max(e)
-        if sum(gains) <= tol or top <= 0:
-            stop = "no_gain"
-            break
-        d = [s[i] * e[i] / top if e[i] > 0 else 0.0 for i in range(n)]   # 2. 上げ幅を効率に比例して配る
-        best, bad, prev_t, edge = None, 0, 0.0, None
 
+    def keep(p):
+        trace.append({k: v for k, v in p.items() if k != "a_vals"})
+
+    def line(d, step, how):
+        """s + t·d の線探索。戻り値 ("raised", 強さ) / ("best", (強さ, 点)) / ("none", 上限を超えた理由か None)。"""
         def at(t):
             sv = [clip(s[i] + t * d[i]) for i in range(n)]
-            return sv, dict(run_s(sv, None), phase="line", step=it + 1, t=t, hard=len(hq), **s_summary(sv))
-        for t in LINE_T:                             # 3. 線探索(全部の質問で)
+            return sv, dict(run_s(sv, None), phase="line", step=step, t=t, dir=how, **s_summary(sv))
+        best, bad, prev_t = None, 0, 0.0
+        for t in LINE_T:
             sv, pt = at(t)
-            trace.append({k: v for k, v in pt.items() if k != "a_vals"})
+            keep(pt)
             if not pt["feasible"]:
-                edge = pt["over"]
-                break
+                return ("best", best) if best else ("none", pt["over"])
             if pt["a_mean"] <= target:               # 目標に届いた: 手前とのあいだで、届く最小の t
                 lo, hi, hs = prev_t, t, sv
                 for _ in range(6):
@@ -934,12 +919,12 @@ def _tune(run_s, s0: list[float], p1: dict, target: float, s_max: float, sc: Set
                     mid = 0.5 * (lo + hi)
                     sm, pm = at(mid)
                     pm["phase"] = "shrink"
-                    trace.append({k: v for k, v in pm.items() if k != "a_vals"})
+                    keep(pm)
                     if pm["a_mean"] <= target and pm["feasible"]:
                         hi, hs = mid, sm
                     else:
                         lo = mid
-                return hs, "raised", trace
+                return "raised", hs
             if pt["effect"] > (best[1]["effect"] if best else cur["effect"]) + tol:
                 best, bad = (sv, pt), 0
             else:
@@ -947,11 +932,38 @@ def _tune(run_s, s0: list[float], p1: dict, target: float, s_max: float, sc: Set
                 if bad >= GAIN_PATIENCE:
                     break
             prev_t = t
-        if best is None:
-            stop = edge or "no_gain"
+        return ("best", best) if best else ("none", None)
+    for it in range(iters):
+        hq = hard_of(cur["a_vals"], target, hard)   # 1. 残りやすい質問で、部品ごとの効率
+        a_h = float(np.mean([cur["a_vals"][i] for i in hq]))
+        e = [float("-inf")] * n
+        for i in range(n):
+            up = clip(s[i] * PROBE_UP)
+            if up <= s[i] + 1e-9:
+                continue
+            sv = list(s)
+            sv[i] = up
+            pr = run_s(sv, hq)
+            if pr["feasible"]:
+                e[i] = ((a_h - pr["a_mean"]) * sc.sign - (abs(pr["b_delta"]) - abs(cur["b_delta"]))) / (up - s[i])
+        top = max(e)
+        res = ("none", None)
+        if top > 0:                                  # 2〜3. 効率に比例した向き
+            res = line([s[i] * e[i] / top if e[i] > 0 else 0.0 for i in range(n)], it + 1, "efficiency")
+        if res[0] == "none" and any(x < s_max - 1e-9 for x in s):
+            # 効率の向きで良くならないとき(1 個ずつの試しが小さすぎる組など)だけ、全部を同じ割合で上げる向き
+            # (上限を超える試しになった部品と s_max の部品は動かない)
+            over = res[1]
+            res = line([s[i] if e[i] > float("-inf") else 0.0 for i in range(n)], it + 1, "uniform")
+            if res[0] == "none" and res[1] is None:
+                res = ("none", over)
+        if res[0] == "raised":
+            return res[1], "raised", trace
+        if res[0] == "none":
+            stop = res[1] or "no_gain"
             break
-        s, cur = best[0], dict(best[1], phase="step")
-        trace.append({k: v for k, v in cur.items() if k != "a_vals"})
+        s, cur = res[1][0], dict(res[1][1], phase="step")
+        keep(cur)
     return s, stop, trace
 
 
