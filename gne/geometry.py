@@ -33,6 +33,7 @@ from .steer import GneError
 # 基準の値(ここだけで変える)
 HALF_COS_MIN = 0.5        # 半分どうしの cos がこれ未満の行に、信用しない印を付ける
 CUMSUM_COS_MIN = 0.9      # 選ぶ層で、更新の累積と方向ベクトルの cos がこれ未満なら、材料と方向が合わない疑いを知らせる
+FEW_QUESTIONS = 32        # 片側の質問がこれより少ないと、半分ずつの数は揺れやすいと知らせる
 TOP_K = 6                 # 寄与率・説明率・保存する向きの数の既定
 TOP_DIMS = 5              # 行ごとに出す、大きい次元の数
 
@@ -419,7 +420,7 @@ def analyze(session, name: str, *, parts="layer", normalize="both", top_k: int =
     if chk is not None and np.isfinite(chk).any():
         material["check_layer_rel_median"] = float(np.nanmedian(chk))
         material["check_layer_rel_max"] = float(np.nanmax(chk))
-    if min(n_a, n_b) < 32:
+    if min(n_a, n_b) < FEW_QUESTIONS:
         notes.append({"code": "few_questions", "text": f"質問が少ない(A {n_a}・B {n_b})ので、半分ずつ(各側 {n_a // 2}・{n_b // 2} 問)の"
                                                        "数は揺れやすく、結論には足りません"})
     # 方向ベクトル
