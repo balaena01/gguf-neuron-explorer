@@ -1178,6 +1178,7 @@ class HeadsRefineOut(Envelope):                 # gne heads refine(残りの質�
     loop_exit: int | None = None                # ループのモデルで、1 回目の出口の段(合わせたレシピの行の exit_before / exit_after)
     rank: str | None = None                     # 足す部品の探し方
     units_by_round: dict[str, int] = {}         # 代表の合わせたレシピの、何回目に入った部品が何個か("0" = 元の組)
+    no_recommend: str | None = None             # 推す行が無い理由: no_better(どの行も合わせると良くならない)/ replies_break(応答が壊れる)
     updated: str
     seconds: float
 

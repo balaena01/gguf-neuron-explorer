@@ -111,7 +111,7 @@ export function checkSpec(text) {
 // "16:H8:s15.65@evil" → { layer, head, s, direction }
 const parseUnit = (u) => { const m = String(u).match(/^(\d+):H(\d+):s([^@]+)(?:@(.+))?$/i); return m ? { layer: +m[1], head: +m[2], s: +m[3], direction: m[4] || null } : null; };
 // 部品の印: ヘッドは HEAD パネルへのリンク、ニューロン(L:Nn)は文字だけ
-const unitChip = (u, extra = "") => (u.kind === "neuron" ? `<span class="mono">L${u.layer} N${u.head ?? u.index}${extra}</span>`
+const unitChip = (u, extra = "") => (u.kind === "neuron" ? `<a href="#" class="pp-head mono" data-neuron="${u.layer}:${u.head ?? u.index}" title="${t("NEURON パネルで開く")}">L${u.layer} N${u.head ?? u.index}${extra}</a>`
   : u.kind === "layer_attn" ? `<span class="mono" title="${t("層の注意の出力全体(attn_output、線形注意の層は ssm_out)")}">L${u.layer} attn${extra}</span>`
   : u.kind === "layer_mlp" ? `<span class="mono" title="${t("層の MLP の出力全体(ffn_down)")}">L${u.layer} ffn${extra}</span>`
   : headChip(u.layer, u.head ?? u.index, extra));
@@ -120,8 +120,19 @@ const headChip = (L, h, extra = "") => `<a href="#" class="pp-head mono" data-he
 // 残りから追加の結果: 表の行(上限の数か "s1")の、土台と合わせたレシピ。v0.8.3 までの結果は key が無く n_new で引く
 const combinedRow = (d, key) => ((d.refine && d.refine.combined_rows) || []).find((c) => String(c.key ?? c.n_new) === String(key)) || null;
 // レシピの欄に読み込むときの名前: 土台(元の組 + それまでの回)と足した組を合わせたもの
+// v0.8.4 からの残りから追加の結果か(合わせたレシピの行に判定がある)。v0.8.3 までは推す組を足した組だけの値で決めていた
+const refineNew = (d) => ((d.refine && d.refine.combined_rows) || []).some((c) => c.verdict);
 const combinedName = (d, c) => `${d.name}-${String(c.key ?? c.n_new) === "s1" ? "s1" : `n${c.key ?? c.n_new}`}-base-plus-added`;
 const roundsUpTo = (k) => (k <= 1 ? t("1 回目") : t("1〜{k} 回目", { k }));
+// 残りから追加の結果の行の判定(合わせたレシピの数で: better / worse / no_gain / replies_break)の注
+const WHY = { remain_up: "残りが増える", effect_down: "組の効きが下がる", b_move: "B 側が A 側へ動く", drift: "B 側の直交成分のずれ", replies_break: "応答が壊れる" };
+const verdictNote = (c) => {
+  if (!c || !c.verdict) return "";
+  const added = c.recommended_added ? ` <span class="muted">${t("(足した組だけの値では推していた)")}</span>` : "";
+  if (c.verdict === "better") return c.recommended ? "" : `<div class="muted note">${t("合わせると良くなる(推す行のほうが良い)")}${added}</div>`;
+  if (c.verdict === "no_gain") return `<div class="muted note">${t("合わせても良くならない(推さない)")}${added}</div>`;
+  return `<div class="note ng">${t("合わせると悪くなる: {w}(推さない)", { w: (c.why || []).map((k) => t(WHY[k] || k)).join("・") })}${added}</div>`;
+};
 const partName = (q) => (q.kind === "neuron" ? `L${q.layer} N${q.head}` : q.kind === "layer_attn" ? `L${q.layer} attn` : q.kind === "layer_mlp" ? `L${q.layer} ffn` : `L${q.layer} H${q.head}`);
 
 // 層ごとの cohen_d の小さな棒グラフ(SVG)。基準層は白、cohen_d 最大の層は緑。棒にマウスを当てると値
@@ -140,12 +151,13 @@ function dChart(layers, base, best) {
 }
 
 export class PipelinePanel {
-  constructor(root, { onRun, onShowDirection, onOpenHead, onLoadProj, onEval, onOverlay, onOpenCandidates, isLoop } = {}) {
+  constructor(root, { onRun, onShowDirection, onOpenHead, onOpenNeuron, onLoadProj, onEval, onOverlay, onOpenCandidates, isLoop } = {}) {
     this.isLoop = isLoop || (() => false);       // 同じ層を 2 回実行するモデル(ループの中の部品の方向の欄を出す)
     this.root = root;
     this.onRun = onRun;                          // (kind, params) → Promise<ジョブ | null>(jobs.js の start。見積もりの確認つき)
     this.onShowDirection = onShowDirection || (() => {});   // (名前) → 上の「方向を見る」でその方向を開く
     this.onOpenHead = onOpenHead || (() => {});   // ({ layer, head, tab }) → HEAD パネル
+    this.onOpenNeuron = onOpenNeuron || null;     // ({ layer, n }) → NEURON パネル(無ければ、ニューロンの印は文字だけ)
     this.onLoadProj = onLoadProj || (() => {});   // (名前, ["L:Hh:sS@NAME"], 方向) → レシピを置き換える
     this.onEval = onEval || (() => {});           // (params, 名前) → 評価の画面へ送る(そこで設定を見て、変えて、始める)
     this.onOverlay = onOverlay || (() => {});     // (field) → 地図の色(causal:<name>)
@@ -394,6 +406,7 @@ export class PipelinePanel {
         ${t("A 平均 {a} → {b}", { a: fmt(c.a_mean_before, 2), b: fmt(c.a_mean_after, 2) })} · B Δ ${sgn(c.b_delta, 2)} · ${t("B ⊥ {a} → {b}", { a: fmt(c.b_drift_orth_base, 3), b: fmt(c.b_drift_orth, 3) })}
         <button class="small" id="pp-rf-load" title="${t("元の組と足した組を合わせたユニット(全部の回)で今のレシピを置き換える")}">${t("合わせた組でレシピを置き換える")}</button>
         <button class="small" id="pp-rf-eval" title="${t("合わせた組のレシピを評価の画面へ送る(強さ 0 と 1、ランダムな向きの比べる用 8 本が入る。始める前に変えられる)")}">${t("合わせた組を評価へ送る")}</button></p>`
+        : (r.combined_rows || []).length ? `<p class="ng"><b>${r.no_recommend === "replies_break" ? t("推せる行の合わせたレシピは、どれも応答が壊れました。足さないほうがよい(土台のままを勧めます)。") : t("どの行も、合わせると元の方向・元の目標で良くならない(残りが減らず、組の効きも上がらない)か、悪くなります。足さないほうがよい(土台のままを勧めます)。")}</b></p>`
         : `<p class="muted">${t("足す組を作れなかったので、合わせた組はありません。")}</p>`}
       ${r.check && !d.writes ? this.refineCheck(r.check) : ""}
       <p class="muted">${t("下の表のどの行も、元の組に足した組です。「レシピを置き換える」「評価へ送る」は、どの行も土台と足した組を合わせたレシピを使います(足した組は土台を当てた状態で探したので、単独では使いません)。強さを上げるのは足した組だけで、土台の部品の強さはそのままです。")}</p></div>`;
@@ -475,8 +488,8 @@ export class PipelinePanel {
       ${(d.reused || []).length ? `<p class="note muted">${t("同じ JSON・同じ設定で作り済みの{w}を使い回しました(作り直すときは「最初から作り直す」に印を付けて流し直す)",
         { w: d.reused.map((x) => (x === "direction" ? t("方向") : x === "causal" ? t("因果の結果") : x)).join(t("と")) })}</p>` : ""}
       <p class="note">${t("目標: L{L} の A 側の射影の値を {v} まで({src})", { L: (d.causal && (d.causal.score_layers || []).slice(-1)[0]) ?? "—", v: fmt(d.target, 2),
-        src: esc(d.target_from === "settings" ? t("設定") : d.target_from ? t(d.target_from) : "—") })}${this.recText(d)}${d.refine
-        ? `<br><span class="muted">${t("(これは足す組を探したときの、新しい方向での目標と推す組です。表の合わせたレシピの数は、元の方向 {dir} の目標 {thr} で測っています)", { dir: esc(d.refine.direction || d.refine.root || d.refine.base), thr: fmt(d.refine.threshold, 2) })}</span>` : ""}</p>
+        src: esc(d.target_from === "settings" ? t("設定") : d.target_from ? t(d.target_from) : "—") })}${this.recText(d)}${this.oldRefineNote(d)}${d.refine
+        ? `<br><span class="muted">${t("(この目標は、足す組を探したときの新しい方向でのものです。表の合わせたレシピの数と推す行は、元の方向 {dir} の目標 {thr} で決めています)", { dir: esc(d.refine.direction || d.refine.root || d.refine.base), thr: fmt(d.refine.threshold, 2) })}</span>` : ""}</p>
       <div class="pp-actions"><button class="small" id="pp-showdir" title="${t("上の「方向を見る」で、この方向の層ごとの射影の値と分布を見る")}">${t("方向を見る")}</button>
         ${d.writes ? "" : `<button class="small" id="pp-map" title="${t("地図の板の上辺のヘッドを、止めたときの下がり方で色付けする")}">${t("地図: 効き")}</button>`}
         ${d.spec ? `<button class="small" id="pp-respec" title="${t("この実行に使った JSON を入力欄に戻す(設定を変えて流し直すため)")}">${t("入力欄に戻す")}</button>` : ""}</div>
@@ -499,6 +512,11 @@ export class PipelinePanel {
     }
     for (const a of out.querySelectorAll("[data-head]")) {
       a.addEventListener("click", (ev) => { ev.preventDefault(); const [L, h] = a.dataset.head.split(":").map(Number); this.onOpenHead({ layer: L, head: h, tab: "causal" }); });
+    }
+    // ニューロンの印: NEURON パネルで開く。同じ層を 2 回実行するモデルの段の番号は地図の層と一致しないので、文字だけにする
+    for (const a of out.querySelectorAll("[data-neuron]")) {
+      if (!this.onOpenNeuron || this.isLoop()) { const sp = document.createElement("span"); sp.className = "mono"; sp.innerHTML = a.innerHTML; a.replaceWith(sp); continue; }
+      a.addEventListener("click", (ev) => { ev.preventDefault(); const [L, n] = a.dataset.neuron.split(":").map(Number); this.onOpenNeuron({ layer: L, n }); });
     }
     this.wireCand(out, d);
     const more = $("#pp-eta-more");
@@ -628,12 +646,24 @@ export class PipelinePanel {
 
   // 見出しの「推す組」: rank writes で、どれも届かないときは組の効きがいちばん大きい組、推す組が無いときはその理由と次の手
   recText(d) {
+    if (d.refine && refineNew(d)) {                                      // 残りから追加の結果: 合わせたレシピの数で推した行
+      const c = d.refine.combined;
+      const k = c ? c.key ?? c.n_new : null;
+      if (c && (k === null || k === undefined)) return ` · <b>${t("推す行あり(合わせたレシピ)")}</b>`;
+      if (c) return ` · <b>${t("推す行(合わせたレシピ): {k}", { k: k === "s1" ? "s=1" : t("上限 {n}", { n: k }) })}</b>`;
+      return ` · <b class="ng">${t("推す行なし: 足さないほうがよい(土台のままを勧めます)")}</b>`;
+    }
     const r = d.recommended;
     if (r && r.reached === false) return ` · <b>${t("推す組: {n} 個(どれも目標に届かないので、組の効きがいちばん大きい組)", { n: r.n_heads })}</b>`;
     if (r) return ` · <b>${t("推す組: {n} ヘッド", { n: r.n_heads })}</b>`;
     if (d.no_recommend) return ` · ${t("推す組なし({r})", { r: t(d.no_recommend.reason) })}<br><span class="muted">${
       t("次の手: 「止めて選ぶ」(v0.7.0 までの選び方、--rank causal)、部品の種類を変える、組の行の「残りから追加」")}</span>`;
     return ` · ${t("推す組なし(どの組も目標に届かない)")}`;
+  }
+
+  // v0.8.3 までの残りから追加の結果には、合わせたレシピの数での判定が無い(推す組は足した組だけの値)
+  oldRefineNote(d) {
+    return d.refine && !refineNew(d) ? `<p class="note muted">${t("v0.8.3 までの残りから追加の結果なので、推す組は足した組だけの値(新しい方向)で決めたものです。合わせたレシピの数で選び直すには、元の結果からもう一度残りから追加してください。")}</p>` : "";
   }
 
   // 1. 方向と基準層
@@ -654,8 +684,10 @@ export class PipelinePanel {
     const share = Object.entries(w.totals_share || {}).filter(([k, x]) => x !== null && (w.n_units || {})[k])
       .map(([k, x]) => `${t(KIND_LABEL[k] || k)} ${sgn(100 * x, 0)}%`).join(" · ");
     const corr = Object.entries(v.spearman || {}).map(([k, x]) => `${k === "all" ? t("部品全体") : t(KIND_LABEL[k] || k)} ${sgn(x.score_vs_gap_drop, 2)}(${t("{n} 個", { n: x.n })})`).join(" · ");
+    const vwhy = (r) => (r.excluded ? `<span class="pp-ex">${t("外した: B 側の直交成分のずれが {d} を超える(ふつうの入力の残差まで大きく動かす)", { d: fmt(a.drift_max ?? 0.5, 2) })}</span>`
+      : r.effect !== undefined && r.effect !== null && r.effect <= 0 ? `<span class="muted">${t("組に使わない: A 側の下がり − B 側の動きの大きさが 0 以下")}</span>` : "");
     const vrows = (v.top || []).map((r, i) => `<tr class="${r.excluded ? "rnd" : ""}"><td>${i + 1}</td><td class="l">${unitChip(r)}</td><td>${t(KIND_LABEL[r.kind] || r.kind)}</td>
-      <td>${sgn(r.score, 3)}</td><td>${sgn(r.gap_drop, 3)}</td><td>${sgn(r.causal, 3)}</td><td>${sgn(r.b_side_delta, 3)}</td><td>${fmt(r.drift_orth_b, 3)}</td></tr>`).join("");
+      <td>${sgn(r.score, 3)}</td><td>${sgn(r.gap_drop, 3)}</td><td>${sgn(r.causal, 3)}</td><td>${sgn(r.b_side_delta, 3)}</td><td>${fmt(r.drift_orth_b, 3)}</td><td class="l">${vwhy(r)}</td></tr>`).join("");
     const stop = { target: t("全部 1"), raised: t("上げて届いた"), s_max: t("上限で止めた"), drift: t("B 側の直交成分のずれで止めた"),
       b_move: t("B 側が A 側へ動くので止めた"), no_gain: t("上げても良くならないので止めた"), iters: t("回数の上限で止めた") };
     const STRENGTH = { per_unit: t("部品ごと"), uniform: t("全部を同じ倍率") };
@@ -676,6 +708,19 @@ export class PipelinePanel {
       const tr = pts.map((p) => `<tr class="${p.feasible ? "" : "ng"}"><td>×${fmt(p.alpha, 2)}</td><td>${fmt(p.a_mean, 2)}</td><td>${sgn(p.b_delta, 2)}</td><td>${fmt(p.b_orth, 3)}</td>${ex(p)}<td>${fmt(p.effect, 2)}</td><td>${p.feasible ? "" : esc(t(p.over === "b_move" ? "B 側が A 側へ動く" : "直交成分のずれ"))}</td></tr>`).join("");
       const exh = X === null || X === undefined ? "" : `<th>${t("段 {L} の B Δ", { L: X })}</th><th>${t("段 {L} の B ⊥", { L: X })}</th>`;
       return `<details class="note"><summary>${t("倍率ごと({n} 点)", { n: pts.length })}</summary><table class="evx mono"><thead><tr><th>${t("倍率")}</th><th>${t("A 平均")}</th><th>B Δ</th><th>B ⊥</th>${exh}<th>${t("効き")}</th><th>${t("上限")}</th></tr></thead><tbody>${tr}</tbody></table></details>`;
+    };
+    const BLOCK = { s_max: "s の上限", b_move: "B 側が A 側へ動く", drift: "直交成分のずれ", limit: "上限" };
+    const probesHTML = (r) => {                                          // 部品ごとの強さ: 回ごとの、残りやすい質問と部品ごとの効率
+      const P = r.probes || [], hs = r.heads || [];
+      if (!P.length) return "";
+      const cell = (p, i) => (p.eff[i] === null || p.eff[i] === undefined ? `<span class="muted">${esc(t(BLOCK[p.blocked[i]] || p.blocked[i] || "—"))}</span>`
+        : `${sgn(p.eff[i], 3)} <span class="muted">s${fmt(p.s[i], 2)}</span>`);
+      const rows = hs.map((h, i) => `<tr><td class="l">${unitChip(h)}</td>${P.map((p) => `<td>${cell(p, i)}</td>`).join("")}<td>${fmt(h.s, 2)}</td></tr>`).join("");
+      const qs = P.map((p) => `<details><summary class="muted">${t("{k} 回目: 射影の値が残りやすい質問 {n} 問(その質問の A 平均 {a})", { k: p.step, n: (p.hard || []).length, a: fmt(p.a_hard, 2) })}</summary>
+        <table class="evx mono dv-ex"><tbody>${(p.questions || []).map((q, j) => `<tr><td class="w">${esc(q)}</td><td>${fmt((p.a_vals || [])[j], 2)}</td></tr>`).join("")}</tbody></table></details>`).join("");
+      return `<details class="note pp-probes"><summary>${t("強さの決め方(部品ごとの効率、{n} 回)", { n: P.length })}</summary>
+        ${noteHTML(t("回ごとに、射影の値が残りやすい A 側の質問を選び直し、部品ごとに s を 1.5 倍にしてみて、その質問での組の効き(A 側の下がり − B 側の動きの大きさ)の増え方を s の増えで割った値(効率)を測ります。上げ幅は効率に比例して配り、効率が 0 以下の部品と上げられない部品は据え置きます。表の値は効率と、そのときの s。"), "muted note")}
+        <table class="evx mono"><thead><tr><th class="l">${t("部品")}</th>${P.map((p) => `<th>${t("{k} 回目", { k: p.step })}</th>`).join("")}<th>${t("決まった s")}</th></tr></thead><tbody>${rows}</tbody></table>${qs}</details>`;
     };
     const hoNote = (r) => {                                              // --holdout: 選ぶのに使っていない質問での数
       const h = r.holdout, H = a.holdout;
@@ -734,13 +779,15 @@ export class PipelinePanel {
     const unitsCell = (key, r, extra) => {
       if (!R) return `<td class="units">${chipsOf(r)}${extra}</td>`;
       const c = combinedRow(d, key);
-      return `<td class="units">${baseChips(c, r)}<div class="pp-added"><span class="pp-round">${t("足した組({k} 回目)", { k: rnd })}</span> ${chipsOf(r)}</div>${dupNote(c)}${cExit(c)}${extra}${addedNote(r)}</td>`;
+      return `<td class="units">${verdictNote(c)}${baseChips(c, r)}<div class="pp-added"><span class="pp-round">${t("足した組({k} 回目)", { k: rnd })}</span> ${chipsOf(r)}</div>${dupNote(c)}${cExit(c)}${extra}${addedNote(r)}</td>`;
     };
-    const s1 = a.s1 ? `<tr class="pp-s1"><td>s=1</td>${unitsCell("s1", a.s1, `<div class="muted note">${kinds(a.s1.kinds)} · ${t("倍率を上げる前(取り除くだけ)")}</div>${R ? "" : hoNote(a.s1) + exitNote(a.s1)}`)}
+    const s1rec = R && refineNew(d) && !!(combinedRow(d, "s1") || {}).recommended;
+    const s1 = a.s1 ? `<tr class="pp-s1${s1rec ? " rec" : ""}"><td>s=1${s1rec ? ` <span class="badge">${t("推奨")}</span>` : ""}</td>${unitsCell("s1", a.s1, `<div class="muted note">${kinds(a.s1.kinds)} · ${t("倍率を上げる前(取り除くだけ)")}</div>${R ? "" : hoNote(a.s1) + exitNote(a.s1)}`)}
         <td>1 / 1 / 1</td>${R ? ccells(combinedRow(d, "s1")) : cells(a.s1)}${btns("s1", a.s1, false)}</tr>` : "";
     const cmp = s1 + (a.table || []).slice().sort((x, y) => y.n_heads - x.n_heads).map((r) => {
       if (r.skipped) return `<tr><td>${r.n_heads}</td><td class="excl" colspan="8">${esc(r.skipped)}</td></tr>`;
-      return `<tr class="${r.recommended ? "rec" : ""}" data-n="${r.n_heads}"><td>${r.n_heads}${r.recommended ? ` <span class="badge">${t("推奨")}</span>` : ""}</td>${unitsCell(r.n_heads, r, `<div class="muted note">${kinds(r.kinds)}</div>${R ? "" : hoNote(r) + exitNote(r)}${steps(r)}`)}
+      const rec = R && refineNew(d) ? !!(combinedRow(d, r.n_heads) || {}).recommended : r.recommended;
+      return `<tr class="${rec ? "rec" : ""}" data-n="${r.n_heads}"><td>${r.n_heads}${rec ? ` <span class="badge">${t("推奨")}</span>` : ""}</td>${unitsCell(r.n_heads, r, `<div class="muted note">${kinds(r.kinds)}</div>${R ? "" : hoNote(r) + exitNote(r)}${steps(r)}${probesHTML(r)}`)}
         <td>${fmt(r.s_max, 2)} / ${fmt(r.s_median, 2)} / ${fmt(r.s_min ?? Math.min(...(r.heads || []).map((h) => h.s)), 2)}<div class="muted note">${esc(stop[r.stop] || r.stop || "")}</div>${R ? `<div class="muted note">${t("足した組の強さ(土台はそのまま)")}</div>` : ""}</td>${R ? ccells(combinedRow(d, r.n_heads)) : cells(r)}${btns(r.n_heads, r, true)}</tr>`;
     }).join("");
     const ck = d.check || (R && R.check);
@@ -756,7 +803,7 @@ export class PipelinePanel {
       ${noteHTML(t("点数の上位を 1 個ずつ s=1 で射影して(または止めて)流し直し、因果スクリーニングと同じ物差しで測ります。測った「A−B の差の縮み」と点数の順位相関を出します。"), "muted note")}
       <p class="note mono">${kinds(v.kinds)}${corr ? ` · ${t("順位相関")} ${corr}` : ""}</p>
       <div class="evx-scroll"><table class="evx mono pp-top"><thead><tr><th>#</th><th class="l">${t("部品")}</th><th>${t("種類")}</th><th title="${t("選ぶ層で s=1 の射影で直接に縮まる A−B の差")}">${t("点数")}</th>
-        <th title="${t("流し直して測った A−B の差の縮み")}">${t("測った縮み")}</th><th title="${t("A 側の射影の値の下がり方")}">${t("A の下がり")}</th><th title="${t("B 側の射影の値の変化")}">B Δ</th><th title="${t("B 側の直交成分のずれ")}">B ⊥</th></tr></thead><tbody>${vrows}</tbody></table></div></section>
+        <th title="${t("流し直して測った A−B の差の縮み")}">${t("測った縮み")}</th><th title="${t("A 側の射影の値の下がり方")}">${t("A の下がり")}</th><th title="${t("B 側の射影の値の変化")}">B Δ</th><th title="${t("B 側の直交成分のずれ")}">B ⊥</th><th></th></tr></thead><tbody>${vrows}</tbody></table></div></section>
       <section class="pp-stage"><h4>${t("5. s=1 から組を作る")}</h4>
       ${noteHTML(t("確かめた部品を、A 側の下がり − B 側の動きの大きい順に、s=1 で 1 個ずつ組に足します(A 側の平均が下がり、組の効きが増え、上限の中のときだけ)。目標に届けば強さは全部 1。届かなければ強さを上げます。部品ごと(既定)では、部品ごとに s を 1.5 倍にしてみて、射影の値が残りやすい質問での組の効きの増え方(効率)を測り、効率に比例して上げ幅を配ることを繰り返します(効く部品は高く、B 側を押す部品は低く。どの部品も 1 より下げず、組から外さない)。s が 1 を超えると成分を反転させるので、B 側(ふつうの入力)が A 側へ動くことがあります。目標に届けば届く最小の上げ幅、届かなければ上限の中で組の効きがいちばん大きい点を使います。効き = A 側の下がり − B 側の動きの大きさ。上限 = B 側の直交成分のずれ {d}、B 側が A 側へ動く量は A と B の差の {m}%。", { d: fmt(a.drift_max ?? 0.5, 2), m: fmt(100 * (a.b_move_max ?? 0.1), 0) }), "muted note")}
       <p class="note">${t("届かないときの強さの決め方")}: <b>${esc(STRENGTH[a.strength || "uniform"] || a.strength || "")}</b>${a.strength ? "" : ` <span class="muted">${t("(v0.8.2 までの結果は全部を同じ倍率)")}</span>`}</p>
@@ -766,7 +813,7 @@ export class PipelinePanel {
       <div class="evx-scroll"><table class="evx mono pp-cmp"><thead><tr><th title="${t("組の部品の数の上限")}">${t("上限")}</th><th class="l" title="${R ? t("薄い字 = 土台の部品(何回目に入ったか)、ふつうの字 = この行で足した部品") : t("組の部品と強さ s")}">${t("部品と強さ")}</th><th title="${t("部品ごとの強さ s の最大・中央値・最小")}">${t("s 最大 / 中央値 / 最小")}</th>
         <th title="${t("目標を超えて残った A 側の例の数")}">${R ? t("残り(前 → 後)") : t("残り")}</th><th title="${t("A 側の射影の値の平均")}">${R ? t("A 平均(前 → 後)") : t("A 平均")}</th><th title="${t("B 側の射影の値の変化")}">B Δ</th>
         <th title="${t("B 側の直交成分のずれ(小さいほど他を壊さない)")}">B ⊥</th><th title="${t("A 側の下がり − B 側の動きの大きさ")}">${t("効き")}</th><th title="${t("A 側の射影の値の平均が目標に届いたか")}">${t("届いた")}</th><th></th></tr></thead><tbody>${cmp}</tbody></table></div>
-      ${noteHTML(t("推奨 = 目標に届いた組のうち、残る例の数が最も少ない組と同程度(A 側の 5% まで)で、B 側のずれが最小の 1.25 倍までの組の中で、部品が最も少ない組。どれも届かなければ、上限の中で組の効きがいちばん大きい組と同程度(差の 5% まで)で部品が最も少ない組。") + (R ? " " + t("残りから追加の結果では、推奨は足した組を新しい方向で測った値で決めています(合わせたレシピの数では決めていません)。") : ""), "muted note")}
+      ${noteHTML(t("推奨 = 目標に届いた組のうち、残る例の数が最も少ない組と同程度(A 側の 5% まで)で、B 側のずれが最小の 1.25 倍までの組の中で、部品が最も少ない組。どれも届かなければ、上限の中で組の効きがいちばん大きい組と同程度(差の 5% まで)で部品が最も少ない組。") + (R ? " " + t("残りから追加の結果では、推奨は合わせたレシピの数(元の方向・元の目標)で決めます。足すと残りが増える・組の効きが下がる・B 側の上限を超える行は推さず、どの行も良くならなければ推しません(足さないほうがよい)。推す行の応答が壊れていれば次の行にします。") : ""), "muted note")}
       ${(a.notes || []).map((x) => `<p class="note ng">${x.code === "s1_low"
         ? t("倍率を上げる前の組(取り除くだけ)は、目標までの差の {p}% しか縮めません。直接書き込む部品の成分を取り除くだけでは届かない題材で、強さを上げて(成分を反転させて)届かせています", { p: fmt(100 * x.closed, 0) })
         : x.code === "loop_inner" ? t("組にループの中の部品(段 {a}〜{b} の重み)が入っています。重みは 2 回とも使われるので、1 回目(段 {c}〜{d})にも効きます", { a: x.lo, b: x.hi, c: x.first[0], d: x.first[1] })
@@ -847,7 +894,8 @@ export class PipelinePanel {
       const chips = (r.heads || []).map((h) => headChip(h.layer, h.head, ` <span class="muted">s${fmt(h.s, 1)}</span>`)).join(" ");
       const c = crow(r.n_heads), off = R && !c ? " disabled" : "";
       const nb = c ? (c.n_base ?? (c.units.length - (r.units || []).length)) : 0;
-      return `<tr class="${r.recommended ? "rec" : ""}" data-n="${r.n_heads}"><td>${r.n_heads}${r.recommended ? ` <span class="badge">${t("推奨")}</span>` : ""}</td><td class="units">${R && c ? `<div class="pp-base">${t("土台 {n} 個(元の組{k})", { n: nb, k: (R.round || 1) > 1 ? t(" + {r}の追加", { r: roundsUpTo(R.round - 1) }) : "" })}</div><div class="pp-added">` : ""}${chips}${R && c ? "</div>" : ""}</td>
+      const rec = R && refineNew(d) ? !!(c || {}).recommended : r.recommended;
+      return `<tr class="${rec ? "rec" : ""}" data-n="${r.n_heads}"><td>${r.n_heads}${rec ? ` <span class="badge">${t("推奨")}</span>` : ""}</td><td class="units">${R ? verdictNote(c) : ""}${R && c ? `<div class="pp-base">${t("土台 {n} 個(元の組{k})", { n: nb, k: (R.round || 1) > 1 ? t(" + {r}の追加", { r: roundsUpTo(R.round - 1) }) : "" })}</div><div class="pp-added">` : ""}${chips}${R && c ? "</div>" : ""}</td>
         <td>${fmt(r.s_max, 2)}</td><td>${r.remain ?? "—"}${nA ? ` / ${nA}` : ""}</td><td>${fmt(r.a_max, 2)}</td><td>${fmt(r.a_mean, 2)}</td><td>${sgn(r.b_side_delta, 2)}</td><td>${fmt(r.b_drift_orth, 3)}</td>
         <td class="${r.reached ? "ok" : "ng"}">${r.reached ? "✓" : "×"}</td>
         <td class="l">${c ? `<div class="note">${t("元の組と合わせると(元の方向・元の目標で): 残り {a} → {b} 問 · A 平均 {ma} → {mb} · B Δ {bd} · B ⊥ {c}", { a: c.remain_before, b: c.remain_after, ma: fmt(c.a_mean_before, 2), mb: fmt(c.a_mean_after, 2), bd: sgn(c.b_delta, 2), c: fmt(c.b_drift_orth, 3) })}</div>` : R ? `<div class="note ng">${t("この行には土台と合わせたレシピがありません")}</div>` : ""}

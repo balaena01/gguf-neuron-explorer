@@ -3377,7 +3377,10 @@ def _refine_text(d: dict) -> str:
              f"2. 残りの質問で一括 → 新しい方向 {pp['direction']}" + (f"(作り済みの{'・'.join({'direction': '方向', 'causal': '因果'}[x] for x in pp['reused'])}を使い回した)" if pp["reused"] else "")]
     rows = d.get("combined_rows") or []
     if rows:
-        lines.append(f"3. 土台と足した組を合わせたレシピ(元の方向・元の目標で測る。前 = 土台だけ、後 = 合わせたもの。強さを上げたのは足した組だけ)")
+        lines.append(f"3. 土台と足した組を合わせたレシピ(元の方向・元の目標で測る。前 = 土台だけ、後 = 合わせたもの。強さを上げたのは足した組だけ。"
+                     "推す行もこの数で決める)")
+        why_ja = {"remain_up": "残りが増える", "effect_down": "組の効きが下がる", "b_move": "B 側が A 側へ動く", "drift": "B 側の直交成分のずれ",
+                  "replies_break": "応答が壊れる"}
         for c in rows:
             lab = "s=1 の組" if c.get("key") == "s1" else f"上限 {c.get('key') or c['n_new']}"
             ao = c.get("added_only") or {}
@@ -3385,7 +3388,9 @@ def _refine_text(d: dict) -> str:
                          f"A 平均 {c['a_mean_before']:.2f} → {c['a_mean_after']:.2f}、B Δ {c.get('b_delta', float('nan')):+.2f}、"
                          f"B ⊥ {c['b_drift_orth_base']:.3f} → {c['b_drift_orth']:.3f}"
                          + (f"、段 {c['exit_after']['layer']} の A {c['exit_before']['a_mean']:.2f} → {c['exit_after']['a_mean']:.2f}" if c.get("exit_after") else "")
-                         + ("  ← 代表" if cb and c["recipe"] == cb["recipe"] else ""))
+                         + ("  ← 推す" if cb and c["recipe"] == cb["recipe"] else "")
+                         + {"worse": f"  [悪くなる: {'・'.join(why_ja.get(k, k) for k in c.get('why') or [])}]", "no_gain": "  [良くならない]",
+                            "replies_break": "  [応答が壊れる]"}.get(c.get("verdict"), ""))
             lines.append(f"      {c['recipe']}")
             for x in c.get("dups") or []:
                 who = {"layer_attn": "attn", "layer_mlp": "ffn", "neuron": f"N{x['head']}"}.get(x["kind"], f"H{x['head']}")
@@ -3394,27 +3399,33 @@ def _refine_text(d: dict) -> str:
             if ao:
                 lines.append(f"      (参考: 足した組だけ、新しい方向で 残り {ao.get('remain')}、A 平均 {ao.get('a_mean') or float('nan'):.2f}"
                              + ("" if ao.get("reached") else "、目標に届かない") + ")")
-        lines.append(f"代表は {Path(cb['recipe']).with_name(d['name'] + '.combined.yaml')} にも置いた({byr})"
-                     + ("(推す組)" if cb["chosen_by"] == "recommended" else "(推す組が無いので、合わせた残りが最も少ない組)"))
+        if cb:
+            lines.append(f"推す行の合わせたレシピは {Path(cb['recipe']).with_name(d['name'] + '.combined.yaml')} にも置いた({byr})")
+        else:
+            lines.append("推す行なし: " + ("推せる行の合わせたレシピは、どれも応答が壊れた。" if d.get("no_recommend") == "replies_break"
+                                          else "どの行も、合わせると元の方向・元の目標で良くならないか悪くなる。")
+                         + "足さないほうがよい(土台のままを勧める)")
         ck = d.get("check")
         if ck:
             r0, r1 = ck["rows"]["none"], ck["rows"]["recipe"]
             cell = lambda x: f"{x['match_finished']}/{x['finished']}" if x.get("match_finished") is not None else f"{x['finished']}/{x['n']}"   # noqa: E731
-            lines.append(f"4. 代表の合わせたレシピで応答での確かめ(validate.match の一致、A / B): 無介入 {cell(r0['A'])} / {cell(r0['B'])}、"
+            lines.append(f"4. {'s=1 の組' if ck.get('key') == 's1' else '上限 ' + str(ck.get('key'))} の合わせたレシピで応答での確かめ"
+                         f"(validate.match の一致、A / B): 無介入 {cell(r0['A'])} / {cell(r0['B'])}、"
                          f"合わせたレシピ {cell(r1['A'])} / {cell(r1['B'])}。空 {r1['A']['empty']}/{r1['B']['empty']}(無介入 {r0['A']['empty']}/{r0['B']['empty']})、"
                          f"繰り返し {r1['A']['loop']}/{r1['B']['loop']}(無介入 {r0['A']['loop']}/{r0['B']['loop']})")
             for w in [ck.get("match_warning"), ck.get("note")] + [f"{sd} 側の応答が壊れている(繰り返し {x['loop']}・空 {x['empty']} / {x['n']})"
                                                               for sd, x in (ck.get("break_warning") or {}).items()]:
                 if w:
                     lines.append(f"   注意: {w}")
-        lines.append(f"確かめる: gne eval --recipe {cb['recipe']} --random-controls 16")
+        if cb:
+            lines.append(f"確かめる: gne eval --recipe {cb['recipe']} --random-controls 16")
         lines.append("足した組だけの表(新しい方向、参考。単独では使わない):")
         for r in pp["table"]:
             if r.get("skipped"):
                 lines.append(f"   {r['n_heads']} 個: {r['skipped']}")
                 continue
             lines.append(f"   {r['n_heads']} 個: 最大 s {r['s_max']:.2f}、残る {r['remain']}  " + " ".join(r["units"])
-                         + ("  ← 推す" if r["recommended"] else "") + ("" if r["reached"] else "(目標に届かない)"))
+                         + ("  (足した組だけの値での推奨)" if r["recommended"] else "") + ("" if r["reached"] else "(目標に届かない)"))
     else:
         lines.append("3. 足す組を作れなかったので、合わせたレシピはありません")
     return "\n".join(lines)

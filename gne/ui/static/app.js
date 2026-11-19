@@ -953,6 +953,7 @@ async function setView(v) {
         pipeline: {                                                       // CHiPS: JSON から方向とヘッドを作る(head_pipeline のジョブ)
           onRun: (kind, params) => jobsBar.start(kind, params),
           onOpenHead: (u) => openHead(u),
+          onOpenNeuron: ({ layer, n }) => openNeuron({ layer, n }),       // 部品の表のニューロン → NEURON パネル
           onLoadProj: (name, specs, dir) => replaceRecipe(name, () => state.recipe.loadProj(name, specs, dir)),
           onEval: (params, label) => sendToEval(params, label),           // 評価へ送る(評価の画面で確かめてから始める)
           onOverlay: (field) => { setView("map"); applyOverlay(field); },

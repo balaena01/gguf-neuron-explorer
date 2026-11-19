@@ -3182,6 +3182,9 @@ def _seed_pipeline_writes_refine(s, root: str = "ppw81") -> dict:
                 "s_median": 1.0, "reached": False, "remain": 4, "a_mean": 5.0, "b_side_delta": 0.1, "b_drift_orth": 0.02, "effect": 12.0,
                 "recipe": str(hd / f"{name}.alloc-s1.yaml")}
     al["recommended"] = 2
+    al["table"][0]["probes"] = [{"step": 1, "hard": [0, 2], "a_vals": [9.0, 7.5], "a_hard": 8.25, "s": [1.0, 1.0, 1.0], "eff": [0.8, None, 0.1],
+                                 "blocked": [None, "b_move", None], "questions": ["Question 0?", "Question 2?"]}]
+    out["verify"]["top"][2]["excluded"] = True                                     # 外した理由の文
     out.pop("check", None)                                                         # 足した組だけの一括では応答での確かめをしない
     rows = []
     for key in ("3", "2", "s1"):
@@ -3193,6 +3196,8 @@ def _seed_pipeline_writes_refine(s, root: str = "ppw81") -> dict:
             if any(u.startswith("12:H5") for u in us) else []
         rows.append({"key": key, "n_new": None if key == "s1" else int(key), "s1": key == "s1", "recipe": str(rp), "units": [p["spec"] for p in parts],
                      "parts": parts, "dups": dups, "n_heads": len(parts), "n_base": 5, "n_added": len(us), "recommended": key == "2",
+                     "recommended_added": key == "3", "verdict": {"3": "worse", "2": "better", "s1": "no_gain"}[key],
+                     "why": ["b_move"] if key == "3" else [],
                      "reached": True, "reached_combined": key != "s1", "remain_before": 3, "remain_after": {"3": 0, "2": 1, "s1": 2}[key],
                      "a_mean_before": 4.0, "a_mean_after": -9.5, "a_max_before": 12.0, "a_max_after": 1.0, "b_mean": -10.0,
                      "b_mean_base": -9.8, "b_mean_after": -9.6, "b_delta_base": 0.2, "b_delta": 0.4, "b_drift_orth_base": 0.06,
@@ -3255,12 +3260,20 @@ def test_pipeline_writes_refine_rows_are_combined(pipe_writes_server, browser):
             continue
         note = pg.evaluate(f"document.querySelector('{res} .pp-refine').textContent")
         assert "2 回目" in note and "ppw81" in note and "元の組 4 個 + 1 回目 1 個 + 2 回目 2 個" in note
-        rows = pg.evaluate(f"""[...document.querySelectorAll('{res} table.pp-cmp tbody tr')].map(tr => ({{
+        rows = pg.evaluate(f"""[...document.querySelectorAll('{res} table.pp-cmp > tbody > tr')].map(tr => ({{
             base: [...tr.querySelectorAll('.pp-base .pp-round')].map(x => x.textContent),
             added: !!tr.querySelector('.pp-added'), text: tr.innerText}}))""")
         assert len(rows) == 4                                                       # s=1、3、2、1
         assert [r["base"] for r in rows] == [["元の組(4)", "1 回目(1)"]] * 3 + [[]] and all(r["added"] for r in rows)
         assert "3 → 0" in rows[1]["text"] and "4.00 → -9.50" in rows[1]["text"]
+        # 推す行は合わせたレシピの数で(上限 2)。上限 3 は合わせると B 側が A 側へ動くので推さない(足した組だけの値では推していた)
+        badges = pg.evaluate(f"[...document.querySelectorAll('{res} table.pp-cmp > tbody > tr')].map(tr => !!tr.querySelector('.badge'))")
+        assert badges == [False, False, True, False]
+        assert "合わせると悪くなる: B 側が A 側へ動く" in rows[1]["text"] and "足した組だけの値では推していた" in rows[1]["text"]
+        assert "合わせても良くならない" in rows[0]["text"]
+        assert "推す行(合わせたレシピ): 上限 2" in pg.evaluate(f"document.querySelector('{res} .pp-res-head').innerText")
+        assert "強さの決め方(部品ごとの効率、1 回)" in rows[1]["text"]                    # 回ごとの質問と部品ごとの効率の表
+        assert "外した: B 側の直交成分のずれ" in pg.evaluate(f"document.querySelector('{res} table.pp-top').innerText")
         assert "2 つの方向" in rows[1]["text"] and "2 つの方向" not in rows[2]["text"]
         assert "合わせたレシピがありません" in rows[3]["text"]
         assert pg.evaluate(f"document.querySelector(\"{res} table.pp-cmp [data-load='1']\").disabled")

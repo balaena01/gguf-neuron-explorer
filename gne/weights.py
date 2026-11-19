@@ -182,6 +182,15 @@ class Weights:
     def has_tensor(self, name: str) -> bool:
         return name in self._tensors
 
+    @property
+    def n_main(self) -> int:
+        """推論の本流で実行される層の数。MTP(nextn)の層は GGUF の block_count に入る(Qwen3.5 の MTP つきの GGUF は 24 + 1 層)が、
+        本流では実行されない(llama.cpp の llama_model_n_layer も数えない)。同じ層を 2 回実行する arch は block_count が実行順の層の数。"""
+        n = self.meta.n_layer
+        k = int(self.field(f"{self.meta.arch}.nextn_predict_layers", 0) or 0)
+        mtp = [L for L in range(n) if f"blk.{L}.nextn.eh_proj.weight" in self._tensors]
+        return min([n - k] + mtp)
+
     def tensor(self, name: str):
         t = self._tensors.get(name)
         if t is None:

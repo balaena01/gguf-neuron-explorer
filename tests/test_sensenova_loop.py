@@ -335,7 +335,7 @@ def test_score_layers_and_candidate_ranges():
     from gne.api import Session
     from gne.loopsearch import visit_ranges
     from gne.steer import GneError
-    fake = SimpleNamespace(weights=SimpleNamespace(loop=plan_from_kinds(KINDS)), meta=SimpleNamespace(n_layer=56))
+    fake = SimpleNamespace(weights=SimpleNamespace(loop=plan_from_kinds(KINDS), n_main=56), meta=SimpleNamespace(n_layer=56))
     assert Session.score_layers_of(fake, "loop") == [27, 51, 54]
     assert Session.score_layers_of(fake, "27,51,54") == [27, 51, 54] and Session.score_layers_of(fake, None) is None
     with pytest.raises(GneError):

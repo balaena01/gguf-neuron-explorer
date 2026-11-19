@@ -119,7 +119,7 @@ def measure_writes(session, ds, cs, *, select_layer: int, positions: str = "last
     if e.hc_streams:
         raise GneError("ARCH_UNSUPPORTED", "残差が複数本の流れのモデル(hyper-connections)の書き込みの順位づけは未対応です")
     S = int(select_layer)
-    n_layer = session.meta.n_layer
+    n_layer = session.weights.n_main                    # MTP(nextn)の層は本流で実行されないので数えない
     if not 1 <= S <= n_layer - 2:
         raise GneError("BAD_ARGS", f"選ぶ層は 1〜{n_layer - 2} です(L{S})")
     kinds = tuple(kinds)
@@ -702,9 +702,12 @@ def allocate_units(session, st, verified: list[dict], *, target: float, n_units=
             if strength == "per_unit":
                 if "a_vals" not in p1:
                     p1 = run(units)
+                probes = []
                 sv, stop, rtrace = _tune(lambda x, a_idx, units=units: run(
                     [ProjHead(u.layer, u.head, xi, u.direction, u.kind) for u, xi in zip(units, x, strict=True)], None, a_idx),
-                    [1.0] * len(units), p1, target, s_max, sc, hard=int(hard))
+                    [1.0] * len(units), p1, target, s_max, sc, hard=int(hard), probes=probes)
+                for pb in probes:                    # 選んだ質問の文(画面でたためる一覧)
+                    pb["questions"] = [_q_text(st.scorer.prompts_side["A"][i]) for i in pb["hard"]]
                 alpha = None
             else:
                 alpha, stop, rtrace = _raise(lambda a, units=units: run([ProjHead(u.layer, u.head, a, u.direction, u.kind)
@@ -713,6 +716,8 @@ def allocate_units(session, st, verified: list[dict], *, target: float, n_units=
                 rtrace = [{k: v for k, v in p.items() if k != "a_vals"} for p in rtrace]
             n_iter = len(rtrace) - 1
         row = finish(units, alpha, f"n{n}", sv)
+        if strength == "per_unit" and p1["a_mean"] > target:
+            row["probes"] = probes
         table.append({"n_heads": n, "n_units": n, **row,
                       "reached": bool(row["a_mean"] <= target + 1e-6 or stop in ("target", "raised")),
                       "iterations": n_iter, "stop": stop, "capped": None, "raise": rtrace, "strength": strength,
@@ -754,6 +759,12 @@ def allocate_units(session, st, verified: list[dict], *, target: float, n_units=
     p.write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
     out["path"] = str(p)
     return out
+
+
+def _q_text(q, n: int = 160) -> str:
+    """質問の短い文(会話の履歴なら最後の user の発話)。"""
+    x = q if isinstance(q, str) else next((m.get("content") or "" for m in reversed(q) if m.get("role") == "user"), "")
+    return x if len(x) <= n else x[:n - 1] + "…"
 
 
 def loop_exit(session, score_layers) -> int | None:
@@ -874,7 +885,7 @@ def hard_of(a_vals, target: float, hard: int) -> list[int]:
 
 
 def _tune(run_s, s0: list[float], p1: dict, target: float, s_max: float, sc: SetScore, *, hard: int = 16,
-          iters: int = TUNE_ITERS) -> tuple[list[float], str, list[dict]]:
+          iters: int = TUNE_ITERS, probes: list | None = None) -> tuple[list[float], str, list[dict]]:
     """部品ごとの強さ(v0.8.3 からの既定)。s0(全部 1)から、毎回
     1. 射影の値が残りやすい A 側の質問(目標を超えたまま残っている質問、hard 個まで。回ごとに選び直す)で、部品ごとに s を PROBE_UP
        倍にしてみて(ほかはそのまま)、A 側の下がり − B 側の動きの大きさの増え方 g_i と、強さ 1 あたりの効率 e_i = g_i / Δs_i を出す。
@@ -886,6 +897,8 @@ def _tune(run_s, s0: list[float], p1: dict, target: float, s_max: float, sc: Set
        効率の向きで組の効きが増えないときだけ、全部を同じ割合で上げる向き(d_i = s_i)で線探索する。
     どちらの向きでも組の効きが増えなければ止める(no_gain。上限を超えたためなら b_move / drift)。部品は外さず、s は 1 以上・s_max 以下。
     run_s(sv, a_idx) は強さ sv の組を、A 側は a_idx の質問(None で全部)で測る(a_vals に質問ごとの値)。p1 は s0 の点(a_vals つき)。
+    probes にリストを渡すと、回ごとに選んだ質問(hard: 添字、a_vals: その値)・部品ごとの s と効率(eff。上げられない部品は None と
+    理由 blocked: s_max / b_move / drift)を足す(画面の「強さの決め方」の表)。
     戻り値 (部品ごとの s, 止まった理由 raised / no_gain / iters / b_move / drift, 測った点の並び)。"""
     tol = GAIN_TOL * sc.gap
     n = len(s0)
@@ -937,15 +950,23 @@ def _tune(run_s, s0: list[float], p1: dict, target: float, s_max: float, sc: Set
         hq = hard_of(cur["a_vals"], target, hard)   # 1. 残りやすい質問で、部品ごとの効率
         a_h = float(np.mean([cur["a_vals"][i] for i in hq]))
         e = [float("-inf")] * n
+        blocked: list[str | None] = [None] * n
         for i in range(n):
             up = clip(s[i] * PROBE_UP)
             if up <= s[i] + 1e-9:
+                blocked[i] = "s_max"
                 continue
             sv = list(s)
             sv[i] = up
             pr = run_s(sv, hq)
             if pr["feasible"]:
                 e[i] = ((a_h - pr["a_mean"]) * sc.sign - (abs(pr["b_delta"]) - abs(cur["b_delta"]))) / (up - s[i])
+            else:
+                blocked[i] = pr.get("over") or "limit"
+        if probes is not None:
+            probes.append({"step": it + 1, "hard": [int(i) for i in hq], "a_vals": [float(cur["a_vals"][i]) for i in hq],
+                           "a_hard": a_h, "s": [float(x) for x in s],
+                           "eff": [None if x == float("-inf") else float(x) for x in e], "blocked": blocked})
         top = max(e)
         res = ("none", None)
         if top > 0:                                  # 2〜3. 効率に比例した向き

@@ -47,6 +47,39 @@ MIN_ROUTED = 200            # MoE: 専門家の観測トークン数がこれよ
 NOISE_LORA_SCALE = 1e-6
 
 
+def refine_verdicts(rows: list[dict], *, n_a: int, gap: float, sign: float, threshold: float,
+                    b_move_max: float = 0.10, drift_max: float = 0.5) -> list[dict]:
+    """残りから追加の合わせたレシピの行に、良くなるか(verdict: better / worse / no_gain と理由 why)を付け、推す順に並べた良くなる行を返す。
+    数はどれも元の方向・元の目標で、前 = 土台だけ、後 = 土台 + 足した組。
+    - worse: 残りが増える(remain_up)、組の効きが差の 1% より下がる(effect_down)、B 側が A 側へ差の 10% より動く(b_move)、
+      B 側の直交成分のずれが 0.5 を超える(drift)。推さない。
+    - better: worse でなく、残りが減るか、組の効きが差の 1% より上がる。それ以外は no_gain。
+    - 推す順: 目標に届く行があれば、残りが最少から A 側の 5% 以内 → B ⊥ が最小の 1.25 倍以内 → 足した部品が少ない → 全体が少ない。
+      届く行が無ければ、組の効きが最大から差の 5% 以内 → 足した部品が少ない。"""
+    tol_e, tol_n = 0.01 * gap, max(1, int(np.ceil(0.05 * n_a)))
+    for c in rows:
+        toward = sign * float(c.get("b_delta") or 0.0) / gap
+        why = [k for k, bad in (("remain_up", c["remain_after"] > c["remain_before"]),
+                                ("effect_down", c["effect"] < c["effect_base"] - tol_e),
+                                ("b_move", toward > b_move_max), ("drift", c["b_drift_orth"] > drift_max)) if bad]
+        good = not why and (c["remain_after"] < c["remain_before"] or c["effect"] > c["effect_base"] + tol_e)
+        c.update(verdict="worse" if why else "better" if good else "no_gain", why=why, b_toward=toward)
+    ok = [c for c in rows if c["verdict"] == "better"]
+    tie = lambda c: (c.get("n_added", 0), c.get("n_heads", 0), rows.index(c))      # noqa: E731
+    reach = [c for c in ok if c["a_mean_after"] <= threshold + 1e-6]
+    if reach:
+        r_min = min(c["remain_after"] for c in reach)
+        near = [c for c in reach if c["remain_after"] <= r_min + tol_n]
+        d_min = min(c["b_drift_orth"] for c in near)
+        first = sorted([c for c in near if c["b_drift_orth"] <= d_min * 1.25 + 1e-4], key=tie)
+    elif ok:
+        e_max = max(c["effect"] for c in ok)
+        first = sorted([c for c in ok if c["effect"] >= e_max - 5 * tol_e], key=tie)
+    else:
+        return []
+    return first + sorted([c for c in ok if c not in first], key=lambda c: (-c["effect"],) + tie(c))
+
+
 def reply_breaks(rows: dict) -> dict:
     """応答での確かめの行(none・recipe → 側 → 数)から、組を当てると繰り返し・空の応答が側の質問の 1/4(2 問以上)増える側。"""
     out = {}
@@ -2328,7 +2361,7 @@ class Session:
             Ls = parse_layers(spec)
         else:
             Ls = [int(x) for x in spec]
-        n = self.meta.n_layer
+        n = self.weights.n_main                                          # MTP の層は本流で実行されないので数えない
         bad = [L for L in Ls if not 0 <= L <= n - 2]
         if bad or not Ls:
             raise GneError("BAD_ARGS", f"射影の値を測る層は 0〜{n - 2} です({bad or spec})")
@@ -2552,7 +2585,7 @@ class Session:
         from .causal import prepare
         from .direction import score_layers_default
         from .unitwrites import allocate_units, measure_writes, parse_kinds, save_writes, verify_rows, verify_units
-        S = int(sel) if sel is not None else self.meta.n_layer - 2        # 既定: 最後に測れる層
+        S = int(sel) if sel is not None else self.weights.n_main - 2      # 既定: 最後に測れる層(MTP の層は数えない)
         kinds = parse_kinds(pipe["unit_kinds"])
         ds = self.direction_set(name)
         ts = time.perf_counter()                                   # 3. 書き込みの順位づけ(質問は全部)
@@ -2689,7 +2722,7 @@ class Session:
         if not re.fullmatch(r"[\w.\-]+", name):
             raise GneError("BAD_ARGS", f"名前 {name!r} は英数字・_・-・. だけにしてください")
         self.engine.free_steer()
-        S = int(select_layer) if select_layer is not None else self.meta.n_layer - 2
+        S = int(select_layer) if select_layer is not None else self.weights.n_main - 2
         summ, arrays = measure_writes(self, ds, cs, select_layer=S, positions=positions, subset=subset,
                                       max_examples=max_examples, kinds=parse_kinds(kinds), direction_layer=direction_layer,
                                       top_q=top_q, loop_direction=loop_direction, progress=self.progress)
@@ -2774,6 +2807,15 @@ class Session:
         rows = [r for r in al["table"] if not r.get("skipped")]
         if not rows:
             raise GneError("BAD_ARGS", f"配分の結果 {name} に使える組がありません")
+        rfp = hd / f"{name}.refine.json"
+        ref0 = json.loads(rfp.read_text(encoding="utf-8")) if rfp.exists() else {}
+        if n_heads is None and "round" in ref0:     # 残りから追加の結果に重ねる: 既定は合わせたレシピの数で推した行(v0.8.3 までの結果は従来どおり)
+            key = next((str(c.get("key") or c.get("n_new")) for c in ref0.get("combined_rows") or [] if c.get("recommended")), None)
+            if key is None or key == "s1":
+                raise GneError("BAD_ARGS", f"{name} には重ねる土台に推す行がありません"
+                               + ("(どの行も足すと良くならない)" if key is None else "(推す行が倍率を上げる前の組 s1)"),
+                               "重ねる行を n_heads(表の行の上限の数)で選んでください")
+            n_heads = int(key)
         if n_heads is None:
             row = next((r for r in rows if r.get("recommended")), rows[0])
         else:
@@ -2927,7 +2969,7 @@ class Session:
             comb_rows.append({"key": key, "n_new": n_new, "s1": n_new is None, "recipe": str(cpath),
                               "units": [q["spec"] for q in parts], "parts": parts, "dups": dups_of(parts),
                               "n_heads": len(parts), "n_base": len(prior_units), "n_added": len(new_units),
-                              "recommended": bool(r.get("recommended")), "reached": bool(r.get("reached")),
+                              "recommended_added": bool(r.get("recommended")), "recommended": False, "reached": bool(r.get("reached")),
                               "reached_combined": after["reached"],
                               "remain_before": before["remain"], "remain_after": after["remain"],
                               "a_mean_before": before["a_mean"], "a_mean_after": after["a_mean"],
@@ -2938,24 +2980,41 @@ class Session:
                               "effect_base": before["effect"], "effect": after["effect"],
                               **({"exit_before": before["exit"], "exit_after": after["exit"]} if X is not None else {}),
                               "added_only": {k_: r.get(k_) for k_ in ("remain", "a_mean", "b_side_delta", "b_drift_orth", "effect", "reached")}})
-        # 代表: 推す組。無ければ(どれも目標に届かない)、合わせた残りが最も少なく、B 側のずれが小さい組
-        comb = next((c for c in comb_rows if c["recommended"]), None) or \
-            min(comb_rows, key=lambda c: (c["remain_after"], c["b_drift_orth"]), default=None)
-        check = None
+        # 推す行: 使うのは合わせたレシピなので、元の方向・元の目標で測った合わせたレシピの数で選ぶ(規則は refine_verdicts)
+        order = refine_verdicts(comb_rows, n_a=int(len(a)), gap=abs(a0m - b0m) or 1.0, sign=sign, threshold=thr)
+        n_chk = check_replies if check_replies is not None else st.get("check_replies")
+        n_chk = 16 if n_chk is None else int(n_chk)
+        cs_chk, val_chk, ho = cs, val, {}
+        if n_chk > 0:
+            rpj = hd / f"{root}.pipeline.json"
+            ho = (json.loads(rpj.read_text(encoding="utf-8")).get("holdout") or {}) if rpj.exists() else {}
+            if ho.get("contrast") and Path(ho["contrast"]).exists():    # 元の一括が選ぶ質問と測る質問を分けていたら、測る質問で
+                cs_chk, val_chk = load_contrast(ho["contrast"])
+        comb, check, why_none = None, None, ("no_better" if not order else None)
+        for c in order[:3]:                         # 5. 推す行の合わせたレシピで、元の一括と同じ応答での確かめ。壊れていれば次の行
+            if n_chk <= 0:
+                comb = c
+                break
+            ck = self.reply_check(cs_chk, val_chk, c["recipe"], n=n_chk, max_tokens=int(check_tokens or st.get("check_tokens") or 512))
+            ck.update(key=c["key"], n_heads=c["n_heads"], held_out_contrast=bool(ho.get("contrast")))
+            c["check"] = {k_: ck.get(k_) for k_ in ("rows", "break_warning", "match_warning", "note")}
+            check = ck
+            if ck.get("break_warning"):
+                c["verdict"], c["why"] = "replies_break", list(c.get("why") or []) + ["replies_break"]
+                continue
+            comb = c
+            break
+        if comb is None and order:
+            why_none = "replies_break"
+        stale = hd / f"{out_name}.combined.yaml"
         if comb is not None:
-            comb = {**comb, "chosen_by": "recommended" if comb["recommended"] else "fewest_remaining"}
-            shutil.copyfile(comb["recipe"], hd / f"{out_name}.combined.yaml")   # 代表は <名前>.combined.yaml にも置く
-            n_chk = check_replies if check_replies is not None else st.get("check_replies")
-            n_chk = 16 if n_chk is None else int(n_chk)
-            if n_chk > 0:                           # 5. 代表の合わせたレシピで、元の一括と同じ応答での確かめ
-                cs_chk, val_chk = cs, val
-                rpj = hd / f"{root}.pipeline.json"
-                ho = (json.loads(rpj.read_text(encoding="utf-8")).get("holdout") or {}) if rpj.exists() else {}
-                if ho.get("contrast") and Path(ho["contrast"]).exists():  # 元の一括が選ぶ質問と測る質問を分けていたら、測る質問で
-                    cs_chk, val_chk = load_contrast(ho["contrast"])
-                check = self.reply_check(cs_chk, val_chk, comb["recipe"], n=n_chk,
-                                         max_tokens=int(check_tokens or st.get("check_tokens") or 512))
-                check.update(key=comb["key"], n_heads=comb["n_heads"], recommended=comb["recommended"], held_out_contrast=bool(ho.get("contrast")))
+            comb["recommended"] = True
+            comb = {**comb, "chosen_by": "combined"}
+            shutil.copyfile(comb["recipe"], stale)   # 代表は <名前>.combined.yaml にも置く
+            if check is not None:
+                check["recommended"] = True
+        else:
+            stale.unlink(missing_ok=True)           # 推す行が無い(足さないほうがよい): 前の代表を残さない
         by_round: dict[int, int] = {}
         for q in (comb or {}).get("parts") or parts_of(prior_units, rounds0):
             by_round[q["round"]] = by_round.get(q["round"], 0) + 1
@@ -2970,13 +3029,13 @@ class Session:
                             "reused": p.get("reused") or [],
                             "table": [{k_: r.get(k_) for k_ in ("n_heads", "units", "s_max", "remain", "reached", "recommended", "skipped")}
                                       for r in alloc["table"]]},
-               "combined": comb, "combined_rows": comb_rows, "check": check,
+               "combined": comb, "combined_rows": comb_rows, "check": check, "no_recommend": why_none,
                "updated": time.strftime("%Y-%m-%dT%H:%M:%S"), "seconds": time.perf_counter() - t0}
         (hd / f"{out_name}.refine.json").write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
         pd = json.loads(Path(p["path"]).read_text(encoding="utf-8"))      # 一括の結果にも、どの組の残りから作ったかを書く
         pd["refine"] = {k_: out[k_] for k_ in ("base", "root", "round", "chain", "direction", "n_heads", "base_units", "base_parts",
                                                "base_measure", "none_measure", "threshold", "score_layer", "loop_exit", "units_by_round",
-                                               "remaining", "combined", "combined_rows", "check")}
+                                               "remaining", "combined", "combined_rows", "check", "no_recommend")}
         Path(p["path"]).write_text(json.dumps(pd, ensure_ascii=False, indent=1), encoding="utf-8")
         out["path"] = str(hd / f"{out_name}.refine.json")
         return out

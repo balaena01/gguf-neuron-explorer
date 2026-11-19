@@ -1013,8 +1013,9 @@ def test_refine_adds_heads_from_remaining_questions(session, tmp_path):
         assert {u.direction for u in rr.units} == {"rf", "rf_r1"}                        # 元の方向と、作り直した方向
         assert c["remain_before"] == rm["n"] and c["b_drift_orth_base"] >= 0
     if rows:
-        cb = out["combined"]
-        assert cb["chosen_by"] in ("recommended", "fewest_remaining") and (hd / "rf_r1.combined.yaml").exists()
+        cb = out["combined"]                                                  # 推す行は合わせたレシピの数で(無ければ足さないほうがよい)
+        assert (cb is None) == (out["no_recommend"] is not None) and (hd / "rf_r1.combined.yaml").exists() == (cb is not None)
+        assert cb is None or (cb["chosen_by"] == "combined" and cb["verdict"] == "better")
         assert pd["refine"]["combined_rows"] == out["combined_rows"]
     again = session.heads_refine("rf", n_heads=2, new_heads=[1])
     assert again["name"] == "rf_r1" and again["pipeline"]["reused"] == ["direction", "causal"]
