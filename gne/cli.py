@@ -2985,6 +2985,7 @@ def heads_pipeline(c: Common, holder: dict,
                    check_tokens: Optional[int] = typer.Option(None, "--check-tokens", help="応答での確かめの長さの上限(既定 512)"),
                    holdout: bool = typer.Option(False, "--holdout", help="--rank writes: 質問を半分に分け、偶数番目で選び、奇数番目(選ぶのに使っていない質問)で表の数と応答の確かめを測る(側ごとに 16 問以上)"),
                    loop_direction: Optional[str] = typer.Option(None, "--loop-direction", help="--rank writes、重みを 2 回使うモデル: ループの中の部品を、1 回目の段(first)か 2 回目の段(second)の方向で測って射影する"),
+                   strength: Optional[str] = typer.Option(None, "--strength", help="--rank writes: s=1 の組が目標に届かないときの強さの決め方。per_unit(既定、部品ごとに、射影の値が残りやすい質問での効率に応じて上げる)/ uniform(全部を同じ倍率、v0.8.2 まで)"),
                    yes: bool = _YES):
     """対照集合から、方向づくり → 基準層 → 候補づくり → 強さの配分 を 1 回で回す。候補づくりと配分は 2 通り:
     --rank writes(既定): 全部の部品(注意ヘッド・線形注意のヘッド、--unit-kinds all で MLP のニューロンも)を方向への書き込みの量で
@@ -2998,7 +2999,7 @@ def heads_pipeline(c: Common, holder: dict,
             "select_layer": select_layer, "candidate_layers": candidate_layers, "always_layers": always_layers,
             "rank": rank, "unit_kinds": unit_kinds, "verify_top": verify_top, "verify_sample": verify_sample, "verify_mode": verify_mode,
             "n_units": _ints(n_units), "check_replies": check_replies, "check_tokens": check_tokens,
-            "holdout": True if holdout else None, "loop_direction": loop_direction}
+            "holdout": True if holdout else None, "loop_direction": loop_direction, "strength": strength}
     _gate(s, "head_pipeline", {"spec": str(spec), **{k: v for k, v in over.items() if v is not None}}, yes, None)
     d = s.heads_pipeline(spec, **over)
     if d.get("writes"):
@@ -3046,7 +3047,9 @@ def heads_pipeline(c: Common, holder: dict,
 
 
 KIND_JA = {"attn": "注意", "linear": "線形注意", "neuron": "ニューロン", "layer_attn": "層の注意全体", "layer_mlp": "層の MLP 全体"}
-WRITES_STOP = {"target": "全部 1", "raised": "全体を上げた", "s_max": "上限で止めた", "drift": "B 側の直交成分のずれで止めた",
+STRENGTH_JA = {"per_unit": "部品ごと", "uniform": "全部を同じ倍率"}
+WRITES_STOP = {"target": "全部 1", "raised": "上げて届いた", "s_max": "上限で止めた", "drift": "B 側の直交成分のずれで止めた",
+               "iters": "回数の上限で止めた",
                "b_move": "B 側が A 側へ動くので止めた", "no_gain": "上げても良くならないので止めた"}
 
 
@@ -3082,7 +3085,7 @@ def _pipeline_writes_lines(d: dict) -> list[str]:
              + "・".join(f"{KIND_JA[k]} {n}" for k, n in ve["kinds"].items() if n) + f"、{ve['seconds']:.0f} 秒)。"
              f"点数と、測った A−B の差の縮みの順位相関: " + _verify_corr_line(ve["spearman"]),
              f"5. s=1 から組を作る(目標 {d['target']:.2f} = {d['target_from']}、候補 {al['pool']} 個。"
-             f"A 側の平均は無介入で {al['base_a_mean']:.2f}):"]
+             f"A 側の平均は無介入で {al['base_a_mean']:.2f}。届かないときの強さの決め方: {STRENGTH_JA.get(al.get('strength') or 'uniform', al.get('strength'))}):"]
     if al.get("holdout"):
         h_ = al["holdout"]
         lines.append(f"   質問を半分に分けた(--holdout): 選ぶのに {d['n_prompts']} 問、表の数を測り直すのに A {h_['n_a']} 問・B {h_['n_b']} 問"
@@ -3092,8 +3095,10 @@ def _pipeline_writes_lines(d: dict) -> list[str]:
             lines.append(f"   上限 {r['n_heads']} 個: {r['skipped']}")
             continue
         kk = "・".join(f"{KIND_JA[k]} {n}" for k, n in r["kinds"].items() if n)
+        strg = (f"強さ {r['s_max']:.2f}" if r.get("alpha") is not None or abs(r["s_max"] - r.get("s_min", r["s_max"])) < 1e-9 else
+                f"強さ 最大 {r['s_max']:.2f}・中央値 {r['s_median']:.2f}・最小 {r['s_min']:.2f}")
         head = f"   s=1(上げる前): {r['n_used']} 個({kk})" if r.get("s1") else \
-            f"   上限 {r['n_heads']} 個: {r['n_used']} 個({kk})、強さ {r['s_max']:.2f}({WRITES_STOP.get(r['stop'], r['stop'])})"
+            f"   上限 {r['n_heads']} 個: {r['n_used']} 個({kk})、{strg}({WRITES_STOP.get(r['stop'], r['stop'])})"
         lines.append(head + f"、A 平均 {r['a_mean']:.2f}、B Δ {r['b_side_delta']:+.2f}、B 直交 {r['b_drift_orth']:.4f}、"
                      f"残る {r['remain']}/{al['n_a']}" + ("" if r.get("effect") is None else f"、効き {r['effect']:.2f}")
                      + ("  ← 推す" if r.get("recommended") else "") + ("" if r["reached"] else "(目標に届かない)"))
@@ -3107,7 +3112,11 @@ def _pipeline_writes_lines(d: dict) -> list[str]:
         if X is not None and bl and b0:              # ループのモデル: 1 回目の出口での変化(ループの中の部品は 1 回目にも効く)
             lines.append(f"      段 {X}(1 回目の出口): A {b0['A']:.2f} → {bl['A']:.2f}、B Δ {bl['B'] - b0['B']:+.2f}"
                          + ("" if bl.get("b_orth") is None else f"、B 直交 {bl['b_orth']:.4f}"))
-        if len(r.get("raise") or []) > 1:           # 倍率ごとの A 平均・B Δ・B 直交(格子の点と、上限の手前を詰めた点)
+        steps_ = [p for p in (r.get("raise") or []) if p.get("phase") == "step"]
+        if steps_:                                   # 部品ごとの強さ: 回ごとに採った点(強さの最大・中央値・最小と、A 平均・B Δ・B 直交)
+            lines.append("      回ごと: " + " | ".join(f"{p['step']}: s {p['s_max']:.1f}/{p['s_median']:.1f}/{p['s_min']:.1f} A {p['a_mean']:.1f} "
+                                                   f"BΔ {p['b_delta']:+.1f} B⊥ {p['b_orth']:.2f}" for p in steps_))
+        elif len(r.get("raise") or []) > 1:         # 倍率ごとの A 平均・B Δ・B 直交(格子の点と、上限の手前を詰めた点)
             edge = [p for p in r["raise"] if p.get("phase") == "edge"]          # 上限の手前を詰めた点は、上限の中で最後の点と超えた最初の点だけ
             keep = [max((p for p in edge if p["feasible"]), key=lambda p: p["alpha"], default=None),
                     min((p for p in edge if not p["feasible"]), key=lambda p: p["alpha"], default=None)]

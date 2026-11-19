@@ -18,15 +18,17 @@ const short = (s, n = 80) => { const x = String(s ?? ""); return x.length > n ? 
 const NAME_RE = /^[\w.-]+$/;
 const PIPE_KEYS = ["positions", "score_positions", "target", "n_heads", "hard", "top_layers", "max_examples", "s_max", "direction_layer", "resume", "name",
                    "rank", "unit_kinds", "verify_top", "verify_sample", "verify_mode", "n_units", "check_replies", "check_tokens",
-                   "score_layers", "select_layer", "candidate_layers", "always_layers", "include_score_layers", "same_reply", "loop_direction", "holdout"];
+                   "score_layers", "select_layer", "candidate_layers", "always_layers", "include_score_layers", "same_reply", "loop_direction", "holdout",
+                   "strength"];
 const DRAFT = "gne.pipeline.draft";               // 入力欄の下書き(このブラウザだけ)
 // 設定の欄 → ジョブの引数(spec の pipeline に値があれば、読み込んだときに欄に入れる)
 const FIELDS = [["target", "#pp-target"], ["n_heads", "#pp-nheads"], ["max_examples", "#pp-mx"], ["positions", "#pp-pos"],
                 ["top_layers", "#pp-tl"], ["hard", "#pp-hard"], ["rank", "#pp-rank"], ["unit_kinds", "#pp-kinds"],
                 ["n_units", "#pp-nunits"], ["verify_top", "#pp-vtop"], ["check_replies", "#pp-ckn"], ["check_tokens", "#pp-ckt"],
-                ["holdout", "#pp-holdout"], ["loop_direction", "#pp-loopdir"]];
+                ["holdout", "#pp-holdout"], ["loop_direction", "#pp-loopdir"], ["strength", "#pp-strength"]];
 const DEFAULTS = { target: "", n_heads: "6,5,4", max_examples: 64, positions: "last", top_layers: 4, hard: 16, rank: "writes", unit_kinds: "heads",
-                   n_units: "24,12,6", verify_top: 64, check_replies: 16, check_tokens: 512, holdout: false, loop_direction: "first" };
+                   n_units: "24,12,6", verify_top: 64, check_replies: 16, check_tokens: 512, holdout: false, loop_direction: "first",
+                   strength: "per_unit" };
 // 欄に値を入れる(チェックボックスは checked、並びはカンマ区切り。null・undefined は既定)
 function setField(el, v, def) {
   const x = v === undefined || v === null || v === "" ? def : v;
@@ -169,10 +171,12 @@ export class PipelinePanel {
         <label class="muted" title="${t("射影の値を測る段(基準層・因果・配分)で使う質問の数(等間隔に間引く)。方向づくりには全部使う")}">${t("測る質問の数")} <input id="pp-mx" type="number" min="4" max="4096" value="${DEFAULTS.max_examples}"></label>
         <label class="muted" title="${t("方向を作る位置。last = 質問の最後のトークン、response = 応答を書かせてその位置(遅い)")}">${t("方向を作る位置")} <select id="pp-pos"><option value="last">${t("質問の最後")}</option><option value="response">${t("応答(遅い)")}</option></select></label>
         <label class="muted" title="${t("候補の探し方。書き込みの量で全部から(既定) = 全部の層の注意ヘッド・線形注意のヘッド(部品で選べばニューロンも)を方向への書き込みの量で並べ、上位を s=1 で確かめてから、s=1 で組に足す(足りないときだけ全体の強さを上げる)。止めて選ぶ = v0.7.0 までの選び方(層ごとに止めた効き目の上位の層のヘッドを 1 個ずつ止め、効率で配り直す)。応答が変わらないときは、もう一方も試す")}">${t("候補の探し方")} <select id="pp-rank"><option value="writes">${t("書き込みの量で全部から(既定)")}</option><option value="causal">${t("止めて選ぶ(v0.7.0 まで)")}</option></select></label>
+        <label class="muted" title="${t("効率を測るときの、射影の値が残りやすい質問(目標を超えたまま残っている A 側の質問)の数。どちらの探し方でも、強さを部品ごとに配るときに使う")}">${t("残りやすい質問の数")} <input id="pp-hard" type="number" min="1" max="1024" value="${DEFAULTS.hard}"></label>
         <label class="muted" title="${t("同じ JSON・同じ設定で作り済みの方向と因果の結果があっても使い回さず、最初から作り直す(止めて流し直すときは外したままにすると配分からやり直せる)")}"><input type="checkbox" id="pp-fresh"> ${t("最初から作り直す")}</label></div>
       <fieldset class="pp-set fx-part" id="pp-fs-writes" aria-describedby="pp-fs-writes-off"><legend class="muted note fx-part-h">${t("書き込みの量で全部から選ぶときの設定")} <span class="pp-fs-off" id="pp-fs-writes-off" hidden>${t("(「止めて選ぶ」では使いません)")}</span></legend>
         <label class="muted" title="${t("書き込みの量で全部から選ぶときの部品の種類")}">${t("部品")} <select id="pp-kinds"><option value="heads">${t("ヘッドだけ(既定)")}</option><option value="all">${t("ヘッド・線形注意・ニューロン")}</option><option value="heads,layers">${t("ヘッドと層全体")}</option><option value="all,layers">${t("ヘッド・ニューロン・層全体")}</option></select></label>
         <label class="muted" title="${t("比べる組の部品の数の上限(カンマ区切り、既定 24,12,6)。上限ごとに組を作り、表で比べる")}">${t("組の大きさの上限")} <input id="pp-nunits" size="8" value="${DEFAULTS.n_units}" spellcheck="false"></label>
+        <label class="muted" title="${t("s=1 の組が目標に届かないときの強さの決め方。部品ごと(既定) = 部品ごとに s を少し上げてみて、射影の値が残りやすい質問での組の効き(A 側の下がり − B 側の動きの大きさ)の増え方に比例して上げ幅を配る(効く部品は高く、B 側を押す部品は低く)。全部を同じ倍率 = v0.8.2 までの決め方")}">${t("強さの決め方")} <select id="pp-strength"><option value="per_unit">${t("部品ごと(既定)")}</option><option value="uniform">${t("全部を同じ倍率(v0.8.2 まで)")}</option></select></label>
         <details class="more" id="pp-more"><summary class="muted">${t("細かい設定")}</summary><div class="pp-set">
           <label class="muted" title="${t("点数の上位から、1 個ずつ s=1 で射影して流し直し、効き目を確かめる部品の数(既定 64)。多いほど時間がかかる")}">${t("確かめる部品の数")} <input id="pp-vtop" type="number" min="1" max="1024" value="${DEFAULTS.verify_top}"></label>
           <label class="muted" title="${t("選んだ組と無介入で応答を書かせ、validate.match に一致した数を数える質問の数(側ごと、既定 16)。0 で行わない")}">${t("応答での確かめの質問の数")} <input id="pp-ckn" type="number" min="0" max="256" value="${DEFAULTS.check_replies}"></label>
@@ -184,7 +188,6 @@ export class PipelinePanel {
       <fieldset class="pp-set fx-part" id="pp-fs-causal" aria-describedby="pp-fs-causal-off"><legend class="muted note fx-part-h">${t("止めて選ぶ(v0.7.0 まで)ときの設定")} <span class="pp-fs-off" id="pp-fs-causal-off" hidden>${t("(「書き込みの量で全部から」では使いません)")}</span></legend>
         <label class="muted" title="${t("比べる組のヘッドの数(カンマ区切り)。少ない組ほど 1 ヘッドの強さが大きくなる")}">${t("ヘッド数")} <input id="pp-nheads" size="8" value="${DEFAULTS.n_heads}" spellcheck="false"></label>
         <label class="muted" title="${t("層ごとのスクリーニングのあと、ヘッドを 1 個ずつ止めて測る層の数")}">${t("ヘッドを測る層の数")} <input id="pp-tl" type="number" min="1" max="64" value="${DEFAULTS.top_layers}"></label>
-        <label class="muted" title="${t("効率を測るときの、射影の値が残りやすい質問の数")}">${t("残りやすい質問の数")} <input id="pp-hard" type="number" min="1" max="1024" value="${DEFAULTS.hard}"></label>
       </fieldset>
       <p class="muted note" id="pp-prio">${t("欄の値が使われます。JSON の pipeline に同じ項目があれば、読み込んだときにその値が欄に入ります(欄を書き換えれば欄の値が優先)。")}</p>
       </div>
@@ -312,7 +315,9 @@ export class PipelinePanel {
     const num = (sel, lo) => { const v = Number(this.$(sel).value); return Number.isInteger(v) && v >= lo ? v : null; };
     const mx = num("#pp-mx", 4);
     if (mx === null) { this.status(t("測る質問の数は 4 以上の整数で"), true); return null; }
-    const p = { spec: c.spec, max_examples: mx, positions: this.$("#pp-pos").value };
+    const hard = num("#pp-hard", 1);
+    if (hard === null) { this.status(t("残りやすい質問の数は 1 以上の整数で"), true); return null; }
+    const p = { spec: c.spec, max_examples: mx, positions: this.$("#pp-pos").value, hard };
     if (this.$("#pp-fresh").checked) p.resume = false;
     p.rank = this.$("#pp-rank").value;                                   // writes(既定)/ causal(v0.7.0 まで)
     if (p.rank === "writes") {
@@ -321,14 +326,14 @@ export class PipelinePanel {
       const vt = num("#pp-vtop", 1), ck = num("#pp-ckn", 0), ct = num("#pp-ckt", 16);
       if (vt === null || ck === null || ct === null) { this.status(t("確かめる部品の数は 1 以上、応答での確かめの質問の数は 0 以上、上限のトークン数は 16 以上の整数で"), true); return null; }
       Object.assign(p, { unit_kinds: this.$("#pp-kinds").value, n_units: nu, verify_top: vt, check_replies: ck, check_tokens: ct,
-                         holdout: this.$("#pp-holdout").checked });
+                         holdout: this.$("#pp-holdout").checked, strength: this.$("#pp-strength").value });
       if (this.isLoop()) p.loop_direction = this.$("#pp-loopdir").value;
     } else {
       const nh = ints("#pp-nheads");
       if (!nh.length || !nh.every((x) => Number.isInteger(x) && x >= 1)) { this.status(t("ヘッド数は 1 以上の整数をカンマ区切りで(例 6,5,4)"), true); return null; }
-      const tl = num("#pp-tl", 1), hard = num("#pp-hard", 1);
-      if (tl === null || hard === null) { this.status(t("ヘッドを測る層の数と残りやすい質問の数は 1 以上の整数で"), true); return null; }
-      Object.assign(p, { n_heads: nh, top_layers: tl, hard });
+      const tl = num("#pp-tl", 1);
+      if (tl === null) { this.status(t("ヘッドを測る層の数は 1 以上の整数で"), true); return null; }
+      Object.assign(p, { n_heads: nh, top_layers: tl });
     }
     const tg = this.$("#pp-target").value.trim();
     if (tg) {
@@ -623,11 +628,17 @@ export class PipelinePanel {
     const corr = Object.entries(v.spearman || {}).map(([k, x]) => `${k === "all" ? t("部品全体") : t(KIND_LABEL[k] || k)} ${sgn(x.score_vs_gap_drop, 2)}(${t("{n} 個", { n: x.n })})`).join(" · ");
     const vrows = (v.top || []).map((r, i) => `<tr class="${r.excluded ? "rnd" : ""}"><td>${i + 1}</td><td class="l">${unitChip(r)}</td><td>${t(KIND_LABEL[r.kind] || r.kind)}</td>
       <td>${sgn(r.score, 3)}</td><td>${sgn(r.gap_drop, 3)}</td><td>${sgn(r.causal, 3)}</td><td>${sgn(r.b_side_delta, 3)}</td><td>${fmt(r.drift_orth_b, 3)}</td></tr>`).join("");
-    const stop = { target: t("全部 1"), raised: t("全体を上げた"), s_max: t("上限で止めた"), drift: t("B 側の直交成分のずれで止めた"),
-      b_move: t("B 側が A 側へ動くので止めた"), no_gain: t("上げても良くならないので止めた") };
+    const stop = { target: t("全部 1"), raised: t("上げて届いた"), s_max: t("上限で止めた"), drift: t("B 側の直交成分のずれで止めた"),
+      b_move: t("B 側が A 側へ動くので止めた"), no_gain: t("上げても良くならないので止めた"), iters: t("回数の上限で止めた") };
+    const STRENGTH = { per_unit: t("部品ごと"), uniform: t("全部を同じ倍率") };
     // 倍率ごとの A 平均・B Δ・B ⊥(格子の点と、上限の手前を詰めた点。超 = 上限を超えた点)
     const X = a.loop_exit;                                               // ループのモデル: 1 回目の出口の段
     const steps = (r) => {
+      const st = (r.raise || []).filter((p) => p.phase === "step");          // 部品ごとの強さ: 回ごとに採った点
+      if (st.length) {
+        const tr = st.map((p) => `<tr><td>${p.step}</td><td>${fmt(p.s_max, 2)} / ${fmt(p.s_median, 2)} / ${fmt(p.s_min, 2)}</td><td>${fmt(p.a_mean, 2)}</td><td>${sgn(p.b_delta, 2)}</td><td>${fmt(p.b_orth, 3)}</td><td>${fmt(p.effect, 2)}</td></tr>`).join("");
+        return `<details class="note"><summary>${t("回ごと({n} 回)", { n: st.length })}</summary><table class="evx mono"><thead><tr><th>${t("回")}</th><th>${t("s 最大 / 中央値 / 最小")}</th><th>${t("A 平均")}</th><th>B Δ</th><th>B ⊥</th><th>${t("効き")}</th></tr></thead><tbody>${tr}</tbody></table></details>`;
+      }
       // 上限の手前を詰めた点は、上限の中で最後の点と超えた最初の点だけ
       const edge = (r.raise || []).filter((p) => p.phase === "edge");
       const lastOk = edge.filter((p) => p.feasible).sort((x, y) => y.alpha - x.alpha)[0], firstNg = edge.filter((p) => !p.feasible).sort((x, y) => x.alpha - y.alpha)[0];
@@ -655,11 +666,11 @@ export class PipelinePanel {
         <td>${sgn(r.b_side_delta, 2)}</td><td>${fmt(r.b_drift_orth, 3)}</td><td>${r.effect === undefined ? "—" : fmt(r.effect, 2)}</td><td class="${r.reached ? "ok" : "ng"}">${r.reached ? "✓" : "×"}</td>`;
     const chipsOf = (r) => (r.heads || []).map((h) => unitChip(h, ` <span class="muted">s${fmt(h.s, 2)}</span>`)).join(" ");
     const s1 = a.s1 ? `<tr class="pp-s1"><td>s=1</td><td class="units">${chipsOf(a.s1)}<div class="muted note">${kinds(a.s1.kinds)} · ${t("倍率を上げる前(取り除くだけ)")}</div>${hoNote(a.s1)}${exitNote(a.s1)}</td>
-        <td>1 / 1</td>${cells(a.s1)}${btns("s1", a.s1, false)}</tr>` : "";
+        <td>1 / 1 / 1</td>${cells(a.s1)}${btns("s1", a.s1, false)}</tr>` : "";
     const cmp = s1 + (a.table || []).slice().sort((x, y) => y.n_heads - x.n_heads).map((r) => {
       if (r.skipped) return `<tr><td>${r.n_heads}</td><td class="excl" colspan="8">${esc(r.skipped)}</td></tr>`;
       return `<tr class="${r.recommended ? "rec" : ""}" data-n="${r.n_heads}"><td>${r.n_heads}${r.recommended ? ` <span class="badge">${t("推奨")}</span>` : ""}</td><td class="units">${chipsOf(r)}<div class="muted note">${kinds(r.kinds)}</div>${hoNote(r)}${exitNote(r)}${steps(r)}</td>
-        <td>${fmt(r.s_max, 2)} / ${fmt(r.s_median, 2)}<div class="muted note">${esc(stop[r.stop] || r.stop || "")}</div></td>${cells(r)}${btns(r.n_heads, r, true)}</tr>`;
+        <td>${fmt(r.s_max, 2)} / ${fmt(r.s_median, 2)} / ${fmt(r.s_min ?? Math.min(...(r.heads || []).map((h) => h.s)), 2)}<div class="muted note">${esc(stop[r.stop] || r.stop || "")}</div></td>${cells(r)}${btns(r.n_heads, r, true)}</tr>`;
     }).join("");
     const ck = d.check;
     const cell = (x) => (x.match_finished !== null && x.match_finished !== undefined ? `${x.match_finished}/${x.finished}` : `${x.finished}/${x.n}`);
@@ -676,9 +687,10 @@ export class PipelinePanel {
       <div class="evx-scroll"><table class="evx mono pp-top"><thead><tr><th>#</th><th class="l">${t("部品")}</th><th>${t("種類")}</th><th title="${t("選ぶ層で s=1 の射影で直接に縮まる A−B の差")}">${t("点数")}</th>
         <th title="${t("流し直して測った A−B の差の縮み")}">${t("測った縮み")}</th><th title="${t("A 側の射影の値の下がり方")}">${t("A の下がり")}</th><th title="${t("B 側の射影の値の変化")}">B Δ</th><th title="${t("B 側の直交成分のずれ")}">B ⊥</th></tr></thead><tbody>${vrows}</tbody></table></div></section>
       <section class="pp-stage"><h4>${t("5. s=1 から組を作る")}</h4>
-      ${noteHTML(t("確かめた部品を、A 側の下がり − B 側の動きの大きい順に、s=1 で 1 個ずつ組に足します(A 側の平均が下がり、組の効きが増え、上限の中のときだけ)。目標に届けば強さは全部 1。届かなければ組の全部の強さを同じ倍率で上げます。s が 1 を超えると成分を反転させるので、B 側(ふつうの入力)が A 側へ動くことがあります。倍率ごとに測り、目標に届けば届く最小の倍率、届かなければ上限の中で組の効きがいちばん大きい倍率を使います。効き = A 側の下がり − B 側の動きの大きさ。上限 = B 側の直交成分のずれ {d}、B 側が A 側へ動く量は A と B の差の {m}%。", { d: fmt(a.drift_max ?? 0.5, 2), m: fmt(100 * (a.b_move_max ?? 0.1), 0) }), "muted note")}
+      ${noteHTML(t("確かめた部品を、A 側の下がり − B 側の動きの大きい順に、s=1 で 1 個ずつ組に足します(A 側の平均が下がり、組の効きが増え、上限の中のときだけ)。目標に届けば強さは全部 1。届かなければ強さを上げます。部品ごと(既定)では、部品ごとに s を 1.5 倍にしてみて、射影の値が残りやすい質問での組の効きの増え方(効率)を測り、効率に比例して上げ幅を配ることを繰り返します(効く部品は高く、B 側を押す部品は低く。どの部品も 1 より下げず、組から外さない)。s が 1 を超えると成分を反転させるので、B 側(ふつうの入力)が A 側へ動くことがあります。目標に届けば届く最小の上げ幅、届かなければ上限の中で組の効きがいちばん大きい点を使います。効き = A 側の下がり − B 側の動きの大きさ。上限 = B 側の直交成分のずれ {d}、B 側が A 側へ動く量は A と B の差の {m}%。", { d: fmt(a.drift_max ?? 0.5, 2), m: fmt(100 * (a.b_move_max ?? 0.1), 0) }), "muted note")}
+      <p class="note">${t("届かないときの強さの決め方")}: <b>${esc(STRENGTH[a.strength || "uniform"] || a.strength || "")}</b>${a.strength ? "" : ` <span class="muted">${t("(v0.8.2 までの結果は全部を同じ倍率)")}</span>`}</p>
       ${a.holdout ? `<p class="note">${t("質問を半分に分けました: 偶数番目で選び、奇数番目(選ぶのに使っていない質問、A {a} 問・B {b} 問)で各行の数と応答の確かめを測り直しています(目標 {t})", { a: a.holdout.n_a, b: a.holdout.n_b, t: fmt(a.holdout.target, 2) })}</p>` : ""}
-      <div class="evx-scroll"><table class="evx mono pp-cmp"><thead><tr><th>${t("上限")}</th><th class="l">${t("部品と強さ")}</th><th>${t("s 最大 / 中央値")}</th>
+      <div class="evx-scroll"><table class="evx mono pp-cmp"><thead><tr><th>${t("上限")}</th><th class="l">${t("部品と強さ")}</th><th>${t("s 最大 / 中央値 / 最小")}</th>
         <th title="${t("目標を超えて残った A 側の例の数")}">${t("残り")}</th><th title="${t("A 側の射影の値の平均")}">${t("A 平均")}</th><th title="${t("B 側の射影の値の変化")}">B Δ</th>
         <th title="${t("B 側の直交成分のずれ(小さいほど他を壊さない)")}">B ⊥</th><th title="${t("A 側の下がり − B 側の動きの大きさ")}">${t("効き")}</th><th>${t("届いた")}</th><th></th></tr></thead><tbody>${cmp}</tbody></table></div>
       ${(a.notes || []).map((x) => `<p class="note ng">${x.code === "s1_low"

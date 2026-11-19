@@ -285,7 +285,11 @@ def estimate(session, kind: str, params: dict) -> dict:
         else:                                                  # rank writes: 順位づけ(全部の質問)+ 上位の確かめ + s=1 から組 + 応答での確かめ
             n_ver = int(pipe.get("verify_top", 64)) + int(pipe.get("verify_sample", 16))
             nu = [int(x) for x in (pipe.get("n_units") or (24, 12, 6))]
-            trials = n_ver + max(nu) + len(nu) * 12
+            if (pipe.get("strength") or "per_unit") == "per_unit":   # 部品ごと: 毎回、部品の数だけ試す(残りやすい質問だけで。4 回と見て)
+                hr = int(pipe.get("hard") or 16)
+                trials = int(n_ver + max(nu) + sum(min(n_, max(nu)) * 4 * (hr + b) / (mx + b) + 5 * 4 for n_ in nu))
+            else:
+                trials = n_ver + max(nu) + len(nu) * 12
             prefills = 2 * n * 2 + 2 * mx + 2 * n + trials * (mx + b)
             ck = 16 if pipe.get("check_replies") is None else int(pipe.get("check_replies"))
             gen = 2 * sp.gen(2 * min(ck, n), int(pipe.get("check_tokens") or 512)) if ck > 0 else 0.0

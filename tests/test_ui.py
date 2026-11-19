@@ -3269,21 +3269,25 @@ def test_pipeline_writes_fields(pipe_writes_server, browser):
               "document.querySelector('#pp-fs-writes-off').hidden, document.querySelector('#pp-fs-causal-off').hidden]"
         assert pg.evaluate(dis) == [False, True, True, False]                          # 既定(書き込みの量): 止めて選ぶ用の欄は無効
         assert pg.evaluate("[document.querySelector('#pp-loopdir').disabled, document.querySelector('#pp-loopdir-off').hidden]") == [True, False]
-        for sel in ("#pp-nunits", "#pp-vtop", "#pp-ckn", "#pp-ckt", "#pp-holdout", "#pp-loopdir", "#pp-nheads", "#pp-tl", "#pp-hard"):
+        assert pg.evaluate("document.querySelector('#pp-strength').value") == "per_unit"          # 既定は部品ごと(v0.8.3)
+        for sel in ("#pp-nunits", "#pp-vtop", "#pp-ckn", "#pp-ckt", "#pp-holdout", "#pp-loopdir", "#pp-strength", "#pp-nheads", "#pp-tl", "#pp-hard"):
             assert pg.evaluate(f"!!document.querySelector('{sel}').closest('label').title"), sel   # どの欄にも短い説明
         assert pg.evaluate("document.querySelector('#pp-prio').textContent").strip()
         spec = {"name": "fw", "system_a": "You are a pirate.", "system_b": "You are a helpful assistant.",
                 "user_prompts": [f"Question {i}?" for i in range(6)],
-                "pipeline": {"n_units": [8, 4], "verify_top": 12, "holdout": True, "check_replies": 0, "check_tokens": 64, "unit_kinds": "all"}}
+                "pipeline": {"n_units": [8, 4], "verify_top": 12, "holdout": True, "check_replies": 0, "check_tokens": 64, "unit_kinds": "all",
+                             "strength": "uniform"}}
         _step(pg, "chips", "input")
         pg.fill("#pp-text", json.dumps(spec))
         pg.dispatch_event("#pp-text", "input")
         vals = "[...['#pp-nunits', '#pp-vtop', '#pp-ckn', '#pp-ckt', '#pp-kinds']].map(s => document.querySelector(s).value)"
         assert pg.evaluate(vals) == ["8,4", "12", "0", "64", "all"] and pg.evaluate("document.querySelector('#pp-holdout').checked")
+        assert pg.evaluate("document.querySelector('#pp-strength').value") == "uniform"
         p = pg.evaluate("window.gne.directionView.pipe.params()")
-        assert (p["rank"], p["n_units"], p["verify_top"], p["holdout"], p["check_replies"], p["check_tokens"], p["unit_kinds"]) == \
-            ("writes", [8, 4], 12, True, 0, 64, "all")
-        assert not ({"n_heads", "top_layers", "hard", "loop_direction"} & set(p))      # 止めて選ぶ用の欄・ループのモデルだけの欄は渡さない
+        assert (p["rank"], p["n_units"], p["verify_top"], p["holdout"], p["check_replies"], p["check_tokens"], p["unit_kinds"], p["strength"]) == \
+            ("writes", [8, 4], 12, True, 0, 64, "all", "uniform")
+        assert p["hard"] == 16                                                       # 残りやすい質問の数はどちらの探し方でも使う(v0.8.3)
+        assert not ({"n_heads", "top_layers", "loop_direction"} & set(p))             # 止めて選ぶ用の欄・ループのモデルだけの欄は渡さない
         pg.evaluate("document.querySelector('#pp-more').open = true")
         pg.fill("#pp-vtop", "20")                                                     # 欄を書き換えれば欄の値(JSON の pipeline より優先)
         pg.click("#pp-holdout")
@@ -3295,7 +3299,7 @@ def test_pipeline_writes_fields(pipe_writes_server, browser):
         pg.select_option("#pp-rank", "causal")                                       # 止めて選ぶ: 書き込みの量の欄は無効、渡すのは止めて選ぶ用の欄
         assert pg.evaluate(dis) == [True, False, False, True]
         p = pg.evaluate("window.gne.directionView.pipe.params()")
-        assert p["rank"] == "causal" and p["n_heads"] == [6, 5, 4] and not ({"n_units", "verify_top", "holdout", "unit_kinds"} & set(p))
+        assert p["rank"] == "causal" and p["n_heads"] == [6, 5, 4] and not ({"n_units", "verify_top", "holdout", "unit_kinds", "strength"} & set(p))
         pg.select_option("#pp-rank", "writes")
         pg.evaluate("const v = window.gne.directionView.pipe; v.isLoop = () => true; v.rankFields()")   # 同じ層を 2 回実行するモデル
         assert not pg.evaluate("document.querySelector('#pp-loopdir').disabled")

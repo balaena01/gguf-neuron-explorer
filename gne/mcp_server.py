@@ -484,7 +484,7 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
                              max_examples: int | None = None, resume: bool = True, rank: str | None = None,
                              unit_kinds: str | None = None, n_units: list[int] | None = None,
                              check_replies: int | None = None, holdout: bool | None = None,
-                             loop_direction: str | None = None) -> dict:
+                             loop_direction: str | None = None, strength: str | None = None) -> dict:
         """対照集合(name・user_prompts か側ごとの質問 prompts_a / prompts_b・system_a / system_b か recipe_a / recipe_b、
         任意で pipeline の設定。表か JSON / YAML の
         パス)から、方向づくり → 基準層 → 候補づくり → 強さの配分 をジョブで 1 回で回す(job_status で結果)。質問は何百個でもよく、止めて測る段階は max_examples 個
@@ -501,11 +501,12 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
         unit_kinds は heads / all / neurons / layers(層の注意の出力全体・MLP の出力全体、ユニット "L:attn:sS@NAME"・"L:ffn:sS@NAME")と、
         そのカンマ区切り(例 "heads,layers")。holdout=True で質問を半分に分け、偶数番目で選び、奇数番目(選ぶのに使っていない質問)で
         表の数(allocate.table[].holdout)と応答の確かめを測る。loop_direction は重みを 2 回使うモデルでループの中の部品に使う方向の段
-        (first / second)。"""
+        (first / second)。strength は s=1 の組が目標に届かないときの強さの決め方: "per_unit"(既定。部品ごとに、射影の値が残りやすい
+        質問での効率に応じて上げる。強さは部品ごとに違う)/ "uniform"(全部を同じ倍率、v0.8.2 まで)。"""
         try:
             p = {"spec": spec, "target": target, "n_heads": n_heads, "max_examples": max_examples,
                  "resume": None if resume else False, "rank": rank, "unit_kinds": unit_kinds, "n_units": n_units,
-                 "check_replies": check_replies, "holdout": holdout, "loop_direction": loop_direction}
+                 "check_replies": check_replies, "holdout": holdout, "loop_direction": loop_direction, "strength": strength}
             return jobs.start("head_pipeline", {k: v for k, v in p.items() if v is not None}).view()
         except Exception as e:  # noqa: BLE001
             return _err(e)

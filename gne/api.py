@@ -2264,8 +2264,8 @@ class Session:
     # 指定で足す)。rank 以外は writes のときだけ使う設定(causal の結果の settings には rank だけを載せる)
     PIPELINE_WRITES = {"rank": "writes", "unit_kinds": "heads", "verify_top": 64, "verify_sample": 16, "verify_mode": "proj",
                        "n_units": [24, 12, 6], "check_replies": None, "check_tokens": 512, "loop_direction": None,
-                       "holdout": False}
-    CAUSAL_ONLY = ("n_heads", "hard", "top_layers", "always_layers", "include_score_layers")   # rank causal だけで使う設定
+                       "holdout": False, "strength": "per_unit"}
+    CAUSAL_ONLY = ("n_heads", "top_layers", "always_layers", "include_score_layers")   # rank causal だけで使う設定(hard は両方で使う)
 
     def _loop_pipeline_defaults(self, pipe: dict) -> dict | None:
         """同じ層を 2 回実行するモデル(sensenova_loop)の一括の既定。測る層を指定しなければ loop(段 27・51・54)・選ぶ層 54 にする
@@ -2375,6 +2375,9 @@ class Session:
             parse_kinds(pipe["unit_kinds"])                             # 書き方の誤りは流す前に返す
             if pipe["verify_mode"] not in ("proj", "ablate"):
                 raise GneError("BAD_ARGS", "verify_mode は proj(s=1 で射影)か ablate(出力を 0)です")
+            from .unitwrites import STRENGTHS
+            if (pipe.get("strength") or "per_unit") not in STRENGTHS:
+                raise GneError("BAD_ARGS", f"strength は {' / '.join(STRENGTHS)} です({pipe.get('strength')!r})")
         else:                                       # v0.7.0 までの流れ: writes の設定は使わない(settings には rank だけを残す)
             for k in self.PIPELINE_WRITES:
                 if k != "rank":
@@ -2583,7 +2586,8 @@ class Session:
                                          for L in st.score_layers}}
         a = allocate_units(self, st, ver["rows"], target=float(tgt), n_units=[int(x) for x in pipe["n_units"]],
                            s_max=float(pipe["s_max"]), name=name, direction_layer=pipe["direction_layer"],
-                           remain_threshold=float(tgt), max_examples=mx, progress=self.progress)
+                           remain_threshold=float(tgt), max_examples=mx, strength=str(pipe.get("strength") or "per_unit"),
+                           hard=int(pipe.get("hard") or 16), progress=self.progress)
         cs_chk, val_chk = cs, val
         if spec_rep is not None:                                   # 表の数を、選ぶのに使っていない質問で測り直す
             cs_chk, val_chk, out["holdout"] = self._pipeline_holdout(st, ds, spec_rep, a, pipe, sp, mx)

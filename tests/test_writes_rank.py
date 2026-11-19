@@ -353,6 +353,71 @@ def test_raise_keeps_low_alpha_when_raising_does_not_help():
     assert stop == "drift" and alpha <= 10.0 and alpha > 7.0
 
 
+def _tune_case(W, a0, b_of, sc):
+    """部品ごとの強さの試し: 質問ごとの A の値 = a0_q − Σ_i W[q][i]·(s_i − 1)、B 側の平均 = b_of(s)。run_s(sv, a_idx) を返す。"""
+    calls = []
+
+    def run_s(sv, a_idx=None):
+        calls.append((list(sv), None if a_idx is None else list(a_idx)))
+        vals = [a0[q] - sum(W[q][i] * (sv[i] - 1) for i in range(len(sv))) for q in range(len(a0))]
+        idx = range(len(a0)) if a_idx is None else a_idx
+        pt = sc.point(max(sv), float(np.mean([vals[q] for q in idx])), b_of(sv), 0.05)
+        if a_idx is None:
+            pt["a_vals"] = vals
+        return pt
+    return run_s, calls
+
+
+def test_tune_per_unit_strengths():
+    """v0.8.3: 部品ごとの強さ。部品は外れず s は 1 以上。射影の値が残りやすい質問(hard)に効く部品が先に・高く上がり、
+    上げると B 側を A 側へ押す部品は上がらない。目標に届けば届く最小の上げ幅で止める。効率は hard の質問だけで測る。"""
+    from gne.unitwrites import SetScore, _raise, _tune
+    sc = SetScore(base_a=60.0, base_b=-40.0, drift_max=0.5, b_move_max=0.10)     # 差 100、B が A 側へ動いてよいのは 10 まで
+    W = [[12, 0, 1], [12, 0, 1], [0, 1, 6], [0, 1, 6]]                            # 部品 0 は残りやすい質問 0・1 に効く
+    a0 = [50.0, 48.0, 10.0, 8.0]
+    b_of = lambda sv: -40.0 + 4.0 * max(0.0, sv[1] - 1) ** 1.2                     # noqa: E731  部品 1 は上げると B 側が A 側へ
+    run_s, calls = _tune_case(W, a0, b_of, sc)
+    p1 = run_s([1.0, 1.0, 1.0])
+    sv, stop, trace = _tune(run_s, [1.0, 1.0, 1.0], p1, target=0.0, s_max=30.0, sc=sc, hard=2)
+    assert len(sv) == 3 and min(sv) >= 1.0 and stop == "raised"                   # 部品は外さない
+    assert sv[1] == 1.0 and sv[0] > sv[2]                                          # B 側を押す部品は上がらない、効く部品が高い
+    end = run_s(sv)
+    assert end["a_mean"] <= 1e-6 and end["feasible"]
+    probes = [sorted(a) for _, a in calls if a is not None]
+    assert probes[:3] == [[0, 1]] * 3 and all(len(a) == 2 for a in probes)       # 効率は残りやすい質問(2 問)だけで測る(回ごとに選び直す)
+    first = next(p for p in trace if p.get("phase") == "line")
+    assert first["s_max"] > first["s_min"] == 1.0                                  # 最初の上げ幅は効く部品に寄る
+    assert all({"s_max", "s_median", "s_min", "a_mean", "b_delta", "b_orth", "effect"} <= set(p) and "a_vals" not in p for p in trace)
+
+
+def test_tune_stops_at_limits():
+    """上限で止まる: 効く部品も B 側を押すときは、B 側の動きの上限の手前で止まる。s は s_max を超えない。効かない組は上げない。"""
+    from gne.unitwrites import SetScore, _tune
+    sc = SetScore(base_a=60.0, base_b=-40.0, drift_max=0.5, b_move_max=0.10)
+    run_s, _ = _tune_case([[5, 0], [5, 0]], [50.0, 50.0], lambda sv: -40.0 + 3.0 * (sv[0] - 1), sc)   # B が A 側へ 3/強さ
+    sv, stop, _ = _tune(run_s, [1.0, 1.0], run_s([1.0, 1.0]), target=-40.0, s_max=30.0, sc=sc)
+    assert stop in ("b_move", "no_gain") and run_s(sv)["feasible"] and run_s(sv)["b_toward"] <= 0.10 and sv[1] == 1.0
+    run_s, _ = _tune_case([[0.5, 0]], [50.0], lambda sv: -40.0, sc)                # 弱い部品だけ: s_max で止まる
+    sv, stop, _ = _tune(run_s, [1.0], run_s([1.0]), target=-40.0, s_max=30.0, sc=sc, iters=20)
+    assert max(sv) <= 30.0 + 1e-9
+    run_s, _ = _tune_case([[0, 0]], [50.0], lambda sv: -40.0, sc)                  # 効かない: 上げない
+    sv, stop, _ = _tune(run_s, [1.0], run_s([1.0]), target=-40.0, s_max=30.0, sc=sc)
+    assert (sv, stop) == ([1.0], "no_gain")
+
+
+def test_tune_beats_uniform_when_one_unit_pushes_b():
+    """一律では B 側を押す部品も一緒に上がるので上限で止まり届かない題材で、部品ごとなら届く(同じ部品の組)。"""
+    from gne.unitwrites import SetScore, _raise, _tune
+    sc = SetScore(base_a=60.0, base_b=-40.0, drift_max=0.5, b_move_max=0.10)
+    W = [[12, 2, 3]] * 2
+    run_s, _ = _tune_case(W, [30.0, 30.0], lambda sv: -40.0 + 4.0 * max(0.0, sv[1] - 1) ** 1.2, sc)
+    p1 = run_s([1.0, 1.0, 1.0])
+    sv, stop, _ = _tune(run_s, [1.0, 1.0, 1.0], p1, target=-40.0, s_max=30.0, sc=sc)
+    a_u, stop_u, _ = _raise(lambda a: run_s([a, a, a]), p1, -40.0, 30.0, sc)
+    assert stop == "raised" and run_s(sv)["a_mean"] <= -40.0 + 1e-6
+    assert stop_u in ("b_move", "no_gain") and run_s([a_u] * 3)["a_mean"] > -40.0
+
+
 def test_recommend_when_no_set_reaches():
     """どれも届かなければ、上限の中で組の効きが最大(差の 5% 以内なら数が少ない組)を推す。どれも満たさなければ推さず、理由と次の手。"""
     from gne.unitwrites import SetScore, _recommend
@@ -523,12 +588,13 @@ def test_pipeline_rank_writes_end_to_end(session):
             continue
         assert Path(r["recipe"]).exists() and r["n_used"] <= r["n_heads"] and r["s_max"] >= 1.0
         rec = Recipe.load(r["recipe"])
-        assert len(rec.proj_units) == r["n_used"] and all(u.k == pytest.approx(r["alpha"]) for u in rec.proj_units)
-        assert r["stop"] in ("target", "raised", "s_max", "drift", "b_move", "no_gain")
+        assert len(rec.proj_units) == r["n_used"] and [u.k for u in rec.proj_units] == pytest.approx([h["s"] for h in r["heads"]])
+        assert r["strength"] == "per_unit" and r["s_min"] >= 1.0 and r["s_min"] <= r["s_median"] <= r["s_max"]
+        assert r["stop"] in ("target", "raised", "s_max", "drift", "b_move", "no_gain", "iters")
         if r["stop"] == "target":
             assert r["alpha"] == 1.0
-        # 倍率ごとの点(α=1 から)と、組の効き・上限の中か
-        assert r["raise"][0]["alpha"] == 1.0 and all({"a_mean", "b_delta", "b_orth", "effect", "feasible"} <= set(p) for p in r["raise"])
+        # 測った点(s=1 から)と、組の効き・上限の中か
+        assert r["raise"][0]["phase"] == "s1" and all({"a_mean", "b_delta", "b_orth", "effect", "feasible"} <= set(p) for p in r["raise"])
         assert r["feasible"] and r["b_toward"] <= al["b_move_max"] + 1e-9
     assert al["s1"] and all(h["s"] == 1.0 for h in al["s1"]["heads"]) and Path(al["s1"]["recipe"]).exists()
     acc = [t for t in al["trace"] if t["accepted"]]
@@ -540,6 +606,12 @@ def test_pipeline_rank_writes_end_to_end(session):
     from gne.schemas import SCHEMA_VERSION, HeadsPipelineOut
     HeadsPipelineOut.model_validate({"schema_version": SCHEMA_VERSION, "command": "heads pipeline", "model_id": "x",
                                      "llama_cpp_version": "x", "seed": 0, "generated_at": "x", **out})
+    # 一律の指定(v0.8.2 までの決め方): 同じ部品の組で、強さは全部同じ倍率
+    out_u = session.heads_pipeline({**spec, "name": "pwu", "pipeline": {**spec["pipeline"], "strength": "uniform"}}, n_heads=[3])
+    for r in [x for x in out_u["allocate"]["table"] if not x.get("skipped")]:
+        assert r["strength"] == "uniform" and r["alpha"] is not None and r["s_min"] == r["s_max"] == pytest.approx(r["alpha"])
+    assert [r["units"][:1] and [u.split(":s")[0] for u in r["units"]] for r in out_u["allocate"]["table"] if not r.get("skipped")] == \
+        [[u.split(":s")[0] for u in r["units"]] for r in al["table"] if not r.get("skipped")]          # 同じ部品(強さだけが違う)
     # 残りから追加: 新しい選び方の上でも動き、足す部品の探し方を引き継ぐ
     ap = session.store.heads_dir(session.meta.model_id) / "pw.alloc.json"
     a2 = json.loads(ap.read_text(encoding="utf-8"))
