@@ -4088,5 +4088,29 @@ def nw_export(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: O
     return d, "\n".join(lines), 0
 
 
+@gne_command(heads_app, "geometry", "heads geometry")
+def heads_geometry(c: Common, holder: dict,
+                   name: str = typer.Option(..., "--name", help="heads writes の保存名(<root>/heads/<model_id>/<名前>.writes.npz)"),
+                   parts: str = typer.Option("layer", "--parts", help="行の単位: layer(層ごと)/ attn,mlp(注意の出力全体と MLP の出力全体。注意の出力全体は線形注意の層では線形注意の出力)/ layer,attn,mlp"),
+                   normalize: str = typer.Option("both", "--normalize", help="特異値分解の前に行(層)の大きさをそろえるか: rows / none / both(両方を出す)"),
+                   top_k: Optional[int] = typer.Option(None, "--top-k", help="寄与率・層ごとの説明率・保存する向きを何番目まで出すか(既定 6)"),
+                   layers: Optional[str] = typer.Option(None, "--layers", help="使う層(例 10-30、既定は材料の全部の層)"),
+                   min_half_cos: Optional[float] = typer.Option(None, "--min-half-cos", help="信用しない印の基準(半分どうしの cos がこれ未満の行。既定 0.5)"),
+                   compare: Optional[str] = typer.Option(None, "--compare", help="比べる方向ベクトル(カンマ区切り。既定は heads refine の方向 <名前>_r1 などがあればそれ)"),
+                   exclude_dims: Optional[str] = typer.Option(None, "--exclude-dims", help="計算から除く残差の次元(例 1234,567。行ごとの上位の次元を見て決める)"),
+                   out_name: Optional[str] = typer.Option(None, "--out-name", help="結果の保存名(既定は --name と同じ)")):
+    """heads writes の材料の、層ごとの更新ベクトル(A 側の平均の更新 − B 側の平均の更新。その層が残差に足した量)を比べる。
+    層どうしのコサイン類似度の行列、特異値分解(行の大きさをそろえる・そろえない。基準は、行が直交していたときの値と、半分どうしの
+    差から作る雑音の目安)、質問を半分ずつに分けた差どうしの一致、方向ベクトルとの cos、同じ重みを 2 回使うモデルでは 1 回目と 2 回目、
+    heads refine の方向との cos。モデルは流さない(GPU を使わない)。かたまりや上位の向きは、更新の差が似ていることしか示さない
+    (A と B の質問の話題・長さの違いも映る)。"""
+    from .geometry import HALF_COS_MIN, TOP_K, human_lines
+    s = holder["session"] = c.session()
+    d = s.heads_geometry(name, parts=parts, normalize=normalize, top_k=TOP_K if top_k is None else top_k, layers=layers,
+                         min_half_cos=HALF_COS_MIN if min_half_cos is None else min_half_cos, compare=compare,
+                         exclude_dims=exclude_dims, out_name=out_name)
+    return d, "\n".join(human_lines(d)), 0
+
+
 if __name__ == "__main__":
     app()

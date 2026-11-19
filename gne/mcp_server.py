@@ -587,6 +587,29 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
             return _err(e)
 
     @srv.tool()
+    async def heads_geometry(name: str, parts: str = "layer", normalize: str = "both", top_k: int | None = None,
+                             layers: str | None = None, min_half_cos: float | None = None, compare: str | None = None,
+                             exclude_dims: str | None = None, out_name: str | None = None) -> dict:
+        """heads writes の材料 name の、層ごとの更新ベクトル(A 側の平均の更新 − B 側の平均の更新)を比べる(GPU を使わない、数秒)。
+        層どうしのコサイン類似度(行列は保存した .geometry.json / .npz にあり、ここでは省く)、特異値分解(normalize: rows = 行の大きさを
+        そろえる / none / both。基準は行が直交していたときの値と、半分どうしの差から作る雑音の目安)、半分ずつの一致(min_half_cos 未満に
+        信用しない印、既定 0.5)、方向ベクトルとの cos、ループのモデルでは同じ重みの 1 回目と 2 回目、heads refine の方向との cos。
+        parts は layer / attn,mlp / layer,attn,mlp。かたまりや上位の向きは更新の差が似ていることしか示さない(返り値の reading)。"""
+        from .geometry import HALF_COS_MIN, TOP_K
+
+        def run():
+            d = session.heads_geometry(name, parts=parts, normalize=normalize, top_k=TOP_K if top_k is None else top_k,
+                                       layers=layers, min_half_cos=HALF_COS_MIN if min_half_cos is None else min_half_cos,
+                                       compare=compare, exclude_dims=exclude_dims, out_name=out_name)
+            d = dict(d, similarity={k: v for k, v in d["similarity"].items() if k != "matrix"})
+            for s_ in d["svd"].values():                # 行ごとの配列は保存したファイルで読む(返り値を小さくする)
+                for k in ("U", "row_explained", "cos_own"):
+                    s_.pop(k, None)
+            d["material"] = {k: v for k, v in d["material"].items() if k != "cumsum"}
+            return d
+        return await call(run, gpu=False)
+
+    @srv.tool()
     async def headproj_export(recipe: str, bake: bool = False, requant: str | None = None, verify: bool = True,
                               strip_meta: bool = False, into: str | None = None, adapter_name: str | None = None) -> dict:
         """保存したレシピの proj のユニット(ヘッドの方向成分の射影、と gain・keyed)を書き出す(CHANGE-06 E)。既定は LoRA アダプタ

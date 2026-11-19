@@ -1141,6 +1141,23 @@ class HeadsLoopOut(Envelope):                   # gne heads visits / loop-pipeli
     model_config = ConfigDict(extra="allow")
 
 
+class HeadsGeometryOut(Envelope):               # gne heads geometry(heads writes の材料の、層ごとの更新ベクトルの比べ)
+    model_config = ConfigDict(extra="allow")
+    name: str
+    path: str
+    npz: str
+    material: dict[str, Any]                    # 材料(名前・方向・選ぶ層・質問の数)と確かめ(半分ずつの平均、更新の累積と方向ベクトルの cos)
+    settings: dict[str, Any]
+    rows: list[dict[str, Any]]                  # 行ごと: 大きさ・半分どうしの cos・雑音の比・信用しない印・方向ベクトルとの cos・上位の次元
+    similarity: dict[str, Any]                  # 層どうしのコサイン類似度(matrix は MCP では省く)
+    svd: dict[str, Any]                         # rows / none: 寄与率・累積・基準(直交・雑音)・半分ずつの確かめ・U・層ごとの説明率
+    loop: dict[str, Any] | None                 # 同じ重みの 1 回目と 2 回目の組(ループのモデルだけ)
+    compare: list[dict[str, Any]]               # 比べる方向ベクトル(既定は heads refine の方向)との cos
+    notes: list[dict[str, Any]]
+    reading: list[str]                          # 読み取りの注意
+    seconds: float
+
+
 class FieldtestOut(Envelope):                   # gne fieldtest(本番と同じ動かし方で、ファイルどうしを比べる)
     name: str
     path: str
@@ -1545,6 +1562,7 @@ COMMAND_SCHEMAS: dict[str, type[Envelope]] = {
     "connections": ConnectionsOut, "worker": WorkerOut, "writers": WritersOut, "writers-export": WritersExportOut,
     "direction score": DirectionScoreOut, "heads causal": HeadsCausalOut, "heads writers": HeadsWritersOut, "behave": BehaveOut, "heads allocate": HeadsAllocateOut,
     "headproj export": GainOut, "headproj check": HeadprojCheckOut, "heads pipeline": HeadsPipelineOut, "heads writes": HeadsWritesOut,
+    "heads geometry": HeadsGeometryOut,
     "heads candidates": HeadsCandidatesOut,
     "heads refine": HeadsRefineOut, "fieldtest": FieldtestOut,
     "heads visits": HeadsLoopOut, "heads loop-pipeline": HeadsLoopOut, "heads loop-merge": HeadsLoopOut, "heads measure": HeadsLoopOut,

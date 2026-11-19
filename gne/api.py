@@ -3925,6 +3925,13 @@ round_01.scores.txt に「番号 P C」を 1 行ずつ書く(例: 17 3 4)。全�
         baselines = {f"L{L}": texts.get((L, None), "") for L in sorted(by_layer)}
         return {"design": design_name, "runs": runs, "examples": examples, "baselines": baselines}
 
+    def heads_geometry(self, name: str, **kw) -> dict:
+        """heads writes の材料 name の層ごとの更新ベクトル(A 側と B 側の差)を、層どうしのコサイン類似度・特異値分解・半分ずつの
+        一致・方向ベクトルとの cos で比べる(gne/geometry.py)。モデルは流さない(GPU を使わない)。結果は
+        <root>/heads/<model_id>/<保存名>.geometry.json と .geometry.npz。"""
+        from .geometry import analyze
+        return analyze(self, name, **kw)
+
 
 def bake_score_check(lora: dict, baked: dict, layers, *, last: int | None = None, noise: float = 0.0) -> tuple[dict, bool]:
     """V26・V33 の射影の値の判定。lora・baked は Scorer.run の結果({側: {"values": {L: 例ごとの射影の値}}})。層ごと・側ごとに
