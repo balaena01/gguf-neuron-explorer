@@ -287,6 +287,29 @@ def test_heads_geometry_end_to_end(tmp_path):
     assert "cumsum_mismatch" in {n["code"] for n in d2["notes"]} and d2["compare"] == []
 
 
+def test_offdiag_stats_skip_same_layer_parts(tmp_path):
+    s, z = _session_with_material(tmp_path, refine=False)
+    d = s.heads_geometry("d1", parts="layer,attn,mlp")
+    rows, X, *_ = G.build_rows(z, ("layer", "attn", "mlp"), None)
+    C = G.cosine_matrix(X)
+    keep = [(i, j) for i in range(len(rows)) for j in range(len(rows)) if i != j
+            and not (rows[i]["layer"] == rows[j]["layer"] and (rows[i]["part"] == "layer") != (rows[j]["part"] == "layer"))]
+    sm = d["similarity"]
+    assert sm["offdiag_excluded_pairs"] == 6                                       # 3 層 × (層全体と注意・層全体と MLP)
+    assert sm["offdiag_abs_max"] == pytest.approx(max(abs(C[i, j]) for i, j in keep))
+    assert sm["offdiag_abs_mean"] == pytest.approx(np.mean([abs(C[i, j]) for i, j in keep]))
+    assert np.allclose(np.array(sm["matrix"]), C, atol=1e-4)                        # 行列そのものには残す
+    assert s.heads_geometry("d1", out_name="d1l")["similarity"]["offdiag_excluded_pairs"] == 0
+
+
+def test_table_aligns_by_display_width():
+    out = G._table(["行", "種類", "cos r̂_l"], [["L0", "線形注意", "+0.99"], ["L10/attn", "MLP", "−"]], left=2)
+    assert G._width("線形注意") == 8 and G._width("r̂") == 1 and G._width("cos r̂_l") == 7
+    # 右寄せの列の終わりがそろう(表示の幅で数える)
+    ends = [G._width(x) for x in out]
+    assert ends[0] == ends[1] == ends[2]
+
+
 def test_heads_geometry_odd_halves_and_errors(tmp_path):
     s, _ = _session_with_material(tmp_path, n_a=15, refine=False)
     d = s.heads_geometry("d1", normalize="rows", min_half_cos=0.99)

@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import re
 import time
+import unicodedata
 from pathlib import Path
 
 import numpy as np
@@ -470,11 +471,18 @@ def analyze(session, name: str, *, parts="layer", normalize="both", top_k: int =
     n_unrel = sum(1 for r in rows if not r["reliable"])
     # 類似度の行列
     C = cosine_matrix(X)
-    off = C[~np.eye(len(C), dtype=bool)] if len(C) > 1 else np.zeros(1)
+    # 対角以外のまとめの数からは、同じ層の層全体の行と部品の行の組を除く(層全体 = 注意 + MLP なので、それだけで cos が高い)
+    keep = ~np.eye(len(C), dtype=bool)
+    part_of = np.array([r["part"] for r in rows])
+    layer_of = np.array([r["layer"] for r in rows])
+    same = (layer_of[:, None] == layer_of[None, :]) & ((part_of[:, None] == "layer") != (part_of[None, :] == "layer"))
+    keep &= ~same
+    off = C[keep] if keep.any() else np.zeros(1)
     adj = [float(C[i, i + 1]) for i in range(len(rows) - 1)
            if rows[i]["part"] == rows[i + 1]["part"] and rows[i + 1]["layer"] == rows[i]["layer"] + 1]
     sim = {"order": "parts", "parts": list(parts_t), "n": len(rows),
            "offdiag_abs_max": float(np.abs(off).max()), "offdiag_abs_mean": float(np.abs(off).mean()),
+           "offdiag_excluded_pairs": int(same.sum() // 2),
            "adjacent": {"n": len(adj), "min": min(adj), "median": float(np.median(adj)), "max": max(adj)} if adj else None,
            "matrix": [[round(float(x), 4) for x in row] for row in C]}
     # 特異値分解
@@ -539,7 +547,8 @@ def analyze(session, name: str, *, parts="layer", normalize="both", top_k: int =
         notes.append({"code": "unreliable", "text": f"{n_unrel} 行は、半分どうしの cos が {min_half_cos} 未満です(信用しない印)"})
     if "layer" in parts_t and len(parts_t) > 1:
         notes.append({"code": "layer_and_parts", "text": "層全体の行は注意と MLP の行の和なので、同じ層の層全体と部品の行どうしの cos は"
-                                                         "それだけで高くなります(対角以外の最大にも入ります)"})
+                                                         "それだけで高くなります(対角以外の |cos| の平均・最大からは、その組を除きました。"
+                                                         "行列には残っています)"})
     if ex:
         notes.append({"code": "excluded_dims", "text": f"次元 {', '.join(map(str, ex))} を 0 にしてから計算しました(行ごとの上位の次元は、除く前の値)"})
     out = {"name": out_name, "material": material, "arch": {k: ac[k] for k in ("arch", "checked", "moe_layers")},
@@ -564,6 +573,23 @@ def _f(x, fmt: str) -> str:
     return "—" if x is None else format(x, fmt)
 
 
+def _width(s: str) -> int:
+    """端末での表示の幅(全角・幅広の文字は 2、結合文字は 0、ほかは 1)。"""
+    return sum(0 if unicodedata.combining(ch) else 2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in s)
+
+
+def _table(header: list[str], body: list[list[str]], left: int = 1, indent: str = "  ") -> list[str]:
+    """表示の幅で桁をそろえた表。最初の left 列は左寄せ、ほかは右寄せ。"""
+    cells = [[str(c) for c in row] for row in [header, *body]]
+    n = max(len(r) for r in cells)
+    w = [max(_width(r[j]) for r in cells if j < len(r)) for j in range(n)]
+
+    def pad(c, j):
+        sp = " " * (w[j] - _width(c))
+        return c + sp if j < left else sp + c
+    return [indent + " ".join(pad(c, j) for j, c in enumerate(r)).rstrip() for r in cells]
+
+
 def human_lines(d: dict) -> list[str]:
     m, st = d["material"], d["settings"]
     S = m.get("select_layer")
@@ -578,35 +604,34 @@ def human_lines(d: dict) -> list[str]:
     lines.append("材料の確かめ: " + " / ".join(ck))
     lines.append(f"行ごと(cos r̂_l = その層の方向との cos、cos r̂_S = 選ぶ層の方向との cos。2 乗がその方向に沿う割合。"
                  f"× = 半分どうしの cos が {st['min_half_cos']} 未満):")
-    lines.append(f"  {'行':<10} {'種類':<5} {'回':>2} {'大きさ':>8} {'半分cos':>7} {'雑音比':>6} {'cos r̂_l':>8} {'cos r̂_S':>8} {'上位5次元':>8}")
-    for r in d["rows"]:
-        lines.append(f"  {r['label']:<10} {MIXER_JA.get(r['mixer'], r['mixer']):<5} {r['visit'] or '':>2} {r['norm']:>8.3g} {_f(r['half_cos'], '7.2f')} "
-                     f"{_f(r['noise_ratio'], '6.2f')} {_f(r['cos_own'], '+8.2f')} {_f(r['cos_select'], '+8.2f')} "
-                     f"{_f(r['top_dims']['share'], '8.2f')}" + ("  ×" if not r["reliable"] else ""))
+    lines += _table(["行", "種類", "回", "大きさ", "半分cos", "雑音比", "cos r̂_l", "cos r̂_S", "上位5次元", "印"],
+                    [[r["label"], MIXER_JA.get(r["mixer"], r["mixer"]), str(r["visit"] or ""), f"{r['norm']:.3g}",
+                      _f(r["half_cos"], ".2f"), _f(r["noise_ratio"], ".2f"), _f(r["cos_own"], "+.2f"), _f(r["cos_select"], "+.2f"),
+                      _f(r["top_dims"]["share"], ".2f"), "" if r["reliable"] else "×"] for r in d["rows"]], left=2)
     sm = d["similarity"]
-    line = f"類似度の行列: 対角以外の |cos| 平均 {sm['offdiag_abs_mean']:.3f}・最大 {sm['offdiag_abs_max']:.3f}"
+    line = f"類似度の行列: 対角以外の |cos| 平均 {sm['offdiag_abs_mean']:.3f}・最大 {sm['offdiag_abs_max']:.3f}" + \
+        (f"(同じ層の層全体と部品の組 {sm['offdiag_excluded_pairs']} 個を除く)" if sm.get("offdiag_excluded_pairs") else "")
     if sm.get("adjacent"):
         a = sm["adjacent"]
         line += f"。隣の層どうし(同じ部品)の cos: 最小 {a['min']:+.2f}・中央値 {a['median']:+.2f}・最大 {a['max']:+.2f}"
     lines.append(line + f"(行列は {Path(d['npz']).name} と JSON)")
     for mode, s in d["svd"].items():
         lines.append(f"特異値分解({'行の大きさをそろえる' if mode == 'rows' else '行の大きさをそろえない'}。基準は、データの全体に対する割合):")
-        lines.append(f"  {'k':>2} {'寄与率':>7} {'累積':>6} {'直交の基準':>9} {'雑音の基準':>9} {'半分で求めた向きの説明率':>12} {'半分どうしの重なり':>9} {'cos r̂_S':>8}")
-        for j in range(s["k"]):
-            lines.append(f"  {j + 1:>2} {s['explained'][j]:>7.3f} {s['cumulative'][j]:>6.3f} {s['baseline_orthogonal'][j]:>9.3f} "
-                         f"{s['baseline_noise'][j]:>9.3f} {s['half_cross'][j]:>12.3f} {s['half_overlap'][j]:>9.3f} "
-                         f"{_f((s.get('cos_select') or [None] * s['k'])[j], '+8.2f')}")
+        cs = s.get("cos_select") or [None] * s["k"]
+        lines += _table(["k", "寄与率", "累積", "直交の基準", "雑音の基準", "半分で求めた向きの説明率", "半分どうしの重なり", "cos r̂_S"],
+                        [[str(j + 1), f"{s['explained'][j]:.3f}", f"{s['cumulative'][j]:.3f}", f"{s['baseline_orthogonal'][j]:.3f}",
+                          f"{s['baseline_noise'][j]:.3f}", f"{s['half_cross'][j]:.3f}", f"{s['half_overlap'][j]:.3f}", _f(cs[j], "+.2f")]
+                         for j in range(s["k"])], left=0)
         lines.append(f"  (雑音の目安の全体 ‖(X_h0 − X_h1)/2‖² ÷ ‖X‖² = {_f(s['noise_total'], '.3f')}。半分で求めた向きの説明率と重なりは累積)")
     lp = d.get("loop")
     if lp:
         lines.append(f"同じ重みの 1 回目と 2 回目(段のずれ {lp['shift']}。cos の右のかっこは半分ずつで測った値):")
-        lines.append(f"  {'重みの層':>6} {'1回目':>5} {'2回目':>5} {'層全体 cos':>16} {'注意 cos':>16} {'MLP cos':>16} {'大きさ(層全体)':>14}")
-        for p_ in lp["pairs"]:
-            def c(x):
-                return "—" if not x else f"{x['cos']:+.2f}({_f(x['cos_halves'][0], '+.2f')},{_f(x['cos_halves'][1], '+.2f')})"
-            nl = p_.get("layer")
-            lines.append(f"  {p_['stored']:>6} {p_['first']:>5} {p_['second']:>5} {c(p_.get('layer')):>16} {c(p_.get('attn')):>16} "
-                         f"{c(p_.get('mlp')):>16} " + (f"{nl['norm_first']:.3g} / {nl['norm_second']:.3g}" if nl else "—"))
+        def c(x):
+            return "—" if not x else f"{x['cos']:+.2f}({_f(x['cos_halves'][0], '+.2f')},{_f(x['cos_halves'][1], '+.2f')})"
+        lines += _table(["重みの層", "1回目", "2回目", "層全体 cos", "注意 cos", "MLP cos", "大きさ(層全体、1回目 / 2回目)"],
+                        [[str(p_["stored"]), str(p_["first"]), str(p_["second"]), c(p_.get("layer")), c(p_.get("attn")), c(p_.get("mlp")),
+                          f"{p_['layer']['norm_first']:.3g} / {p_['layer']['norm_second']:.3g}" if p_.get("layer") else "—"]
+                         for p_ in lp["pairs"]], left=0)
     for cp in d.get("compare") or []:
         sel = cp["select"]
         parts = [f"選ぶ層での方向ベクトルどうしの cos {_f(sel.get('cos_direction_select'), '+.3f')}"]
