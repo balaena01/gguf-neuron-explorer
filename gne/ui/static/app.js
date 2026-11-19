@@ -44,6 +44,14 @@ window.gne = state;                       // 自動テスト(playwright)と開�
 
 const MIXER = { attention: "attention", linear_attention: t("線形注意"), recurrent: t("回帰"), conv: t("畳み込み"), none: t("mixer なし") };
 const mixerLabel = (li) => MIXER[li.mixer];
+// このモデルで書き込みの量での順位づけ(rank writes)を実行しない理由(実行できれば null)。サーバーの既定の切り替え(_rank_fallback)と同じ条件
+function writesBlocked(arch) {
+  if (!arch) return null;
+  if (arch.hc_streams) return t("このモデルは残差が {n} 本の流れ(hyper-connections)なので、書き込みの量での順位づけは実行しません(未対応)。止めて選ぶ流れで実行し、切り替えたことを結果に出します。", { n: arch.hc_streams });
+  const pn = (arch.layers || []).filter((li) => li.mixer === "attention" && li.post_norm_mixer && li.post_norm_mixer !== "?").length;
+  if (pn) return t("このモデルでは注意の層 {n} 個で出力のあとに正規化があるので、書き込みの量での順位づけは実行しません(点数が残差での寄与を表さないため)。止めて選ぶ流れで実行し、切り替えたことを結果に出します。正規化を補正した点数が次の版で入るまでの扱いです。", { n: pn });
+  return null;
+}
 const isMoE = () => state.arch.layers.some((li) => li.ffn.startsWith("moe"));
 const moeLayer = (L) => { const li = state.arch.layers[L]; return li && li.ffn.startsWith("moe") ? li : null; };
 // MoE の層の通し番号 → { expert, neuron }(MoE でなければ null)
@@ -959,8 +967,7 @@ async function setView(v) {
           onEval: (params, label) => sendToEval(params, label),           // 評価へ送る(評価の画面で確かめてから始める)
           onOverlay: (field) => { setView("map"); applyOverlay(field); },
           isLoop: () => !!(state.arch && state.arch.loop),               // 同じ層を 2 回実行するモデル(ループの中の部品の方向の欄)
-          // 注意の出力のあとに正規化がある層の数(v0.8.6: 書き込みの量での順位づけは実行しない。既定は止めて選ぶ流れ)
-          postNormAttn: () => (state.arch ? state.arch.layers.filter((li) => li.mixer === "attention" && li.post_norm_mixer && li.post_norm_mixer !== "?").length : 0),
+          writesBlocked: () => writesBlocked(state.arch),               // 書き込みの量での順位づけを実行しないモデル(既定は止めて選ぶ流れ)
         },
         candidates: {                                                     // 強さの候補(heads_candidates)の候補を使う
           onLoadCandidate: (c) => loadCandidate(c),

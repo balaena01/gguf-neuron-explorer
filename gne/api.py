@@ -2366,17 +2366,15 @@ class Session:
         pipe の rank を causal にして理由を返す(モデルは読み込まず、GGUF のメタデータで決める)。指定したときは何もしない。"""
         if pipe.get("rank") != "writes" or rank_given:
             return None
-        hc = int(self.weights.field(f"{self.meta.arch}.hyper_connection.count", 0) or 0)
-        if hc:
+        why = writes_block_reason(self.weights, self.meta.arch)
+        if why:
             pipe["rank"] = "causal"
-            return "残差が複数本の流れのモデル(hyper-connections)は書き込みの順位づけに未対応なので、rank causal で流した"
-        pn = [li.index for li in self.weights.arch.layers[:self.weights.n_main]
-              if li.mixer == "attention" and li.post_norm_mixer not in ("", "?")]
-        if pn:                                                         # 出力のあとの正規化(v0.8.6。補正した点数は次の版)
-            pipe["rank"] = "causal"
-            return (f"注意の層 {len(pn)} 個で出力のあとに正規化があり、書き込みの量の点数(正規化の前)が残差での寄与を表さないので、"
-                    "既定の選び方を rank causal(止めて選ぶ)に切り替えて実行しました(正規化を補正した点数が次の版で入るまでの扱い)")
+            until = _writes_block_until(why)
+            return f"{why}ので、既定の選び方を rank causal(止めて選ぶ)に切り替えて実行しました" + (f"({until})" if until else "")
         return None
+
+    def _writes_block_reason(self) -> str | None:
+        return writes_block_reason(self.weights, self.meta.arch)
 
     @staticmethod
     def _layers_of(spec) -> list[int] | None:
@@ -2524,7 +2522,7 @@ class Session:
                 if rank_given or e.code != "ARCH_UNSUPPORTED":
                     raise
                 # 既定(rank を指定していない)で、この arch の捕捉に未対応だったときは、v0.7.0 までの選び方で続ける
-                self.warn(f"書き込みの順位づけはこのモデルに未対応なので、rank causal で流します({e.message})")
+                self.warn(f"このモデルでは書き込みの量での順位づけを実行できないので、止めて選ぶ流れ(rank causal)で実行します。理由: {e.message}")
                 pipe["rank"] = "causal"
                 for k in self.PIPELINE_WRITES:
                     if k != "rank":
@@ -2532,7 +2530,8 @@ class Session:
                 more = self._loop_pipeline_defaults(pipe)
                 if more:
                     out["arch_defaults"] = {**(out.get("arch_defaults") or {}), **more}
-                out.update(settings=dict(pipe), rank="causal", rank_note=f"書き込みの順位づけに未対応({e.message})なので rank causal で流した")
+                out.update(settings=dict(pipe), rank="causal",
+                           rank_note=f"書き込みの量での順位づけを実行できないので、既定の選び方を rank causal(止めて選ぶ)に切り替えて実行しました。理由: {e.message}")
                 out.pop("unused_settings", None)
                 for k in ("writes", "verify"):
                     out.pop(k, None)
@@ -3051,7 +3050,14 @@ class Session:
                 pipe["hard"] = max(1, min(int(st["hard"]), len(qa)))
         elif rk == "causal":                                            # 元が v0.7.0 までの流れ(rank の記録が無い古い結果も)
             if unit_kinds not in (None, "heads"):
-                raise GneError("BAD_ARGS", "ニューロンも足すには rank writes にしてください(rank causal はヘッドだけ)")
+                why = self._writes_block_reason()
+                if why:                                                 # 書き込みの量で選べないモデル: 行き止まりにしない
+                    until = _writes_block_until(why)
+                    raise GneError("ARCH_UNSUPPORTED", f"このモデルでは、ニューロンや層全体を足す選び方は使えません。理由: {why}ためです"
+                                   "(ニューロン・層全体を足せるのは、書き込みの量で選ぶ流れ --rank writes だけです)" + (f"。{until}" if until else ""),
+                                   "ヘッドだけで足すには --unit-kinds を外してください(止めて選ぶ流れで足します)")
+                raise GneError("BAD_ARGS", "ニューロンや層全体を足せるのは、書き込みの量で選ぶ流れ(--rank writes)だけです",
+                               "--rank writes を付けてください。ヘッドだけで足すなら --unit-kinds を外してください")
             pipe.pop("loop_direction", None)
             pipe.update(rank="causal", n_heads=[int(x) for x in new_heads], hard=max(1, min(int(st.get("hard") or 16), len(qa))))
         else:
@@ -4025,6 +4031,24 @@ def _merge_logit(old, new):
     o = np.argsort(nn)
     return LogitLens(new.layer, nn[o], cat(old.up_ids, new.up_ids)[o], cat(old.up_z, new.up_z)[o],
                      cat(old.down_ids, new.down_ids)[o], cat(old.down_z, new.down_z)[o])
+
+
+def writes_block_reason(weights, arch: str) -> str | None:
+    """このモデルで書き込みの量での順位づけ(rank writes)を実行しない理由(「…ので」の前に置く文)。実行できれば None。
+    残差が複数本の流れ(hyper-connections)と、注意の出力のあとに正規化がある層(v0.8.6、補正した点数が入るまで)。
+    UI の CHiPS の欄(app.js の writesBlocked)も同じ条件。"""
+    hc = int(weights.field(f"{arch}.hyper_connection.count", 0) or 0)
+    if hc:
+        return f"このモデルは残差が {hc} 本の流れ(hyper-connections)で、書き込みの量での順位づけに対応していない"
+    pn = [li.index for li in weights.arch.layers[:weights.n_main] if li.mixer == "attention" and li.post_norm_mixer not in ("", "?")]
+    if pn:
+        return f"注意の層 {len(pn)} 個で出力のあとに正規化があり、書き込みの量の点数(正規化の前)が残差での寄与を表さない"
+    return None
+
+
+def _writes_block_until(why: str) -> str:
+    """writes_block_reason の文に添える、いつまでの扱いか(出力のあとの正規化だけ。補正した点数が入れば実行する)。"""
+    return "正規化を補正した点数が次の版で入るまでの扱いです" if "正規化" in why else ""
 
 
 def _merge_resid(old: ResidStats, new: ResidStats) -> ResidStats:

@@ -151,9 +151,11 @@ function dChart(layers, base, best) {
 }
 
 export class PipelinePanel {
-  constructor(root, { onRun, onShowDirection, onOpenHead, onOpenNeuron, onLoadProj, onEval, onOverlay, onOpenCandidates, isLoop, postNormAttn } = {}) {
+  constructor(root, { onRun, onShowDirection, onOpenHead, onOpenNeuron, onLoadProj, onEval, onOverlay, onOpenCandidates, isLoop, writesBlocked } = {}) {
     this.isLoop = isLoop || (() => false);       // 同じ層を 2 回実行するモデル(ループの中の部品の方向の欄を出す)
-    this.postNormAttn = postNormAttn || (() => 0);   // 注意の出力のあとに正規化がある層の数(書き込みの量での順位づけは実行しない、v0.8.6)
+    // このモデルで書き込みの量での順位づけ(rank writes)を実行しない理由の文(実行できれば null)。サーバーの既定の切り替えと同じ条件:
+    // 残差が複数本の流れ(hyper-connections)、注意の出力のあとに正規化がある層(v0.8.6)
+    this.writesBlocked = writesBlocked || (() => null);
     this.rankForced = false;                     // 欄の既定(書き込みの量)を、そのモデルでは実行しないので止めて選ぶに替えたか
     this.root = root;
     this.onRun = onRun;                          // (kind, params) → Promise<ジョブ | null>(jobs.js の start。見積もりの確認つき)
@@ -245,7 +247,7 @@ export class PipelinePanel {
     // 左に手順、右に選んだ手順。結果は 1 回のジョブ(方向とヘッドを作る)の段ごとに分けて見せる
     const res = (sel) => () => (this.data ? [this.$("#pp-result .pp-res-head"), ...this.$$(`#pp-result ${sel}`)] : [this.$("#pp-nores")]);
     this.steps = new Steps(root, {
-      shared: this.$("#pp-shared"), store: "gne.chips.step", label: t("CHiPS の手順"),
+      shared: this.$("#pp-shared"), store: "gne.chips.step", label: t("CHiPS の手順"), extra: () => [this.$("#pp-nores")],
       steps: [{ key: "input", label: t("1. 対照の文"), els: () => [this.$("#pp-input"), this.$("#pp-run")], shared: true },
               { key: "dir", label: t("2. 方向と基準層"), els: res("section.pp-stage:nth-of-type(1)") },
               { key: "causal", label: t("3. 効くヘッドを探す"), els: res("section.pp-stage:nth-of-type(2)") },
@@ -317,12 +319,12 @@ export class PipelinePanel {
   // 候補の探し方に合わせて、使わない設定のまとまりを無効にする(値は残すが、ジョブには渡さない)。ループの中の部品の方向は、
   // 同じ層を 2 回実行するモデルのときだけ選べる
   rankFields() {
-    const pn = this.postNormAttn(), opt = this.$("#pp-rank option[value=writes]"), note = this.$("#pp-rank-blocked");
-    opt.disabled = pn > 0;
-    note.hidden = pn === 0;
-    if (pn > 0) {                                  // このモデルでは書き込みの量での順位づけは実行しない(既定は止めて選ぶ)
+    const why = this.writesBlocked(), opt = this.$("#pp-rank option[value=writes]"), note = this.$("#pp-rank-blocked");
+    opt.disabled = !!why;
+    note.hidden = !why;
+    if (why) {                                     // このモデルでは書き込みの量での順位づけは実行しない(既定は止めて選ぶ)
       if (this.$("#pp-rank").value === "writes") { this.$("#pp-rank").value = "causal"; this.rankForced = true; }
-      note.textContent = t("このモデルでは注意の層 {n} 個で出力のあとに正規化があるので、書き込みの量での順位づけは実行しません(点数が残差での寄与を表さないため)。止めて選ぶ流れで実行し、切り替えたことを結果に出します。正規化を補正した点数が次の版で入るまでの扱いです。", { n: pn });
+      note.textContent = why;
     }
     const writes = this.$("#pp-rank").value === "writes";
     this.$("#pp-fs-writes").disabled = !writes;

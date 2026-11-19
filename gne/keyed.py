@@ -307,13 +307,14 @@ def post_norm_gamma(weights, L: int, kind: str = "ffn") -> np.ndarray | None:
         if weights.has_tensor(name):
             return np.asarray(tensor_to_f32(weights.tensor(name)), dtype=np.float64).reshape(-1)
         if pn:
-            raise GneError("ARCH_UNSUPPORTED", f"{arch} は post-norm ですが、層 {L} の FFN の post-norm の重み(post_ffw_norm)が"
-                                               "見つかりません。keyed の補正を確かめていない arch です")
+            raise GneError("ARCH_UNSUPPORTED", f"{arch} は MLP の出力のあとに正規化がある arch ですが、層 {L} の正規化の重み(post_ffw_norm)が"
+                                               "見つからないので、keyed は実行しません。理由: この層での補正を確かめていないためです")
         return None
     if kind == "attn":
         if pn:
-            raise GneError("ARCH_UNSUPPORTED", f"{arch} は post-norm です。attention の書き込みの post-norm 補正は確かめていません",
-                           "FFN(kind: ffn)の keyed を使ってください")
+            raise GneError("ARCH_UNSUPPORTED", f"{arch} は注意の出力のあとに正規化があるので、attn の keyed は実行しません。"
+                                               "理由: 正規化の分の補正を確かめていないためです",
+                           "代わりに FFN(kind: ffn)の keyed を使ってください")
         if arch in _ATTN_OUT_RESCALED:
             raise GneError("ARCH_UNSUPPORTED", f"{arch} は attention の出力(LoRA の差分を含む)に後から倍率を掛けます。"
                                                "attn の keyed の大きさの補正は確かめていません", "FFN(kind: ffn)の keyed を使ってください")
@@ -412,8 +413,9 @@ def write_vector(weights, ds, L: int, *, direction_layer: str = "own", rms_a: fl
     n_floor = 0
     if gamma is not None:
         if rms_a is None:
-            raise GneError("BAD_KEY", f"層 {L} は post-norm ですが、鍵に rms_a(発火位置での書き込みの rms)がありません",
-                           "鍵を作り直してください(post-norm の arch では作成時に rms_a を保存します)")
+            raise GneError("BAD_KEY", f"層 {L} は MLP の出力のあとに正規化があるので、補正に使う rms_a(発火位置での書き込みの rms)が"
+                                      "鍵に要りますが、この鍵にはありません",
+                           "鍵を作り直してください(この構造の層では、作るときに rms_a を保存します)")
         g, n_floor = floor_gamma(gamma)
         if g.size != n_embd:
             raise GneError("ARCH_UNSUPPORTED", f"層 {L} の post-norm の重みの長さ {g.size} が n_embd={n_embd} と違います")
@@ -891,7 +893,8 @@ def keyed_plan(weights, units, key_of: KeySource, dir_of: DirSource, *, directio
         d = write_vector(weights, dget(u.direction), u.layer, direction_layer=direction_layer, rms_a=ks.rms_a.get(u.layer),
                          gamma=gamma, kind=u.kind, expert=u.expert, gate=gate, info=info)
         if gamma is not None:
-            note("post-norm の arch です。keyed の書き込みは d = rms̄_A·(r ⊘ γ) の一次近似です(rms の変化を無視)")
+            note(f"層 {u.layer} は MLP の出力のあとに正規化があるので、keyed の書き込みは正規化の分を補正して実行します"
+                 "(d = rms̄_A·(r ⊘ γ)。書き込みで rms が変わる分は無視した一次近似なので、α が大きいと効きは α に比例しません)")
         li = weights.arch.layers[weights.stored(u.layer)] if u.kind == "attn" else None
         if li is not None and li.post_norm_mixer not in ("", "?"):    # 構造で見た注意の出力のあとの正規化(v0.8.6)
             note(f"層 {u.layer} は注意(混ぜる層)の出力のあとに正規化({li.post_norm_mixer})があるので、attn の keyed は実行しますが、"

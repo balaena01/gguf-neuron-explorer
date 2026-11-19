@@ -52,6 +52,21 @@ GNE_TEST_MODEL=models/Qwen3.5-4B-Q8_0.gguf .venv/bin/python -m pytest -q tests/t
 | V7 | info | set_cvec + prefill 22 ms(うち再予約 14 ms) |
 | V8 | pass | 同上 |
 
+### 出力のあとに正規化があるモデルの V2(v0.8.6)
+
+LFM3 には `ffn_out` の捕捉名が無いので、V2 は MLP の出力の正規化のあと(`model.layers.{}.post_ffn_norm-L`)を γ ⊙ y / rms(y)(y = W_down@a、γ は `blk.L.post_ffw_norm.weight`、eps は `layer_norm_rms_epsilon`)と比べる。v0.8.5 までは例外で止まっていた。Gemma 3 は `ffn_out` があるので、今までどおり正規化の前で比べる。どれも Q8_0、許容は 2% / 10%。
+
+| モデル | 層 | 結果 | 相対誤差(中央値 / 最大) | 添字を 1 ずらしたとき(中央値) |
+|---|---|---|---|---|
+| LFM3-1.7B | L12 | pass | 0.69% / 1.08%(54 トークン) | 138% |
+| LFM3-1.7B | L1 | pass | 0.78% / 1.56% | 174% |
+| LFM3-Omni-2B | L12 | pass | 0.57% / 1.02% | 132% |
+| LFM3-Omni-2B | L1 | pass | 0.77% / 1.17% | 172% |
+| Gemma 3 1B | L13 | pass | 0.86% / 1.25%(47 トークン、`ffn_out`) | 135% |
+| Gemma 3 1B | L1 | pass | 0.63% / 0.94% | 117% |
+
+正規化のあとの名前は `model.layers.{}.post_ffn_norm-L`(LFM3)と `ffn_post_norm-L` の 2 つだけを試し、どちらも無い arch では理由を出して V2 を飛ばす(`configs/arch/residual_writers.yaml` の `output_norm` のほかの arch では確かめていない)。
+
 ## 2. [VERIFY] とリスクの確認結果
 
 | 項目 | 結果 | 根拠 |

@@ -10,9 +10,12 @@ const MARK = { done: ["ok", "済"], run: ["run", "実行中"], todo: ["wait", "�
 export class Steps {
   // root: 画面の入れ物(中身はすでに描いてある)。steps: [{ key, label, els: () => [要素], shared: 共通の設定を使うか, sep: 前に区切り }]
   // shared: 共通の設定の要素(無ければ null)。store: 選んだ手順を覚える localStorage の鍵。onSelect(key): 手順を替えたあと
-  constructor(root, { steps, shared = null, store = null, label = "", onSelect = null }) {
+  // extra: () => [要素]。手順の els が状態で変わる(結果が無いときだけの知らせなど)とき、どの手順の els にも今は入っていなくても、
+  // いまの手順で見せないなら隠す要素(v0.8.6: 結果の読み込み中に手順を替えると「まだ結果がありません」が残った)
+  constructor(root, { steps, shared = null, store = null, label = "", onSelect = null, extra = null }) {
     this.root = root;
     this.steps = steps;
+    this.extra = extra || (() => []);
     this.store = store;
     this.onSelect = onSelect || (() => {});
     this.state = {};
@@ -66,6 +69,7 @@ export class Steps {
   apply() {
     const show = new Set(this.steps.find((x) => x.key === this.cur).els().filter(Boolean));
     for (const s of this.steps) for (const el of s.els()) if (el) el.hidden = !show.has(el);
+    for (const el of this.extra()) if (el) el.hidden = !show.has(el);
   }
 
   // 状態の印。state: done(済)・run(実行中)・todo(まだ)・warn・null(印なし)

@@ -138,6 +138,9 @@ def test_post_norm_models(which, tmp_path):
             s.heads_pipeline({**base, "name": "pnx", "pipeline": {"rank": "writes", "max_examples": 6, "verify_top": 4,
                                                                    "verify_sample": 0, "n_units": [2], "check_replies": 0}})
         assert e.value.code == "ARCH_UNSUPPORTED"
+        with pytest.raises(GneError, match="ニューロンや層全体を足す選び方は使えません") as e:   # 残りから追加: 行き止まりにしない案内
+            s.heads_refine("pnc", unit_kinds="neurons", check_replies=0)
+        assert e.value.code == "ARCH_UNSUPPORTED" and "--unit-kinds を外して" in (e.value.hint or "")
         from gne.verify import Verifier
         v2 = Verifier(s.engine, s.weights, layer=s.engine.n_layer // 2).v2_ffn_linearity()
         assert v2.status == "pass", v2.detail

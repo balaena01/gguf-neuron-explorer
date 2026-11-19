@@ -3659,6 +3659,121 @@ def test_pipeline_late_open_does_not_overwrite(pipe_server, browser):
     pg.close()
 
 
+@pytest.fixture(scope="module")
+def spread_server(tmp_path_factory):
+    """残差の大きさが少数の次元に偏ったモデルの真似: 層 6 の統計の、大きい 8 成分を除いた大きさを中央値の 1/3 にしておく
+    (Qwen3-0.6B 自体は約 1.3 倍で偏っていない)。"""
+    if not MODEL.exists():
+        pytest.skip("モデルがありません")
+    from gne.api import Session
+    s = Session(MODEL, root=tmp_path_factory.mktemp("ui_spread"))
+    _seed(s)
+    s.stats_resid(tokens=512, layers=[6])
+    st = s.resid_stats()
+    st.p50_rest = (st.p50 / 3.0).astype(np.float32)
+    st.save(s.store.resid_path(s.meta.model_id))
+    yield from _serve(s)
+
+
+@pytest.mark.model
+def test_chat_keeps_warning_after_reply(spread_server, browser):
+    """実物の生成: 偏りの大きい層を rel で押すと、レシピの欄に強さの注意が出て、チャットの警告(steer の偏りの知らせ)が
+    生成のあとの状態の文にも残る(v0.8.5 までは「… 秒で … 列を生成」に上書きされて消えた)。"""
+    errors = []
+    pg = _open_page(browser, errors)
+    pg.goto(spread_server + "/")
+    pg.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
+    pg.evaluate("window.gne.recipe.clear()")
+    pg.fill("#jump", "L6 N100")
+    pg.press("#jump", "Enter")
+    pg.wait_for_function("document.querySelector('#neuron-body .n-id')", timeout=30000)
+    pg.click("#neuron-body [data-rc='1']")
+    _recipe_tab(pg)
+    note = pg.evaluate("[...document.querySelectorAll('.rc-spread-warn')].map(e => e.textContent).join(' ')")
+    assert "約 3.0 倍" in note, note
+    _recipe_tab(pg, "try")
+    pg.click("#rc-chat")
+    pg.wait_for_selector("#ch-text", timeout=30000)
+    pg.click("[data-cols='1']")
+    pg.fill("#ch-max", "6")
+    pg.dispatch_event("#ch-max", "change")
+    pg.fill("#ch-text", "Hello")
+    pg.click("#ch-send")
+    pg.wait_for_function("!document.querySelector('#ch-send').disabled", timeout=120000)
+    stt = pg.evaluate("document.querySelector('#ch-status').textContent")
+    assert "秒で 1 列を生成" in stt and "警告" in stt and "偏って" in stt, stt
+    assert not errors, errors
+    pg.close()
+
+
+@pytest.mark.model
+def test_pipeline_no_result_note_after_late_open(pipe_server, browser):
+    """これまでの実行から結果を開き、読み込みが終わる前に手順を替えても、結果が届いたあとに「まだ結果がありません」が残らない
+    (v0.4.0 の手順の画面から v0.8.5 まで、読み込み中に手順 4 を開くと結果の上に残った)。"""
+    url = pipe_server
+    late = _Late(_path_key("/api/pipelines"), {}, hold="ppx")
+    errors = []
+    pg = _open_page(browser, errors)
+    pg.route("**/api/pipelines**", late)
+    pg.goto(url + "/")
+    pg.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
+    pg.click("#views button[data-view=chips]")
+    pg.wait_for_function("window.gne.directionView && window.gne.directionView.mode === 'pipe'", timeout=60000)
+    pg.evaluate("window.gne.directionView.pipe.data = null")
+    _step(pg, "chips", "past")
+    pg.wait_for_selector("#pp-past tr[data-pp=ppx]", timeout=30000)
+    pg.click("#pp-past tr[data-pp=ppx]")
+    late.wait_held(pg)
+    _step(pg, "chips", "alloc")                                                       # 読み込み中: まだ結果が無いので知らせが出る
+    vis = "(() => { const e = document.querySelector('#pp-nores'); return !e.hidden && e.offsetParent !== null; })()"
+    assert pg.evaluate(vis)
+    late.release(pg, "**/api/pipelines/ppx")
+    pg.wait_for_function("window.gne.directionView.pipe.data && window.gne.directionView.pipe.data.name === 'ppx'", timeout=30000)
+    for st in ("alloc", "dir", "causal", "cand"):
+        _step(pg, "chips", st)
+        assert not pg.evaluate(vis), st
+    assert not errors, errors
+    pg.close()
+
+
+@pytest.mark.model
+def test_pipeline_rank_default_when_writes_cannot_run(pipe_server, browser):
+    """書き込みの量での順位づけを実行しないモデル(残差が複数本の流れ・注意の出力のあとに正規化)では、CHiPS の欄の既定が
+    「止めて選ぶ」になり、書き込みの量は選べず、理由が出る。既定のまま流すときは rank を送らない(サーバーが切り替えて、結果に
+    rank_note を入れる)。自分で「止めて選ぶ」を選んだら rank を送る。構造の情報を真似て確かめる(実物の qwen4exp では確かめていない)。"""
+    url = pipe_server
+    errors = []
+    pg = _open_page(browser, errors)
+    pg.goto(url + "/")
+    pg.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
+    pg.click("#views button[data-view=chips]")
+    pg.wait_for_function("window.gne.directionView && window.gne.directionView.mode === 'pipe'", timeout=60000)
+    _step(pg, "chips", "input")
+    pg.select_option("#pp-tpl-sel", "small")
+    assert pg.evaluate("document.querySelector('#pp-rank').value") == "writes"         # ふつうのモデル(Qwen3)では書き込みの量が既定
+    assert pg.evaluate("document.querySelector('#pp-rank-blocked').hidden")
+    state = "(() => ({ v: document.querySelector('#pp-rank').value, dis: document.querySelector('#pp-rank option[value=writes]').disabled, "\
+            "note: document.querySelector('#pp-rank-blocked').hidden ? null : document.querySelector('#pp-rank-blocked').textContent, "\
+            "p: window.gne.directionView.pipe.params() }))()"
+    refresh = "document.querySelector('#pp-rank').value = 'writes'; window.gne.directionView.pipe.rankForced = false; window.gne.directionView.pipe.rankFields()"
+    for mimic, word in (("window.gne.arch.hc_streams = 4", "hyper-connections"),
+                        ("window.gne.arch.hc_streams = 0; for (const li of window.gne.arch.layers) if (li.mixer === 'attention') li.post_norm_mixer = 'post_attention_norm'",
+                         "正規化")):
+        pg.evaluate(mimic)
+        pg.evaluate(refresh)
+        st = pg.evaluate(state)
+        assert st["v"] == "causal" and st["dis"] and word in (st["note"] or ""), st
+        assert st["p"] and "rank" not in st["p"] and st["p"]["n_heads"], st["p"]           # 既定のまま: rank は送らない
+        pg.select_option("#pp-rank", "causal")                                           # 自分で選んだら送る
+        assert pg.evaluate(state)["p"]["rank"] == "causal"
+    pg.evaluate("for (const li of window.gne.arch.layers) li.post_norm_mixer = ''")
+    pg.evaluate(refresh)
+    st = pg.evaluate(state)
+    assert st["v"] == "writes" and not st["dis"] and st["note"] is None and st["p"]["rank"] == "writes"
+    assert not errors, errors
+    pg.close()
+
+
 @pytest.mark.model
 def test_candidates_late_open_does_not_overwrite(cand_server, browser):
     """「強さの候補」: 結果を開く読み込みが遅れて届いても、その間に開き直した結果を上書きしない。保存してある cand_api と cand_ui を使い、
@@ -3939,7 +4054,7 @@ def refine_server(tmp_path_factory):
                                "rows": {k: {sd: {"n": 4, "finished": 4, "match_finished": (3 if k == "none" else 1) if sd == "A" else 0,
                                                  "empty": 0, "loop": 1 if k == "recipe" and sd == "B" else 0, "at_limit": 0} for sd in "AB"}
                                         for k in ("none", "recipe")}}}}
-    r1["rank_note"] = "書き込みの順位づけに未対応(テスト)なので rank causal で流した"           # 選び方を切り替えた知らせ(v0.8.6)
+    r1["rank_note"] = "書き込みの量での順位づけを実行できないので、既定の選び方を rank causal(止めて選ぶ)に切り替えて実行しました(テスト)"           # 選び方を切り替えた知らせ(v0.8.6)
     r1["postnorm"] = {"layers": [12], "unsure_layers": [], "note": "テストの知らせ"}                 # 出力のあとの正規化の知らせ
     (hd / "ppx_r1.pipeline.json").write_text(json.dumps(r1, ensure_ascii=False))
     yield from _serve(s)
