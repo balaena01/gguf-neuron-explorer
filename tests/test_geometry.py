@@ -428,11 +428,14 @@ def test_label_null_shuffle_and_sign_flip():
     assert obs[1] < 1.6 * n95[1] and obs[2] < 1.6 * n95[2]
     assert nl["norms"].shape == (100, 3) and nl["cos_abs"].shape == (100, 3, 3) and nl["explained"]["rows"].shape == (100, 3)
     assert np.allclose(nl["explained"]["rows"].sum(axis=1), 1.0) and abs(nl["half_cos"].mean()) < 0.1
-    # 対になった対照集合: 差が全部同じなら、符号を入れ替えた平均の大きさは元の大きさ以下
-    E = np.tile(rng.standard_normal((1, 2, 10)), (8, 1, 1))
+    # 平均を引いてから入れ替えるので、基準は狙った違いの大きさによらない(雑音だけの差の分布)
+    QA2 = QA.copy()
+    QA2[:, 0, 0] += 50.0
+    assert np.allclose(G.label_null(QA2, QB, False, 30, 3, 3)["norms"], G.label_null(QA, QB, False, 30, 3, 3)["norms"])
+    # 対になった対照集合: 差 = 共通の向き + 雑音。符号を入れ替えた基準は雑音の大きさで、共通の向きの大きさより十分小さい
+    E = np.tile(rng.standard_normal((1, 2, 10)) * 5, (16, 1, 1)) + 0.3 * rng.standard_normal((16, 2, 10))
     ns = G.label_null(E, np.zeros_like(E), paired=True, n_perm=50, seed=2, k=2)
-    assert ns["scheme"] == "sign_flip" and np.all(ns["norms"] <= np.linalg.norm(E[0], axis=1) + 1e-9)
-    assert np.any(ns["norms"] < 0.99 * np.linalg.norm(E[0], axis=1))
+    assert ns["scheme"] == "sign_flip" and np.all(np.percentile(ns["norms"], 95, axis=0) < 0.2 * np.linalg.norm(E.mean(0), axis=1))
     # 同じ乱数なら同じ結果
     assert np.allclose(G.label_null(QA, QB, False, 20, 5, 3)["norms"], G.label_null(QA, QB, False, 20, 5, 3)["norms"])
 
@@ -455,6 +458,7 @@ def test_within_row_finds_leftover_direction():
     assert out["leftover_total"] == pytest.approx(1 - out["share_mean"])
     assert out["leftover_explained"][0] > 0.9 * out["leftover_total"]                 # 取り残しのほとんどが w の向き
     assert out["leftover_stability"][0] > 0.95 and out["leftover_ab_ratio"][0] > 50
+    assert out["leftover_ba_ratio"][0] < 2                                             # B 側の向きでは A 側と同じくらいの広がり
     assert np.allclose(out["q_cos"], (E @ dh) / np.linalg.norm(E, axis=1))
     p = G.within_row(EA, EB, paired=True, r_own=None, rS=None, k=3)
     assert "leftover_ab_ratio" not in p and p["share_own"] is None and len(p["q_cos"]) == 32

@@ -451,17 +451,20 @@ def _sym_eigvals(G: np.ndarray) -> np.ndarray:
 
 def label_null(QA: np.ndarray, QB: np.ndarray, paired: bool, n_perm: int = PERMUTATIONS, seed: int = 0,
                k: int = TOP_K, chunk: int = 10) -> dict:
-    """A と B のラベルを入れ替えて作る基準(§2.5)。対になった対照集合は質問ごとの差の符号を無作為に入れ替え、対にならない対照集合は
-    両側の質問を混ぜて同じ数ずつに分け直す。入れ替えた差ごとに、行の大きさ・半分どうしの cos・行どうしの |cos|・特異値分解の
-    寄与率(両方の版)を出し、n_perm 回の分布を返す。半分は、入れ替えたあとの各側の並びの偶数番目・奇数番目。
-    QA・QB は (質問, 行, d)。"""
+    """A と B のラベルを入れ替えて作る基準(§2.5)。まず狙った違いを抜く: 対にならない対照集合は各側の平均を引き、対になった対照集合は
+    質問ごとの差 u_q^A − u_q^B から平均の差を引く。そのうえで、対にならない対照集合は両側の質問を混ぜて元と同じ数ずつに分け直し、
+    対になった対照集合は質問ごとの差の符号を無作為に入れ替えて、差(の平均)を作る。平均を引かずに入れ替えると、狙った違いが
+    入れ替えた差にも残り、層どうしの cos の基準が狙った違いの形を含んでしまう(各側 64 問の対になった対照集合で、どの組も基準を
+    超えなかった)。入れ替えた差ごとに、行の大きさ・半分どうしの cos・行どうしの |cos|・特異値分解の寄与率(両方の版)を出し、
+    n_perm 回の分布を返す。半分は、入れ替えたあとの各側の並びの偶数番目・奇数番目。QA・QB は (質問, 行, d)。"""
     rng = np.random.default_rng(seed)
     nA, nB = QA.shape[0], QB.shape[0]
     nr, d = QA.shape[1], QA.shape[2]
     if paired:
-        U = (QA - QB).reshape(nA, nr * d)
+        E = QA - QB
+        U = (E - E.mean(0)).reshape(nA, nr * d)
     else:
-        U = np.concatenate([QA, QB]).reshape(nA + nB, nr * d)
+        U = np.concatenate([QA - QA.mean(0), QB - QB.mean(0)]).reshape(nA + nB, nr * d)
     N = U.shape[0]
     kk = min(int(k), nr)
     norms, hcos, ex_rows, ex_none = [], [], [], []
@@ -511,8 +514,8 @@ def within_row(EA: np.ndarray, EB: np.ndarray, paired: bool, r_own: np.ndarray |
     3. e_q を並べた行列の特異値分解(中心をずらさない)の寄与率と、1 番目の向きと d̂・r̂_l の cos。
     4. 1 本の方向で取り残す分 E (I − d̂d̂ᵀ) の特異値分解の寄与率(Σ‖e_q‖² に対する割合)。
     5. 取り残しの向きの安定度: 偶数番目・奇数番目の質問で別々に求めた向きどうしの |cos| と部分空間の重なり。
-       対にならない対照集合では、片方の半分で求めた向きに沿った A 側のもう半分の質問の広がり ÷ B 側の質問どうしの広がり
-       (1 前後なら、ふつうの質問どうしの違いと同じ程度)。
+       対にならない対照集合では、片方の半分で求めた向きに沿った A 側のもう半分の質問の広がり ÷ B 側の質問どうしの広がり(A/B)と、
+       役割を入れ替えた同じ量(B/A)。両方とも 1 より大きいなら、それぞれの側の質問どうしの違いの向き。
     6. 質問ごとの cos(e_q, d̂)。"""
     EA, EB = EA.astype(np.float64), EB.astype(np.float64)
     E = EA - EB if paired else EA - EB.mean(0)
@@ -543,16 +546,30 @@ def within_row(EA: np.ndarray, EB: np.ndarray, paired: bool, r_own: np.ndarray |
         out["leftover_stability"] = [float(abs(V0[j] @ V1[j])) for j in range(kh)]
         out["leftover_overlap"] = [float(x) for x in subspace_overlap(V0, V1)]
         if not paired:
-            F = EB - EB.mean(0)
-            rat = []
-            for j in range(kh):
-                r_ = []
-                for Vh, held in ((V0, ~ev), (V1, ev)):
-                    a_ = float(((Ep[held] @ Vh[j]) ** 2).mean())
-                    b_ = float(((F @ Vh[j]) ** 2).mean())
-                    r_.append(a_ / b_ if b_ > 0 else None)
-                rat.append(float(np.mean([x for x in r_ if x is not None])) if any(x is not None for x in r_) else None)
-            out["leftover_ab_ratio"] = rat
+            # 片方の半分で求めた向きに沿った、もう半分の広がり ÷ もう一方の側の質問どうしの広がり(どちらも d̂ の成分を除く)。
+            # A 側で求めた向き(A/B)と、役割を入れ替えて B 側で求めた向き(B/A)の両方を出す。両方とも 1 より大きいなら、それぞれの
+            # 側の質問どうしの違い(話題など)の向きで、A 側だけに特有とは言えない
+            Bp = EB - EB.mean(0)
+            Bp = Bp - np.outer(Bp @ dh, dh)
+            evb = np.arange(len(Bp)) % 2 == 0
+
+            def ratio(P, Q, evp, n):
+                if evp.sum() < 2 or (~evp).sum() < 2:
+                    return []
+                Va = np.linalg.svd(P[evp], full_matrices=False)[2][:n]
+                Vb = np.linalg.svd(P[~evp], full_matrices=False)[2][:n]
+                res = []
+                for j in range(min(len(Va), len(Vb))):
+                    r_ = []
+                    for Vh, held in ((Va, ~evp), (Vb, evp)):
+                        a_ = float(((P[held] @ Vh[j]) ** 2).mean())
+                        b_ = float(((Q @ Vh[j]) ** 2).mean())
+                        r_.append(a_ / b_ if b_ > 0 else None)
+                    r_ = [x for x in r_ if x is not None]
+                    res.append(float(np.mean(r_)) if r_ else None)
+                return res
+            out["leftover_ab_ratio"] = ratio(Ep, Bp, ev, kh)
+            out["leftover_ba_ratio"] = ratio(Bp, Ep, evb, kh)
     nq = np.sqrt(sq)
     out["q_cos"] = [float(x) for x in np.divide(E @ dh, nq, out=np.zeros_like(nq), where=nq > 0)]
     return out
@@ -899,18 +916,20 @@ def human_lines(d: dict) -> list[str]:
     if w:
         lines.append(f"同じ層の中の質問ごとの差の分解({'対になった対照集合: e_q = u_q^A − u_q^B' if ws['paired'] else '側ごとに別の質問: e_q = u_q^A − (B 側の平均)'}。"
                      "割合は Σ‖e_q‖² に対して。取り残し = 平均の向き d̂ に直交する分):")
-        head = ["行", "d̂ で説明", "r̂_l で説明", "r̂_S で説明", "上位1本", "取り残し", "取り残し1番目", "安定度(1番目)"] +             ([] if ws["paired"] else ["A/B の広がりの比(1番目)"])
+        head = ["行", "d̂ で説明", "r̂_l で説明", "r̂_S で説明", "上位1本", "取り残し", "取り残し1番目", "安定度(1番目)"] + \
+            ([] if ws["paired"] else ["A/B の広がりの比", "B/A(入れ替え)"])
         body = []
         for x in w:
             row = [x["label"], _f(x["share_mean"], ".2f"), _f(x["share_own"], ".2f"), _f(x["share_select"], ".2f"),
                    _f((x.get("explained") or [None])[0], ".2f"), _f(x["leftover_total"], ".2f"),
                    _f((x.get("leftover_explained") or [None])[0], ".3f"), _f((x.get("leftover_stability") or [None])[0], ".2f")]
             if not ws["paired"]:
-                row.append(_f((x.get("leftover_ab_ratio") or [None])[0], ".2f"))
+                row += [_f((x.get("leftover_ab_ratio") or [None])[0], ".2f"), _f((x.get("leftover_ba_ratio") or [None])[0], ".2f")]
             body.append(row)
         lines += _table(head, body, left=1)
-        lines.append("  (安定度 = 偶数番目・奇数番目の質問で別々に求めた取り残しの向きどうしの |cos|。A/B の広がりの比は、片方の半分で"
-                     "求めた向きに沿った A 側のもう半分の広がり ÷ B 側の質問どうしの広がり。1 前後ならふつうの質問どうしの違いと同じ程度)")
+        lines.append("  (安定度 = 偶数番目・奇数番目の質問で別々に求めた取り残しの向き(1 番目)どうしの |cos|。A/B の広がりの比は、A 側の片方の"
+                     "半分で求めた向きに沿った A 側のもう半分の広がり ÷ B 側の質問どうしの広がり。B/A は役割を入れ替えた同じ量。"
+                     "両方とも 1 より大きいなら、それぞれの側の質問どうしの違い(話題など)の向きで、A 側だけに特有とは言えない)")
         lo = [f"{x['mean_cos']:+.2f} {x['text'] or '#' + str(x['q'])}" for x in ws["lowest"]]
         lines.append(f"平均の向き d̂ との cos が低い A 側の質問(信用できる層全体の行 {ws['rows_used']} 行の平均): " + " | ".join(lo))
     for cp in d.get("compare") or []:
