@@ -513,6 +513,27 @@ def create_app(session, *, warm: bool = True, openai: bool = False) -> FastAPI:
     def writers_list():
         return data.writers_list()
 
+    # --- 層の幾何(gne heads geometry): 保存した配列だけで計算する(GPU を使わない、数秒)ので、ジョブにせずその場で返す ----------
+    @app.get("/api/geometry")
+    def geometry_list():
+        from ..geometry import list_materials
+        return list_materials(session)
+
+    @app.get("/api/geometry/{name}")
+    def geometry_one(name: str):
+        from ..geometry import read_result
+        return read_result(session, name)
+
+    @app.post("/api/geometry/{name}")
+    def geometry_run(name: str, params: dict = Body({})):
+        from ..geometry import UI_PARAMS, analyze, read_result
+        d = analyze(session, name, **{k: v for k, v in params.items() if k in UI_PARAMS and v not in (None, "")})
+        return read_result(session, d["name"])
+
+    @app.post("/api/geometry/{name}/export")
+    def geometry_export(name: str, out: str = Body(...), source: str = Body(...), force: bool = Body(False)):
+        return session.heads_geometry_export(name, out, source, force=force)
+
     @app.get("/api/writers/{name}")
     def writers_one(name: str):
         return data.writers_summary(name)

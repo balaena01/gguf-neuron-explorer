@@ -809,7 +809,8 @@ def analyze(session, name: str, *, parts="layer", normalize="both", top_k: int =
         wsum = {"paired": paired, "k": kw, "rows_used": len(lr),
                 "q_mean_cos": [float(x) for x in mq],
                 "lowest": [{"q": qd["index_a"][j], "mean_cos": float(mq[j]), "text": texts.get(qd["index_a"][j])} for j in order[:5]],
-                "highest": [{"q": qd["index_a"][j], "mean_cos": float(mq[j]), "text": texts.get(qd["index_a"][j])} for j in order[::-1][:3]]}
+                "highest": [{"q": qd["index_a"][j], "mean_cos": float(mq[j]), "text": texts.get(qd["index_a"][j])} for j in order[::-1][:3]],
+                "questions": [{"q": q_, "text": texts.get(q_)} for q_ in qd["index_a"]]}
         if QA.shape[0] < 2 * FEW_QUESTIONS:
             notes.append({"code": "within_few", "text": f"A 側の質問が {QA.shape[0]} 問なので、質問に沿った分解の上位の向きは雑音で決まりやすく、"
                                                         "安定度(半分どうしの |cos|)と並べてしか読めません"})
@@ -836,6 +837,47 @@ def analyze(session, name: str, *, parts="layer", normalize="both", top_k: int =
     out["path"], out["npz"] = str(pj), str(pz)
     pj.write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
     return out
+
+
+# --- UI(「層の幾何」の画面)向け ----------------------------------------------------------------------------
+
+UI_PARAMS = ("parts", "normalize", "top_k", "layers", "min_half_cos", "compare", "exclude_dims", "permutations", "seed")
+
+
+def list_materials(session) -> list[dict]:
+    """heads writes の材料(新しい順)と、質問ごとの更新・heads geometry の結果があるか。"""
+    hd = session.store.heads_dir(session.meta.model_id)
+    out = []
+    for p in sorted(hd.glob("*.writes.npz"), key=lambda q: -q.stat().st_mtime) if hd.exists() else []:
+        name = p.name[: -len(".writes.npz")]
+        js = {}
+        pj = hd / f"{name}.writes.json"
+        if pj.exists():
+            try:
+                js = json.loads(pj.read_text(encoding="utf-8"))
+            except ValueError:
+                js = {}
+        out.append({"name": name, "direction": js.get("direction"), "select_layer": js.get("select_layer"),
+                    "n": js.get("n"), "has_q": (hd / f"{name}.writes_q.npz").exists(),
+                    "has_result": (hd / f"{name}.geometry.json").exists(),
+                    "updated": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(p.stat().st_mtime))})
+    return out
+
+
+def read_result(session, name: str) -> dict:
+    """保存した heads geometry の結果(JSON)に、ラベル入れ替えの |cos| の基準の行列(npz)を足したもの。"""
+    if not re.fullmatch(r"[\w.\-]+", str(name or "")):
+        raise GneError("BAD_ARGS", f"名前 {name!r} は英数字・_・-・. だけです")
+    hd = session.store.heads_dir(session.meta.model_id)
+    pj, pz = hd / f"{name}.geometry.json", hd / f"{name}.geometry.npz"
+    if not pj.exists():
+        raise GneError("FILE_NOT_FOUND", f"heads geometry の結果 {name} がありません", "「計算する」か gne heads geometry --name で作ります")
+    d = json.loads(pj.read_text(encoding="utf-8"))
+    if pz.exists():
+        z = np.load(pz)
+        if "cos_null95" in z.files:
+            d["similarity"]["null95"] = [[round(float(x), 4) for x in row] for row in z["cos_null95"]]
+    return d
 
 
 # --- 方向ベクトルとして保存する(§6。1 つの部品に 2 本以上の向きを当てる射影は作らない)------------------------------

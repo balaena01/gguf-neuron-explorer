@@ -15,6 +15,7 @@ import { EmbedView } from "./embed.js";
 import { DirectionView } from "./direction.js";
 import { EvalView } from "./eval.js";
 import { WritersView } from "./writers.js";
+import { GeometryView } from "./geometry.js";
 import { FiresPanel } from "./fires.js";
 import { JobsBar, KIND, computeMenu } from "./jobs.js";
 import { LayersView } from "./layers.js";
@@ -689,7 +690,7 @@ function closeSearch() {
 }
 
 // --- LIST・NEURON ----------------------------------------------------------------------------------------
-let rank, neuron, layersView, searchList, chat, firesPanel, recipePanel, jobsBar, embedView, evalView, agent, headPanel, writersView, expertPanel, directionView;
+let rank, neuron, layersView, searchList, chat, firesPanel, recipePanel, jobsBar, embedView, evalView, agent, headPanel, writersView, expertPanel, directionView, geometryView;
 
 // パネル(左の LIST、右の「くわしく見る」と「レシピ」)を開く。真ん中の画面が狭くなりすぎたときだけ、ほかのパネルを細くたたむ:
 // くわしく見るを開くときはレシピ → LIST の順(レシピは足せば開き直す)、LIST を開くときはレシピを、レシピを開くときは LIST を。見ている「くわしく見る」はたたまない
@@ -952,6 +953,7 @@ async function setView(v) {
   ev.classList.toggle("hidden", v !== "embed");
   xv.classList.toggle("hidden", v !== "eval");
   wv.classList.toggle("hidden", v !== "writers");
+  $("#geometry-view").classList.toggle("hidden", v !== "geometry");
   dv.classList.toggle("hidden", !dm);
   if (dm) {                                                                // 方向・CHiPS・鍵・FiSH・強さの候補
     if (!state.model) { dv.innerHTML = `<p class="muted view-empty">${t("合成の構造には direction ビューのデータがありません")}</p>`; return; }
@@ -996,6 +998,16 @@ async function setView(v) {
     }
     directionView.setMode(dm);
     await directionView.refresh();
+    return;
+  }
+  if (v === "geometry") {                                                  // 層の幾何(gne heads geometry)
+    const gv = $("#geometry-view");
+    if (!state.model) { gv.innerHTML = `<p class="muted view-empty">${t("合成の構造には層の幾何の材料がありません")}</p>`; return; }
+    if (!geometryView) {
+      geometryView = new GeometryView(gv);
+      state.geometryView = geometryView;                                 // 自動テスト用
+    }
+    await geometryView.refresh();
     return;
   }
   if (v === "writers") {                                                   // 書き手の強さ(gne writers)

@@ -16,7 +16,7 @@
   <!-- 画面の切り替え: 探す / 作る / 確かめる の 3 群 -->
   <nav id="views" aria-label="画面" data-i18n-aria-label="画面">
     <div class="grp"><span class="grp-l" data-i18n="探す" data-i18n-en="Explore">探す</span><span class="nav">
-      <button type="button" data-view="map" class="on" aria-current="true" data-i18n-en="map" data-i18n="地図">地図</button><button type="button" data-view="layers" data-i18n-en="layers" data-i18n="層">層</button><button type="button" data-view="writers" data-i18n-en="writers" data-i18n="書き手">書き手</button><button type="button" data-view="embed" data-i18n-en="embed" data-i18n="埋め込み">埋め込み</button></span></div>
+      <button type="button" data-view="map" class="on" aria-current="true" data-i18n-en="map" data-i18n="地図">地図</button><button type="button" data-view="layers" data-i18n-en="layers" data-i18n="層">層</button><button type="button" data-view="writers" data-i18n-en="writers" data-i18n="書き手">書き手</button><button type="button" data-view="embed" data-i18n-en="embed" data-i18n="埋め込み">埋め込み</button><button type="button" data-view="geometry" data-i18n-en="geometry" data-i18n="層の幾何" data-i18n-title="層ごとの更新ベクトル(A 側と B 側の差)を、層どうしのコサイン類似度と特異値分解で比べる" title="層ごとの更新ベクトル(A 側と B 側の差)を、層どうしのコサイン類似度と特異値分解で比べる">層の幾何</button></span></div>
     <div class="grp"><span class="grp-l" data-i18n="作る" data-i18n-en="Build">作る</span><span class="nav">
       <button type="button" data-view="direction" data-i18n-en="direction" data-i18n="方向">方向</button><button type="button" data-view="chips" data-i18n-title="対照の文から方向を作り、効くヘッドを探して強さを配る(CHiPS)" title="対照の文から方向を作り、効くヘッドを探して強さを配る(CHiPS)">CHiPS</button><button type="button" data-view="keys" data-i18n-en="keys" data-i18n="キー" data-i18n-title="キーつきの書き込み(keyed)のキーを作り、分かれ方を確かめる" title="キーつきの書き込み(keyed)のキーを作り、分かれ方を確かめる">キー</button><button type="button" data-view="fish" data-i18n-title="すでにあるニューロンを式から計算した重みで書き換え、決まった場面の応答でだけ方向を書く(FiSH)" title="すでにあるニューロンを式から計算した重みで書き換え、決まった場面の応答でだけ方向を書く(FiSH)">FiSH</button></span></div>
     <div class="grp"><span class="grp-l" data-i18n="確かめる" data-i18n-en="Check">確かめる</span><span class="nav">
@@ -59,6 +59,7 @@
     <div id="direction-view" class="hidden"></div>
     <div id="eval-view" class="hidden"></div>
     <div id="writers-view" class="hidden"></div>
+    <div id="geometry-view" class="hidden"></div>
     <div id="embed-view" class="hidden"></div>
     <div id="agent-pop" class="hidden"></div>
   </section>

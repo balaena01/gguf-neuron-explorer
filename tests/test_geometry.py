@@ -589,3 +589,85 @@ def test_mcp_heads_geometry(tmp_path):
                 out = (sc.get("result", sc) if isinstance(sc, dict) else sc) if sc else json.loads(bad.content[0].text)
                 assert out["error"]["code"] == "FILE_NOT_FOUND"
     anyio.run(main)
+
+
+# --- UI(「層の幾何」の画面。Qwen3-0.6B の GGUF を CPU で読む Session と、合成の材料。ブラウザは Playwright の Chromium)-----------
+
+@pytest.fixture(scope="module")
+def geo_server(tmp_path_factory):
+    if not MODEL.exists():
+        pytest.skip(f"{MODEL} がありません")
+    from gne.api import Session
+    from gne.reverse import ContrastSet
+    from tests.test_ui import _serve
+    root = tmp_path_factory.mktemp("geo_ui")
+    s = Session(MODEL, root=root, n_gpu_layers=0, n_ctx=1024)
+    n_layer, d = s.weights.n_main - 1, s.meta.n_embd
+    QA, QB = _synthetic_q(nA=12, nB=12, n_layer=n_layer, d=d)
+    z = _material_from_q(QA, QB, ["attention"] * n_layer)
+    hd = s.store.heads_dir(s.meta.model_id)
+    hd.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(hd / "g.writes.npz", **z)
+    (hd / "g.writes.json").write_text(json.dumps({"direction": "g", "select_layer": n_layer - 1, "positions": "last", "n": {"A": 12, "B": 12}}))
+    cpath = root / "c.yaml"
+    cpath.write_text("system_a: a\nsystem_b: b\nuser_prompts:\n" + "".join(f"  - question {i}\n" for i in range(12)), encoding="utf-8")
+    G.save_q(hd, "g", _q_arrays(QA, QB, contrast=cpath, sha=ContrastSet.load(cpath).sha))
+    dd = s.store.direction_dir(s.meta.model_id)
+    dd.mkdir(parents=True, exist_ok=True)
+    C = np.cumsum(z["upd_layer_diff"].astype(np.float32), axis=0)
+    np.savez(dd / "g.npz", layers=np.arange(n_layer, dtype=np.int32), positions="last", **{f"layer_{L}": C[L] for L in range(n_layer)})
+    yield from _serve(s)
+
+
+@pytest.fixture(scope="module")
+def geo_browser():
+    from tests.test_ui import CHROME, _JaBrowser
+    if not CHROME.exists():
+        pytest.skip(f"Chromium がありません({CHROME})")
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as p:
+        b = p.chromium.launch(executable_path=str(CHROME), headless=True)
+        yield _JaBrowser(b)
+        b.close()
+
+
+@pytest.mark.model
+def test_geometry_view_in_browser(geo_server, geo_browser):
+    """層の幾何の画面: 材料を選んで計算し、ヒートマップの値をマウスとキーボードで読み、表・質問ごとの分解・方向ベクトルとしての
+    保存が動く。英語の文言もすべて辞書にある。"""
+    for lang in ("ja", "en"):
+        pg = geo_browser.new_page(viewport={"width": 1400, "height": 900})
+        errs = []
+        pg.on("pageerror", lambda e: errs.append(str(e)))
+        pg.goto(f"{geo_server}/?lang={lang}", wait_until="networkidle")
+        pg.click('button[data-view="geometry"]')
+        pg.wait_for_selector("#geo-pick option", state="attached")
+        pg.select_option("#geo-pick", "g")
+        pg.click("#geo-go")
+        pg.wait_for_function("/秒|Computed/.test(document.querySelector('#geo-status').textContent)", timeout=60000)
+        pg.wait_for_selector("#geo-heat")
+        box = pg.locator("#geo-heat").bounding_box()
+        assert box["width"] > 200 and box["height"] > 100
+        before = pg.locator("#geo-readout").inner_text()
+        pg.mouse.move(box["x"] + 120, box["y"] + 20)
+        pg.wait_for_function("document.querySelector('#geo-readout').textContent.startsWith('cos')")
+        pg.locator("#geo-heat").focus()
+        pg.keyboard.press("ArrowRight")
+        pg.keyboard.press("ArrowDown")
+        txt = pg.locator("#geo-readout").inner_text()
+        assert txt.startswith("cos") and txt != before
+        pg.locator('[data-range="max"]').click()
+        pg.locator('[data-mode="none"]').click()
+        assert pg.locator("#geo-svd-table tbody tr").count() == 6
+        pg.locator("#geo-heat-table summary").click()
+        pg.wait_for_selector("#geo-heat-table table")
+        assert pg.locator("#geo-heat-table table").first.locator("tbody tr").count() == pg.locator("tr[data-wi]").count()
+        pg.locator("tr[data-wi]").nth(1).click()
+        assert pg.locator("#geo-wq li").count() == 12 and "question" in pg.locator("#geo-wq li").first.inner_text()
+        pg.fill("#geo-export-name", f"g_exp_{lang}")
+        pg.click("#geo-export-go")
+        pg.wait_for_selector("#geo-export-out .ok")
+        assert errs == []
+        if lang == "en":
+            assert pg.evaluate("[...window.gneI18n.missing]") == []
+        pg.close()
