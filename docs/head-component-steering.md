@@ -349,6 +349,8 @@ SenseNova-Loop-9B(Q4_K_M、選ぶ層 段 54。表は docs/sensenova_loop.md)で�
 | `neuron_{a,b}_{own,sel}_<層>` | (n_ff,) | ニューロンごとの書き込み |
 | `top_label`・`top_q_a`・`top_q_b` | (上位の数,)・(質問の数, 上位の数) | 点数の上位の部品の、質問ごとの書き込み |
 
+質問ごと・層ごとの更新は、`--save-q` を付けたときだけ別のファイル `<名前>.writes_q.npz` に保存する(v0.9.0。層ごとの更新を比べる `gne heads geometry` の材料。形式は [layer-geometry.md](layer-geometry.md) §1)。
+
 ---
 
 ## 4. 例ごとの当てはめ
@@ -518,6 +520,7 @@ SenseNova-Loop-9B(Q4_K_M、選ぶ層 段 54。表は docs/sensenova_loop.md)で�
 | どこを探すかを決める(方向の差を attention・専門家・共有の専門家に分ける) | `gne heads writers --name <方向>`(`--expert-layers` で専門家ごとにも) | なし |
 | 3.5〜3.6 組を作り、効率で配り直す・ヘッド数を減らす | `gne heads allocate --name <方向> --target <射影の値>`(`heads_allocate`)。比を固定しないなら `--method greedy` | なし |
 | 3.9 全部の部品(ヘッド・線形注意・ニューロン)を書き込みの量で並べ、上位を確かめる | `gne heads writes --name <方向>`(`heads_writes`。`--unit-kinds heads` でヘッドだけ、`--verify-top 0` で確かめない) | なし |
+| 層ごとの更新ベクトル(A − B)を比べる(層どうしの cos・特異値分解・半分ずつの一致・質問に沿った分解) | `gne heads geometry --name <writes の名前>`(`heads_geometry`、UI の「層の幾何」。[layer-geometry.md](layer-geometry.md)) | なし |
 | 3.9 その順位で組を作る(s=1 から) | `gne heads pipeline --spec <JSON> --rank writes`(`--unit-kinds heads / all`、`--n-units 24,12,6`、`--check-replies 0` で応答の確かめを切る) | 応答の確かめだけ |
 | ニューロンの射影が式どおりか | `gne headproj check --layer L --neuron N --direction <方向>` | なし |
 | 3.2〜3.6・3.9 をまとめて回す | `gne heads pipeline --spec <JSON>`(`heads_pipeline`、UI の「CHiPS」の画面で JSON を読み込んでも回せる。用途別のひな形は `configs/pipeline/`)。既定は §3.9 の `--rank writes`、§3.4〜3.6 の流れは `--rank causal` | 応答の確かめだけ(`--rank writes`) |

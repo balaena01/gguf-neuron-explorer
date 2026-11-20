@@ -466,14 +466,16 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
 
     @srv.tool()
     async def heads_writes(name: str, contrast: str | None = None, select_layer: int | None = None, unit_kinds: str = "all",
-                           verify_top: int = 64, verify_mode: str = "proj", max_examples: int | None = None) -> dict:
+                           verify_top: int = 64, verify_mode: str = "proj", max_examples: int | None = None,
+                           save_q: bool = False) -> dict:
         """全部の部品(注意ヘッド・線形注意のヘッド・MLP のニューロン)を、方向 name への書き込みの量で順位づけするジョブを投げる
         (job_status で結果。生成なし)。質問 1 問につき 1 回流し、点数 = 選ぶ層(既定は最後に測れる層)での「s=1 の射影で直接に
         縮まる A と B の差」。上位 verify_top 個を 1 個ずつ s=1 で射影して(verify_mode="ablate" なら止めて)確かめ、点数との順位相関を
-        返す。直接の書き込みしか見ないので、後ろの書き手を動かしているだけの部品は見落とす。層ごとの更新のベクトルは .writes.npz。"""
+        返す。直接の書き込みしか見ないので、後ろの書き手を動かしているだけの部品は見落とす。層ごとの更新のベクトルは .writes.npz。
+        save_q=True なら質問ごとの更新を .writes_q.npz に保存する(heads_geometry の質問に沿った分解の材料)。"""
         try:
             p = {"direction": name, "select_layer": select_layer, "kinds": unit_kinds, "verify_top": verify_top,
-                 "verify_mode": verify_mode, "max_examples": max_examples,
+                 "verify_mode": verify_mode, "max_examples": max_examples, "save_q": save_q or None,
                  "contrast": None if contrast is None else str(_contrast_path(session, contrast, None, None, None, None))}
             return jobs.start("heads_writes", {k: v for k, v in p.items() if v is not None}).view()
         except Exception as e:  # noqa: BLE001
@@ -585,6 +587,42 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
             return d
         except Exception as e:  # noqa: BLE001
             return _err(e)
+
+    @srv.tool()
+    async def heads_geometry(name: str, parts: str = "layer", normalize: str = "both", top_k: int | None = None,
+                             layers: str | None = None, min_half_cos: float | None = None, compare: str | None = None,
+                             exclude_dims: str | None = None, out_name: str | None = None,
+                             permutations: int | None = None, seed: int = 0, export_direction: str | None = None,
+                             export_from: str | None = None, export_force: bool = False) -> dict:
+        """heads writes の材料 name の、層ごとの更新ベクトル(A 側の平均の更新 − B 側の平均の更新)を比べる(GPU を使わない、数秒)。
+        層どうしのコサイン類似度(行列は保存した .geometry.json / .npz にあり、ここでは省く)、特異値分解(normalize: rows = 行の大きさを
+        そろえる / none / both。基準は行が直交していたときの値と、半分どうしの差から作る雑音の目安)、半分ずつの一致(min_half_cos 未満に
+        信用しない印、既定 0.5)、方向ベクトルとの cos、ループのモデルでは同じ重みの 1 回目と 2 回目、heads refine の方向との cos。
+        parts は layer / attn,mlp / layer,attn,mlp。heads_writes(save_q=True)で質問ごとの更新を保存してあれば、ラベル入れ替えの
+        基準(permutations 回、既定 200、0 で切る)と、同じ層の中の質問に沿った分解(within)も返す。かたまりや上位の向きは更新の差が
+        似ていることしか示さない(返り値の reading)。export_direction と export_from(svd-rows:K / svd-none:K / within:K)を渡すと、
+        その向きを方向ベクトルとして保存する(direction_score・heads_writes・headproj ablate で使える。単位ベクトル)。"""
+        from .geometry import HALF_COS_MIN, PERMUTATIONS, TOP_K
+
+        def run():
+            d = session.heads_geometry(name, parts=parts, normalize=normalize, top_k=TOP_K if top_k is None else top_k,
+                                       layers=layers, min_half_cos=HALF_COS_MIN if min_half_cos is None else min_half_cos,
+                                       compare=compare, exclude_dims=exclude_dims, out_name=out_name,
+                                       permutations=PERMUTATIONS if permutations is None else permutations, seed=seed)
+            d = dict(d, similarity={k: v for k, v in d["similarity"].items() if k != "matrix"})
+            for s_ in d["svd"].values():                # 行ごとの配列は保存したファイルで読む(返り値を小さくする)
+                for k in ("U", "row_explained", "cos_own"):
+                    s_.pop(k, None)
+            d["material"] = {k: v for k, v in d["material"].items() if k != "cumsum"}
+            if export_direction or export_from:
+                if not (export_direction and export_from):
+                    raise GneError("BAD_ARGS", "export_direction と export_from は一緒に渡します")
+                d["export"] = session.heads_geometry_export(d["name"], export_direction, export_from, force=export_force)
+            if d.get("within"):                          # 質問ごとの cos は保存したファイルで読む
+                d["within"] = [{k: v for k, v in x.items() if k != "q_cos"} for x in d["within"]]
+                d["within_summary"] = {k: v for k, v in d["within_summary"].items() if k != "q_mean_cos"}
+            return d
+        return await call(run, gpu=False)
 
     @srv.tool()
     async def headproj_export(recipe: str, bake: bool = False, requant: str | None = None, verify: bool = True,

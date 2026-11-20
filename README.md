@@ -122,6 +122,7 @@ gne heads causal --name evil                                  # heads whose zero
 gne heads allocate --name evil --target -3 --n-heads 6,5,4    # strengths in proportion to efficiency (projection drop per unit of strength), sets with fewer heads compared
 gne heads allocate --name evil --target -3 --method greedy     # or raise the most effective head one step at a time
 gne heads writes --name evil                                  # rank every attention head, linear-attention head and MLP neuron by its write along the direction, then check the top ones
+gne heads geometry --name evil                                # compare the per-layer update vectors (A minus B): layer-to-layer cosine, SVD, split-half agreement (docs/layer-geometry.md)
 gne headproj check --layer 20 --neuron 4096 --direction evil  # check a neuron projection unit (20:N4096:s1@evil) against the formula
 gne headproj check --layer 20 --whole ffn --direction evil     # the same for a whole-layer MLP output unit (20:ffn:s1@evil; --whole attn for 20:attn:s1@evil)
 gne heads candidates --alloc evil --prompts held_out.yaml     # responses for each set × scale, written out for blind scoring

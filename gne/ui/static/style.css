@@ -74,6 +74,10 @@
   --side-b: #9fb3cf;        /* 対照の B 側 */
   --d1: #c38cf0;
   --d2: #5ec8d8;
+  /* 符号のある値の色(層の幾何のヒートマップ): 負 = 青、0 = 灰、正 = 赤(dataviz の 2 色 + 灰の真ん中、暗い面用) */
+  --div-neg: #3987e5;
+  --div-mid: #383835;
+  --div-pos: #e66767;
   --rec-bg: #7a2633;        /* 録音中 */
   --rec-line: #c94f5f;
   /* 字 */
@@ -830,3 +834,37 @@ fieldset.fx-part:disabled .pp-fs-off { color: var(--text-hi); }
 table.fx-tab tr.fx-pick { cursor: pointer; }
 table.fx-tab tr.fx-pick:hover :is(td, th) { background: var(--hover); }
 table.fx-tab th.fx-scan-g { text-align: center; border-bottom: 1px solid var(--line-mid); }
+
+/* 層の幾何(geometry.js) */
+#geometry-view { position: absolute; inset: 0; overflow-y: auto; overflow-x: hidden; background: var(--bg); z-index: 10; padding: 0 var(--sp-6) var(--sp-8); }
+.geo-tools input[type="number"] { width: 5em; }
+.geo-reading { border-left: 3px solid var(--warn-line); background: var(--sunk); padding: var(--sp-3) var(--sp-5); margin: var(--sp-4) 0; font-size: var(--fs-m); color: var(--text-2); max-width: 980px; }
+.geo-reading ul { margin: var(--sp-2) 0 0; padding-left: var(--sp-7); }
+.geo-notes { font-size: var(--fs-m); color: var(--text-3); margin: var(--sp-2) 0 var(--sp-4); padding-left: var(--sp-7); max-width: 980px; }
+.geo-ctl { display: flex; flex-wrap: wrap; gap: var(--sp-5); align-items: center; margin: var(--sp-2) 0; }
+.geo-legend { display: flex; flex-wrap: wrap; gap: var(--sp-5); align-items: center; color: var(--text-3); margin: var(--sp-2) 0; }
+.geo-legend i { display: inline-block; width: 12px; height: 10px; margin-right: var(--sp-2); vertical-align: middle; border-radius: var(--r-xs); }
+.geo-legend .geo-scale { display: inline-flex; align-items: center; gap: var(--sp-3); }
+.geo-legend i.geo-ramp { width: 140px; height: 10px; }
+.geo-legend i.geo-hatch { background: repeating-linear-gradient(135deg, var(--muted) 0 1px, transparent 1px 5px); border: 1px solid var(--line-mid); }
+.geo-legend i.geo-tick { width: 2px; background: var(--warn); }
+.geo-legend i.geo-dash { width: 18px; height: 0; border-top: 2px dashed var(--text-2); border-radius: 0; }
+.geo-legend i.geo-dot { width: 18px; height: 0; border-top: 2px dotted var(--ok); border-radius: 0; }
+.geo-legend i.geo-diamond { width: 8px; height: 8px; background: var(--warn); transform: rotate(45deg); border-radius: 0; }
+.geo-heat-wrap { overflow-x: auto; }
+#geo-heat:focus-visible, #geo-u:focus-visible, #geo-dir:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.geo-readout { color: var(--text-2); min-height: 1.4em; margin: var(--sp-2) 0 var(--sp-4); white-space: normal; }
+.geo-tip { position: absolute; z-index: 20; pointer-events: none; background: var(--scrim); border: 1px solid var(--line-mid); border-radius: var(--r-m);
+  padding: var(--sp-2) var(--sp-4); font-size: var(--fs-s); color: var(--text-hi); max-width: 360px; }
+.geo-tables { display: grid; gap: var(--sp-5); }
+.tbl-wrap { overflow: auto; max-inline-size: 100%; max-block-size: min(520px, 70vh); }
+.tbl-wrap thead th { position: sticky; inset-block-start: 0; background: var(--bg); z-index: 1; }
+.tbl-wrap tbody th { position: sticky; inset-inline-start: 0; background: var(--bg); }
+.geo-matrix td, .geo-matrix th { padding-right: var(--sp-3); }
+table.geo-within tr.geo-unrel td { color: var(--muted); }
+.geo-cellbar { display: inline-block; width: 40px; height: 8px; margin-right: var(--sp-3); vertical-align: middle;
+  background: linear-gradient(to right, var(--side-b) calc(var(--v) * 100%), var(--line-soft) calc(var(--v) * 100%)); border-radius: var(--r-xs); }
+.note.warn { color: var(--warn); }
+.geo-more { margin: 0 0 var(--sp-3); }
+.geo-qlist { font-size: var(--fs-m); color: var(--text-2); margin: var(--sp-2) 0 var(--sp-4); max-width: 980px; }
+.geo-loop summary { cursor: pointer; }
