@@ -330,7 +330,7 @@ export class GeometryView {
     const opts = [];
     for (const [mode, s] of Object.entries(d.svd)) for (let k = 1; k <= s.k; k++) opts.push([`svd-${mode}:${k}`, `${mode === "rows" ? t("特異値分解(そろえる)") : t("特異値分解(そろえない)")} V${k}`]);
     if (d.within) for (let k = 1; k <= (d.within_summary.k || 1); k++) opts.push([`within:${k}`, t("各層の取り残しの向き {k} 番目", { k })]);
-    opts.unshift(["update", t("その層が足した分の向き(層全体の更新の差 d̂_l)")], ["update-attn", t("その層が足した分の向き(注意の出力全体)")],
+    opts.push(["update", t("その層が足した分の向き(層全体の更新の差 d̂_l)")], ["update-attn", t("その層が足した分の向き(注意の出力全体)")],
       ["update-mlp", t("その層が足した分の向き(MLP の出力全体)")]);
     return `<h4 class="note">${t("6. 方向ベクトルとして保存する")}</h4>
       <p class="note warn">${t("確かめのための向きです。全部の層から消すと、応答が同じ文の繰り返しになることがあります(各側 64 問の対照集合で、特異値分解の 1 番目を全部の層から消すと 30 問中 12〜15 問)。消した応答を読んで確かめます。層ごとの向き(取り残し・その層が足した分)には最後の層の向きが無く(更新がほぼ 0 の層・信用しない層も保存しない)、その層では手前で一番近い層の向きが使われます。")}</p>

@@ -758,6 +758,12 @@ def test_geometry_view_in_browser(geo_server, geo_browser):
         pg.wait_for_selector("#geo-export-out .ok")
         notes = pg.locator("#geo-export-out").inner_text()
         assert ("繰り返し" in notes) if lang == "ja" else ("repeat" in notes or "繰り返し" in notes)    # 書き出しの知らせ(サーバの文は日本語)
+        # その層が足した分の向き: この合成の材料はどの層も半分どうしがそろわない(信用しない)ので、保存できない理由が出る
+        pg.select_option("#geo-export-src", "update")
+        pg.fill("#geo-export-name", f"g_upd_{lang}")
+        pg.click("#geo-export-go")
+        pg.wait_for_selector("#geo-export-out .err")
+        assert "信用しない" in pg.locator("#geo-export-out").inner_text()
         # 細かい設定: 層を絞り、比べない
         pg.locator(".geo-more summary").click()
         pg.fill("#geo-layers", "0-3")
