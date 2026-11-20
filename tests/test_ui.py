@@ -717,9 +717,9 @@ def test_top_bar_opens_each_screen(server, browser):
     強さの候補は direction ビューの中身を入れ替えて出す(中の切り替えは無い)。地図の上の帯(層・並べ方・色・線・この層で計算)は地図だけ。
     方向の画面は開いただけでは測らない。英語の画面でも文言は辞書にある。"""
     # 地図の上の帯は地図のときだけ見える(地図の上に重ねるほかの画面と分ける)
-    want = {"map": "#map-bar", "layers": "#layers-view", "writers": "#writers-view", "embed": "#embed-view", "eval": "#eval-view",
-            "direction": "#dv-dir", "chips": "#dv-pipe", "keys": "#dv-key", "fish": "#dv-fish", "cand": "#dv-cand"}
-    assert len(want) == 10
+    want = {"map": "#map-bar", "layers": "#layers-view", "writers": "#writers-view", "embed": "#embed-view", "geometry": "#geometry-view",
+            "eval": "#eval-view", "direction": "#dv-dir", "chips": "#dv-pipe", "keys": "#dv-key", "fish": "#dv-fish", "cand": "#dv-cand"}
+    assert len(want) == 11
     for lang in ("ja", "en"):
         pg = browser.new_page(viewport={"width": 1500, "height": 860})
         errors, posts = [], []
@@ -729,7 +729,7 @@ def test_top_bar_opens_each_screen(server, browser):
         pg.goto(server + f"/?lang={lang}")
         pg.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
         groups = pg.evaluate("[...document.querySelectorAll('#views .grp')].map(g => [...g.querySelectorAll('button[data-view]')].map(b => b.dataset.view))")
-        assert groups == [["map", "layers", "writers", "embed"], ["direction", "chips", "keys", "fish"], ["eval", "cand"]]
+        assert groups == [["map", "layers", "writers", "embed", "geometry"], ["direction", "chips", "keys", "fish"], ["eval", "cand"]]
         assert not pg.evaluate("document.querySelector('#dv-mode')")
         for v, sel in [*want.items(), ("map", "#map-bar")]:
             pg.click(f"#views button[data-view={v}]")
