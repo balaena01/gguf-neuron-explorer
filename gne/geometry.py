@@ -886,19 +886,25 @@ def read_result(session, name: str) -> dict:
 
 # --- 方向ベクトルとして保存する(§6。1 つの部品に 2 本以上の向きを当てる射影は作らない)------------------------------
 
-EXPORT_FROM = ("svd-rows", "svd-none", "within")
+EXPORT_FROM = ("svd-rows", "svd-none", "within", "update", "update-attn", "update-mlp")
+UPDATE_PARTS = {"update": "layer", "update-attn": "attn", "update-mlp": "mlp"}
+UPDATE_ZERO = 1e-6        # 層の更新の大きさがこれ × 層の中の最大より小さければ「ほぼ 0」として保存しない
 
 
 def export_direction(session, result: str, out: str, source: str, *, force: bool = False) -> dict:
     """heads geometry の結果 result の向きを、今の方向ベクトルの形(<root>/directions/<model_id>/<out>.npz)で保存する。
     source: svd-rows:K / svd-none:K(特異値分解の K 番目の向き。全部の層に同じ向き)、within:K(各層の層全体の行の、質問に沿った
-    分解の取り残しの K 番目の向き。層ごとに違う向き。質問ごとの更新が要る)。符号は、その層の残差の平均の差(元の方向ベクトルの
-    元の値)への射影が正になる向き(svd は選ぶ層で)。対照集合・測る位置・基準層は元の方向ベクトルから写す。単位ベクトルなので、
-    大きさには意味がない(add の強さには使わない)。"""
-    m = re.fullmatch(r"(svd-rows|svd-none|within):(\d+)", str(source or ""))
-    if not m or int(m.group(2)) < 1:
-        raise GneError("BAD_ARGS", f"保存する向きは svd-rows:K / svd-none:K / within:K です({source!r})")
-    kind, k = m.group(1), int(m.group(2))
+    分解の取り残しの K 番目の向き。層ごとに違う向き。質問ごとの更新が要る)、update / update-attn / update-mlp(その層が新しく
+    足した分の向き d̂_l = 層ごとの更新の差 d_l の向き。層全体・注意の出力全体・MLP の出力全体。層ごとに違う向き)。
+    符号は、svd・within はその層の残差の平均の差(元の方向ベクトルの元の値)への射影が正になる向き(svd は選ぶ層で)、update は
+    A 側 − B 側の更新そのものの向き。対照集合・測る位置・基準層は元の方向ベクトルから写す。単位ベクトルなので、大きさには意味が
+    ない(add の強さには使わない)。update で、更新がほぼ 0 の層と信用しない印の層(半分どうしの cos が結果の基準未満)は保存しない
+    (その層のユニットでは、gne の道具は手前で一番近い層の向きを使う。知らせに出す)。"""
+    src = str(source or "")
+    m = re.fullmatch(r"(svd-rows|svd-none|within):(\d+)", src) or re.fullmatch(r"(update|update-attn|update-mlp)()", src)
+    if not m or (m.group(2) and int(m.group(2)) < 1):
+        raise GneError("BAD_ARGS", f"保存する向きは svd-rows:K / svd-none:K / within:K / update / update-attn / update-mlp です({source!r})")
+    kind, k = m.group(1), int(m.group(2) or 0)
     if not re.fullmatch(r"[\w.\-]+", str(out or "")):
         raise GneError("BAD_ARGS", f"方向の名前 {out!r} は英数字・_・-・. だけです")
     hd = session.store.heads_dir(session.meta.model_id)
@@ -921,7 +927,47 @@ def export_direction(session, result: str, out: str, source: str, *, force: bool
     notes = []
     vecs: dict[int, np.ndarray] = {}
     flipped = []
-    if kind.startswith("svd"):
+    if kind in UPDATE_PARTS:                         # その層が新しく足した分の向き(材料の層ごとの更新の差 d_l)
+        z, _ = load_material(hd, js["material"]["name"])
+        part = UPDATE_PARTS[kind]
+        V, V0, V1 = part_vectors(z, part), part_vectors(z, part, "diff_h0"), part_vectors(z, part, "diff_h1")
+        ex = list(js["settings"].get("exclude_dims") or [])
+        if ex:
+            for M_ in (V, V0, V1):
+                M_[:, ex] = 0.0
+        thr = float(js["settings"].get("min_half_cos", HALF_COS_MIN))
+        nrm = np.linalg.norm(V, axis=1)
+        top = float(nrm.max()) if len(nrm) else 0.0
+        skipped: dict[str, list[int]] = {"zero": [], "unreliable": []}
+        for i, L in enumerate(int(x) for x in z["layer_index"]):
+            if L not in ds.raw:
+                continue
+            if top <= 0 or nrm[i] <= UPDATE_ZERO * top:
+                skipped["zero"].append(L)
+                continue
+            hc = _cos(V0[i], V1[i])
+            if hc is None or hc < thr:
+                skipped["unreliable"].append(L)
+                continue
+            vecs[L] = V[i]
+        if not vecs:
+            raise GneError("BAD_ARGS", f"結果 {result} の材料に、保存できる{ {'layer': '層', 'attn': '注意の', 'mlp': 'MLP の'}[part] }更新がありません"
+                                       "(どの層も更新がほぼ 0 か、信用しない印)")
+        along = _cos(vecs[S], np.asarray(ds.raw[S], np.float64)) if S in vecs and S in ds.raw else None
+        for why, Ls in skipped.items():
+            if Ls:
+                notes.append({"code": f"update_{why}", "layers": Ls,
+                              "text": f"層 {', '.join(map(str, Ls[:8]))}{' …' if len(Ls) > 8 else ''} は"
+                                      + ("更新がほぼ 0 なので" if why == "zero" else f"信用しない印(半分どうしの cos が {thr} 未満)なので")
+                                      + "保存していません。その層のユニットでは、gne の道具は手前で一番近い層の向きを使います"})
+        missing = sorted(set(ds.raw) - set(vecs) - set(skipped["zero"]) - set(skipped["unreliable"]))
+        if missing:
+            notes.append({"code": "missing_layers", "text": f"層 {', '.join(map(str, missing[:8]))}{' …' if len(missing) > 8 else ''} には向きがありません"
+                                                            "(材料の行が無い層。最後の層は材料に入らない)。その層のユニットでは、gne の道具は"
+                                                            "手前で一番近い層の向きを使います"})
+        notes.append({"code": "update_meaning", "text": "その層が新しく足した分の向き(層ごとの更新の差 d_l の向き)です。方向ベクトル r̂_l(その層までの"
+                                                        "残差の差 = それまでの更新の積み重ね)とは別の向きで、射影の値・目標は元の方向ベクトルで測ります"})
+    elif kind.startswith("svd"):
         mode = "rows" if kind == "svd-rows" else "none"
         key = f"V_{mode}"
         if key not in arr.files:

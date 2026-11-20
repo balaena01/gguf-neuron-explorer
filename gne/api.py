@@ -2464,7 +2464,7 @@ class Session:
     PIPELINE_DEFAULTS = {"positions": "last", "score_positions": "last", "target": None, "n_heads": [6, 5, 4], "hard": 16,
                          "top_layers": 4, "max_examples": 64, "s_max": 30.0, "direction_layer": "own", "resume": True,
                          "include_score_layers": False, "same_reply": False, "score_layers": None, "select_layer": None,
-                         "candidate_layers": None, "always_layers": None}
+                         "candidate_layers": None, "always_layers": None, "from_direction": None}
     # rank: writes(v0.8.0 からの既定: 全部の部品を書き込みの量で順位づけ → 上位を s=1 で確かめる → s=1 から組を作る)/
     # causal(v0.7.0 までの既定: 層 → ヘッドを止めて測る因果スクリーニング → 効率で配り直す)。unit_kinds の既定は heads(ニューロンは
     # 指定で足す)。rank 以外は writes のときだけ使う設定(causal の結果の settings には rank だけを載せる)
@@ -2636,7 +2636,9 @@ class Session:
         self.engine.free_steer()                   # 生成しないので、生成用のコンテキストを空けて VRAM を使えるようにする
         ts = time.perf_counter()                                   # 1. 方向(全部の質問)
         d = None
-        if pipe["resume"] and pipe["positions"] != "response":
+        if pipe.get("from_direction"):             # 作り済みの方向ベクトルを使う(heads geometry で保存した向きなど。方向づくりを飛ばす)
+            d = self._pipeline_from_direction(str(pipe["from_direction"]), name, path, cs, pipe["positions"])
+        elif pipe["resume"] and pipe["positions"] != "response":
             try:
                 m = self.direction_set(name).meta
                 if m.get("contrast_sha") == cs.sha and m.get("positions") == pipe["positions"]:
@@ -2648,7 +2650,8 @@ class Session:
         if d is None:                                      # same_reply は positions response のときだけ(違えば direction が断る)
             d = self.direction(contrast=path, name=name, positions=pipe["positions"], same_reply=bool(pipe["same_reply"]))
         out["direction"] = {"path": d["path"], "positions": d["positions"], "n_rows": d["n_rows"],
-                            "seconds": time.perf_counter() - ts, "reused": "direction" in reused}
+                            "seconds": time.perf_counter() - ts, "reused": "direction" in reused,
+                            **({"from": d["from"]} if d.get("from") else {})}
         ts = time.perf_counter()                                   # 2. 基準層(cohen_d が最大の層)
         sc = self.direction_score(name, contrast=path, positions=sp, record_base=True, max_examples=mx)
         out["score"] = {"base_layer": sc["base_layer"], "best_layer": sc["best_layer"], "n": sc["n"],
@@ -4086,6 +4089,34 @@ round_01.scores.txt に「番号 P C」を 1 行ずつ書く(例: 17 3 4)。全�
         baselines = {f"L{L}": texts.get((L, None), "") for L in sorted(by_layer)}
         return {"design": design_name, "runs": runs, "examples": examples, "baselines": baselines}
 
+    def _pipeline_from_direction(self, src: str, name: str, contrast_path: Path, cs, positions: str) -> dict:
+        """一括(heads pipeline)で、作り済みの方向ベクトル src を使う。src を一括の名前 name の方向として写し、対照集合の sha と
+        出どころを一括の対照集合に付け替える(以降の段は今までどおり name の方向を使う)。src の対照集合と質問・system が違えば知らせる。"""
+        if src == name:
+            raise GneError("BAD_ARGS", f"from_direction に一括と同じ名前 {name} は使えません(一括はその名前の方向を書き直す)",
+                           "一括の name を別の名前にしてください")
+        sp = self.direction_path(src)
+        z = np.load(sp)
+        pos = str(z["positions"]) if "positions" in z.files else None
+        if pos and pos != positions:
+            raise GneError("BAD_ARGS", f"方向 {src} の測る位置({pos})と一括の測る位置({positions})が違います")
+        srcs = str(z["source"]) if "source" in z.files else ""
+        try:
+            from .reverse import ContrastSet
+            c0 = ContrastSet.load(srcs) if srcs and Path(srcs).exists() else None
+        except GneError:
+            c0 = None
+        if c0 is None or any(c0.prompts(x) != cs.prompts(x) or c0.system(x) != cs.system(x) for x in "AB"):
+            self.warn(f"方向 {src} を作った対照集合と、この一括の対照集合の質問・system が同じとは確かめられません。違う質問で作った方向は、"
+                      "射影の値・目標の意味が変わります")
+        arrs = {k: z[k] for k in z.files}
+        arrs.update(contrast_sha=np.array(cs.sha), source=np.array(str(contrast_path)), from_direction=np.array(src))
+        dst = self.store.direction_dir(self.meta.model_id) / f"{name}.npz"
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        np.savez(dst, **arrs)
+        return {"path": str(dst), "positions": pos or positions, "from": src,
+                "n_rows": {"A": int(arrs.get("n_rows_A", 0) or 0), "B": int(arrs.get("n_rows_B", 0) or 0)}}
+
     def heads_geometry(self, name: str, **kw) -> dict:
         """heads writes の材料 name の層ごとの更新ベクトル(A 側と B 側の差)を、層どうしのコサイン類似度・特異値分解・半分ずつの
         一致・方向ベクトルとの cos で比べる(gne/geometry.py)。モデルは流さない(GPU を使わない)。結果は
@@ -4094,7 +4125,8 @@ round_01.scores.txt に「番号 P C」を 1 行ずつ書く(例: 17 3 4)。全�
         return analyze(self, name, **kw)
 
     def heads_geometry_export(self, result: str, out: str, source: str, *, force: bool = False) -> dict:
-        """heads geometry の結果 result の向き(svd-rows:K / svd-none:K / within:K)を方向ベクトル out として保存する(gne/geometry.py)。"""
+        """heads geometry の結果 result の向き(svd-rows:K / svd-none:K / within:K / update / update-attn / update-mlp)を方向ベクトル out
+        として保存する(gne/geometry.py)。"""
         from .geometry import export_direction
         return export_direction(self, result, out, source, force=force)
 

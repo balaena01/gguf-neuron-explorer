@@ -2601,9 +2601,12 @@ export const EN = {
   "列の部品": "column part",
   "セルの大きさ": "Cell size",
   "行が多くてセルが小さいので、行・列の部品を選んで切り出すか、セルを大きくするか、下の表で読みます": "Many rows make the cells small: pick a row and column part, enlarge the cells, or read the tables below",
-  "確かめのための向きです。全部の層から消すと、応答が同じ文の繰り返しになることがあります(各側 64 問の対照集合で、特異値分解の 1 番目を全部の層から消すと 30 問中 12〜15 問)。消した応答を読んで確かめます。各層の取り残しの向きには最後の層の向きが無く、その層では手前で一番近い層の向きが使われます。": "These directions are for checking. Removing one from every layer can turn replies into repeated sentences (with a 64-per-side set, removing the first SVD direction from every layer did so in 12–15 of 30 replies). Read the replies with it removed. Per-layer leftover directions have none for the last layer; there the tools use the nearest earlier layer's direction.",
+  "確かめのための向きです。全部の層から消すと、応答が同じ文の繰り返しになることがあります(各側 64 問の対照集合で、特異値分解の 1 番目を全部の層から消すと 30 問中 12〜15 問)。消した応答を読んで確かめます。層ごとの向き(取り残し・その層が足した分)には最後の層の向きが無く(更新がほぼ 0 の層・信用しない層も保存しない)、その層では手前で一番近い層の向きが使われます。": "These directions are for checking. Removing one from every layer can turn replies into repeated sentences (with a 64-per-side set, removing the first SVD direction from every layer did so in 12–15 of 30 replies). Read the replies with it removed. Per-layer directions (leftover, the part a layer added) have none for the last layer (layers with a near-zero or unreliable update are not saved either); there the tools use the nearest earlier layer's direction.",
   "同じ名前の方向があれば置き換える": "Replace a direction with the same name",
   "行 = {r}、列 = {c}": "rows = {r}, columns = {c}",
   "この特異値分解には、信用しない行が {n} 行入っています(同じ重さで数えています)": "This SVD includes {n} unreliable rows (weighted like the others)",
   "方向の長さが 0 の層 {l} を外しました。A 側と B 側の残差がまったく同じ層です(短い畳み込みの層は数トークン前までしか見ないので、両側で違う system プロンプトがまだ届いていません)。この層では方向に沿った書き込みが決まりません。": "Layers {l}, where the direction has length 0, were left out. On these layers the residuals of sides A and B are identical (short convolution layers only see the last few tokens, so the system prompts that differ between the sides have not reached them yet). Writes along the direction cannot be measured there.",
+  "その層が足した分の向き(層全体の更新の差 d̂_l)": "direction the layer added (whole-layer update difference d̂_l)",
+  "その層が足した分の向き(注意の出力全体)": "direction the layer added (attention output)",
+  "その層が足した分の向き(MLP の出力全体)": "direction the layer added (MLP output)",
 };

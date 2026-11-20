@@ -3069,6 +3069,7 @@ def heads_pipeline(c: Common, holder: dict,
                    holdout: bool = typer.Option(False, "--holdout", help="--rank writes: 質問を半分に分け、偶数番目で選び、奇数番目(選ぶのに使っていない質問)で表の数と応答の確かめを測る(側ごとに 16 問以上)"),
                    loop_direction: Optional[str] = typer.Option(None, "--loop-direction", help="--rank writes、重みを 2 回使うモデル: ループの中の部品を、1 回目の段(first)か 2 回目の段(second)の方向で測って射影する"),
                    strength: Optional[str] = typer.Option(None, "--strength", help="--rank writes: s=1 の組が目標に届かないときの強さの決め方。per_unit(既定、部品ごとに、射影の値が残りやすい質問での効率に応じて上げる)/ uniform(全部を同じ倍率、v0.8.2 まで)"),
+                   from_direction: Optional[str] = typer.Option(None, "--from-direction", help="作り済みの方向ベクトルを使う(方向づくりを飛ばす。heads geometry で保存した向きなど。一括の名前の方向として写す)"),
                    yes: bool = _YES):
     """対照集合から、方向づくり → 基準層 → 候補づくり → 強さの配分 を 1 回で回す。候補づくりと配分は 2 通り:
     --rank writes(既定): 全部の部品(注意ヘッド・線形注意のヘッド、--unit-kinds all で MLP のニューロンも)を方向への書き込みの量で
@@ -3082,7 +3083,8 @@ def heads_pipeline(c: Common, holder: dict,
             "select_layer": select_layer, "candidate_layers": candidate_layers, "always_layers": always_layers,
             "rank": rank, "unit_kinds": unit_kinds, "verify_top": verify_top, "verify_sample": verify_sample, "verify_mode": verify_mode,
             "n_units": _ints(n_units), "check_replies": check_replies, "check_tokens": check_tokens,
-            "holdout": True if holdout else None, "loop_direction": loop_direction, "strength": strength}
+            "holdout": True if holdout else None, "loop_direction": loop_direction, "strength": strength,
+            "from_direction": from_direction}
     _gate(s, "head_pipeline", {"spec": str(spec), **{k: v for k, v in over.items() if v is not None}}, yes, None)
     d = s.heads_pipeline(spec, **over)
     pn = d.get("postnorm")
@@ -4149,7 +4151,7 @@ def heads_geometry(c: Common, holder: dict,
                    permutations: Optional[int] = typer.Option(None, "--permutations", help="A と B のラベルを入れ替えて作る基準の回数(質問ごとの更新 <名前>.writes_q.npz があるときだけ。既定 200、0 で切る)"),
                    perm_seed: int = typer.Option(0, "--perm-seed", help="ラベルの入れ替えの乱数"),
                    export_direction: Optional[str] = typer.Option(None, "--export-direction", help="結果の向きを、この名前の方向ベクトルとして保存する(--export-from と一緒に)"),
-                   export_from: Optional[str] = typer.Option(None, "--export-from", help="保存する向き: svd-rows:K / svd-none:K(特異値分解の K 番目、全部の層に同じ向き)/ within:K(各層の質問に沿った分解の取り残しの K 番目)"),
+                   export_from: Optional[str] = typer.Option(None, "--export-from", help="保存する向き: svd-rows:K / svd-none:K(特異値分解の K 番目、全部の層に同じ向き)/ within:K(各層の質問に沿った分解の取り残しの K 番目)/ update・update-attn・update-mlp(その層が新しく足した分の向き = 層ごとの更新の差の向き。層全体・注意の出力全体・MLP の出力全体)"),
                    force_export: bool = typer.Option(False, "--force-export", help="同じ名前の方向ベクトルがあっても置き換える")):
     """heads writes の材料の、層ごとの更新ベクトル(A 側の平均の更新 − B 側の平均の更新。その層が残差に足した量)を比べる。
     層どうしのコサイン類似度の行列、特異値分解(行の大きさをそろえる・そろえない。基準は、行が直交していたときの値と、半分どうしの

@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import yaml
 
 from gne import geometry as G
 from gne.steer import GneError
@@ -528,6 +529,67 @@ def test_export_direction_from_geometry(tmp_path):
         s.heads_geometry_export("nothing", "x", "svd-rows:1")
 
 
+def test_export_update_directions(tmp_path):
+    """その層が新しく足した分の向き(update・update-attn・update-mlp): 層ごとの d̂_l をそのまま保存し、更新がほぼ 0 の層・信用しない層は
+    保存せず知らせる。"""
+    from gne.direction import DirectionSet
+    s, z = _session_with_material(tmp_path, refine=False)
+    hd = s.store.heads_dir(s.meta.model_id)
+    z = dict(z)
+    rng = np.random.default_rng(21)
+    for k in ("attn", "linear", "mlp"):                                                # 半分どうしがそろった材料(信用できる行)
+        h0 = z[f"upd_{k}_diff_h0"].astype(float)
+        h1 = h0 + 0.05 * rng.standard_normal(h0.shape) * (np.abs(h0).max() + 1e-9) * (h0 != 0)
+        z[f"upd_{k}_diff_h1"] = h1.astype(np.float32)
+        z[f"upd_{k}_diff"] = ((h0 + h1) / 2).astype(np.float32)
+    for x in ("diff", "diff_h0", "diff_h1"):                                           # 層 1 の MLP の更新を 0 に
+        z[f"upd_mlp_{x}"] = z[f"upd_mlp_{x}"].copy()
+        z[f"upd_mlp_{x}"][1] = 0
+    z["upd_attn_diff_h1"] = z["upd_attn_diff_h1"].copy()                               # 層 2 の注意: 半分どうしが逆向き
+    z["upd_attn_diff_h1"][2] = -z["upd_attn_diff_h0"][2]
+    z["upd_attn_diff"] = z["upd_attn_diff"].copy()
+    z["upd_attn_diff"][2] = (z["upd_attn_diff_h0"][2] + z["upd_attn_diff_h1"][2]) / 2 + 1e-3
+    for x in ("diff", "diff_h0", "diff_h1"):
+        z[f"upd_layer_{x}"] = z[f"upd_attn_{x}"] + z[f"upd_linear_{x}"] + z[f"upd_mlp_{x}"]
+    np.savez_compressed(hd / "d1.writes.npz", **z)
+    s.heads_geometry("d1", permutations=0)
+    e = s.heads_geometry_export("d1", "d1_upd", "update")
+    ds = DirectionSet.load(e["path"])
+    for L in ds.raw:
+        assert ds.unit(L) @ G._unit(z["upd_layer_diff"][L].astype(float)) == pytest.approx(1.0, abs=1e-6)   # 符号も A − B の向き
+    m = s.heads_geometry_export("d1", "d1_mlp", "update-mlp")
+    assert 1 not in DirectionSet.load(m["path"]).raw and {n["code"] for n in m["notes"]} >= {"update_zero", "update_meaning", "for_checking"}
+    a = s.heads_geometry_export("d1", "d1_attn", "update-attn")
+    da = DirectionSet.load(a["path"])
+    assert 2 not in da.raw and "update_unreliable" in {n["code"] for n in a["notes"]}
+    assert da.unit(0) @ G._unit((z["upd_attn_diff"][0] + z["upd_linear_diff"][0]).astype(float)) == pytest.approx(1.0, abs=1e-6)
+    for bad in ("update:1", "updates", "update-ffn"):
+        with pytest.raises(GneError):
+            s.heads_geometry_export("d1", "x_bad", bad)
+
+
+def test_pipeline_from_direction_copies_under_the_pipeline_name(tmp_path):
+    """heads pipeline の from_direction: 作り済みの方向を一括の名前の方向として写し、対照集合の sha と出どころを付け替える。"""
+    from gne.direction import DirectionSet, load_contrast
+    s, _ = _session_with_material(tmp_path, refine=False)
+    dd = s.store.direction_dir(s.meta.model_id)
+    cpath = tmp_path / "pipe.yaml"
+    cpath.write_text("name: pipe\nsystem_a: a\nsystem_b: b\nuser_prompts: [q1, q2, q3, q4]\n", encoding="utf-8")
+    cs, _ = load_contrast(cpath)
+    warns = []
+    s.warn = warns.append
+    d = s._pipeline_from_direction("d1", "pipe", cpath, cs, "last")
+    copy = DirectionSet.load(d["path"])
+    assert d["from"] == "d1" and copy.meta["contrast_sha"] == cs.sha and copy.meta["source"] == str(cpath)
+    assert all(np.allclose(copy.raw[L], s.direction_set("d1").raw[L]) for L in copy.raw)
+    assert warns and "確かめられません" in warns[0]                                       # 元の対照集合が分からない
+    with pytest.raises(GneError):
+        s._pipeline_from_direction("pipe", "pipe", cpath, cs, "last")                  # 同じ名前は書き直すことになるので断る
+    with pytest.raises(GneError):
+        s._pipeline_from_direction("d1", "pipe2", cpath, cs, "response")               # 測る位置が違う
+    assert (dd / "d1.npz").exists()
+
+
 @pytest.mark.model
 @pytest.mark.skipif(not MODEL.exists(), reason=f"{MODEL} がありません")
 def test_heads_writes_save_q_with_model(tmp_path):
@@ -549,6 +611,12 @@ def test_heads_writes_save_q_with_model(tmp_path):
         e = s.heads_geometry_export("ev_q", "ev_within1", "within:1")                # 書き出した方向は既存のコマンドで使える
         sc = s.direction_score("ev_within1", layers=[s.weights.n_main - 2])
         assert sc and "error" not in sc
+        u = s.heads_geometry_export("ev_q", "ev_update", "update")                     # その層が足した分の向きで一括を最初から
+        spec = yaml.safe_load((ROOT / "configs" / "contrast" / "evil.yaml").read_text(encoding="utf-8"))
+        spec["name"] = "ev_upd_pipe"
+        p = s.heads_pipeline(spec, from_direction="ev_update", verify_top=4, verify_sample=0, n_units=[2], max_examples=8,
+                             check_replies=0, target="B")
+        assert p["direction"]["from"] == "ev_update" and p["writes"] and u["layers"] > 0
         out2 = s.heads_writes("evil", verify_top=0, name="ev_noq", max_examples=8)
         assert "q_npz" not in out2 and not (s.store.heads_dir(s.meta.model_id) / "ev_noq.writes_q.npz").exists()
     finally:
