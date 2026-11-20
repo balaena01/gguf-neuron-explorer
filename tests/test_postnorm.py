@@ -1,4 +1,4 @@
-"""出力のあとの正規化(post-norm)の見分けと、補正が入るまでの扱い(v0.8.6)。
+"""出力のあとの正規化(post-norm)の見分けと、補正が入るまでの扱い(v0.9.0)。
 
 モデル不要: 構造の表(configs/arch/residual_writers.yaml の output_norm)と、小さな GGUF で層ごとの見分け
 (lfm3・gemma3 は拾い、qwen35 の同じ名前のテンソル = MLP の手前の正規化は拾わない。表に無い arch の post_attention_norm は
@@ -90,10 +90,10 @@ def test_guards_on_post_norm_layers(tmp_path):
         neuron_layer_ok(g, 1)
     heads = [ProjHead(1, 0, 2.0, "d"), ProjHead(1, -1, 1.0, "d", "attn"), ProjHead(0, 5, 1.0, "d", "neuron")]
     msg = postnorm_mixer_warning(g, heads)
-    assert msg and "層 1 " in msg and "5 割" in msg and "層 0" not in msg
+    assert msg and "層 1 " in msg and "5 割" in msg and "層 0" not in msg       # 補正を切ったときの知らせ(v0.8.x と同じ計算)
     with pytest.raises(GneError, match="正規化") as e:
         _refuse_postnorm_check(g, 1, "mixer")
-    assert "次の版" in (e.value.hint or "")
+    assert "補正つき" in (e.value.hint or "")                     # 補正を切ったとき(v0.9.0)だけ使う道。補正つきの検算を案内する
     with pytest.raises(GneError, match="正規化があるので.*bake は実行しません"):
         bake_bias_gguf(g, {1: np.zeros(16, np.float32)}, tmp_path / "g3.gguf", tmp_path / "out.gguf")
     q = Weights(_tiny(tmp_path / "q35.gguf", "qwen35", [ATTN + ["post_attention_norm"]] * 2))
@@ -166,8 +166,37 @@ def test_post_norm_models(which, tmp_path):
         assert hw["split"] == "after_norm" and hw["post_norm_layers"] and hw["sum_error"] < 1e-6
         k = s.direction_key(Path(__file__).resolve().parent.parent / "configs" / "keyed" / "one_scene.json", name="pnk", layers=[L], target="attn")
         assert k["layers"][0]["layer"] == L
+        # B2(v0.9.0): 補正つき(既定)なら attn の keyed も実行でき、正規化の後の値で検算が通る。補正を切ると B1 と同じく実行しない
+        s.steer([f"{L}:attn:keyed:a2@pn#pnk"], prompt="Hello.", max_tokens=4)
+        ck = s.check_keyed(L, key="pnk", direction="pn", kind="attn")
+        assert ck["compared"] == "after_norm" and ck["v30"], ck["rows"]
+        s.proj_correction = False
         with pytest.raises(GneError, match="attn の keyed の書き込みは実行しません"):
             s.steer([f"{L}:attn:keyed:a2@pn#pnk"], prompt="Hello.", max_tokens=4)
+        with pytest.raises(GneError, match="補正を切っている"):
+            s.steer([f"{L}:N10:s1@pn"], prompt="Hello.", max_tokens=4)
+        s.proj_correction = True
+        # 補正つきの射影: 残差に足された値の r̂ の成分の変化が予測どおり(s=1・2・6・30)。層全体の s=1 で成分がほぼ 0
+        for fn, args in ((s.check_whole_proj, (L, "attn", "pn")), (s.check_whole_proj, (L, "ffn", "pn")),
+                         (s.check_head_proj, (L, 0, "pn")), (s.check_neuron_proj, (L, 10, "pn"))):
+            d = fn(*args, ss=(1.0, 2.0, 6.0, 30.0))
+            assert d["compared"] == "after_norm" and d["ok"], d["rows"]
+        # 補正つきの ablate は、残差の r̂ の成分がちょうど消える(V13)。補正なしは残る
+        abl = s.ablate("pn", tmp_path / "ab.lora.gguf", from_layer=L, verify=True)
+        assert abl["proj_correction"] == "postnorm" and abl["verify"]["v13"]["pass"], abl["verify"]
+        abl0 = s.ablate("pn", tmp_path / "ab0.lora.gguf", from_layer=L, verify=True, correction=False)
+        assert abl0["verify"]["v13"]["max_dev"] > 10 * abl["verify"]["v13"]["max_dev"]
+        # 記録の無い古いレシピ: 補正つきで当て、使うたびに知らせと効きの見込みを出す。proj_correction: none で前と同じ計算
+        old = tmp_path / "old.yaml"
+        old.write_text(f"name: old\nmodel_id: {s.meta.model_id}\ndose_unit: rel\nunits:\n- {{layer: {L}, kind: head, head: 0, mode: proj, k: 6.0, direction: pn}}\n")
+        for _ in range(2):
+            s.warnings = []
+            st = s.steer(s.recipe(path=old), prompt="Hello.", max_tokens=4)
+            assert st["proj_correction"] == "postnorm" and any("記録がありません" in x for x in s.warnings)
+            assert any("効きの見込み" in x for x in s.warnings)
+        s.warnings = []
+        st = s.steer(s.recipe(path=old, proj_correction="none"), prompt="Hello.", max_tokens=4)
+        assert st["proj_correction"] == "none" and not any("記録がありません" in x for x in s.warnings)
         from gne.ablate import writer_info
         cnt = writer_info(s.weights)["counts"]
         n_conv = sum(li.mixer == "conv" for li in s.weights.arch.layers)
@@ -195,7 +224,7 @@ def test_resid_spread_stats(tmp_path):
     assert sm["warn"] and sm["warn_at"] == SPREAD_WARN
     st.save(tmp_path / "new.npz")
     assert ResidStats.load(tmp_path / "new.npz").spread(4) == pytest.approx(5.0)
-    old = ResidStats(L, p50 * 0.5, p50, p50 * 2, p50, 100, "sha", 512, True)          # v0.8.6 より前の形
+    old = ResidStats(L, p50 * 0.5, p50, p50 * 2, p50, 100, "sha", 512, True)          # v0.9.0 より前の形
     np.savez(tmp_path / "old.npz", layers=old.layers, p10=old.p10, p50=old.p50, p90=old.p90, mean=old.mean,
              n_tokens=old.n_tokens, corpus_sha=old.corpus_sha, chunk_tokens=old.chunk_tokens, exclude_pos0=old.exclude_pos0)
     lo = ResidStats.load(tmp_path / "old.npz")
@@ -214,8 +243,8 @@ def test_check_arch_messages(tmp_path):
     pn = ["post_attention_norm", "post_ffw_norm"]
     g = Weights(_tiny(tmp_path / "g3.gguf", "gemma3", [ATTN + pn]))
     ws = g.check_arch()
-    assert any("MLP の出力のあとに正規化" in w and "実行しません" in w for w in ws)
-    assert any("注意(混ぜる層)の出力のあとに正規化" in w and "--rank causal" in w for w in ws)
+    assert any("MLP の出力のあとに正規化" in w and "補正して当てます" in w for w in ws)        # v0.9.0: 補正つきの射影
+    assert any("注意(混ぜる層)の出力のあとに正規化" in w and "--rank causal" in w and "補正して" in w for w in ws)
     q = Weights(_tiny(tmp_path / "q35.gguf", "qwen35", [ATTN + ["post_attention_norm"]]))
     assert not any("正規化" in w for w in q.check_arch())
     u = Weights(_tiny(tmp_path / "new.gguf", "qwen3", [ATTN + ["post_attention_norm"]]))
@@ -265,3 +294,82 @@ def test_conv_writer_in_ablate(tmp_path):
     assert [n.split(".", 2)[2] for n in residual_writers(lf)[0]] == ["shortconv.out_proj.weight", "ffn_down.weight"]
     wi = writer_info(lf)
     assert wi["counts"] == {"shortconv.out_proj": 1, "ffn_down": 2, "attn_output": 1} and wi["verified"]
+
+
+# --- B2: 補正つきの射影(v0.9.0)----------------------------------------------------------------------------
+
+def test_corrected_direction_math(tmp_path):
+    """v̂ = normalize(γ⊙r̂) を書き込みから引くと、残差に足す値 γ⊙y'/rms(y') の r̂ の成分は s=1 で 0、s=2 でちょうど反対。
+    補正なし(correction=False)は r̂ のまま。副作用の比と頭打ちの見込み。"""
+    from gne.postnorm import corrected_dir, post_add, predict_ratio, side_ratio, side_warning
+    from gne.weights import Weights
+    pn = ["post_attention_norm", "post_ffw_norm"]
+    g3 = Weights(_tiny(tmp_path / "g3.gguf", "gemma3", [ATTN + pn]))
+    rng = np.random.default_rng(3)
+    r = rng.standard_normal(16)
+    rh = r / np.linalg.norm(r)
+    from gne.postnorm import gamma
+    gm = gamma(g3, 0, "mixer")
+    v = corrected_dir(g3, 0, r, "mixer").astype(np.float64)
+    np.testing.assert_allclose(v, gm * rh / np.linalg.norm(gm * rh), rtol=1e-5)
+    np.testing.assert_allclose(corrected_dir(g3, 0, r, "mixer", correction=False), rh, rtol=1e-6)
+    y = rng.standard_normal((5, 16))
+    base = post_add(y, gm, 1e-6) @ rh
+    s1 = post_add(y - np.outer(y @ v, v), gm, 1e-6) @ rh
+    s2 = post_add(y - 2 * np.outer(y @ v, v), gm, 1e-6) @ rh
+    np.testing.assert_allclose(s1, 0, atol=1e-6)
+    np.testing.assert_allclose(s2, -base, rtol=1e-6)
+    plain = post_add(y - np.outer(y @ rh, rh), gm, 1e-6) @ rh       # 補正なしでは成分が残る
+    assert np.abs(plain).max() > 1e-3
+    assert side_ratio(g3, 0, r, "mixer") > 0
+    np.testing.assert_allclose(predict_ratio(y, y, v, 1.0), 1.0, rtol=1e-6)    # 強さ 1 を基準に、s=2(折り返し)までは比例
+    np.testing.assert_allclose(predict_ratio(y, y, v, 2.0), 1.0, rtol=1e-6)
+    assert np.median(predict_ratio(y, y, v, 30.0)) < 0.9              # 大きな s では頭打ち
+    w1 = side_warning(g3, [(0, "mixer", r)])
+    assert w1 is None or "倍" in w1
+    q = Weights(_tiny(tmp_path / "q35.gguf", "qwen35", [ATTN + ["post_attention_norm"]]))
+    np.testing.assert_allclose(corrected_dir(q, 0, r, "mixer"), rh, rtol=1e-6)    # 正規化の無いモデルは r̂ のまま
+    assert side_ratio(q, 0, r, "mixer") is None
+
+
+def test_recipe_proj_correction_record(tmp_path):
+    """レシピの proj_correction: 保存すると必ず書く(記録が無ければ postnorm)、読み戻せる、to_dict は記録があるときだけ、
+    変な値は断る。like / scaled は引き継ぐ。"""
+    from gne.steer import Recipe, Unit
+    u = Unit(3, None, 0.0, "head", mode="proj", k=2.0, head=1, direction="d")
+    r = Recipe([u], "m", name="x")
+    assert "proj_correction" not in r.to_dict()
+    r.save(tmp_path / "a.yaml")
+    assert Recipe.load(tmp_path / "a.yaml").proj_correction == "postnorm"
+    r2 = Recipe([u], "m", name="y", proj_correction="none")
+    r2.save(tmp_path / "b.yaml")
+    back = Recipe.load(tmp_path / "b.yaml")
+    assert back.proj_correction == "none" and back.to_dict()["proj_correction"] == "none"
+    assert back.scaled(2.0).proj_correction == "none" and back.like([u]).proj_correction == "none"
+    (tmp_path / "old.yaml").write_text("name: old\nunits:\n- {layer: 3, kind: head, head: 1, mode: proj, k: 2.0, direction: d}\n")
+    assert Recipe.load(tmp_path / "old.yaml").proj_correction is None
+    with pytest.raises(GneError):
+        Recipe([u], "m", proj_correction="both").validate()
+
+
+def test_corrected_writers_for_ablate(tmp_path):
+    """ablate の向き: 混ぜる層の書き込み行列は注意の後の γ、ffn_down は MLP の後の γ で補正する。補正なし・正規化の無いモデルは r̂。
+    ニューロンの射影は、補正つきなら正規化のある層でも当てられる。"""
+    from gne.ablate import residual_writers, writer_dirs
+    from gne.headproj import neuron_layer_ok
+    from gne.postnorm import gamma
+    from gne.weights import Weights
+    pn = ["post_attention_norm", "post_ffw_norm"]
+    g3 = Weights(_tiny(tmp_path / "g3.gguf", "gemma3", [ATTN + pn]))
+    r = np.random.default_rng(5).standard_normal(16)
+    rh = r / np.linalg.norm(r)
+    ws = residual_writers(g3)
+    d = writer_dirs(g3, {0: ws[0]}, {0: rh}, True)
+    for name, gside in (("blk.0.attn_output.weight", "mixer"), ("blk.0.ffn_down.weight", "ffn")):
+        g = gamma(g3, 0, gside)
+        np.testing.assert_allclose(d[name], g * rh / np.linalg.norm(g * rh), rtol=1e-5)
+    dn = writer_dirs(g3, {0: ws[0]}, {0: rh}, False)
+    assert all(np.allclose(x, rh, rtol=1e-6) for x in dn.values())
+    neuron_layer_ok(g3, 0, allow_post_norm=True)
+    with pytest.raises(GneError, match="補正を切っている"):
+        neuron_layer_ok(g3, 0)

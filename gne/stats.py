@@ -76,7 +76,7 @@ def _rows_check(name: str, x: np.ndarray, n_tok: int) -> None:
 SPREAD_TOP = 8          # 偏りの量: 位置ごとに、絶対値の大きい 8 成分を除いた残差の大きさの中央値と比べる
 SPREAD_WARN = 2.0       # rel の基準(‖残差‖の中央値)が、偏りを除いた大きさの何倍以上なら知らせるか。偏りの少ないモデル
                         # (Qwen3-0.6B・LFM3-1.7B で測った値は 1.25〜1.35 倍)で決めた強さの目安が、そのままは使えない境目として
-                        # 置いた値(Gemma 3 1B は 6.7 倍で、強さ 0.2 で崩れ始めた。v0.8.6)
+                        # 置いた値(Gemma 3 1B は 6.7 倍で、強さ 0.2 で崩れ始めた。v0.9.0)
 
 @dataclass
 class ResidStats:
@@ -89,7 +89,7 @@ class ResidStats:
     corpus_sha: str
     chunk_tokens: int
     exclude_pos0: bool = True
-    p50_rest: np.ndarray | None = None   # 位置ごとに大きい SPREAD_TOP 成分を除いた ‖残差‖ の中央値(v0.8.6 から。古い統計には無い = None、層ごとの欠けは NaN)
+    p50_rest: np.ndarray | None = None   # 位置ごとに大きい SPREAD_TOP 成分を除いた ‖残差‖ の中央値(v0.9.0 から。古い統計には無い = None、層ごとの欠けは NaN)
 
     def rho(self, L: int) -> float:
         hit = np.nonzero(self.layers == L)[0]

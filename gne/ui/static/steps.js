@@ -11,7 +11,7 @@ export class Steps {
   // root: 画面の入れ物(中身はすでに描いてある)。steps: [{ key, label, els: () => [要素], shared: 共通の設定を使うか, sep: 前に区切り }]
   // shared: 共通の設定の要素(無ければ null)。store: 選んだ手順を覚える localStorage の鍵。onSelect(key): 手順を替えたあと
   // extra: () => [要素]。手順の els が状態で変わる(結果が無いときだけの知らせなど)とき、どの手順の els にも今は入っていなくても、
-  // いまの手順で見せないなら隠す要素(v0.8.6: 結果の読み込み中に手順を替えると「まだ結果がありません」が残った)
+  // いまの手順で見せないなら隠す要素(v0.9.0: 結果の読み込み中に手順を替えると「まだ結果がありません」が残った)
   constructor(root, { steps, shared = null, store = null, label = "", onSelect = null, extra = null }) {
     this.root = root;
     this.steps = steps;

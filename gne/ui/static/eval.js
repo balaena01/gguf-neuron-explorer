@@ -185,7 +185,8 @@ export class EvalView {
     const doses = this.$("#evx-doses").value.split(",").map((x) => +x.trim()).filter((x) => Number.isFinite(x));
     if (!doses.length) return;
     const sent = this.sent;
-    const p = sent ? { recipe: sent.recipe, doses, when: this.$("#evx-when").value } : { units: this.recipe.specs(), doses, when: this.$("#evx-when").value };
+    const p = sent ? { recipe: sent.recipe, doses, when: this.$("#evx-when").value }
+      : { units: this.recipe.specs(), doses, when: this.$("#evx-when").value, proj_correction: this.recipe.projCorrection };   // 射影の補正(v0.9.0)
     const nc = Math.max(0, Math.floor(+this.$("#evx-rc-n").value || 0));
     if (nc) p.random_controls = nc;
     const react = this.$("#evx-react").value.trim(), hc = Math.max(0, Math.floor(+this.$("#evx-hc-n").value || 0));

@@ -3676,6 +3676,53 @@ def spread_server(tmp_path_factory):
 
 
 @pytest.mark.model
+def test_recipe_proj_correction_toggle(spread_server, browser):
+    """射影の補正(v0.9.0): 出力のあとに正規化があるモデル(構造の情報を真似る)で、記録の無い古いレシピを読み込むと、レシピの欄に
+    補正つきで当てている知らせが出続け、チャット・保存の要求に proj_correction が載る。保存の前に確かめる(やめれば保存しない)。
+    「補正なし」を選ぶと none を送る。正規化の無いモデルでは欄を出さない。"""
+    errors = []
+    pg = _open_page(browser, errors)
+    pg.goto(spread_server + "/")
+    pg.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
+    bodies = []
+    pg.on("request", lambda rq: bodies.append((rq.url, rq.post_data)) if rq.method == "POST" else None)
+    pg.evaluate("window.gne.recipe.load('oldr', [{layer: 6, kind: 'head', head: 0, mode: 'proj', s: 2, direction: 'dx'}], null, null, 'own',"
+                " {proj_correction: 'unrecorded'})")
+    _recipe_tab(pg)
+    assert not pg.evaluate("!!document.querySelector('#rc-pc')")                  # 正規化の無いモデル(Qwen3)では出さない
+    pg.evaluate("for (const li of window.gne.arch.layers) if (li.mixer === 'attention') li.post_norm_mixer = 'post_attention_norm';"
+                " window.gne.recipe._save()")
+    _recipe_tab(pg)
+    pg.wait_for_selector("#rc-pc", timeout=10000)
+    note = pg.evaluate("[...document.querySelectorAll('.rc-pc-warn')].map(e => e.textContent).join(' ')")
+    assert "記録がありません" in note and "補正つき" in note
+    _dialogs(pg, "dismiss", once=True)                                                # 保存の前に確かめる: やめれば送らない
+    pg.fill("#rc-name", "oldr")
+    pg.click("#rc-save")
+    pg.wait_for_timeout(500)
+    assert any("記録がありません" in x for x in _asked(pg)) and not any("/api/recipes/oldr" in u for u, _ in bodies)
+    pg.select_option("#rc-pc", "none")
+    assert pg.evaluate("window.gne.recipe.projCorrection") == "none"
+    assert not pg.evaluate("[...document.querySelectorAll('.rc-pc-warn')].length")   # 選んだら知らせは消える(記録が決まった)
+    _recipe_tab(pg, "try")                                                           # チャットの要求にも載る
+    pg.click("#rc-chat")
+    pg.wait_for_selector("#ch-text", timeout=30000)
+    pg.click("[data-cols='1']")
+    pg.fill("#ch-text", "Hello")
+    pg.click("#ch-send")
+    pg.wait_for_function("!document.querySelector('#ch-send').disabled", timeout=60000)
+    steer = [json.loads(b) for u, b in bodies if u.endswith("/api/steer") and b]
+    assert steer and steer[-1]["columns"][-1]["proj_correction"] == "none"
+    _recipe_tab(pg)
+    pg.click("#rc-save")
+    pg.wait_for_timeout(800)
+    sent = [json.loads(b) for u, b in bodies if "/api/recipes/oldr" in u and b]
+    assert sent and sent[-1]["proj_correction"] == "none"
+    assert not errors, errors
+    pg.close()
+
+
+@pytest.mark.model
 def test_chat_keeps_warning_after_reply(spread_server, browser):
     """実物の生成: 偏りの大きい層を rel で押すと、レシピの欄に強さの注意が出て、チャットの警告(steer の偏りの知らせ)が
     生成のあとの状態の文にも残る(v0.8.5 までは「… 秒で … 列を生成」に上書きされて消えた)。"""
@@ -4054,7 +4101,7 @@ def refine_server(tmp_path_factory):
                                "rows": {k: {sd: {"n": 4, "finished": 4, "match_finished": (3 if k == "none" else 1) if sd == "A" else 0,
                                                  "empty": 0, "loop": 1 if k == "recipe" and sd == "B" else 0, "at_limit": 0} for sd in "AB"}
                                         for k in ("none", "recipe")}}}}
-    r1["rank_note"] = "書き込みの量での順位づけを実行できないので、既定の選び方を rank causal(止めて選ぶ)に切り替えて実行しました(テスト)"           # 選び方を切り替えた知らせ(v0.8.6)
+    r1["rank_note"] = "書き込みの量での順位づけを実行できないので、既定の選び方を rank causal(止めて選ぶ)に切り替えて実行しました(テスト)"           # 選び方を切り替えた知らせ(v0.9.0)
     r1["postnorm"] = {"layers": [12], "unsure_layers": [], "note": "テストの知らせ"}                 # 出力のあとの正規化の知らせ
     (hd / "ppx_r1.pipeline.json").write_text(json.dumps(r1, ensure_ascii=False))
     yield from _serve(s)

@@ -207,13 +207,14 @@ class Weights:
             nm = sorted({li.post_norm_ffn if li.post_norm_ffn not in ("", "?") else "post_ffw_norm" for li in self.arch.layers
                          if li.post_norm_ffn or li.has_post_ffn_norm})
             out.append(f"MLP の出力のあとに正規化({', '.join(nm)})があります({len(pf)} 層): ニューロンの add は方向を足す働きはしますが、残差には正規化を"
-                       "通った分が入るので「ニューロン n を押した」とは等価ではありません。ニューロン・MLP 全体の射影は実行しません"
-                       "(正規化を補正した射影は次の版で入れます)")
+                       "通った分が入るので「ニューロン n を押した」とは等価ではありません。ニューロン・MLP 全体の射影と ablate は、正規化を"
+                       "補正して当てます(書き込みから normalize(γ⊙r̂) を引く。--no-proj-correction で v0.8.x と同じ計算)")
         if pm:
             nm = sorted({li.post_norm_mixer for li in self.arch.layers if li.post_norm_mixer not in ("", "?")})
-            out.append(f"注意(混ぜる層)の出力のあとに正規化({', '.join(nm)})があります({len(pm)} 層): ヘッド・注意全体の射影は実行しますが、方向の成分は"
-                       "完全には消えません。書き込みの量での順位づけ(--rank writes・heads writes)は実行しません。代わりに --rank causal "
-                       "を使ってください(どちらも、正規化を補正する次の版までの扱いです)")
+            out.append(f"注意(混ぜる層)の出力のあとに正規化({', '.join(nm)})があります({len(pm)} 層): ヘッド・注意全体の射影は、正規化を補正して"
+                       "当てます(s=1 で方向の成分をちょうど取り除く。ほかの s では比例せず、大きな s では頭打ち。--no-proj-correction で v0.8.x と"
+                       "同じ計算)。書き込みの量での順位づけ(--rank writes・heads writes)は実行しません。代わりに --rank causal を使ってください"
+                       "(点数の補正が入るまでの扱いです)")
         if pu:
             out.append(f"層 {', '.join(map(str, pu[:6]))}{' …' if len(pu) > 6 else ''} の post_attention_norm が、注意の出力のあとの正規化か"
                        "MLP の手前の正規化か、この arch では確かめていません(configs/arch/residual_writers.yaml の output_norm に無い)")

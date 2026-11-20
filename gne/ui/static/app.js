@@ -1022,7 +1022,8 @@ async function setView(v) {
                                       return replaceRecipe(rd.name || "", () => {
                                         state.recipe.load(rd.name || "", us, rd.ablate, rd.sampling, rd.direction_layer,
                                                           { default_direction: rd.default_direction, default_key: rd.default_key,
-                                                            loop_edits: rd.loop_edits });   // keyed の既定・2 回実行するモデルの当て方
+                                                            loop_edits: rd.loop_edits,       // keyed の既定・2 回実行するモデルの当て方
+                                                            proj_correction: rd.proj_correction || "unrecorded" });   // 射影の補正の記録(v0.9.0)
                                         if (scale !== 1) state.recipe.applyScale(scale);
                                       });
                                     } });
@@ -1245,6 +1246,8 @@ async function main() {
       onAdded: () => recipeTouched(true),
       onReplaced: () => showRecipe("units"),
       doseSpread: () => (state.model ? state.model.dose_spread : null),
+      postNorm: () => !!(state.arch && (state.arch.layers || []).some((li) => (li.post_norm_mixer && li.post_norm_mixer !== "?")
+                                                                         || (li.post_norm_ffn && li.post_norm_ffn !== "?"))),
     });
     headPanel = new HeadPanel($("#head-body"), {
       onRecipe: (L, h, k) => {

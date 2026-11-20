@@ -88,6 +88,11 @@ def _fake_session(tmp_path):
                         _contrast_file=Session._contrast_file)
     s.warn = s.warnings.append
     s._as_recipe = lambda r: r
+    # v0.9.0: 射影の補正の記録と見込み(この偽のセッションのモデルには出力のあとの正規化が無い)
+    s.proj_forecast = lambda r, scales=(1.0,): []
+    s.proj_forecast_text = lambda r, old: None
+    s.proj_record_note = lambda r: None
+    s.proj_correction_label = lambda r=None: "postnorm"
     return s
 
 

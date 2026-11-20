@@ -63,8 +63,11 @@ def eps_of(weights) -> float:
 def gamma(weights, L: int, side: str) -> np.ndarray | None:
     """層 L の出力のあとの正規化の γ(side は mixer / ffn)。正規化が無い・確かめていない("?")層は None。"""
     from .weights import tensor_to_f32
-    li = weights.arch.layers[L]
-    nm = li.post_norm_mixer if side == "mixer" else li.post_norm_ffn
+    ai = getattr(weights, "arch", None)
+    if ai is None:                                   # 構造の情報の無い重み(テストの偽物など)は正規化なしとみなす
+        return None
+    li = ai.layers[L]
+    nm = getattr(li, "post_norm_mixer", "") if side == "mixer" else getattr(li, "post_norm_ffn", "")
     if not nm or nm == "?":
         return None
     return np.asarray(tensor_to_f32(weights.tensor(f"blk.{weights.stored(L)}.{nm}.weight")), np.float64).reshape(-1)
@@ -277,3 +280,172 @@ def writer_sums_vresult(session):
     src = {"real": "実物で確かめた名前", "graph": "グラフを読んだだけの名前"}.get(res.get("checked"), "")
     return VResult("V27", title, "pass" if res["ok"] else "fail",
                    f"{src}。相対誤差(中央値 / 最大): " + "; ".join(parts), res)
+
+
+# --- 補正つきの射影(v0.9.0 B2)-------------------------------------------------------------------------
+# 残差の r̂ の成分は (γ⊙r̂)·y / rms(y)。書き込み y から v̂ = normalize(γ⊙r̂) の成分を引けば、rms に関係なく 0 になる(s=1)。
+# s=2 は折り返し(大きさが変わらない)なので成分はちょうど反対。ほかの s では rms が変わるので比例せず、s を上げると頭打ちになる。
+
+SIDE_RATIO_WARN = 3.0     # 補正で残差が r̂ 以外へ動く量 ÷ r̂ に沿って動く量 がこれを超える層は警告する(LFM3・Gemma 3 で測った値で置いた)
+KIND_SIDE = {"head": "mixer", "attn": "mixer", "linear": "mixer", "neuron": "ffn", "ffn": "ffn"}
+
+
+def writer_side(name_or_kind: str) -> str:
+    """書き込み行列の名前か proj の種類 → mixer / ffn。"""
+    if name_or_kind in KIND_SIDE:
+        return KIND_SIDE[name_or_kind]
+    return "ffn" if ".ffn_down" in name_or_kind else "mixer"
+
+
+def corrected_dir(weights, L: int, r: np.ndarray, side: str, *, correction: bool = True) -> np.ndarray:
+    """層 L の side(mixer / ffn)で書き込みから引く単位ベクトル。出力のあとに正規化があり補正するなら normalize(γ⊙r̂)、
+    それ以外は r̂ のまま(正規化の無いモデル・補正を切ったときは、v0.8.x までと同じ)。"""
+    r = np.asarray(r, np.float64).reshape(-1)
+    rh = r / max(float(np.linalg.norm(r)), 1e-30)
+    if not correction:
+        return rh.astype(np.float32)
+    g = gamma(weights, L, side)
+    if g is None:
+        return rh.astype(np.float32)
+    v = g * rh
+    n = float(np.linalg.norm(v))
+    return (v / n).astype(np.float32) if n > 0 else rh.astype(np.float32)
+
+
+def side_ratio(weights, L: int, r: np.ndarray, side: str) -> float | None:
+    """補正つきで消したとき、残差に足す値が r̂ 以外の向きへ動く量 ÷ r̂ に沿って動く量(γ⊙v̂ の r̂ に直交な部分 ÷ r̂ の成分)。
+    正規化の無い層は None(0 と同じ)。"""
+    g = gamma(weights, L, side)
+    if g is None:
+        return None
+    rh = np.asarray(r, np.float64).reshape(-1)
+    rh = rh / max(float(np.linalg.norm(rh)), 1e-30)
+    v = g * rh
+    n = float(np.linalg.norm(v))
+    if n == 0:
+        return float("inf")
+    gv = g * (v / n)
+    along = float(rh @ gv)
+    return float(np.linalg.norm(gv - along * rh) / max(abs(along), 1e-30))
+
+
+def side_warning(weights, items: list[tuple[int, str, np.ndarray]]) -> str | None:
+    """(層, side, r) の並び → 比が SIDE_RATIO_WARN を超える層の警告(無ければ None)。"""
+    bad = []
+    for L, side, r in items:
+        x = side_ratio(weights, L, r, side)
+        if x is not None and x > SIDE_RATIO_WARN:
+            bad.append((L, side, x))
+    if not bad:
+        return None
+    bad = sorted(set(bad))
+    txt = "、".join(f"層 {L}{'(MLP)' if s == 'ffn' else ''} {x:.1f} 倍" for L, s, x in bad[:6]) + (" …" if len(bad) > 6 else "")
+    return (f"この方向を補正つきで取り除くと、{txt}: 残差に足す値が、r̂ に沿って動く量に比べてその倍だけ、ほかの向きへも動きます"
+            f"(この構造のモデルでは中央値でも 1 倍前後。{SIDE_RATIO_WARN:g} 倍を超える層を知らせています)。副作用が出やすい層です")
+
+
+def predict_ratio(y: np.ndarray, yu: np.ndarray, u: np.ndarray, s: float, kind: str = "rms", eps: float = 1e-6) -> np.ndarray:
+    """書き込み y (T, n) の一部 yu(その部品の書き込み。層全体なら y)を、u 方向(単位ベクトル v̂)に s だけ引いたときの、
+    残差の r̂ の成分の変化 ÷ (s × 強さ 1 のときの変化)。トークンごと。頭打ちの表示に使う(1 なら s に比例、0.5 なら半分)。
+    層全体では s=1 と s=2(折り返し)でちょうど 1。"""
+    if kind == "scale":
+        return np.ones(len(y))
+    a = yu @ u                                                       # (T,) 部品の v̂ 成分
+    r0 = np.sqrt(np.mean(y * y, axis=1) + eps)
+
+    def change(k):                                                   # 残差の r̂ 成分 ∝ (u·y)/rms(y)(‖γ⊙r̂‖ は消える)
+        y1 = y - k * a[:, None] * u[None, :]
+        return (y1 @ u) / np.sqrt(np.mean(y1 * y1, axis=1) + eps) - (y @ u) / r0
+    one = change(1.0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return np.where(np.abs(one) > 1e-12, change(s) / (s * one), 1.0)
+
+
+FORECAST_TEXT = "Tell me a short story about a lighthouse keeper and the sea, and how the light guided the ships home."
+
+
+def projection_forecast(session, recipe, scales=(1.0,), text: str | None = None) -> list[dict]:
+    """レシピの射影のユニットのうち、出力のあとに正規化がある層のものについて、短い文 1 つで、全体の倍率 k(scales)を掛けた
+    ときの効きの見込み(トークンの中央値)を返す。
+      corrected / uncorrected: 層が残差に足す値の r̂ の成分の変化 ÷ 元の成分(補正つき・補正なし。−1 で全部消える)
+      vs_proportional: 補正つきで、比例のときに比べた効き(1 なら比例、小さいほど頭打ち)
+    記録の無い古いレシピの知らせと、頭打ちの表示に使う。"""
+    from .attn import capture_attention
+    from .capture import pick_act_name
+    from .headproj import head_direction, proj_heads
+    w, e = session.weights, session.engine
+    heads = [p for p in proj_heads(recipe) if p.s]
+    pn = []
+    for p in heads:
+        li = w.arch.layers[p.layer]
+        side = writer_side(p.kind)
+        if (li.post_norm_mixer if side == "mixer" else li.post_norm_ffn) not in ("", "?"):
+            pn.append((p, side))
+    if not pn:
+        return []
+    text = text or FORECAST_TEXT
+    ids = e.tokenize(text, add_special=True, parse_special=False)
+    names = set(e.list_names(ids[:16]))
+    Ls = sorted({p.layer for p, _ in pn})
+    acts = {L: pick_act_name(names, L) for L in Ls if any(s == "ffn" and p.layer == L for p, s in pn)}
+    att = [L for L in Ls if any(s == "mixer" and p.layer == L for p, s in pn) and w.arch.layers[L].head_dim]
+    ac = capture_attention(session, [ids], layers=att, want_pattern=False, want_head_out=bool(att),
+                           extra=[a for a in acts.values() if a])[0]
+    T = ac.n_tokens
+    eps = eps_of(w)
+    out = []
+    for p, side in pn:
+        L = p.layer
+        li = w.arch.layers[L]
+        r, _ = head_direction(session.direction_set(p.direction), L, recipe.direction_layer)
+        rh = np.asarray(r, np.float64) / max(float(np.linalg.norm(r)), 1e-30)
+        g = gamma(w, L, side)
+        v = corrected_dir(w, L, rh, side).astype(np.float64)
+        if side == "mixer":
+            if L not in ac.head_out:
+                continue
+            X = ac.head_out[L].astype(np.float64)
+            WO = w.head_writer_matrix(L).astype(np.float64)
+            y = X.reshape(T, -1) @ WO.T
+            if p.kind == "head":
+                _, lo, hi = w.head_block(L, p.head)
+                yu = X[:, p.head, :] @ WO[:, lo:hi].T
+            else:
+                yu = y
+        else:
+            a_nm = acts.get(L)
+            if not a_nm or a_nm not in ac.extra:
+                continue
+            a = ac.extra[a_nm].astype(np.float64)
+            Wd = w.down_matrix(L).astype(np.float64)
+            y = a @ Wd.T
+            yu = np.outer(a[:, p.head], Wd[:, p.head]) if p.kind == "neuron" else y
+        y, yu = y[1:], yu[1:]
+        kind = li.post_norm_kind or "rms"
+        base = post_add(y, g, eps, kind) @ rh
+        den = np.where(np.abs(base) > 1e-12, base, np.nan)
+        for k in scales:
+            s_ = p.s * float(k)
+            c_new = (post_add(y - s_ * np.outer(yu @ v, v), g, eps, kind) @ rh - base) / den
+            c_old = (post_add(y - s_ * np.outer(yu @ rh, rh), g, eps, kind) @ rh - base) / den
+            sat = predict_ratio(y, yu, v, s_, kind, eps)
+            out.append({"unit": p.spec() if hasattr(p, "spec") else f"{L}:{p.head}", "layer": L, "kind": p.kind, "s": s_,
+                        "scale": float(k), "corrected": float(np.nanmedian(c_new)), "uncorrected": float(np.nanmedian(c_old)),
+                        "vs_proportional": float(np.nanmedian(sat))})
+    return out
+
+
+def forecast_text(rows: list[dict], old: bool) -> str | None:
+    """見込みの知らせの文。old なら補正なしとの比較、そうでなければ頭打ち(比例のときの 0.8 倍未満)の行だけ。"""
+    if not rows:
+        return None
+    if old:
+        parts = [f"{r['unit']} s={r['s']:g}: 補正なし {r['uncorrected'] * 100:+.0f}% → 補正つき {r['corrected'] * 100:+.0f}%" for r in rows[:6]]
+        return ("効きの見込み(短い文 1 つで計算した、層が残差に足す値の r̂ の成分の変化。−100% で全部消える): " + "、".join(parts)
+                + (" …" if len(rows) > 6 else ""))
+    sat = [r for r in rows if r["vs_proportional"] < 0.8]
+    if not sat:
+        return None
+    parts = [f"{r['unit']} s={r['s']:g}: 比例のときの {r['vs_proportional']:.2f} 倍" for r in sat[:6]]
+    return ("強さの頭打ち(出力のあとの正規化のため、強さを上げても効きが比例しない。短い文 1 つでの見込み): " + "、".join(parts)
+            + (" …" if len(sat) > 6 else ""))

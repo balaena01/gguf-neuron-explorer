@@ -498,9 +498,9 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
         既定 16、0 で切る)。どの組も目標に届かなければ、組の効き(A 側の下がり − B 側の動きの大きさ)がいちばん大きい組を推す
         (recommended.reached が false)。推す組が無ければ no_recommend に理由と次の手。rank="causal" は v0.7.0 までの流れ(因果スクリーニング → 効率で配り直す。n_heads はこちらだけ)。
         応答での確かめで A 側がほとんど変わらない(check.suggest)ときは、もう一方の rank も試す。結果の rank がどちらで流したか。
-        注意の出力のあとに正規化があるモデル(LFM3・Gemma 系など。v0.8.6)では rank="writes" は実行せず、rank を省くと "causal" で
-        実行して rank_note に理由が入る。組のヘッドの射影がそのモデルの層に当たると postnorm に、方向の成分が残差から完全には
-        消えないことと測った値が入る(どちらも、正規化を補正する次の版までの扱い)。
+        注意の出力のあとに正規化があるモデル(LFM3・Gemma 系など。v0.9.0)では rank="writes" は実行せず、rank を省くと "causal" で
+        実行して rank_note に理由が入る(点数の補正が入るまでの扱い)。組の射影は、正規化を補正して当てる(v0.9.0。postnorm に、
+        補正つきで当てたことと、γ と r̂ がほぼ直交する層の副作用の警告が入る。v0.8.x と同じ計算にするのは CLI の --no-proj-correction だけ)。
         unit_kinds は heads / all / neurons / layers(層の注意の出力全体・MLP の出力全体、ユニット "L:attn:sS@NAME"・"L:ffn:sS@NAME")と、
         そのカンマ区切り(例 "heads,layers")。holdout=True で質問を半分に分け、偶数番目で選び、奇数番目(選ぶのに使っていない質問)で
         表の数(allocate.table[].holdout)と応答の確かめを測る。loop_direction は重みを 2 回使うモデルでループの中の部品に使う方向の段

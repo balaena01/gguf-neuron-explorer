@@ -298,6 +298,15 @@ class Verifier:
 
     # --- V13(§6.17 方向の射影消去、LoRA 版)--------------------------------------------------------------
 
+    def embed_component(self, ids: list[int], r: np.ndarray) -> np.ndarray:
+        """位置 1 以降の、層に入る前の残差(埋め込み)の r 成分。埋め込みを拡大する arch(Gemma 系などの inp_scaled)は捕捉した
+        値を使う(v0.9.0。それまでは token_embd の行のままで、Gemma では V13 の期待値がずれていた)。"""
+        names = set(self.e.list_names(ids[:16]))
+        if "inp_scaled" in names:
+            x = self.capture({"inp_scaled"}, [ids])["inp_scaled"]
+            return x[1:].astype(np.float64) @ r
+        return self.w.embed_rows(ids)[1:].astype(np.float64) @ r
+
     def _resid_all(self, engine: Engine, ids: list[int], lora=None) -> dict[int, np.ndarray]:
         """全層(最終層を除く)の l_out-L(位置 0 = attention sink を除く)。"""
         Ls = list(range(engine.n_layer - 1))                    # 最終層は行が間引かれ得るので除く
@@ -323,7 +332,7 @@ class Verifier:
         from .ablate import bake_ablation_gguf, embed_in_lora, export_ablation_lora, unit
         r = unit(self.rng.standard_normal(self.w.meta.n_embd) if r is None else r)
         ids = self.prompt_ids[0]
-        er = self.w.embed_rows(ids)[1:].astype(np.float64) @ r    # 埋め込みの r 成分(inp_embd は捕捉できない)
+        er = self.embed_component(ids, r)                          # 埋め込みの r 成分(inp_embd は捕捉できない。拡大する arch は inp_scaled)
         base = self._resid_all(self.e, ids)
         variants = []
         with tempfile.TemporaryDirectory() as td:

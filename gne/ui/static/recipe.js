@@ -167,6 +167,9 @@ export class Recipe {
     this.defaultDirection = null;      // 方向を省いた keyed のユニットの方向(レシピの default_direction、CHANGE-07)
     this.defaultKey = null;            // 鍵を省いた keyed のユニットの鍵(レシピの default_key)
     this.loopEdits = null;             // 同じ層を 2 回実行するモデルで、1 回目と 2 回目に別々に当てるレシピ(loop_edits: per_visit)なら "per_visit"
+    // 射影(proj)と ablate の補正(v0.9.0): "postnorm"(補正つき、既定)/ "none"(補正なし = v0.8.x と同じ計算)/
+    // "unrecorded"(記録の無い古いレシピを読み込んだ。補正つきで当て、そのことを知らせ続ける)
+    this.projCorrection = "postnorm";
     this.sampling = null;              // このレシピを試すときのサンプリング { temperature, top_k, top_p, min_p, presence_penalty } か null
     this.skipped = 0;                  // 読み込んだレシピのうち UI では扱えないユニット(ニューロンの gain、ヘッドの query など)の数。
                                        // ヘッドの query(CHANGE-04 E)は L:Hh の文字列の形が無く、送り返せないので外す
@@ -177,6 +180,7 @@ export class Recipe {
         this.directionLayer = d.direction_layer === "base" ? "base" : "own";
         this.defaultDirection = d.default_direction || null; this.defaultKey = d.default_key || null;
         this.loopEdits = d.loop_edits === "per_visit" ? "per_visit" : null;
+        this.projCorrection = ["postnorm", "none", "unrecorded"].includes(d.proj_correction) ? d.proj_correction : "postnorm";
       }
     } catch { /* 下書きが読めなくても空から始める */ }
   }
@@ -186,7 +190,8 @@ export class Recipe {
     try {
       localStorage.setItem(this.key, JSON.stringify({ name: this.name, units: this.units, ablate: this.ablate, sampling: this.sampling,
                                                       direction_layer: this.directionLayer, default_direction: this.defaultDirection,
-                                                      default_key: this.defaultKey, loop_edits: this.loopEdits }));
+                                                      default_key: this.defaultKey, loop_edits: this.loopEdits,
+                                                      proj_correction: this.projCorrection }));
     } catch { /* 置けなくても使える */ }
     if (notify) this.onChange(this);
   }
@@ -197,6 +202,7 @@ export class Recipe {
   // ablate を倍率 s で(− の列は s < 0 = その方向を強める)。無ければ undefined
   ablateAt(s = 1) { return this.ablate ? { ...this.ablate, scale: +(this.ablate.scale * s).toFixed(4) } : undefined; }
   setAblate(a) { this.ablate = a && a.direction ? a : null; this._save(); }
+  setProjCorrection(v) { this.projCorrection = ["postnorm", "none"].includes(v) ? v : "postnorm"; this._save(); }
   // 倍率 s をユニットの強さに掛け込み、全体の倍率を 1 に戻せるようにする(scaleUnit・ablateAt と同じ式なので、反映の後の specs(1)・
   // ablateAt(1) は反映の前の specs(s)・ablateAt(s) と同じ)。名前は倍率が分かる語尾の案にする(保存はしない)。
   // 戻り値は取り消し用の元の状態(undoScale に渡す)。s が 0 か数でなければ何もしない(全部のユニットが無介入になるので)
@@ -332,7 +338,7 @@ export class Recipe {
   remove(i) { this.units.splice(i, 1); this._save(); }
   clear() {
     this.units = []; this.name = ""; this.ablate = null; this.sampling = null; this.skipped = 0; this.directionLayer = "own";
-    this.defaultDirection = null; this.defaultKey = null; this.loopEdits = null; this._save();
+    this.defaultDirection = null; this.defaultKey = null; this.loopEdits = null; this.projCorrection = "postnorm"; this._save();
   }
   // directionLayer: 保存したレシピの direction_layer(proj・keyed のユニットに当てる方向の層、CHANGE-06)。
   // defaults: { default_direction, default_key }(keyed の省いた方向・鍵、CHANGE-07)。/api/recipes が既定で埋めた行
@@ -371,6 +377,8 @@ export class Recipe {
     this.defaultDirection = dd;
     this.defaultKey = dk;
     this.loopEdits = defaults && defaults.loop_edits === "per_visit" ? "per_visit" : null;
+    const pc = defaults && defaults.proj_correction;          // 保存したレシピの記録(無い古いレシピは "unrecorded")
+    this.projCorrection = ["postnorm", "none", "unrecorded"].includes(pc) ? pc : "postnorm";
     this._save();
   }
 }
@@ -386,9 +394,10 @@ export const samplingLabel = (sp) => (sp ? `${t("温度")} ${+sp.temperature} ·
 
 export class RecipePanel {
   constructor(root, recipe, { onOpen, onOpenHead, onOpenExpert, onChat, unitWords, directions, projDirections, headKind, nFF, onRunJob, keys, nLayer,
-                               onAdded, onReplaced, doseSpread }) {
+                               onAdded, onReplaced, doseSpread, postNorm }) {
     this.root = root;
-    this.doseSpread = doseSpread || (() => null);   // 残差の大きさの偏り(/api/model の dose_spread、v0.8.6)
+    this.postNorm = postNorm || (() => false);      // 出力のあとに正規化がある層があるモデルか(射影の補正の欄を出す、v0.9.0)
+    this.doseSpread = doseSpread || (() => null);   // 残差の大きさの偏り(/api/model の dose_spread、v0.9.0)
     this.r = recipe;
     this.tab = "units";                           // いまのタブ: units 中身 / try 試す / out 書き出す
     this.onAdded = onAdded || (() => this.render());          // このパネルの中で足したとき(app.js がパネルを開いて描き直す)
@@ -484,6 +493,7 @@ export class RecipePanel {
       ${this.keyedAddHTML()}
       ${r.moe().length ? `${noteHTML(t("MoE: 方向押し = 専門家のニューロンの add。専門家が選ばれたかに関係なく全トークンにその書き込み方向を足す(ニューロン押しではない)。選ばれたときだけ効くのは gain(×)。専門家全体の ×k と route はモデルを読み直すパッチで当てる(列ごとに 0.3〜1 秒)。3 列チャットの − 列は ×k が 2 − k、route と add は符号を反転。"), "muted note")}` : ""}
       ${this.ablateHTML()}
+      ${this.projCorrectionHTML()}
       ${r.sampling ? `<div class="rc-sampling muted note" title="${t("このレシピを試すときのサンプリング。チャットの「レシピの設定」で使い、保存するとレシピのファイルに入る(OpenAI 互換 API の既定にもなる)")}">${t("サンプリング")}: <span class="mono">${esc(samplingLabel(r.sampling))}</span><button class="small" id="rc-sp-rm" title="${t("レシピから外す")}">×</button></div>` : ""}
       <p class="muted note">${t("ニューロンの強さは rel(その層の残差ノルムの中央値に対する大きさ)。マップに + は黄、− は赤紫の輪で出ます。")}</p>
       ${(() => { const ds = this.doseSpread(); return ds && ds.warn ? `<p class="note rc-spread-warn">${t("このモデルでは残差の大きさが少数の次元に偏っているので、強さ 1 は偏りを除いた大きさの約 {x} 倍にあたります(偏りの少ないモデルでは約 1.3 倍)。弱めの強さ(例 0.1〜0.2)から試してください。", { x: ds.median.toFixed(1) })}</p>` : ""; })()}
@@ -519,7 +529,7 @@ export class RecipePanel {
       if (!x) return;
       if (!(await askReplace(r, x.name))) { ev.target.value = ""; return; }      // いまのレシピが空でなければ確かめる(やめたら選択を戻す)
       r.load(x.name, x.units, x.ablate, x.sampling, x.direction_layer, { default_direction: x.default_direction, default_key: x.default_key,
-                                                                         loop_edits: x.loop_edits });
+                                                                         loop_edits: x.loop_edits, proj_correction: x.proj_correction });
       this.onReplaced();
     });
     for (const el of this.root.querySelectorAll("input[data-i]")) {
@@ -615,7 +625,8 @@ export class RecipePanel {
       : t("proj のユニットに当てる方向の層。その層 = そのヘッドがある層の方向 r_L(own)、基準層 = 方向セットの基準層の r(base。gne direction score で記録した層)");
     return `<div class="rc-ablate"><span class="muted" title="${tip}">${t("方向の層")}</span>
         <select id="rc-dl"><option value="own"${r.directionLayer === "own" ? " selected" : ""}>${t("その層")}</option><option value="base"${r.directionLayer === "base" ? " selected" : ""}>${t("基準層")}</option></select></div>
-      ${r.projs().length ? `${noteHTML(t("射影 s: ヘッドが残差に書くベクトルのうち方向 r̂ に沿った成分だけを (1 − s) 倍にする(1 で消す、2 で反転、直交成分はそのまま)。LoRA で当てるので cvec には入りません。3 列チャットの − 列は s が負(その方向へ強める)。"), "muted note")}` : ""}${
+      ${r.projs().length ? `${noteHTML(t("射影 s: ヘッドが残差に書くベクトルのうち方向 r̂ に沿った成分だけを (1 − s) 倍にする(1 で消す、2 で反転、直交成分はそのまま)。LoRA で当てるので cvec には入りません。3 列チャットの − 列は s が負(その方向へ強める)。")
+        + (this.postNorm() ? t("このモデルは出力のあとに正規化があるので、補正つき(既定)では書き込みから normalize(γ⊙r̂) を引きます。s=1 で残差の r̂ の成分がちょうど消え、s=2 で反転しますが、ほかの s では比例せず、r̂ 以外の向きへも動きます(副作用)。") : ""), "muted note")}` : ""}${
         r.directionLayer === "base" ? `${noteHTML(t("方向の層「基準層」は保存したレシピのファイルにだけ入ります(3 列チャットと「今のレシピで eval」はユニットの文字列を送るので、その層の方向で当てます)。"), "muted note")}` : ""}${
         r.loopEdits === "per_visit" ? `${noteHTML(t("このレシピは、1 回目と 2 回目に別々に当てる形(per_visit)です。保存したレシピのファイルには残りますが、3 列チャットと「今のレシピで eval」はユニットの文字列を送るので、両方の回に当てます。回ごとに当てた値は gne heads measure で、配れる形(両方の回に当てる形)には gne heads loop-merge で直します。"), "pp-warn note")}` : ""}`;
   }
@@ -760,8 +771,25 @@ export class RecipePanel {
       </div>${dirs.length || a ? "" : `<p class="muted note">${t("方向がありません(gne direction --contrast で作れます)")}</p>`}`;
   }
 
+  // 射影の補正(v0.9.0): 出力のあとに正規化があるモデルで、射影(proj)か ablate があるときだけ出す。記録の無い古いレシピは、
+  // 補正つきで当てていることを、このレシピを使っている間ずっと出す
+  projCorrectionHTML() {
+    const r = this.r;
+    if (!this.postNorm() || (!r.projs().length && !r.ablate)) return "";
+    const v = r.projCorrection === "none" ? "none" : "postnorm";
+    const sel = `<div class="rc-ablate" title="${t("出力のあとに正規化があるモデルで、射影と ablate を、正規化を補正して当てるか(補正なしは v0.8.x と同じ計算。前に作って強さを調整したレシピを、前と同じ効き方で比べるとき)")}">
+      <span class="muted">${t("射影の補正")}</span><select id="rc-pc"><option value="postnorm"${v === "postnorm" ? " selected" : ""}>${t("補正つき(既定)")}</option>
+      <option value="none"${v === "none" ? " selected" : ""}>${t("補正なし(v0.8.x と同じ計算)")}</option></select></div>`;
+    const old = r.projCorrection === "unrecorded"
+      ? `<p class="note rc-pc-warn">${t("このレシピには射影の補正の記録がありません(v0.8.x までに作ったレシピ)。いまは補正つきで当てています(前の版では補正なし。同じ強さでも効き方が変わり、s=1 では強くなります)。前と同じ効き方にするには「補正なし」を選んでください。保存すると、選んでいる方で記録します。")}</p>`
+      : "";
+    return sel + old;
+  }
+
   wireAblate() {
     const $ = (s) => this.root.querySelector(s);
+    const pc = $("#rc-pc");
+    if (pc) pc.addEventListener("change", (ev) => { this.r.setProjCorrection(ev.target.value); this.render(); });
     const cur = () => this.r.ablate || { direction: "", scale: 1, layers: "all", from_layer: null };
     $("#rc-ab-dir").addEventListener("change", (ev) => {
       const v = ev.target.value;
@@ -780,6 +808,8 @@ export class RecipePanel {
   }
 
   async save() {
+    if (this.r.projCorrection === "unrecorded" && this.postNorm() && (this.r.projs().length || this.r.ablate)
+        && !(await askConfirm(t("このレシピには射影の補正の記録がありません。いま当てている「補正つき」で記録して保存します(前の版とは効き方が違います)。前と同じ効き方で残すには、やめて「射影の補正」を「補正なし」にしてから保存してください。"), { ok: t("補正つきで保存") }))) return;
     const res = this.root.querySelector("#rc-result");
     const name = this.root.querySelector("#rc-name").value.trim();
     if (!/^[\w.-]+$/.test(name)) { res.innerHTML = `<p class="err">${t("名前は英数字・_・-・. だけにしてください")}</p>`; return; }
@@ -790,10 +820,14 @@ export class RecipePanel {
                                                                    ...((this.r.projs().length || kd) && this.r.directionLayer !== "own" ? { direction_layer: this.r.directionLayer } : {}),
                                                                    ...(kd && this.r.defaultDirection ? { default_direction: this.r.defaultDirection } : {}),
                                                                    ...(kd && this.r.defaultKey ? { default_key: this.r.defaultKey } : {}),
-                                                                   ...(this.r.loopEdits ? { loop_edits: this.r.loopEdits } : {}) });
+                                                                   ...(this.r.loopEdits ? { loop_edits: this.r.loopEdits } : {}),
+                                                                   proj_correction: this.r.projCorrection });
+      if (this.r.projCorrection === "unrecorded") this.r.projCorrection = "postnorm";   // 記録の無い古いレシピは「補正つき」で記録された
+      this.r._save();
       await this.refreshSaved();                     // 一覧を描き直してから知らせる(描き直すと #rc-result も作り直される)
       this.root.querySelector("#rc-result").innerHTML =
-        `<p class="muted note">${t("保存しました({path})", { path: esc((saved && saved.path) || `${name}.yaml`) })}</p>`;   // 保存先はサーバが返す実際のパス(--root を指定していればその下)
+        `<p class="muted note">${t("保存しました({path})", { path: esc((saved && saved.path) || `${name}.yaml`) })}</p>`   // 保存先はサーバが返す実際のパス(--root を指定していればその下)
+        + (saved && saved.note ? `<p class="note pp-warn">${esc(saved.note)}</p>` : "");
     } catch (e) { res.innerHTML = `<p class="err">${esc(e.message)}</p>`; }
   }
 
@@ -913,7 +947,7 @@ export class RecipePanel {
     if (!/^[\w.-]+$/.test(stem)) { this.lxSet(`<p class="err">${t("ファイル名は英数字・_・-・. だけにしてください")}</p>`); return; }
     const all = r.specs();                                  // keyed の省いた方向・鍵はレシピの既定で埋める
     const units = [...r.heads(), ...r.projs(), ...r.keyed()].map((u) => all[r.units.indexOf(u)]);
-    const p = { units, name, bake: f.bake, file_stem: stem, overwrite };
+    const p = { units, name, bake: f.bake, file_stem: stem, overwrite, proj_correction: r.projCorrection };
     if (f.strip) p.strip_meta = true;
     if (!f.bake && f.adapterName.trim()) p.adapter_name = f.adapterName.trim();
     if ((r.projs().length || r.keyed().length) && r.directionLayer && r.directionLayer !== "own") p.direction_layer = r.directionLayer;

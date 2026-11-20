@@ -49,10 +49,12 @@ class Live:
             out = fn()
             return out, list(self.s.warnings)
 
-    def recipe(self, units: list[str], name: str | None = None, ablate: str | dict | None = None):
+    def recipe(self, units: list[str], name: str | None = None, ablate: str | dict | None = None,
+               proj_correction: str | None = None):
+        """proj_correction は画面のレシピの「射影の補正」(postnorm / none / unrecorded = 記録の無い古いレシピ、v0.9.0)。"""
         if not units and not ablate:
             return None
-        return self.s.recipe(units=list(units) or None, dose_unit="rel", name=name, ablate=ablate)
+        return self.s.recipe(units=list(units) or None, dose_unit="rel", name=name, ablate=ablate, proj_correction=proj_correction)
 
     # --- 3 列チャット(§5.3)。SSE の行を順に返す ---------------------------------------------------------
     def steer_stream(self, body: dict):
@@ -69,7 +71,8 @@ class Live:
         max_tokens = int(body.get("max_tokens", 128))
         if not 1 <= max_tokens <= 2048:
             raise GneError("BAD_ARGS", "max_tokens は 1〜2048 です")
-        recipes = [self.recipe(c.get("units") or [], ablate=c.get("ablate")) for c in cols]   # 形式の誤りは始める前に返す
+        recipes = [self.recipe(c.get("units") or [], ablate=c.get("ablate"), proj_correction=c.get("proj_correction"))
+                   for c in cols]                                                   # 形式の誤りは始める前に返す
         from ..when import generate_when, parse_when
         whens = [parse_when(c.get("when") or body.get("when") or "all") for c in cols]
         sampling = None

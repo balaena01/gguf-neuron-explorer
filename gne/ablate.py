@@ -264,36 +264,63 @@ def write_ablation_lora(weights, rs: dict[str, np.ndarray], rows: dict[str, np.n
     return {"path": rep["path"], "n_tensors": rep["n_tensors"], "embed": embed is not None, "bytes": rep["bytes"]}
 
 
+def writer_dirs(weights, names_by_layer: dict[int, list[str]], per: dict[int, np.ndarray], correction: bool) -> dict[str, np.ndarray]:
+    """書き込み行列(とバイアス)の名前 → そのテンソルから引く単位ベクトル。出力のあとに正規化がある層を補正するなら
+    normalize(γ⊙r̂)(混ぜる層の書き込み行列は注意の後の γ、ffn_down 系は MLP の後の γ。v0.9.0)、それ以外は r̂。"""
+    from .postnorm import corrected_dir, writer_side
+    return {n: corrected_dir(weights, L, per[L], writer_side(n), correction=correction)
+            for L, names in names_by_layer.items() for n in names}
+
+
+def ablation_side_warning(weights, Ls: list[int], per: dict[int, np.ndarray], correction: bool) -> str | None:
+    """補正つきで消すとき、残差が r̂ 以外へも大きく動く層の警告(postnorm.side_warning)。"""
+    if not correction:
+        return None
+    from .postnorm import side_warning
+    return side_warning(weights, [(L, s, per[L]) for L in Ls for s in ("mixer", "ffn")])
+
+
 def export_ablation_lora(weights, r: np.ndarray | dict[int, np.ndarray], path: str | Path, *,
                          layers: list[int] | None = None, scale: float = 1.0, embed: bool = True,
-                         meta: dict | None = None, progress: Progress | None = None) -> dict:
+                         meta: dict | None = None, progress: Progress | None = None, correction: bool = True) -> dict:
     """方向 r(1 本を全層に。dict なら層ごとの r_L を各層のライターに = --per-layer)を消す LoRA を書く。
-    embed は tied でないモデルで埋め込みも入れるか(層ごとの方向のときは入れない)。"""
+    embed は tied でないモデルで埋め込みも入れるか(層ごとの方向のときは入れない)。correction: 出力のあとに正規化がある層では
+    書き込みから normalize(γ⊙r̂) を引く(残差の r̂ の成分がちょうど消える。v0.9.0。False なら v0.8.x と同じ r̂)。"""
+    m = weights.meta
+    if m.n_expert:
+        raise GneError("ARCH_UNSUPPORTED", "MoE の射影消去は LoRA では未対応です(gne ablate --bake を使ってください)",
+                       "attention の書き込みだけなら gne headproj ablate --direction <方向> で LoRA にできます")
     Ls = _select_layers(weights, layers)
     warnings = []
+    per = per_layer_directions(r, Ls) if isinstance(r, dict) else {L: unit(r) for L in Ls}
+    ws = residual_writers(weights)
+    dirs = writer_dirs(weights, {L: ws[L] for L in Ls}, per, correction)
+    rows = {}
+    for i, L in enumerate(Ls):
+        for name in ws[L]:
+            W = tensor_to_f32(weights.tensor(name))
+            if W.ndim != 2 or W.shape[0] != m.n_embd:
+                raise GneError("ARCH_UNSUPPORTED", f"{name} の形状 {W.shape} は (n_embd, in) ではありません")
+            rows[name] = dirs[name] @ W
+        if progress:
+            progress(i + 1, len(Ls), "ablate: rᵀW")
+    emb = None
     if isinstance(r, dict):
-        per = per_layer_directions(r, Ls)
-        rows, rs = {}, {}
-        for i, L in enumerate(Ls):
-            for name, v in projection_rows(weights, per[L][None, :], layers=[L]).items():
-                rows[name], rs[name] = v[0], per[L]
-            if progress:
-                progress(i + 1, len(Ls), "ablate: rᵀW")
-        emb = None
         if embed:
             warnings.append("層ごとの方向(--per-layer)では埋め込みは射影しません")
     else:
         ru = unit(r)
-        part = projection_rows(weights, ru[None, :], layers=Ls, progress=progress)
-        rows = {n: v[0] for n, v in part.items()}
-        rs = {n: ru for n in rows}
-        emb = None
         if embed and embed_in_lora(weights):
             emb = (embed_projection(weights, ru[None, :])[:, 0], ru)
         elif embed:
             warnings.append("出力層が埋め込みと共有(tied)なので、LoRA には埋め込みを入れていません(r 成分が埋め込みの分だけ残る)")
-    rep = write_ablation_lora(weights, rs, rows, path, meta={**(meta or {}), "layers": Ls}, scale=scale, embed=emb)
-    return {**rep, "layers": Ls, "scale": scale, "warnings": warnings}
+    sw = ablation_side_warning(weights, Ls, per, correction)
+    if sw:
+        warnings.append(sw)
+    rep = write_ablation_lora(weights, dirs, rows, path,
+                              meta={**(meta or {}), "layers": Ls, "proj_correction": "postnorm" if correction else "none"},
+                              scale=scale, embed=emb)
+    return {**rep, "layers": Ls, "scale": scale, "warnings": warnings, "proj_correction": "postnorm" if correction else "none"}
 
 
 # --- bake -------------------------------------------------------------------------------------------------
@@ -332,7 +359,7 @@ def _moe_writers(weights, Ls: list[int]) -> dict[str, int]:
 
 def bake_ablation_gguf(weights, r: np.ndarray | dict[int, np.ndarray], dst: str | Path, *, layers: list[int] | None = None,
                        scale: float = 1.0, embed: bool = True, requant: str = "q8_0", meta: dict | None = None,
-                       progress: Progress | None = None) -> dict:
+                       progress: Progress | None = None, correction: bool = True) -> dict:
     """ライター(と埋め込み)から r を射影した GGUF を書く。書き換えたテンソルだけ Q8_0 か F16 にし、他は生バイトのまま写す。
     大きなモデルでもメモリに載せるのは 1 テンソルずつ(書く直前に dequantize → 射影 → 量子化)。"""
     if Path(weights.path).resolve() == Path(dst).resolve():
@@ -344,6 +371,10 @@ def bake_ablation_gguf(weights, r: np.ndarray | dict[int, np.ndarray], dst: str 
     axes = {n: 0 for L in Ls for n in ws[L] if not n.endswith("ffn_down_exps.weight")}
     axes.update(_moe_writers(weights, Ls))
     biases = {n.replace(".weight", ".bias"): n for n in axes if weights.has_tensor(n.replace(".weight", ".bias"))}
+    by_layer: dict[int, list[str]] = {}
+    for n in list(axes) + list(biases):
+        by_layer.setdefault(int(n.split(".")[1]), []).append(n)
+    dirs = writer_dirs(weights, by_layer, per, correction)          # 名前ごとの引く向き(補正つきなら normalize(γ⊙r̂))
     emb_r = None
     if embed:
         emb_r = per[Ls[0]] if isinstance(r, dict) else unit(r)        # 層ごとのときは最初の層の方向
@@ -351,7 +382,8 @@ def bake_ablation_gguf(weights, r: np.ndarray | dict[int, np.ndarray], dst: str 
     w = copy_gguf_header(weights, dst, tag=" +ablate" + (f":{meta['direction']}" if meta and meta.get("direction") else ""),
                          recipe=None)
     w.add_key_value("gne.ablate", json.dumps({**(meta or {}), "layers": Ls, "scale": scale, "embed": embed,
-                                              "requant": requant}, ensure_ascii=False), GGUFValueType.STRING)
+                                              "requant": requant, "proj_correction": "postnorm" if correction else "none"},
+                                             ensure_ascii=False), GGUFValueType.STRING)
 
     def layer_of(name: str) -> int:
         return int(name.split(".")[1])
@@ -390,11 +422,10 @@ def bake_ablation_gguf(weights, r: np.ndarray | dict[int, np.ndarray], dst: str 
         if kind is None:
             data = t.data
         elif kind == "writer":
-            L = layer_of(t.name)
-            data, _ = _encode(_project(tensor_to_f32(t), per[L], scale, axes[t.name]), requant)
+            data, _ = _encode(_project(tensor_to_f32(t), dirs[t.name], scale, axes[t.name]), requant)
         elif kind == "bias":
             b = np.array(tensor_to_f32(t), dtype=np.float32).reshape(-1)
-            rr = per[layer_of(t.name)]
+            rr = dirs[t.name]
             data = (b - scale * (b @ rr) * rr).astype(np.float32)
         else:
             data = _bake_embed(weights, t, emb_r, scale, requant)
@@ -404,10 +435,12 @@ def bake_ablation_gguf(weights, r: np.ndarray | dict[int, np.ndarray], dst: str 
             if progress:
                 progress(done, len(modified), "ablate: bake")
     w.close()
+    sw = ablation_side_warning(weights, Ls, per, correction)
     return {"path": str(dst), "modified": modified, "n_modified": len(modified), "layers": Ls, "scale": scale,
             "embed": embed, "requant": requant, "bytes": Path(dst).stat().st_size,
+            "proj_correction": "postnorm" if correction else "none",
             "warnings": (["出力層が埋め込みと共有(tied)なので、埋め込みの射影は出力層にも効きます"]
-                         if embed and weights.meta.tied_output else [])}
+                         if embed and weights.meta.tied_output else []) + ([sw] if sw else [])}
 
 
 def _bake_embed(weights, t, r: np.ndarray, s: float, requant: str, chunk: int = 16384) -> np.ndarray:
@@ -482,10 +515,11 @@ def tensor_types_file(weights, path: Path) -> None:
 
 def bake_via_f16(weights, r, dst: str | Path, *, layers=None, scale: float = 1.0, embed: bool = True, meta: dict | None = None,
                  llama_quantize: str | None = None, imatrix: str | None = None, keep_f16: bool = False,
-                 progress: Progress | None = None) -> dict:
+                 progress: Progress | None = None, correction: bool = True) -> dict:
     """書き換えるテンソルを F16 で書いた中間の GGUF を作り、llama-quantize で元の量子化型に戻す。"""
     return requant_via_f16(weights, lambda mid: bake_ablation_gguf(weights, r, mid, layers=layers, scale=scale, embed=embed,
-                                                                   requant="f16", meta=meta, progress=progress),
+                                                                   requant="f16", meta=meta, progress=progress,
+                                                                   correction=correction),
                            dst, llama_quantize=llama_quantize, imatrix=imatrix, keep_f16=keep_f16)
 
 

@@ -154,7 +154,7 @@ export class PipelinePanel {
   constructor(root, { onRun, onShowDirection, onOpenHead, onOpenNeuron, onLoadProj, onEval, onOverlay, onOpenCandidates, isLoop, writesBlocked } = {}) {
     this.isLoop = isLoop || (() => false);       // 同じ層を 2 回実行するモデル(ループの中の部品の方向の欄を出す)
     // このモデルで書き込みの量での順位づけ(rank writes)を実行しない理由の文(実行できれば null)。サーバーの既定の切り替えと同じ条件:
-    // 残差が複数本の流れ(hyper-connections)、注意の出力のあとに正規化がある層(v0.8.6)
+    // 残差が複数本の流れ(hyper-connections)、注意の出力のあとに正規化がある層(v0.9.0)
     this.writesBlocked = writesBlocked || (() => null);
     this.rankForced = false;                     // 欄の既定(書き込みの量)を、そのモデルでは実行しないので止めて選ぶに替えたか
     this.root = root;

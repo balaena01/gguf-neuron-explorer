@@ -108,27 +108,30 @@ def parse_proj_specs(specs: list[str], default_direction: str | None = None) -> 
     return out
 
 
-def neuron_layer_ok(weights, L: int) -> None:
-    """ニューロンの射影を当てられる層か(dense の MLP で、ffn_down を持ち、post-FFN norm が無い)。だめなら GneError。"""
+def neuron_layer_ok(weights, L: int, *, allow_post_norm: bool = False) -> None:
+    """ニューロンの射影を当てられる層か(dense の MLP で、ffn_down を持つ)。MLP の出力のあとに正規化がある層は、補正つき
+    (allow_post_norm、v0.9.0)のときだけ。だめなら GneError。"""
     if not 0 <= int(L) < weights.meta.n_layer:
         raise GneError("BAD_RECIPE", f"層 {L} は範囲外です")
     li = weights.arch.layers[int(L)]
     if li.ffn != "dense" or not weights.has_tensor(f"blk.{weights.stored(L)}.ffn_down.weight"):
         raise GneError("ARCH_UNSUPPORTED", f"層 {L}({li.ffn})にはニューロンの射影を当てられません(dense の MLP の ffn_down だけ。MoE の層は未対応)")
-    if li.post_norm_ffn:
-        raise GneError("ARCH_UNSUPPORTED", f"層 {L} は MLP の出力のあとに正規化({li.post_norm_ffn if li.post_norm_ffn != '?' else '構造を確かめていない'})"
-                                           "があるので、ニューロン・MLP 全体の射影は実行しません。理由: ffn_down の列の方向成分が、そのまま残差の"
-                                           "方向成分にならないためです",
-                       "正規化を補正した射影は次の版で入れます")
+    if li.post_norm_ffn == "?":
+        raise GneError("ARCH_UNSUPPORTED", f"層 {L} の MLP の出力のあとに正規化があるかを、この arch では確かめていないので、"
+                                           "ニューロン・MLP 全体の射影は実行しません")
+    if li.post_norm_ffn and not allow_post_norm:
+        raise GneError("ARCH_UNSUPPORTED", f"層 {L} は MLP の出力のあとに正規化({li.post_norm_ffn})があり、射影の補正を切っているので"
+                                           "(proj_correction: none / --no-proj-correction)、ニューロン・MLP 全体の射影は実行しません。理由: "
+                                           "補正なしでは ffn_down の列の方向成分が、そのまま残差の方向成分にならないためです(v0.8.x と同じ扱い)",
+                       "補正つき(既定)なら実行できます")
 
 
-# 出力のあとに正規化がある層のヘッド・層全体(attn)の射影は、B の補正が入るまで式どおりでない。段階 1 の測定(LFM3-1.7B・
-# Gemma 3 1B、公開のひな形、最後のトークン)の値を知らせに添える
-POSTNORM_MIXER_NOTE = ("注意(混ぜる層)の出力のあとに正規化があるので、射影は実行しますが、方向 r の成分は残差から完全には"
-                       "消えません。理由: 射影は正規化の前の書き込みから r の成分を引くだけで、残差に入るのは正規化した値だからです"
+# 補正を切ったとき(proj_correction: none / --no-proj-correction、v0.8.x と同じ計算)の、出力のあとに正規化がある層の
+# ヘッド・層全体(attn)の射影の知らせ。段階 1 の測定(LFM3-1.7B・Gemma 3 1B、公開のひな形、最後のトークン)の値を添える
+POSTNORM_MIXER_NOTE = ("注意(混ぜる層)の出力のあとに正規化があり、射影の補正を切っているので、方向 r の成分は残差から完全には"
+                       "消えません。理由: 補正なしの射影は正規化の前の書き込みから r の成分を引くだけで、残差に入るのは正規化した値だからです"
                        "(LFM3-1.7B・Gemma 3 1B で測った値: 層全体を s=1 で射影すると r の成分が中央値で約 5 割残り、ヘッド 1 個では"
-                       "消える割合が 0〜100% とばらつく。強さを上げても比例しない)。組の効きの数は残差で測ったものなので、そのまま"
-                       "使えます。正規化を補正した射影は次の版で入れます")
+                       "消える割合が 0〜100% とばらつく。強さを上げても比例しない)。補正つき(既定)なら s=1 でちょうど取り除けます")
 
 
 def postnorm_mixer_layers(weights, heads) -> tuple[list[int], list[int]]:
@@ -158,6 +161,13 @@ def postnorm_mixer_warning(weights, heads) -> str | None:
     return "。".join(out) or None
 
 
+def _postnorm_route(session, L: int, side: str) -> bool:
+    """この層の side(mixer / ffn)に出力のあとの正規化があり、補正つき(既定)なら、正規化の後で比べる検算に回す。"""
+    li = session.weights.arch.layers[L]
+    pn = li.post_norm_mixer if side == "mixer" else li.post_norm_ffn
+    return pn not in ("", "?") and bool(getattr(session, "proj_correction", True))
+
+
 def _refuse_postnorm_check(weights, L: int, side: str) -> None:
     """V24・V25 は書き込み行列の出力(正規化の前)で測るので、出力のあとに正規化がある層では残差での効きを表さない。実行しない。"""
     li = weights.arch.layers[weights.stored(L)]
@@ -167,7 +177,7 @@ def _refuse_postnorm_check(weights, L: int, side: str) -> None:
         raise GneError("ARCH_UNSUPPORTED", f"層 {L} は{what}の出力のあとに正規化({pn if pn != '?' else '構造を確かめていない post_attention_norm'})"
                                            "があるので、この検算は実行しません。理由: この検算は書き込み行列の出力(正規化の前)で測るので、"
                                            "残差での効きを表さないためです",
-                       "正規化を補正した射影と、正規化のあとの出力で測る検算は次の版で入れます")
+                       "補正つき(既定。--no-proj-correction を外す)なら、正規化のあとの値で比べる検算を流せます")
 
 
 def head_direction(ds, L: int, direction_layer: str = "own") -> tuple[np.ndarray, int]:
@@ -195,10 +205,14 @@ def head_direction(ds, L: int, direction_layer: str = "own") -> tuple[np.ndarray
 class ProjBuilder:
     """r̂ᵀW(層・方向ごと)と残差に書き込む重み行列 W(層ごと、少数だけ)を覚えておき、LoRA の行列を何度も作る(因果・配分のループ用)。"""
 
-    def __init__(self, weights, directions: DirSource | dict, *, direction_layer: str = "own", keep_w: int = 2):
+    def __init__(self, weights, directions: DirSource | dict, *, direction_layer: str = "own", keep_w: int = 2,
+                 correction: bool = True):
         self.weights = weights
         self.ds_of = directions if callable(directions) else directions.__getitem__
         self.direction_layer = direction_layer
+        # v0.9.0: 出力のあとに正規化がある層では、書き込みから v̂ = normalize(γ⊙r̂) を引く(残差の r̂ の成分が s=1 でちょうど 0)。
+        # False なら v0.8.x までと同じ r̂(レシピの proj_correction: none・--no-proj-correction)。正規化の無い層はどちらも同じ
+        self.correction = bool(correction)
         self._rw: dict[tuple, tuple[np.ndarray, np.ndarray]] = {}
         self._w: dict[tuple[int, str], np.ndarray] = {}
         self.keep_w = keep_w
@@ -211,7 +225,7 @@ class ProjBuilder:
             if len(self._w) >= self.keep_w:
                 self._w.pop(next(iter(self._w)))
             if kind == "neuron":
-                neuron_layer_ok(self.weights, L)
+                neuron_layer_ok(self.weights, L, allow_post_norm=self.correction)
                 self._w[key] = self.weights.down_matrix(L)
             else:
                 self._w[key] = self.weights.head_writer_matrix(L)
@@ -225,7 +239,7 @@ class ProjBuilder:
             li = self.weights.arch.layers[L]
             return name, 0, li.n_head * li.head_dim
         if kind == "ffn":
-            neuron_layer_ok(self.weights, L)
+            neuron_layer_ok(self.weights, L, allow_post_norm=self.correction)
             return f"blk.{L}.ffn_down.weight", 0, self.weights.meta.n_ff_at(self.weights.stored(L))
         if kind == "neuron":
             n_ff = self.weights.meta.n_ff_at(self.weights.stored(L))
@@ -238,9 +252,15 @@ class ProjBuilder:
         """層 L のヘッド(ニューロン)に当てる方向(重みは読まない)。"""
         return head_direction(self.ds_of(name), L, self.direction_layer)
 
-    def r_rw(self, L: int, name: str, kind: str = "head") -> tuple[np.ndarray, np.ndarray, int]:
+    def v_of(self, L: int, name: str, kind: str = "head") -> tuple[np.ndarray, int]:
+        """書き込みから引く単位ベクトル(補正つきなら normalize(γ⊙r̂)、正規化の無い層・補正なしなら r̂)。"""
+        from .postnorm import corrected_dir, writer_side
         r, src = self.r_of(L, name)
+        return corrected_dir(self.weights, L, r, writer_side(TENSOR_KIND.get(kind, kind)), correction=self.correction), src
+
+    def r_rw(self, L: int, name: str, kind: str = "head") -> tuple[np.ndarray, np.ndarray, int]:
         kind = TENSOR_KIND.get(kind, kind)
+        r, src = self.v_of(L, name, kind)
         key = (L, name, src) if kind == "head" else (L, name, src, kind)
         if key not in self._rw:
             self._rw[key] = (r, (r.astype(np.float64) @ self.W(L, kind)).astype(np.float32))
@@ -327,7 +347,9 @@ def proj_meta(heads: list[ProjHead], builder: ProjBuilder) -> dict:
     from .ablate import vector_key
     rows = []
     for p in heads:
-        r, src = builder.r_of(p.layer, p.direction)
+        # 書き込みから引く向き(v0.9.0: 正規化のある層を補正するなら normalize(γ⊙r̂))の鍵。正規化の無い層・補正なしは r̂ なので
+        # 今までと同じ鍵(作り済みの LoRA を使い回す)
+        r, src = builder.v_of(p.layer, p.direction, p.kind)
         if p.kind == "neuron":                     # ニューロンのときだけ種類を書く(ヘッドだけのレシピの記録・キャッシュの鍵は今までと同じ)
             rows.append({"layer": p.layer, "neuron": p.head, "kind": "neuron", "s": p.s, "direction": p.direction,
                          "direction_from": src, "vector_key": vector_key(r)})
@@ -346,18 +368,20 @@ def proj_cache_key(heads: list[ProjHead], builder: ProjBuilder) -> str:
 
 
 def export_proj_lora(weights, recipe: Recipe, path: str | Path, directions: DirSource, *,
-                     warn: Callable[[str], None] | None = None) -> dict:
-    """レシピの proj のユニットだけを LoRA アダプタ GGUF に書く(実行時に当てる LoRA と headproj export)。"""
+                     warn: Callable[[str], None] | None = None, correction: bool = True) -> dict:
+    """レシピの proj のユニットだけを LoRA アダプタ GGUF に書く(実行時に当てる LoRA と headproj export)。
+    correction: 出力のあとに正規化がある層を補正するか(v0.9.0。GGUF の gne.proj_correction に記録する)。"""
     from .ablate import write_lora_tensors
     heads = proj_heads(recipe)
     if not heads:
         raise GneError("BAD_RECIPE", "proj のユニットがありません(例 --unit 33:H16:s6@NAME)")
-    b = ProjBuilder(weights, directions, direction_layer=recipe.direction_layer)
+    b = ProjBuilder(weights, directions, direction_layer=recipe.direction_layer, correction=correction)
     tens = b.tensors(heads, warn)
     m = weights.meta
     rep = write_lora_tensors(weights, tens, path, name=f"{m.name} headproj" + (f" {recipe.name}" if recipe.name else ""),
                              kv={"gne.headproj": json.dumps(proj_meta(heads, b), ensure_ascii=False),
-                                 "gne.recipe": json.dumps(recipe.to_dict(), ensure_ascii=False)})
+                                 "gne.recipe": json.dumps(recipe.to_dict(), ensure_ascii=False),
+                                 "gne.proj_correction": "postnorm" if correction else "none"})
     return {**rep, **layer_summary(weights, heads, tens)}
 
 
@@ -405,15 +429,15 @@ def merge_tensors(*parts: dict[str, tuple[np.ndarray, np.ndarray]]) -> dict[str,
 # --- 焼き込み(E.2)---------------------------------------------------------------------------------
 
 def bake_proj_gguf(weights, recipe: Recipe, dst: str | Path, directions: DirSource, *, requant: str = "q8_0",
-                   warn: Callable[[str], None] | None = None) -> dict:
+                   warn: Callable[[str], None] | None = None, correction: bool = True) -> dict:
     """残差に書き込む重み行列のうち proj(と、あればヘッド・ニューロンの gain)で書き換えるテンソルだけを Q8_0 か F16 にし、
     他は元のバイトのまま写した GGUF を書く。変化量は LoRA と同じ B @ A を元の重みに足したもの(LoRA 版と一致させるため)。
     書き換えたテンソル名と元の型は GGUF の gne.patches と、<dst>.headproj.json に残す。"""
     from .gain import bake_gain_gguf
     heads = proj_heads(recipe)
-    b = ProjBuilder(weights, directions, direction_layer=recipe.direction_layer)
+    b = ProjBuilder(weights, directions, direction_layer=recipe.direction_layer, correction=correction)
     extra = b.tensors(heads, warn) if heads else {}
-    meta = proj_meta(heads, b) if heads else None
+    meta = {**proj_meta(heads, b), "proj_correction": "postnorm" if correction else "none"} if heads else None
     rep = bake_gain_gguf(weights, recipe, dst, requant=requant, extra=extra, extra_meta=meta)
     side = Path(str(dst) + ".headproj.json")
     side.write_text(json.dumps({"recipe": recipe.to_dict(), "headproj": meta, "modified": rep["modified"],
@@ -424,7 +448,7 @@ def bake_proj_gguf(weights, recipe: Recipe, dst: str | Path, directions: DirSour
 def bake_proj_split(weights, recipe: Recipe, dst: str | Path, directions: DirSource, *, requant: str = "keep",
                     warn: Callable[[str], None] | None = None,
                     extra: dict[str, tuple[np.ndarray, np.ndarray]] | None = None,
-                    extra_meta: dict[str, object] | None = None) -> dict:
+                    extra_meta: dict[str, object] | None = None, correction: bool = True) -> dict:
     """分割 GGUF への焼き込み。書き換える重み行列は元と同じ型で量子化し直して同じ場所に書き戻すので、
     ファイルの大きさもヘッダーも変わらない(gne.* のメタデータは入れられないので、記録は <1 番目>.headproj.json に残す)。
     書き換えのない分割ファイルはそのまま写す。dst は出力の 1 番目のファイル(-00001-of-0000N.gguf で終わらなければ付ける)。
@@ -450,7 +474,7 @@ def bake_proj_split(weights, recipe: Recipe, dst: str | Path, directions: DirSou
     outs = [dst.parent / f"{stem}-{k + 1:05d}-of-{len(parts):05d}.gguf" for k in range(len(parts))]
     if any(o.resolve() == p.resolve() for o, p in zip(outs, parts)):
         raise GneError("BAD_ARGS", "出力が元のファイルと同じです")
-    b = ProjBuilder(weights, directions, direction_layer=recipe.direction_layer)
+    b = ProjBuilder(weights, directions, direction_layer=recipe.direction_layer, correction=correction)
     ptens = b.tensors(heads, warn) if heads else {}
     tens = merge_tensors(ptens, extra or {})
     if requant not in ("keep", "f16", "q8_0", "auto"):
@@ -523,7 +547,7 @@ def bake_proj_split(weights, recipe: Recipe, dst: str | Path, directions: DirSou
         from .gguf_fast import rewrite_gguf
         for k, rep in replace.items():
             rewrite_gguf(parts[k], outs[k], rep)
-    meta = proj_meta(heads, b) if heads else None
+    meta = {**proj_meta(heads, b), "proj_correction": "postnorm" if correction else "none"} if heads else None
     side = Path(str(outs[0]) + ".headproj.json")
     side.write_text(json.dumps({"recipe": recipe.to_dict(), "headproj": meta, **(extra_meta or {}), "modified": modified,
                                 "requant": "same type, in place" if requant == "keep" else requant},
@@ -729,6 +753,8 @@ def check_neuron_proj(session, L: int, n: int, direction: str, *, ss=(1.0, 2.0, 
     from .attn import _names, _probe, capture_attention
     from .capture import pick_act_name
     from .gain import export_gain_lora
+    if _postnorm_route(session, L, "ffn"):           # 正規化のある層: 正規化の後で比べる(v0.9.0)
+        return check_postnorm_proj(session, L, "neuron", direction, index=n, ss=ss, text=text, direction_layer=direction_layer)
     text = text or "Tell me a short story about a lighthouse keeper and the sea. 灯台守の話をして。"
     e, w = session.engine, session.weights
     neuron_layer_ok(w, L)
@@ -816,6 +842,8 @@ def check_whole_proj(session, L: int, kind: str, direction: str, *, ss=(1.0, 2.0
     from .attn import _names, _probe, capture_attention, writer_out_name
     if kind not in WHOLE:
         raise GneError("BAD_ARGS", f"kind は attn(注意の出力全体)か ffn(MLP の出力全体)です({kind!r})")
+    if _postnorm_route(session, L, "mixer" if kind == "attn" else "ffn"):     # 正規化のある層: 正規化の後で比べる(v0.9.0)
+        return check_postnorm_proj(session, L, kind, direction, ss=ss, text=text, direction_layer=direction_layer)
     text = text or "Tell me a short story about a lighthouse keeper and the sea. 灯台守の話をして。"
     e, w = session.engine, session.weights
     if kind == "ffn":
@@ -890,6 +918,9 @@ def check_head_proj(session, L: int, h: int, direction: str, *, ss=(1.0, 2.0, 6.
     変わることを対比で出す)。"""
     from .attn import _names, _probe, capture_attention, writer_out_name
     from .gain import export_gain_lora
+    session.weights.head_block(L, h)
+    if _postnorm_route(session, L, "mixer"):          # 正規化のある層: 正規化の後で比べる(v0.9.0)
+        return check_postnorm_proj(session, L, "head", direction, index=h, ss=ss, text=text, direction_layer=direction_layer)
     text = text or "Tell me a short story about a lighthouse keeper and the sea. 灯台守の話をして。"
     e, w = session.engine, session.weights
     _, lo, hi = w.head_block(L, h)
@@ -956,3 +987,101 @@ def check_head_proj(session, L: int, h: int, direction: str, *, ss=(1.0, 2.0, 6.
             "direction_from": src, "dir_cos_head": float(np.median(np.abs(vr[keep]) / vn[keep])) if keep.any() else None,
             "rows": rows, "gain": gain_row, "v24": all(r_["ok"] for r_ in rows), "v25": v25,
             "ok": all(r_["ok"] for r_ in rows) and v25}
+
+
+# --- 出力のあとに正規化がある層の射影の検算(v0.9.0 B2)-----------------------------------------------------
+
+def check_postnorm_proj(session, L: int, kind: str, direction: str, *, index: int | None = None, ss=(1.0, 2.0, 6.0, 30.0),
+                        text: str | None = None, direction_layer: str = "own") -> dict:
+    """補正つきの射影(kind head・attn・neuron・ffn、index はヘッドかニューロンの番号)の LoRA を当てて、残差に足された値
+    (正規化の後)の r̂ の成分の変化が、予測 γ ⊙ y'/rms(y') − γ ⊙ y/rms(y)(y' = y − s v̂ (v̂ · y_部品)、v̂ = normalize(γ⊙r̂))
+    と合うか(相対誤差の中央値 < 5%)。層全体の s=1 では、足された値の r̂ の成分がほぼ 0 になる(元の 2% 未満)。r̂ に直交する
+    変化(副作用)の大きさと、比例のときに比べた効き(頭打ち)も出す。y は書き込み行列の出力の捕捉か、ヘッドの出力・活性から計算する。"""
+    from .attn import capture_attention
+    from .capture import pick_act_name
+    from .postnorm import (corrected_dir, eps_of, gamma, layer_names, post_add, predict_ratio, require_writer_sums, side_ratio,
+                           writer_side)
+    side = writer_side(kind)
+    w, e = session.weights, session.engine
+    li = w.arch.layers[L]
+    if (li.post_norm_mixer if side == "mixer" else li.post_norm_ffn) in ("", "?"):
+        raise GneError("BAD_ARGS", f"層 {L} の{'注意' if side == 'mixer' else ' MLP'}の出力のあとに正規化はありません(この検算は正規化のある層用)")
+    require_writer_sums(session, "補正つきの射影の検算")
+    text = text or "Tell me a short story about a lighthouse keeper and the sea. 灯台守の話をして。"
+    nm = layer_names(w, L)
+    names = set(e.list_names(e.tokenize(text, add_special=True, parse_special=False)[:16]))
+    if side == "mixer":
+        added = (nm["mid"], f"l_out-{L - 1}") if nm.get("mid") in names else (nm.get("mixer_post"), None)
+    else:
+        added = (nm["mid"], f"l_out-{L}") if nm.get("mid") in names else (nm.get("ffn_post"), None)
+    if not added[0] or added[0] not in names:
+        raise GneError("ARCH_UNSUPPORTED", f"層 {L} の、残差に足された値(正規化の後)の捕捉の名前が見えません")
+    act = pick_act_name(names, L) if side == "ffn" else None
+    extra = [x for x in (*added, act) if x]
+    ds = session.direction_set(direction)
+    r, src = head_direction(ds, L, direction_layer)
+    rh = np.asarray(r, np.float64) / max(float(np.linalg.norm(r)), 1e-30)
+    v = corrected_dir(w, L, rh, side).astype(np.float64)
+    g, eps = gamma(w, L, side), eps_of(w)
+    pkind = li.post_norm_kind or "rms"
+    base = capture_attention(session, [text], layers=[L] if li.head_dim else [], want_pattern=False,
+                             want_head_out=side == "mixer", extra=extra)[0]
+    T = base.n_tokens
+
+    def added_of(ac):
+        a = ac.extra[added[0]].astype(np.float64)
+        if added[1]:                                  # mid − l_out(L−1)(混ぜる層)/ l_out(L) − mid(MLP)
+            b = ac.extra[added[1]].astype(np.float64)
+            return a - b if side == "mixer" else b - a
+        return a
+    if side == "mixer":
+        X = base.head_out[L].astype(np.float64)                         # (T, H, hd)
+        WO = w.head_writer_matrix(L).astype(np.float64)
+        y = X.reshape(T, -1) @ WO.T
+        if kind == "head":
+            _, lo, hi = w.head_block(L, int(index))
+            yu = X[:, int(index), :] @ WO[:, lo:hi].T
+        else:
+            yu = y
+    else:
+        a = base.extra[act].astype(np.float64) * float((w.meta.ffn_down_scale or {}).get(L, 1.0))
+        Wd = w.down_matrix(L).astype(np.float64)
+        y = a @ Wd.T
+        yu = np.outer(a[:, int(index)], Wd[:, int(index)]) if kind == "neuron" else y
+    add0 = added_of(base)
+    comp0 = add0 @ rh
+    d = session.store.heads_dir(session.meta.model_id)
+    d.mkdir(parents=True, exist_ok=True)
+    rows = []
+    for s_ in ss:
+        unit = Unit(L, int(index) if kind == "neuron" else None, 0.0, kind, mode="proj", k=float(s_), direction=direction,
+                    head=int(index) if kind == "head" else None)
+        rec = Recipe([unit], session.meta.model_id, name=f"v28-L{L}{kind}", direction_layer=direction_layer, proj_correction="postnorm")
+        path = d / f"v28-L{L}-{kind}{'' if index is None else index}-s{s_:g}.lora.gguf"
+        export_proj_lora(w, rec, path, session.direction_set, correction=True)
+        got = capture_attention(session, [text], layers=[], want_pattern=False, want_head_out=False, extra=extra,
+                                lora=[(str(path), 1.0)])[0]
+        e.drop_lora(path)
+        path.unlink(missing_ok=True)
+        meas = added_of(got) - add0
+        pred = post_add(y - s_ * np.outer(yu @ v, v), g, eps, pkind) - post_add(y, g, eps, pkind)
+        mr, pr = meas @ rh, pred @ rh
+        keep = np.abs(pr) > 1e-6 * max(1.0, float(np.abs(pr).max()))
+        rel = np.abs(mr - pr)[keep] / np.abs(pr)[keep]
+        orth = meas - np.outer(mr, rh)
+        side_obs = np.linalg.norm(orth, axis=1)[keep] / np.maximum(np.abs(mr)[keep], 1e-30)
+        sat = predict_ratio(y, yu, v, s_, pkind, eps)
+        row = {"s": float(s_), "comp_change_rel_err_median": float(np.median(rel)) if rel.size else None,
+               "comp_after_over_before_median": float(np.median((comp0 + mr) / np.where(np.abs(comp0) > 1e-12, comp0, 1.0))),
+               "comp_after_over_before_pred": float(np.median((comp0 + pr) / np.where(np.abs(comp0) > 1e-12, comp0, 1.0))),
+               "vs_proportional_median": float(np.median(sat)), "side_change_median": float(np.median(side_obs)) if side_obs.size else None}
+        ok = bool(rel.size and np.median(rel) < 0.05)
+        if kind in WHOLE and s_ == 1.0:
+            ok = ok and abs(row["comp_after_over_before_median"]) < 0.02
+        row["ok"] = ok
+        rows.append(row)
+    e.free_attn_probe()
+    return {"layer": L, "kind": kind, "index": index, "direction": direction, "direction_from": src, "side": side,
+            "out_tensor": added[0], "added_tensor": added[0], "cos_r_v": float(rh @ v), "side_ratio_pred": side_ratio(w, L, rh, side),
+            **({"head": index} if kind == "head" else {"neuron": index} if kind == "neuron" else {}),
+            "rows": rows, "ok": all(x["ok"] for x in rows), "compared": "after_norm"}

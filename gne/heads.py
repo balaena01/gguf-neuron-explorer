@@ -108,7 +108,7 @@ class _Acc:
                 pb = np.concatenate([Pb[:, :, :sb].sum(axis=2, keepdims=True), Pb[:, :, sb:]], axis=2)
                 self.js[L].append(_js_bits(pa, pb).mean(axis=1))
 
-    def metrics(self, weights, dirs: dict[int, np.ndarray] | None) -> dict[int, dict[str, np.ndarray | None]]:
+    def metrics(self, weights, dirs: dict[int, np.ndarray] | None, correction: bool = True) -> dict[int, dict[str, np.ndarray | None]]:
         out = {}
         for L in self.layers:
             m: dict[str, np.ndarray | None] = {k: None for k in METRICS}
@@ -121,12 +121,16 @@ class _Acc:
                 typ = self.nsum[L] / self.rows
                 m["out_shift"] = np.linalg.norm(delta, axis=1) / np.maximum(typ, 1e-9)
                 if dirs is not None and L in dirs:
+                    from .postnorm import gamma as _pn_gamma
                     W = weights.head_writer_matrix(L)                 # (n_embd, n_head·head_dim)
                     hd = delta.shape[1]
                     r = dirs[L] / max(float(np.linalg.norm(dirs[L])), 1e-12)
+                    g = _pn_gamma(weights, L, "mixer") if correction else None   # 正規化のある層: 残差に入る向きは γ ⊙ W_O,h Δ(v0.9.0)
                     cos = []
                     for h in range(delta.shape[0]):
                         v = W[:, h * hd:(h + 1) * hd] @ delta[h]
+                        if g is not None:
+                            v = g * v
                         nv = float(np.linalg.norm(v))
                         cos.append(float(v @ r) / nv if nv > 0 else 0.0)
                     m["dir_cos"] = np.array(cos)
@@ -219,8 +223,8 @@ def heads_contrast(session, contrast: str | Path, *, name: str | None = None, di
                         "triggers": [text[offs[t][0]:offs[t][1]] for t in trig_a]})
         tick(f"heads: {i + 1}/{n}")
     e.free_attn_probe()
-    rows = _flatten(main.metrics(w, dirs), kinds)
-    nrows = _flatten(null.metrics(w, dirs), kinds)
+    rows = _flatten(main.metrics(w, dirs, getattr(session, "proj_correction", True)), kinds)
+    nrows = _flatten(null.metrics(w, dirs, getattr(session, "proj_correction", True)), kinds)
     if not rows:
         raise GneError("BAD_CONTRAST", "測れたヘッドがありません")
     stats = {}

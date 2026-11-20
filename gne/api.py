@@ -120,6 +120,8 @@ class Session:
         self._engine_kw = dict(n_gpu_layers=n_gpu_layers, n_ctx=n_ctx, n_seq_max=n_seq_max, verbose=verbose,
                                mmproj=mmproj)       # mmproj: 音声の入力(media.py)。無ければモデルの横の mmproj*.gguf
         self._engine: Engine | None = None
+        # v0.9.0: 出力のあとに正規化がある層の射影(proj)・ablate を補正するか(--no-proj-correction で False。レシピの記録が優先)
+        self.proj_correction = True
         self._resid: ResidStats | None = None
         self.last_patch_reload_s: float | None = None   # パッチを当てたコピーの読み直しにかかった秒(CHANGE-05)
 
@@ -329,7 +331,8 @@ class Session:
     def recipe(self, *, units: list[str] | None = None, path: str | Path | None = None,
                dose_unit: str | None = None, scale: float = 1.0, name: str | None = None,
                when: str | None = None, ablate: str | dict | None = None, default_direction: str | None = None,
-               direction_layer: str | None = None, default_key: str | None = None) -> Recipe:
+               direction_layer: str | None = None, default_key: str | None = None,
+               proj_correction: str | None = None) -> Recipe:
         """ablate は方向の射影消去(§6.17)。"NAME[@層][:倍率]" か {direction, scale, layers, from_layer}。
         ablate だけ(ユニットなし)のレシピも作れる。default_key は #KEY を省いた keyed のユニットの鍵(CHANGE-07)。
         keyed のユニットは方向と鍵があるか・層が鍵にあるか・長さ・書ける層か(MTP・最終層は断る)をここで確かめる。"""
@@ -358,6 +361,12 @@ class Session:
             r.default_key = default_key
         if direction_layer:
             r.direction_layer = direction_layer
+        if proj_correction == "unrecorded":                    # 画面で読み込んだ古いレシピ(記録なし)をユニットで送ってくるとき
+            r.proj_correction = None
+        elif proj_correction:                                  # v0.9.0: 射影の補正(postnorm / none)。画面の切り替え・API から
+            r.proj_correction = proj_correction
+        elif units and not path:                               # その場で作るレシピは、いまの当て方を記録する(記録の無い扱いにしない)
+            r.proj_correction = self.proj_correction_label(None)
         r.validate()
         if r.ablate is not None:
             self.direction_path(r.ablate.direction)              # 方向が無ければここで返す
@@ -398,7 +407,7 @@ class Session:
                 self.direction_set(u.direction or r.default_direction)
                 if u.kind in ("neuron", "ffn"):                     # ニューロン・MLP 全体の射影: dense の MLP の層だけ
                     from .headproj import neuron_layer_ok
-                    neuron_layer_ok(self.weights, u.layer)
+                    neuron_layer_ok(self.weights, u.layer, allow_post_norm=self.proj_correction_for(r))
                 if u.kind == "attn":                                # 注意の出力全体の射影: ヘッドが残差に書く行列のある層だけ
                     self.weights.head_block(u.layer, 0)
             if u.layer <= 2:
@@ -422,6 +431,39 @@ class Session:
         if msg not in self.warnings:
             self.warn(msg)
 
+    def proj_correction_for(self, recipe: Recipe | None) -> bool:
+        """このレシピの射影・ablate を補正つきで当てるか(v0.9.0)。セッションで切った(--no-proj-correction)か、レシピの記録が
+        none なら補正なし。記録の無い古いレシピは補正つき(proj_record_note が知らせる)。"""
+        return bool(self.proj_correction) and not (recipe is not None and recipe.proj_correction == "none")
+
+    def _keyed_corr(self, recipe: Recipe) -> Recipe:
+        """keyed の計画に渡すレシピ: セッションで補正を切ったとき(--no-proj-correction)は記録を none にした写し
+        (注意の出力のあとに正規化がある層の attn の keyed は、補正なしでは実行しない = v0.8.x・B1 と同じ)。"""
+        return recipe if self.proj_correction_for(recipe) or recipe.proj_correction == "none" else recipe.like(recipe.units, proj_correction="none")
+
+    def proj_correction_label(self, recipe: Recipe | None = None) -> str:
+        return "postnorm" if self.proj_correction_for(recipe) else "none"
+
+    def proj_record_note(self, recipe: Recipe) -> str | None:
+        """記録の無い古いレシピを、出力のあとに正規化がある層の射影・ablate に補正つきで当てるときの知らせ(無ければ None)。
+        使うたびに警告に入れる(画面・MCP・API の結果にも出る)。"""
+        from .headproj import proj_heads
+        from .postnorm import writer_side
+        if recipe.proj_correction is not None or not self.proj_correction:
+            return None
+        Ls = sorted({p.layer for p in proj_heads(recipe) if p.s
+                     and (self.weights.arch.layers[p.layer].post_norm_mixer if writer_side(p.kind) == "mixer"
+                          else self.weights.arch.layers[p.layer].post_norm_ffn) not in ("", "?")})
+        abl = recipe.ablate is not None and any(li.post_norm_mixer not in ("", "?") or li.post_norm_ffn not in ("", "?")
+                                                for li in self.weights.arch.layers)
+        if not Ls and not abl:
+            return None
+        what = "・".join(([f"層 {', '.join(map(str, Ls[:8]))}{' …' if len(Ls) > 8 else ''} の射影"] if Ls else []) + (["ablate"] if abl else []))
+        who = f"レシピ {recipe.name} には" if recipe.name else "このレシピには"
+        return (f"{who}射影の補正の記録がありません(v0.8.x までに作ったレシピ)。{what}は、出力のあとの"
+                "正規化を補正して当てます(前の版では補正なし。同じ強さでも効き方が変わり、s=1 では強くなります)。前と同じ効き方にするには、"
+                "レシピに proj_correction: none を書くか、--no-proj-correction を付けてください(画面ではレシピの欄の「射影の補正」)")
+
     def _key_of(self, name: str):
         """鍵の名前("NAME" か比較用の鍵 "NAME~j")→ KeySet(<root>/keys/<model_id>/、CHANGE-07)。"""
         from .keyed import load_key
@@ -433,7 +475,8 @@ class Session:
         鍵の入力 x を変える、同じ方向の ablate は焼き込みの順によっては keyed を消す。"""
         from .keyed import keyed_plan, keyed_units
         ku = keyed_units(r)
-        keyed_plan(self.weights, r, self._key_of, self.direction_set, direction_layer=r.direction_layer, warn=self._warn_once)
+        keyed_plan(self.weights, self._keyed_corr(r), self._key_of, self.direction_set, direction_layer=r.direction_layer,
+                   warn=self._warn_once)
         same_input = {"ffn": ("neuron",), "attn": ("head",), "shared": ("shared",), "expert": ("expert_neuron",)}
         for k in ku:
             hit = [g.label() for g in r.gain_units if g.layer == k.layer and g.kind in same_input[k.kind]
@@ -468,7 +511,7 @@ class Session:
                 unit_details(self.weights, sv, recipe, self.direction_vec))
 
     def _warn_spread(self, resid: ResidStats, layers: list[int]) -> None:
-        """rel の強さを使う層で、残差の大きさが少数の次元に偏っていれば(偏りの量 ≥ SPREAD_WARN)知らせる(v0.8.6)。"""
+        """rel の強さを使う層で、残差の大きさが少数の次元に偏っていれば(偏りの量 ≥ SPREAD_WARN)知らせる(v0.9.0)。"""
         from .stats import SPREAD_WARN
         hit = [(L, x) for L in layers if (x := resid.spread(L)) is not None and x >= SPREAD_WARN]
         if hit:
@@ -478,7 +521,7 @@ class Session:
                             "約 1.3 倍)。弱めの強さ(例 0.1〜0.2)から試してください")
 
     def dose_spread(self) -> dict | None:
-        """残差の大きさの偏り(info・画面用)。統計が無ければ None、v0.8.6 より前の統計なら {"old": True}。"""
+        """残差の大きさの偏り(info・画面用)。統計が無ければ None、v0.9.0 より前の統計なら {"old": True}。"""
         rs = self.resid_stats()
         if rs is None:
             return None
@@ -599,7 +642,8 @@ class Session:
                                lora_when=lora_when, first_token=first_token)
         return {"messages": msgs, "recipe": recipe.to_dict(), "units": details, "layer_norms": self._norms(vecs),
                 "when": when or recipe.when, "sampling": None if sampling is None else sampling.to_dict(),
-                "baseline": base, "steered": st, "differs": None if base is None else base["token_ids"] != st["token_ids"]}
+                "baseline": base, "steered": st, "differs": None if base is None else base["token_ids"] != st["token_ids"],
+                **({"proj_correction": self.proj_correction_label(recipe)} if recipe.proj_units or recipe.ablate else {})}
 
     # --- export / import ------------------------------------------------------------------------
 
@@ -628,8 +672,14 @@ class Session:
                 export_gain_lora(self.weights, gr, tmp)
                 tmp.replace(path)
             out.append((str(path), 1.0))
+        note = self.proj_record_note(recipe)                    # 記録の無い古いレシピを補正つきで当てる知らせ(使うたびに)
+        if note:
+            self._warn_once(note)
+            fc = self.proj_forecast_text(recipe, old=True)       # 補正なし・補正つきの効きの見込み(くわしく)
+            if fc:
+                self._warn_once(fc)
         if recipe.ablate is not None and recipe.ablate.scale != 0:
-            out.append((str(self.ablation_lora(recipe.ablate)), float(recipe.ablate.scale)))
+            out.append((str(self.ablation_lora(recipe.ablate, correction=self.proj_correction_for(recipe))), float(recipe.ablate.scale)))
         if recipe.proj_units and any(u.k for u in recipe.proj_units):     # CHANGE-06: ヘッドの方向成分の射影
             out.append((str(self.proj_lora(recipe)), 1.0))
         if recipe.keyed_units and any(u.k for u in recipe.keyed_units):   # CHANGE-07: 鍵つきの書き込み
@@ -701,19 +751,73 @@ class Session:
     def proj_lora(self, recipe: Recipe) -> Path:
         """レシピの proj のユニット → LoRA(<root>/heads/<model_id>/proj-<鍵>.lora.gguf に作って使い回す)。鍵は
         ヘッド・s・方向の中身(作り直したら LoRA も作り直す)・direction_layer で決まる。"""
-        from .headproj import ProjBuilder, export_proj_lora, postnorm_mixer_warning, proj_cache_key, proj_heads
+        from .headproj import ProjBuilder, export_proj_lora, proj_cache_key, proj_heads
         heads = [p for p in proj_heads(recipe) if p.s]
-        pw = postnorm_mixer_warning(self.weights, heads)            # 出力のあとに正規化がある層(B の補正が入るまで式どおりでない)
-        if pw:
-            self._warn_once(pw)
-        b = ProjBuilder(self.weights, self.direction_set, direction_layer=recipe.direction_layer)
+        corr = self.proj_correction_for(recipe)
+        for msg in self.proj_notes(heads, corr, recipe.direction_layer):   # 補正の有無ごとの知らせ(使うたびに)
+            self._warn_once(msg)
+        if corr and any(abs(p.s) > 2 for p in heads):           # 大きな s: 頭打ちの見込み(正規化のある層だけ、短い文 1 つで)
+            fc = self.proj_forecast_text(recipe, old=False)
+            if fc:
+                self._warn_once(fc)
+        b = ProjBuilder(self.weights, self.direction_set, direction_layer=recipe.direction_layer, correction=corr)
         path = self._pv_path(self.store.heads_dir(self.meta.model_id) / f"proj-{proj_cache_key(heads, b)}.lora.gguf")
         if not path.exists():
             tmp = path.with_suffix(".part")
             export_proj_lora(self.weights, recipe.like([u for u in recipe.proj_units if u.k]), tmp, self.direction_set,
-                             warn=self.warn)
+                             warn=self.warn, correction=corr)
             tmp.replace(path)
         return path
+
+    def proj_forecast(self, recipe: Recipe, scales=(1.0,)) -> list[dict]:
+        """postnorm.projection_forecast(レシピと倍率ごとに覚えておく)。正規化の無いモデル・射影の無いレシピは空。"""
+        from .postnorm import projection_forecast, writer_layers
+        if not recipe.proj_units or not writer_layers(self.weights):
+            return []
+        key = (json.dumps(recipe.to_dict(), sort_keys=True, default=str), tuple(float(x) for x in scales))
+        cache = self.__dict__.setdefault("_proj_forecast", {})
+        if key not in cache:
+            try:
+                cache[key] = projection_forecast(self, recipe, scales)
+            except GneError as ex:                            # 見込みが計算できなくても、当てること自体は止めない
+                self._warn_once(f"射影の効きの見込みを計算できませんでした({ex.message})")
+                cache[key] = []
+        return cache[key]
+
+    def proj_forecast_text(self, recipe: Recipe, *, old: bool) -> str | None:
+        from .postnorm import forecast_text
+        return forecast_text(self.proj_forecast(recipe), old)
+
+    def proj_notes(self, heads, correction: bool, direction_layer: str = "own") -> list[str]:
+        """射影のユニットが出力のあとに正規化がある層に当たるときの知らせ。補正つき: γ と r̂ がほぼ直交する層の副作用の警告と、
+        強さが比例しないこと。補正なし: 成分が残ること(v0.8.x と同じ計算、A の知らせ)。"""
+        from .headproj import head_direction, postnorm_mixer_warning
+        from .postnorm import side_warning, writer_side
+        w = self.weights
+        pn = [p for p in heads if p.s and (w.arch.layers[p.layer].post_norm_mixer if writer_side(p.kind) == "mixer"
+                                            else w.arch.layers[p.layer].post_norm_ffn) not in ("", "?")]
+        if not pn:
+            return []
+        if not correction:
+            msg = postnorm_mixer_warning(w, [p for p in heads if writer_side(p.kind) == "mixer"])
+            return [msg] if msg else []
+        out = []
+        items = []
+        for p in pn:
+            try:
+                r, _ = head_direction(self.direction_set(p.direction), p.layer, direction_layer)
+            except GneError:
+                continue
+            items.append((p.layer, writer_side(p.kind), r))
+        sw = side_warning(w, items)
+        if sw:
+            out.append(sw)
+        Ls = sorted({p.layer for p in pn})
+        if any(abs(p.s) not in (1.0, 2.0) for p in pn):
+            out.append(f"層 {', '.join(map(str, Ls[:8]))}{' …' if len(Ls) > 8 else ''} の射影は、出力のあとの正規化を補正して当てます。"
+                       "強さ s=1 でその部品の分を取り除き、s=2 でちょうど反対にしますが、ほかの s では効きが s に比例せず、大きな s では"
+                       "頭打ちになります(gne headproj check で s ごとの予測と実測を確かめられます)")
+        return out
 
     def keyed_lora(self, recipe: Recipe) -> tuple[Path, float]:
         """レシピの keyed のユニット → 実行時の LoRA(<root>/keys/<model_id>/lora/keyed-<鍵>.lora.gguf に作って使い回す)と
@@ -722,7 +826,7 @@ class Session:
         決まる(鍵や方向を作り直したら別のパス。Engine は同じパスの LoRA を 1 回しか読まないため、レビュー P15)。
         .part に書いてから置き換える。"""
         from .keyed import export_keyed_lora, keyed_cache_key, keyed_lora_path, keyed_plan
-        kr = recipe.like([u for u in recipe.keyed_units if u.k])
+        kr = self._keyed_corr(recipe.like([u for u in recipe.keyed_units if u.k]))
         if not kr.units:
             raise GneError("BAD_RECIPE", "keyed のユニットがありません(α が 0 でないもの。例 --unit 19:ffn:keyed:a1@NAME#KEY)")
         rows = keyed_plan(self.weights, kr, self._key_of, self.direction_set, direction_layer=kr.direction_layer,
@@ -823,16 +927,25 @@ class Session:
             return q
         raise GneError("FILE_NOT_FOUND", f"対照集合 {name} がありません(configs/contrast/ の名前かパス)")
 
-    def ablation_lora(self, spec) -> Path:
-        """AblateSpec → 倍率 1 の消去 LoRA(<root>/ablate/<model_id>/ に作って使い回す)。"""
-        from .ablate import export_ablation_lora, layer_list, vector_key
+    def ablation_lora(self, spec, *, correction: bool = True) -> Path:
+        """AblateSpec → 倍率 1 の消去 LoRA(<root>/ablate/<model_id>/ に作って使い回す)。correction: 出力のあとに正規化がある
+        層の書き込みから normalize(γ⊙r̂) を引くか(v0.9.0)。正規化のあるモデルで補正したものは名前に -pn を付ける(補正なしは
+        v0.8.x までと同じ名前・同じ中身)。"""
+        from .ablate import ablation_side_warning, export_ablation_lora, layer_list, vector_key
+        from .postnorm import writer_layers
         r, meta = self.ablation_vector(spec.direction, from_layer=spec.from_layer)
         Ls = layer_list(spec.layers)
         tag = "" if Ls is None else "-L" + hashlib.sha256(json.dumps(Ls).encode()).hexdigest()[:8]
+        if correction and writer_layers(self.weights):
+            tag += "-pn"
+            from .ablate import _select_layers, unit
+            sw = ablation_side_warning(self.weights, _select_layers(self.weights, Ls), {L: unit(r) for L in range(self.meta.n_layer)}, True)
+            if sw:
+                self._warn_once(sw)
         path = self._pv_path(self.store.ablate_dir(self.meta.model_id) / f"{spec.direction}-{vector_key(r)}{tag}.lora.gguf")
         if not path.exists():
             tmp = path.with_suffix(".part")
-            export_ablation_lora(self.weights, r, tmp, layers=Ls, meta=meta)
+            export_ablation_lora(self.weights, r, tmp, layers=Ls, meta=meta, correction=correction)
             tmp.replace(path)
         return path
 
@@ -894,9 +1007,9 @@ class Session:
         if recipe.proj_units:                            # CHANGE-06: ヘッドの方向成分の射影も同じ LoRA / 焼き込みに入れる
             from .headproj import ProjBuilder, layer_summary, proj_heads, proj_meta
             heads = proj_heads(recipe)
-            b = ProjBuilder(W, self.direction_set, direction_layer=recipe.direction_layer)
+            b = ProjBuilder(W, self.direction_set, direction_layer=recipe.direction_layer, correction=self.proj_correction_for(recipe))
             ptens = b.tensors(heads, self.warn)
-            extra_meta = proj_meta(heads, b)
+            extra_meta = {**proj_meta(heads, b), "proj_correction": self.proj_correction_label(recipe)}
             summary = layer_summary(W, heads, ptens)
             if bake and requant == "patch":
                 raise GneError("UNSUPPORTED_QUANT", "方向成分の射影はスケールパッチでは書けません(列方向で、単純な倍率ではない)",
@@ -996,14 +1109,15 @@ class Session:
             rep["query_loras"] = q
             if rep["path"] is None:
                 rep["path"], rep["bytes"] = q[0], Path(q[0]).stat().st_size
-        return {"kind": "bake" if bake else "lora", "recipe": recipe.to_dict(), **rep}
+        return {"kind": "bake" if bake else "lora", "recipe": recipe.to_dict(), **rep,
+                **({"proj_correction": self.proj_correction_label(recipe)} if recipe.proj_units else {})}
 
     def _keyed_bundle(self, recipe: Recipe, W=None) -> dict:
         """書き出し用の keyed の LoRA(α そのまま、倍率 1)と記録。W(焼き込む先)は構造が同じことだけ確かめる
         (ΔW = α d κᵀ は W に依らないので、行列はこのモデルで作る)。"""
         from .keyed import keyed_bundle
-        kb = keyed_bundle(self.weights, recipe, self._key_of, self.direction_set, direction_layer=recipe.direction_layer,
-                          warn=self._warn_once)
+        kb = keyed_bundle(self.weights, self._keyed_corr(recipe), self._key_of, self.direction_set,
+                          direction_layer=recipe.direction_layer, warn=self._warn_once)
         if W is not None and W is not self.weights:
             miss = [n for n in kb["tensors"] if not W.has_tensor(n)]
             if miss:
@@ -1577,7 +1691,8 @@ class Session:
     def recipe_save(self, name: str, units: list[str] | Recipe, *, dose_unit: str = "rel",
                     ablate: str | dict | None = None, when: str | None = None, sampling: dict | None = None,
                     default_direction: str | None = None, direction_layer: str | None = None,
-                    default_key: str | None = None, loop_edits: str | None = None) -> dict:
+                    default_key: str | None = None, loop_edits: str | None = None,
+                    proj_correction: str | None = None) -> dict:
         """sampling はこのレシピを試すときのサンプリング(seed は持たない)。default_direction・direction_layer・default_key は
         @方向・#鍵を省いた proj・keyed のユニットの既定(CHANGE-06・07)。"""
         from .steer import sampling_values
@@ -1585,17 +1700,27 @@ class Session:
             raise GneError("BAD_ARGS", f"レシピ名 {name!r} は英数字・_・-・. だけにしてください")
         r = units if isinstance(units, Recipe) else self.recipe(units=list(units), dose_unit=dose_unit, name=name,
                                                                ablate=ablate, when=when, default_direction=default_direction,
-                                                               direction_layer=direction_layer, default_key=default_key)
+                                                               direction_layer=direction_layer, default_key=default_key,
+                                                               proj_correction=proj_correction)
         if sampling:
             r.sampling = sampling_values(sampling, seed=False)
         if loop_edits is not None:                 # 同じ層を 2 回実行するモデルの当て方(shared / per_visit)
             if loop_edits not in ("shared", "per_visit"):
                 raise GneError("BAD_ARGS", f"loop_edits は shared か per_visit です({loop_edits!r})")
             r.loop_edits = loop_edits
+        note = None
+        if proj_correction in ("postnorm", "none"):          # v0.9.0: 画面の「射影の補正」
+            r.proj_correction = proj_correction
+        if r.proj_correction is None:                        # 記録の無い古いレシピ: いま当てている方(補正つき)で記録する
+            was = self.proj_record_note(r)
+            r.proj_correction = self.proj_correction_label(None)
+            if was:
+                note = ("記録の無い古いレシピを、いま当てている「補正つき」(proj_correction: postnorm)として保存しました。前の版とは"
+                        "効き方が違います。前と同じ効き方で残すには、「射影の補正」を「補正なし」にしてから保存し直してください")
         r.name = name
         path = self.store.recipes_dir() / f"{name}.yaml"
         r.save(path)
-        return {"name": name, "path": str(path), "recipe": r.to_dict()}
+        return {"name": name, "path": str(path), "recipe": r.to_dict(), **({"note": note} if note else {})}
 
     def recipe_path(self, name_or_path: str | Path) -> Path:
         p = Path(name_or_path)
@@ -1734,25 +1859,26 @@ class Session:
     def ablate(self, direction: str, out: str | Path, *, from_layer: int | None = None, per_layer: bool = False,
                layers: list[int] | None = None, scale: float = 1.0, embed: bool = True, bake: bool = False,
                requant: str = "q8_0", via_f16: bool = False, imatrix: str | None = None,
-               llama_quantize: str | None = None, verify: bool = False) -> dict:
+               llama_quantize: str | None = None, verify: bool = False, correction: bool | None = None) -> dict:
         """方向の射影消去を LoRA アダプタ GGUF(既定)か、重みを書き換えた GGUF(bake)に書き出す(§6.17)。
         verify なら、LoRA は V13(r 成分が残る分だけか)、bake は V13 と V14(LoRA と greedy が一致するか)を書き出したファイルで見る。"""
         from .ablate import bake_ablation_gguf, bake_via_f16, export_ablation_lora
         if not 0 < scale <= 1.5:
             raise GneError("BAD_ARGS", "--scale は 0 より大きく 1.5 以下にしてください(1 で完全に消す)")
         r, meta = self.ablation_vector(direction, from_layer=from_layer, per_layer=per_layer)
+        corr = self.proj_correction if correction is None else bool(correction)
         t0 = time.perf_counter()
         if not bake:
             rep = export_ablation_lora(self.weights, r, out, layers=layers, scale=scale, embed=embed, meta=meta,
-                                       progress=self.progress)
+                                       progress=self.progress, correction=corr)
             kind = "lora"
         elif via_f16:
             rep = bake_via_f16(self.weights, r, out, layers=layers, scale=scale, embed=embed, meta=meta,
-                               llama_quantize=llama_quantize, imatrix=imatrix, progress=self.progress)
+                               llama_quantize=llama_quantize, imatrix=imatrix, progress=self.progress, correction=corr)
             kind = "bake"
         else:
             rep = bake_ablation_gguf(self.weights, r, out, layers=layers, scale=scale, embed=embed, requant=requant,
-                                     meta=meta, progress=self.progress)
+                                     meta=meta, progress=self.progress, correction=corr)
             kind = "bake"
         for w_ in rep.get("warnings", []):
             self.warn(w_)
@@ -1771,7 +1897,7 @@ class Session:
         ids = v.prompt_ids[0]
         layers = rep.get("layers")
         full = layers == sorted(residual_writers(self.weights))
-        er = self.weights.embed_rows(ids)[1:].astype(np.float64) @ ru
+        er = v.embed_component(ids, ru)                  # 埋め込みを拡大する arch(Gemma 系)は捕捉した inp_scaled から
         if kind == "lora":
             res = v._resid_all(self.engine, ids, [(out, 1.0)])
             expect = 0.0 if rep.get("embed") else er
@@ -1781,7 +1907,8 @@ class Session:
                 res = v._resid_all(e2, ids)
                 lp = out.with_name(out.name + ".v14.lora.gguf")
                 export_ablation_lora(self.weights, r, lp, layers=layers, scale=rep["scale"],
-                                     embed=rep["embed"] and embed_in_lora(self.weights))
+                                     embed=rep["embed"] and embed_in_lora(self.weights),
+                                     correction=rep.get("proj_correction", "postnorm") != "none")
                 seqs = v.prompt_ids[:2]
 
                 def run(engine, lora=None):
@@ -1872,6 +1999,14 @@ class Session:
             name += "@" + re.sub(r"[^\w.\-]+", "_", d["when"])
         path = self.store.eval_dir(self.meta.model_id) / f"{name}.json"
         d = {"name": name, "path": str(path), "created": time.strftime("%Y-%m-%dT%H:%M:%S"), **d}
+        fc = self.proj_forecast(recipe, scales=[x for x in doses if x])   # v0.9.0: 正規化のある層の射影の、倍率ごとの効きの見込み
+        if fc:
+            d["proj_forecast"] = fc
+        d["proj_correction"] = self.proj_correction_label(recipe)
+        old = self.proj_record_note(recipe)                           # 記録の無い古いレシピ・頭打ちの知らせを結果の notes にも残す(画面の評価に出る)
+        extra_notes = [x for x in (old, self.proj_forecast_text(recipe, old=bool(old))) if x]
+        if extra_notes:
+            d["notes"] = [*(d.get("notes") or []), *extra_notes]
         path.write_text(json.dumps(d, ensure_ascii=False, indent=1))
         return d
 
@@ -2748,8 +2883,16 @@ class Session:
             unsure |= set(b_)
         if not sure and not unsure:
             return
-        out["postnorm"] = {"layers": sorted(sure), "unsure_layers": sorted(unsure), "note": POSTNORM_MIXER_NOTE}
-        self._warn_once(f"組のヘッド・層全体(attn)の射影のうち、層 {', '.join(map(str, sorted(sure | unsure)[:8]))} は{POSTNORM_MIXER_NOTE}")
+        if self.proj_correction:                     # v0.9.0: 補正つき(既定)
+            from .postnorm import SIDE_RATIO_WARN
+            note = ("注意(混ぜる層)の出力のあとに正規化があるので、射影は正規化を補正して当てます(書き込みから normalize(γ⊙r̂) を引く。"
+                    "s=1 でその部品の分をちょうど取り除き、ほかの s では比例せず、大きな s では頭打ち)。この構造のモデルでは、取り除くときに"
+                    f"残差が r̂ 以外の向きへも動きやすい(中央値で r̂ に沿った変化の 1 倍前後、{SIDE_RATIO_WARN:g} 倍を超える層は警告)")
+            out["postnorm"] = {"layers": sorted(sure), "unsure_layers": sorted(unsure), "note": note, "proj_correction": "postnorm"}
+        else:
+            out["postnorm"] = {"layers": sorted(sure), "unsure_layers": sorted(unsure), "note": POSTNORM_MIXER_NOTE,
+                               "proj_correction": "none"}
+        self._warn_once(f"組のヘッド・層全体(attn)の射影のうち、層 {', '.join(map(str, sorted(sure | unsure)[:8]))} は{out['postnorm']['note']}")
 
     def reply_check(self, cs, val, recipe: str | Path | Recipe | None, *, n: int = 16, max_tokens: int = 512,
                     prompts: dict | None = None) -> dict:
@@ -3115,7 +3258,8 @@ class Session:
         comb_rows = []
         for key, n_new, r in rows_new:
             new_units = explicit(Recipe.load(r["recipe"]))
-            cr = prior_r.like(prior_units + new_units, name=f"{out_name}-{'s1' if n_new is None else f'n{n_new}'}-combined")
+            cr = prior_r.like(prior_units + new_units, name=f"{out_name}-{'s1' if n_new is None else f'n{n_new}'}-combined",
+                              proj_correction=self.proj_correction_label(prior_r))     # 合わせたレシピは当てた方を記録する
             cpath = hd / f"{out_name}.combined-{'s1' if n_new is None else f'n{n_new}'}.yaml"
             cr.save(cpath)
             a2, b2 = measure(cr)
@@ -3633,11 +3777,13 @@ round_01.scores.txt に「番号 P C」を 1 行ずつ書く(例: 17 3 4)。全�
         name は LoRA の名前の欄(general.name。省くと「<元のモデルの名前> gain <レシピの名前>」、strip_meta では "adapter")。"""
         recipe = self._as_recipe(recipe)
         self._no_nw(recipe, bake=bake)                   # nw は焼き込めない(LoRA には入る)
-        if recipe.proj_units:                            # 出力のあとに正規化がある層のヘッド・attn の射影(式どおりでない)
-            from .headproj import postnorm_mixer_warning, proj_heads
-            pw = postnorm_mixer_warning(self.weights, proj_heads(recipe))
-            if pw:
-                self._warn_once(pw)
+        if recipe.proj_units:                            # 出力のあとに正規化がある層の射影: 補正の有無ごとの知らせ(v0.9.0)
+            from .headproj import proj_heads
+            for msg in self.proj_notes(proj_heads(recipe), self.proj_correction_for(recipe), recipe.direction_layer):
+                self._warn_once(msg)
+        note = self.proj_record_note(recipe)
+        if note:
+            self._warn_once(note)
         if name is not None and bake:
             raise GneError("BAD_ARGS", "名前の欄の指定(name)は LoRA の書き出しだけです(焼き込みは元のモデルのメタデータをそのまま写す)")
         if not recipe.proj_units and not recipe.gain_units and not recipe.keyed_units and not recipe.nw_units:
@@ -3656,8 +3802,9 @@ round_01.scores.txt に「番号 P C」を 1 行ずつ書く(例: 17 3 4)。全�
             rq = requant
             kb = self._keyed_bundle(recipe) if recipe.keyed_units else None
             d = bake_proj_split(self.weights, recipe, out, self.direction_set, requant=rq, warn=self.warn,
-                                extra=kb["tensors"] if kb else None, extra_meta={"keyed": kb["meta"]} if kb else None)
-            d.update(kind="bake", requant=rq, recipe=recipe.to_dict())
+                                extra=kb["tensors"] if kb else None, extra_meta={"keyed": kb["meta"]} if kb else None,
+                                correction=self.proj_correction_for(recipe))
+            d.update(kind="bake", requant=rq, recipe=recipe.to_dict(), proj_correction=self.proj_correction_label(recipe))
             if kb is not None:
                 d.update(keyed_layers=kb["layers"], keyed_rank=kb["rank"])
                 self._warn_requant(d)
@@ -4035,7 +4182,7 @@ def _merge_logit(old, new):
 
 def writes_block_reason(weights, arch: str) -> str | None:
     """このモデルで書き込みの量での順位づけ(rank writes)を実行しない理由(「…ので」の前に置く文)。実行できれば None。
-    残差が複数本の流れ(hyper-connections)と、注意の出力のあとに正規化がある層(v0.8.6、補正した点数が入るまで)。
+    残差が複数本の流れ(hyper-connections)と、注意の出力のあとに正規化がある層(v0.9.0、補正した点数が入るまで)。
     UI の CHiPS の欄(app.js の writesBlocked)も同じ条件。"""
     hc = int(weights.field(f"{arch}.hyper_connection.count", 0) or 0)
     if hc:

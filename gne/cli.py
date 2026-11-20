@@ -56,20 +56,24 @@ class Common:
     verbose: bool = False
     json: bool = False
     mmproj: Optional[Path] = None
+    no_proj_correction: bool = False      # v0.9.0: 出力のあとに正規化がある層の射影・ablate を補正しない(v0.8.x と同じ計算)
 
     def merged(self, over: dict) -> Common:
-        kw = {k: v for k, v in over.items() if v is not None and k not in ("verbose", "json")}
+        kw = {k: v for k, v in over.items() if v is not None and k not in ("verbose", "json", "no_proj_correction")}
         return replace(self, **kw, verbose=self.verbose or bool(over.get("verbose")),
-                       json=self.json or bool(over.get("json")))
+                       json=self.json or bool(over.get("json")),
+                       no_proj_correction=self.no_proj_correction or bool(over.get("no_proj_correction")))
 
     def session(self, model: Optional[Path] = None):
         from .api import Session
         path = model or self.model
         if path is None:
             raise GneError("BAD_ARGS", "GGUF を指定してください", "--model か環境変数 GNE_MODEL")
-        return Session(path, root=self.root, n_gpu_layers=self.n_gpu_layers, n_ctx=self.n_ctx,
-                       n_seq_max=self.n_seq_max, seed=self.seed, verbose=self.verbose, progress=self.progress,
-                       mmproj=self.mmproj)
+        s = Session(path, root=self.root, n_gpu_layers=self.n_gpu_layers, n_ctx=self.n_ctx,
+                    n_seq_max=self.n_seq_max, seed=self.seed, verbose=self.verbose, progress=self.progress,
+                    mmproj=self.mmproj)
+        s.proj_correction = not self.no_proj_correction
+        return s
 
     def progress(self, done: int, total: int, stage: str) -> None:
         now = time.monotonic()
@@ -121,6 +125,10 @@ def _common_params() -> list[inspect.Parameter]:
                           default=typer.Option(False, "--verbose", "-v", help="llama.cpp のログを出す")),
         inspect.Parameter("json", K, annotation=bool,
                           default=typer.Option(False, "--json", help="stdout に JSON だけを出す")),
+        inspect.Parameter("no_proj_correction", K, annotation=bool,
+                          default=typer.Option(False, "--no-proj-correction",
+                                               help="出力のあとに正規化があるモデルで、射影(proj)と ablate を補正しない"
+                                                    "(v0.8.x と同じ計算。記録の無い古いレシピを前と同じ効き方で当てるとき)")),
     ]
 
 
@@ -231,8 +239,10 @@ def main(ctx: typer.Context,
          verbose: bool = typer.Option(False, "--verbose", "-v", help="llama.cpp のログを出す"),
          json_: bool = typer.Option(False, "--json", help="stdout に JSON だけを出す"),
          mmproj: Optional[Path] = typer.Option(None, "--mmproj", envvar="GNE_MMPROJ",
-                                               help="音声の入力に使う mmproj(既定はモデルと同じフォルダの mmproj*.gguf)")):
-    ctx.obj = Common(model, root, n_gpu_layers, n_ctx, n_seq_max, seed, verbose, json_, mmproj)
+                                               help="音声の入力に使う mmproj(既定はモデルと同じフォルダの mmproj*.gguf)"),
+         no_proj_correction: bool = typer.Option(False, "--no-proj-correction",
+                                                 help="出力のあとに正規化があるモデルで、射影(proj)と ablate を補正しない(v0.8.x と同じ計算)")):
+    ctx.obj = Common(model, root, n_gpu_layers, n_ctx, n_seq_max, seed, verbose, json_, mmproj, no_proj_correction)
 
 
 # --- 表示の補助 ------------------------------------------------------------------------------------------
@@ -353,7 +363,7 @@ def info(c: Common, holder: dict,
                      + ("、gne bench の実測から" if sp["source"] == "bench" else "、既定の係数から")))
     ds = (d.get("stats") or {}).get("dose_spread")
     if ds:
-        rows.append(("残差の偏り", "統計が v0.8.6 より前のものなので入っていません(gne stats resid で作り直すと出ます)" if ds.get("old")
+        rows.append(("残差の偏り", "統計が v0.9.0 より前のものなので入っていません(gne stats resid で作り直すと出ます)" if ds.get("old")
                      else f"rel の強さ 1 = 大きい {ds['top']} 成分を除いた大きさの約 {ds['median']:.1f} 倍(層 3 以降の中央値。最大 "
                           f"{ds['max']:.1f} 倍、層 {ds['max_layer']})"))
     text = _table(rows)
@@ -2358,6 +2368,11 @@ def direction_key_verify(c: Common, holder: dict,
                         if "other_max" in r else "") + f"  {'○' if r['ok'] else '×'}")
     if d.get("note"):
         lines.append(f"注: {d['note']}")
+    if d.get("compared") == "after_norm":
+        lines.append("出力のあとに正規化がある層なので、残差に足された値(" + d["out_name"] + ")の差を、正規化を通した予測と比べました"
+                     "(合格は相対誤差 < 5%)。一次の見込みとの差: "
+                     + "、".join(f"α {r['alpha']:+g} {_f(r.get('first_order_rel_err_median'), '.2f')}" for r in d["rows"]))
+        return d, "\n".join(lines + [f"V30 {'合格' if d['v30'] else '不合格'}(正規化の後)"]), 0 if d["v30"] else 1
     lines.append(f"V30 {'合格' if d['v30'] else '不合格'}(相対誤差 < 3%"
                  + ("、書き込みたくない側への漏れ < 0.1" if d["judged_leak"] else "、書き込みたくない側への漏れは判定なし")
                  + ("、ほかの専門家の枠の差 < 1e-3、選ばれ方の変化 0" if kind == "expert" else "") + ")")
@@ -2862,6 +2877,9 @@ def recipe_scale(recipe: Path = typer.Argument(..., exists=True, help="倍率を
     except GneError as e:
         raise typer.BadParameter(e.message, param_hint="--out") from e
     print(f"{out}({len(sr.units)} ユニット、倍率 ×{tag} を掛け込んだ)" + ("。負の倍率なので、各ユニットの向きは元と反対" if scale < 0 else ""))
+    if r.proj_correction is None and (r.proj_units or r.ablate):                    # v0.9.0: 記録の無い古いレシピ
+        print("元のレシピには射影の補正の記録が無いので、補正つき(proj_correction: postnorm)として書きました。出力のあとに正規化がある"
+              "モデルでは前の版と効き方が違います。前と同じ効き方にするには、書き出したレシピの proj_correction を none にしてください")
 
 
 @gne_command(headproj_app, "ablate", "headproj export")
@@ -2883,7 +2901,7 @@ def headproj_ablate(c: Common, holder: dict,
     if not units:
         raise GneError("BAD_ARGS", "指定した層にヘッドがありません")
     rec = Recipe(units, s.meta.model_id, name=f"{direction}-heads-ablate", default_direction=direction,
-                 direction_layer="own" if per_layer else "base")
+                 direction_layer="own" if per_layer else "base", proj_correction=s.proj_correction_label(None))
     out = out or s.store.export_dir() / (f"{direction}-heads-ablate.gguf" if bake else f"{direction}-heads-ablate.lora.gguf")
     d = s.headproj_export(rec, out, bake=bake, requant="keep" if bake else "q8_0")
     lines = [f"{d['path']}({d['bytes'] / 1e6:.2f} MB、{'焼き込み' if bake else 'LoRA'}、{len(units)} ヘッド・{len({u.layer for u in units})} 層、"
@@ -2982,6 +3000,8 @@ def headproj_check(c: Common, holder: dict, layer: int = typer.Option(..., "--la
     sl = [float(x) for x in ss.split(",")]
     if whole is not None:
         d = s.check_whole_proj(layer, whole.lower(), direction, ss=sl)
+        if d.get("compared") == "after_norm":
+            return d, _postnorm_check_text(d, f"L{layer} {d['kind']}", direction), 0 if d["ok"] else 1
         lines = [f"L{layer} {d['kind']}({d['out_tensor']}、方向 {direction} の L{d['direction_from']}、書き込みと方向の |cos| の中央値 "
                  f"{_f(d['dir_cos'], '.3f')})"]
         for r in d["rows"]:
@@ -2991,11 +3011,15 @@ def headproj_check(c: Common, holder: dict, layer: int = typer.Option(..., "--la
         return d, "\n".join(lines), 0 if d["ok"] else 1
     if neuron is not None:
         d = s.check_neuron_proj(layer, neuron, direction, ss=sl)
+        if d.get("compared") == "after_norm":
+            return d, _postnorm_check_text(d, f"L{layer} N{neuron}", direction), 0 if d["ok"] else 1
         who = f"L{layer} N{neuron}"
         lines = [f"{who}({d['out_tensor']}、活性 {d['act_tensor']}、方向 {direction} の L{d['direction_from']}、"
                  f"書く向きと方向の |cos| {_f(d['dir_cos_neuron'], '.3f')}、活性のある位置 {d['n_active']}/{d['n_tokens']})"]
     else:
         d = s.check_head_proj(layer, head, direction, ss=sl)
+        if d.get("compared") == "after_norm":
+            return d, _postnorm_check_text(d, f"L{layer} H{head}", direction), 0 if d["ok"] else 1
         lines = [f"L{layer} H{head}({d['out_tensor']}、方向 {direction} の L{d['direction_from']}、ヘッドの書き込みと方向の |cos| の中央値 "
                  f"{_f(d['dir_cos_head'], '.3f')})"]
     for r in d["rows"]:
@@ -3004,6 +3028,19 @@ def headproj_check(c: Common, holder: dict, layer: int = typer.Option(..., "--la
     lines.append(f"  対比 gain ×{d['gain']['k']:g}: 直交成分の変化 {_f(d['gain']['orth_change_rel_median'], '.3f')}")
     lines.append(f"V24 {'合格' if d['v24'] else '不合格'}・V25 {'合格' if d['v25'] else '不合格'}")
     return d, "\n".join(lines), 0 if d["ok"] else 1
+
+
+def _postnorm_check_text(d: dict, who: str, direction: str) -> str:
+    """出力のあとに正規化がある層の射影の検算(補正つき、v0.9.0)の表示。"""
+    lines = [f"{who}(出力のあとに正規化がある層。残差に足された値 {d['added_tensor']} で比べる、方向 {direction} の L{d['direction_from']}、"
+             f"補正した向きと r̂ の cos {d['cos_r_v']:.3f}、ほかの向きへの動きの予測 {_f(d['side_ratio_pred'], '.2f')} 倍)"]
+    for r in d["rows"]:
+        lines.append(f"  s {r['s']:g}: r̂ の成分の変化の相対誤差(予測との)中央値 {_f(r['comp_change_rel_err_median'], '.2e')}、"
+                     f"成分 {r['comp_after_over_before_median']:+.3f} 倍(予測 {r['comp_after_over_before_pred']:+.3f})、"
+                     f"比例のときに比べた効き {r['vs_proportional_median']:.2f}、ほかの向きへの動き {_f(r['side_change_median'], '.2f')} 倍"
+                     f"  {'○' if r['ok'] else '×'}")
+    lines.append(f"検算(正規化の後) {'合格' if d['ok'] else '不合格'}")
+    return "\n".join(lines)
 
 
 @gne_command(heads_app, "pipeline", "heads pipeline")

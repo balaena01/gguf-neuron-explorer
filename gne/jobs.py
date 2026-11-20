@@ -119,7 +119,7 @@ def _sweep_rank(s, layer: int, **p) -> dict:
 
 def _eval(s, recipe: str | None = None, units: list[str] | None = None, dose_unit: str | None = None,
           compare_methods: bool = False, match_effect: float | None = None, score_layer: int | None = None,
-          alloc: str | None = None, n_heads: list[int] | None = None, **p) -> dict:
+          alloc: str | None = None, n_heads: list[int] | None = None, proj_correction: str | None = None, **p) -> dict:
     """eval(§6.14)。recipe は保存したレシピの名前、units は単発指定(どちらか)。compare_methods は方式の比較(CHANGE-06 F.3)、
     alloc は heads allocate の組のヘッド数ごとの評価(F.4、recipe も units も要らない)。ほかの引数は Session.eval と同じ
     (keyed のレシピの keyed_contrast・keyed_metrics・keyed_examples・keyed_match・keyed_pseudo・keyed_subset も、CHANGE-07 E)。"""
@@ -128,7 +128,8 @@ def _eval(s, recipe: str | None = None, units: list[str] | None = None, dose_uni
                                   random_controls=int(p.get("random_controls") or 0))
     if bool(recipe) == bool(units):
         raise GneError("BAD_ARGS", "recipe(名前)か units のどちらかを渡してください")
-    r = s.recipe(path=s.recipe_path(recipe)) if recipe else s.recipe(units=list(units), dose_unit=dose_unit)
+    r = s.recipe(path=s.recipe_path(recipe), proj_correction=proj_correction) if recipe else \
+        s.recipe(units=list(units), dose_unit=dose_unit, proj_correction=proj_correction)     # v0.9.0: 画面の「射影の補正」
     if compare_methods:
         return s.eval_compare_methods(r, match_effect=match_effect, score_layer=score_layer, suite=p.get("suite"),
                                       when=p.get("when"))
@@ -139,7 +140,7 @@ def _eval(s, recipe: str | None = None, units: list[str] | None = None, dose_uni
 def _headproj_export(s, recipe: str | None = None, out: str | None = None, *, units: list[str] | None = None,
                      name: str | None = None, direction_layer: str | None = None, file_stem: str | None = None,
                      overwrite: bool = True, key: str | None = None, direction: str | None = None,
-                     adapter_name: str | None = None, **p) -> dict:
+                     adapter_name: str | None = None, proj_correction: str | None = None, **p) -> dict:
     """ヘッドの proj・鍵つきの書き込み(keyed、CHANGE-07)と gain(LoRA に入るユニット)を LoRA アダプタか焼き込み GGUF に
     書き出す。recipe(保存したレシピの名前かパス)か units(UI のレシピのユニットの書き方)。key・direction は #KEY・@NAME を
     省いたユニットの鍵と方向。out を省くと Session.default_export_path(<root>/export/<名前>.lora.gguf、焼き込みは
@@ -152,9 +153,10 @@ def _headproj_export(s, recipe: str | None = None, out: str | None = None, *, un
     from .steer import GneError
     if units:
         r = s.recipe(units=list(units), name=name or None, direction_layer=direction_layer, default_key=key,
-                     default_direction=direction)
+                     default_direction=direction, proj_correction=proj_correction)
     elif recipe:
-        r = s.recipe(path=s.recipe_path(recipe), direction_layer=direction_layer, default_key=key, default_direction=direction)
+        r = s.recipe(path=s.recipe_path(recipe), direction_layer=direction_layer, default_key=key, default_direction=direction,
+                     proj_correction=proj_correction)
     else:
         raise GneError("BAD_ARGS", "recipe か units が要ります")
     nm = name or r.name or "headproj"
@@ -615,10 +617,15 @@ class JobRunner:
             with self.arbiter.job():
                 prev = s.progress
                 s.progress = progress
+                w0 = len(getattr(s, "warnings", None) or [])
                 try:
                     job.result = self.kinds[job.kind](s, **job.params)
                 finally:
                     s.progress = prev
+                ws = list(getattr(s, "warnings", None) or [])
+                new = ws[w0:] if len(ws) >= w0 else ws              # 対話的な処理が途中で警告を空にしたときは、残っている分を
+                if new and isinstance(job.result, dict) and "warnings" not in job.result:
+                    job.result["warnings"] = new                    # ジョブの結果にも警告を載せる(画面・MCP の job_status に出る)
             job.status = "done"
         except _Cancelled:
             job.status = "cancelled"

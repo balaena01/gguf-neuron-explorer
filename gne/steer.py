@@ -193,6 +193,10 @@ class Recipe:
     # そのときのセッションの当て方に従う。ファイルに記録が無ければ shared
     loop_edits: str | None = None
     loop_visits: dict | None = None        # ヘッドごとに、どちらの回で選んだか({"21:H20": [1, 2]}、gne heads loop-merge が書く)
+    # v0.9.0: 出力のあとに正規化がある層の射影(proj)と ablate を補正するか。postnorm = 補正つき(v̂ = normalize(γ⊙r̂))、
+    # none = 補正なし(v0.8.x までと同じ計算)。None = 記録の無いレシピ(v0.8.x までに保存したもの。補正つきで当てて知らせる)。
+    # 保存するときは必ず書く(記録が無ければ、いま当てている補正つき = postnorm)
+    proj_correction: str | None = None
 
     @classmethod
     def load(cls, path: str | Path) -> Recipe:
@@ -202,7 +206,8 @@ class Recipe:
                 AblateSpec.from_dict(d.get("ablate")), d.get("sampling") or None, d.get("default_direction") or None,
                 str(d.get("direction_layer") or "own"),
                 None if d.get("default_key") in (None, "") else str(d["default_key"]),
-                str(d.get("loop_edits") or "shared"), d.get("loop_visits") or None)
+                str(d.get("loop_edits") or "shared"), d.get("loop_visits") or None,
+                None if d.get("proj_correction") in (None, "") else str(d["proj_correction"]))
         r.validate()
         return r
 
@@ -215,6 +220,7 @@ class Recipe:
              **({"direction_layer": self.direction_layer} if self.direction_layer != "own" else {}),
              **({"default_key": self.default_key} if self.default_key else {}),
              **self._loop_fields(save=True),
+             "proj_correction": self.proj_correction or "postnorm",
              "units": [_unit_yaml(u) for u in self.units]}
         write_yaml(path, d, code="BAD_RECIPE")           # 読み戻して同じ文字になるか確かめてから書く(U+0085 なども)
 
@@ -228,7 +234,8 @@ class Recipe:
                 **({"default_direction": self.default_direction} if self.default_direction else {}),
                 **({"direction_layer": self.direction_layer} if self.direction_layer != "own" else {}),
                 **({"default_key": self.default_key} if self.default_key else {}),
-                **self._loop_fields()}
+                **self._loop_fields(),
+                **({"proj_correction": self.proj_correction} if self.proj_correction else {})}
 
     def _loop_fields(self, save: bool = False) -> dict:
         """当て方の記録。shared(と記録なし)は書かない(今までのレシピと同じ文字・同じハッシュにする)。保存のときは、
@@ -243,7 +250,7 @@ class Recipe:
         kw = {"model_id": self.model_id, "dose_unit": self.dose_unit, "name": self.name, "when": self.when,
               "ablate": self.ablate, "sampling": self.sampling, "default_direction": self.default_direction,
               "direction_layer": self.direction_layer, "default_key": self.default_key, "loop_edits": self.loop_edits,
-              "loop_visits": self.loop_visits}
+              "loop_visits": self.loop_visits, "proj_correction": self.proj_correction}
         kw.update(over)
         return Recipe(list(units), **kw)
 
@@ -298,6 +305,8 @@ class Recipe:
     def validate(self) -> None:
         if self.dose_unit not in ("rel", "absmax", "raw"):
             raise GneError("BAD_RECIPE", f"dose_unit={self.dose_unit!r} は rel / absmax / raw のどれかです")
+        if self.proj_correction not in (None, "postnorm", "none"):
+            raise GneError("BAD_RECIPE", f"proj_correction={self.proj_correction!r} は postnorm(補正つき)か none(補正なし)です")
         if not self.units and self.ablate is None:
             raise GneError("BAD_RECIPE", "ユニットがありません")
         if self.ablate is not None:

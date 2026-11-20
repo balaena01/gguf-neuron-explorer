@@ -90,6 +90,11 @@ class Setup:
         return out
 
 
+
+def _corr_label(session) -> str:
+    """配分で保存するレシピに記録する射影の補正(v0.9.0。セッションの --no-proj-correction に従う)。"""
+    return "postnorm" if getattr(session, "proj_correction", True) else "none"
+
 def prepare(session, direction: str | DirectionSet, contrast, *, score_layers=None, primary: int | None = None,
             positions: str = "last", subset: str = "all", b_examples: int = 16, direction_layer: str = "own",
             max_examples: int | None = None) -> Setup:
@@ -111,7 +116,8 @@ def prepare(session, direction: str | DirectionSet, contrast, *, score_layers=No
     b_idx = list(range(nb)) if b_examples <= 0 or b_examples >= nb else \
         [int(x) for x in np.linspace(0, nb - 1, b_examples).round().astype(int)]
     st = Setup(session, ds, cs, sc, Ls, prim, ProjBuilder(session.weights, session.direction_set,
-                                                          direction_layer=direction_layer),
+                                                          direction_layer=direction_layer,
+                                                          correction=getattr(session, "proj_correction", True)),
                TmpLora(session), sorted(set(b_idx)))
     st.base = st.measure(None)
     return st
@@ -180,19 +186,27 @@ def screen_layers(session, ds, cs, *, mode: str = "ablate", layers=None, score_l
 # --- 直接の寄与 ------------------------------------------------------------------------------------------
 
 def head_contrib(st: Setup, heads: list[tuple[int, int]], *, chunk: int = 4) -> dict[tuple[int, int], dict[str, float]]:
-    """無介入の A 側で、ヘッドが書く r̂_Sᵀ W[:, blk_h] x_h の平均(層 S ごと。S より後ろのヘッドは 0)。"""
+    """無介入の A 側で、ヘッドが書く r̂_Sᵀ W[:, blk_h] x_h の平均(層 S ごと。S より後ろのヘッドは 0)。注意の出力のあとに
+    正規化がある層(v0.9.0)は、残差に入る分 (γ ⊙ r̂_S)ᵀ W[:, blk_h] x_h / rms_t(rms_t はトークン t の層全体の書き込みの rms)。"""
     from .attn import capture_attention
+    from .postnorm import eps_of
+    from .postnorm import gamma as _pn_gamma
     s, w = st.session, st.session.weights
     # 2 回の重みが共有されているヘッドは、両方の回の書き込みを足す(1 回目の層の番号で表したヘッドが、2 回目の層でも書く)
     vis = {L: _visits(s, L) for L in {L for L, _ in heads}}
     Ls = sorted({V for vs in vis.values() for V in vs})
     U = {}                                        # (S, L) → (n_head, head_dim)
+    G = {L: (_pn_gamma(w, L, "mixer") if getattr(s, "proj_correction", True) else None) for L in Ls}
+    WL = {}
     for L in Ls:
         li = w.arch.layers[L]
         W = st.builder.W(L)
+        if G[L] is not None:
+            WL[L] = W.astype(np.float64)
         for S in st.score_layers:
             if L <= S:
-                U[(S, L)] = (st.scorer.r[S] @ W).reshape(li.n_head, li.head_dim)
+                rr = st.scorer.r[S] if G[L] is None else st.scorer.r[S] * G[L]
+                U[(S, L)] = (rr @ W).reshape(li.n_head, li.head_dim)
     acc = {hk: {str(S): 0.0 for S in st.score_layers} for hk in heads}
     # 直接の書き込みはヘッドの出力を捕まえて測るので、捕捉の上限より長い質問は除く(止めて測る段階は長さの制限がない)
     items = [x for x in st.scorer.items["A"] if len(x[0]) <= s.engine.probe_ubatch]
@@ -205,6 +219,11 @@ def head_contrib(st: Setup, heads: list[tuple[int, int]], *, chunk: int = 4) -> 
         caps = capture_attention(s, [ids for ids, _ in part], layers=Ls, want_pattern=False)
         for ac, (_, rows) in zip(caps, part, strict=True):
             n += 1
+            inv = {}                                                       # 正規化のある層: トークンごとの 1/rms(層全体の書き込み)
+            for V in WL:
+                if V in ac.head_out:
+                    y = ac.head_out[V][rows].reshape(len(ac.head_out[V][rows]), -1).astype(np.float64) @ WL[V].T
+                    inv[V] = 1.0 / np.sqrt(np.mean(y * y, axis=1) + eps_of(w))
             for (L, h) in heads:
                 for V in vis[L]:
                     if V not in ac.head_out:
@@ -212,7 +231,8 @@ def head_contrib(st: Setup, heads: list[tuple[int, int]], *, chunk: int = 4) -> 
                     x = ac.head_out[V][rows, h, :].astype(np.float64)      # (P, head_dim)
                     for S in st.score_layers:
                         if (S, V) in U:
-                            acc[(L, h)][str(S)] += float((x @ U[(S, V)][h]).mean())
+                            c = x @ U[(S, V)][h]
+                            acc[(L, h)][str(S)] += float((c * inv[V]).mean() if V in inv else c.mean())
     s.engine.free_attn_probe()
     return {hk: {k: v / max(n, 1) for k, v in d.items()} for hk, d in acc.items()}
 
@@ -523,7 +543,7 @@ def allocate(session, ds, cs, *, candidates, target: float, score_layer: int, ha
         init = {"heads": [p.spec() for p in cur], "alpha": alpha, "mean_a": val, "reached": reached}
         ipath = session.store.heads_dir(session.meta.model_id) / f"{name}.alloc-initial.yaml"   # 効率で配り直す前の組も試せるように残す
         Recipe(heads_to_units(cur, ds.name), session.meta.model_id, name=f"{name}-initial", default_direction=ds.name,
-               direction_layer=direction_layer).save(ipath)
+               direction_layer=direction_layer, proj_correction=_corr_label(session)).save(ipath)
         init["recipe"] = str(ipath)
     # 効きにくい例
     if hard_subset is not None:
@@ -621,7 +641,7 @@ def allocate(session, ds, cs, *, candidates, target: float, score_layer: int, ha
         par, orth = drift(st.base["B_resid"][S], gb["B"]["resid"][S], st.scorer.r[S])
         units = heads_to_units(heads, ds.name)
         rec = Recipe(units, session.meta.model_id, name=f"{name}-n{n}", default_direction=ds.name,
-                     direction_layer=direction_layer)
+                     direction_layer=direction_layer, proj_correction=_corr_label(session))
         rpath = session.store.heads_dir(session.meta.model_id) / f"{name}.alloc-n{n}.yaml"
         rec.save(rpath)
         table.append({"n_heads": n, "heads": [{"layer": p.layer, "head": p.head, "s": p.s,

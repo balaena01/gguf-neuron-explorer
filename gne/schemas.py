@@ -144,7 +144,7 @@ class ResidModel(_Strict):
     corpus_sha: str
     chunk_tokens: int
     exclude_pos0: bool
-    p50_rest: list[float | None] | None = None        # v0.8.6: 大きい 8 成分を除いた大きさの中央値(残差の偏り)
+    p50_rest: list[float | None] | None = None        # v0.9.0: 大きい 8 成分を除いた大きさの中央値(残差の偏り)
 
 
 class StatsResidOut(Envelope):
@@ -215,6 +215,7 @@ class RecipeModel(_Strict):
     default_key: str | None = None            # CHANGE-07: keyed のユニットの鍵の既定
     loop_edits: Literal["shared", "per_visit"] | None = None   # 同じ層を 2 回実行するモデルの当て方(per_visit のときだけ載る)
     loop_visits: dict[str, Any] | None = None  # ヘッドごとに選んだ回(gne heads loop-merge)
+    proj_correction: Literal["postnorm", "none"] | None = None   # v0.9.0: 射影・ablate の補正(記録の無い古いレシピは無し)
 
 
 class Generation(_Strict):
@@ -236,6 +237,7 @@ class SteerOut(Envelope):
     when: str = "all"
     sampling: dict[str, float] | None = None       # 使ったサンプリング(seed 込み)。greedy なら None
     behavior: dict[str, Any] | None = None         # CHANGE-03 A: --contrast の効果とランダムな対照レシピ(null_pct)
+    proj_correction: str | None = None             # v0.9.0: 射影・ablate を補正つき(postnorm)で当てたか、補正なし(none)か
 
 
 class ReproCheck(_Strict):
@@ -375,6 +377,7 @@ class GainOut(Envelope):                        # §6.16 gne gain
     keyed_layers: dict[str, dict[str, Any]] | None = None  # CHANGE-07: 層 → {tensors: {テンソル: 階数}, keys, directions, rank}
     keyed_rank: dict[str, int] | None = None               # CHANGE-07: テンソル → keyed の階数(= その層の鍵の数)
     expert_bytes_added: int | None = None                  # CHANGE-07 MoE: 専門家の 3 次元テンソルの書き換えで増えた大きさ(バイト。keep なら 0)
+    proj_correction: str | None = None                     # v0.9.0: 射影を補正つき(postnorm)で書いたか、補正なし(none)か
 
 
 class EvalRow(_Strict):                         # §6.14 gne eval の 1 倍率
@@ -434,6 +437,8 @@ class EvalOut(Envelope):
     direction_metrics: dict[str, Any] | None = None   # CHANGE-06 F.1
     keyed: dict[str, Any] | None = None         # CHANGE-07 E: 方式の比較・比較用の鍵・text(測れなければ skipped・hint)
     notes: list[str] | None = None
+    proj_correction: str | None = None          # v0.9.0: 射影・ablate を補正つき(postnorm)で当てたか、補正なし(none)か
+    proj_forecast: list[dict[str, Any]] | None = None   # v0.9.0: 正規化のある層の射影の、倍率ごとの効きの見込み
 
 
 class DirectionLayer(_Strict):
@@ -485,6 +490,7 @@ class AblateOut(Envelope):                      # §6.17 gne ablate
     intermediate_bytes: int | None = None
     verify: dict[str, Any] | None
     seconds: float
+    proj_correction: str | None = None          # v0.9.0: 正規化のある層を補正したか(postnorm / none)
 
 
 class CompareRow(_Strict):
@@ -1113,7 +1119,7 @@ class HeadsPipelineOut(Envelope):               # gne heads pipeline(方向 → 
     arch_defaults: dict[str, Any] | None = None  # この arch だけの既定を使ったとき、その中身(sensenova_loop の測る層など)
     rank: str | None = None                      # どちらの選び方で流したか: writes(v0.8.0 からの既定)/ causal(v0.7.0 まで)
     rank_note: str | None = None                 # 既定の rank writes に未対応のモデルで causal に切り替えたときの理由
-    postnorm: dict[str, Any] | None = None       # v0.8.6: 組の射影が注意の出力のあとに正規化がある層に当たるとき(layers・unsure_layers・note)
+    postnorm: dict[str, Any] | None = None       # v0.9.0: 組の射影が注意の出力のあとに正規化がある層に当たるとき(layers・unsure_layers・note)
     unused_settings: list[str] | None = None     # rank writes で使わない、rank causal だけの設定を渡したとき(n_heads・hard など)
     writes: dict[str, Any] | None = None         # rank writes: 書き込みの順位づけのまとめ(選ぶ層・A−B の差・種類ごとの数と和・保存先)
     verify: dict[str, Any] | None = None         # rank writes: 上位を 1 個ずつ確かめた結果(順位相関・上位の行)
@@ -1179,8 +1185,8 @@ class HeadsRefineOut(Envelope):                 # gne heads refine(残りの質�
     none_measure: dict[str, Any] | None = None  # 無介入の A 平均・B 平均(元の方向)
     loop_exit: int | None = None                # ループのモデルで、1 回目の出口の段(合わせたレシピの行の exit_before / exit_after)
     rank: str | None = None                     # 足す部品の探し方
-    rank_note: str | None = None                # v0.8.6: 前の回が writes でも、注意の出力のあとに正規化があるモデルで causal にしたときの理由
-    postnorm: dict[str, Any] | None = None      # v0.8.6: 足した組の射影が、注意の出力のあとに正規化がある層に当たるとき
+    rank_note: str | None = None                # v0.9.0: 前の回が writes でも、注意の出力のあとに正規化があるモデルで causal にしたときの理由
+    postnorm: dict[str, Any] | None = None      # v0.9.0: 足した組の射影が、注意の出力のあとに正規化がある層に当たるとき
     units_by_round: dict[str, int] = {}         # 代表の合わせたレシピの、何回目に入った部品が何個か("0" = 元の組)
     no_recommend: str | None = None             # 推す行が無い理由: no_better(どの行も合わせると良くならない)/ replies_break(応答が壊れる)
     updated: str
@@ -1247,9 +1253,16 @@ class HeadprojCheckOut(Envelope):               # CHANGE-06 V24・V25(gne headpr
     dir_cos: float | None = None                # 層の書き込み全体: 書き込みと方向の |cos| の中央値
     rows: list[dict[str, Any]]
     gain: dict[str, Any] | None = None          # 対比の gain(層の書き込み全体のときは無し)
-    v24: bool
-    v25: bool
+    v24: bool | None = None                     # 出力のあとに正規化がある層(compared after_norm)では無し
+    v25: bool | None = None
     ok: bool
+    # v0.9.0: 出力のあとに正規化がある層の補正つきの射影(残差に足された値で比べる)
+    compared: str | None = None                 # "after_norm"
+    index: int | None = None
+    side: str | None = None                     # mixer / ffn
+    added_tensor: str | None = None
+    cos_r_v: float | None = None                # 補正した向き v̂ と r̂ の cos
+    side_ratio_pred: float | None = None        # r̂ 以外の向きへの動き ÷ r̂ に沿った動き(予測)
 
 
 # --- CHANGE-07: 鍵つきの書き込み(keyed write)------------------------------------------------------------
@@ -1378,6 +1391,8 @@ class KeyVerifyRow(_Strict):                    # gne direction key-verify の �
     # expert:e だけ
     other_max: float | None = None              # ほかの専門家の枠の ‖Δ‖ ÷ (|α|‖d‖) の最大(0 のはず、合格 < 1e-3)
     selection_changed: int | None = None        # LoRA を当てて選ばれる専門家が変わったトークンの数(0 のはず)
+    # v0.9.0: 出力のあとに正規化がある層(残差に足された値で比べる)
+    first_order_rel_err_median: float | None = None   # Δ と一次の見込み α(κᵀx)(rms̄_A/rms)r の相対誤差(目安、判定に使わない)
 
 
 class DirectionKeyVerifyOut(Envelope):          # CHANGE-07 V30(gne direction key-verify)
@@ -1402,6 +1417,8 @@ class DirectionKeyVerifyOut(Envelope):          # CHANGE-07 V30(gne direction ke
     gate: float | None = None                   # 鍵の gate_a(shared のゲート・専門家のルーターの重みの平均)
     res_scale: float | None = None              # 枝の出力の倍率(granite 系の residual_scale。1 なら出さない)
     note: str | None = None                     # expert: 専門家 e が texts で一度も選ばれなかったとき
+    compared: str | None = None                 # v0.9.0: "after_norm"(出力のあとに正規化がある層。合格は相対誤差 < 5%)
+    ok: bool | None = None
 
 
 class ExpertUsageRow(_Strict):                  # gne direction key-experts の専門家 1 つ
