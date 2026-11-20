@@ -104,6 +104,19 @@ def parse_kinds(spec) -> tuple[str, ...]:
 
 # --- 1. 書き込みの順位づけ ---------------------------------------------------------------------------------
 
+def _zero_direction_layers(builder, ds, layers) -> list[int]:
+    """方向の長さが 0 の層(A と B の残差の差が 0。短い畳み込みの層の最初の数層など)。head_direction が断る層。"""
+    out = []
+    for L in layers:
+        try:
+            builder.r_of(L, ds.name)
+        except GneError as e:
+            if getattr(e, "zero_layer", None) is None:
+                raise
+            out.append(int(L))
+    return out
+
+
 def measure_writes(session, ds, cs, *, select_layer: int, positions: str = "last", subset: str = "all",
                    max_examples: int | None = None, kinds=KINDS, direction_layer: str = "own", top_q: int = 256,
                    candidate_layers: list[int] | None = None, loop_direction: str = "first",
@@ -301,6 +314,14 @@ def measure_writes(session, ds, cs, *, select_layer: int, positions: str = "last
     # 層ごとの直接の書き込み(注意全体・MLP 全体を s=1 で射影したときに選ぶ層で縮む A−B の差。層の更新のベクトルから。部品の種類の
     # 指定に関係なく出す。重みを 2 回使うモデルで両方の回に当てるときは、同じ重みの 2 回分を、部品の番号の段の方向で足す)
     lay: dict[int, list[float]] = {}
+    zero = _zero_direction_layers(builder, ds, sorted(set(exec_layers) | set(hl) | set(nl)))   # A と B の差が 0 の層(v0.9.0)
+    if zero:
+        session.warn(f"方向 {ds.name} の層 {', '.join(map(str, zero[:8]))}{' …' if len(zero) > 8 else ''} は長さが 0 です"
+                     "(A 側と B 側の残差がまったく同じ層。短い畳み込みの層は数トークン前までしか見ないので、両側で違う system "
+                     "プロンプトがまだ届いていません)。この層では方向に沿った書き込みが決まらないので、層ごとの書き込みの表と部品の候補から"
+                     "外しました")
+    hl = [L for L in hl if L not in zero]
+    nl = [L for L in nl if L not in zero]
     for L in exec_layers:
         if L >= S or not (arch.layers[L].head_dim or arch.layers[L].ffn == "dense"):
             continue
@@ -308,6 +329,8 @@ def measure_writes(session, ds, cs, *, select_layer: int, positions: str = "last
         if shared and plan.visit(L) != 0:
             st_ = plan.stored(L)
             rep = st_ + plan.shift if loop_direction == "second" else st_
+        if rep in zero:
+            continue
         r_, _ = builder.r_of(rep, ds.name)
         r_ = r_.astype(np.float64)
         c_ = float(r_ @ rS)

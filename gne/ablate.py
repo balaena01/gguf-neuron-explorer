@@ -128,12 +128,18 @@ def layer_list(spec: str | list[int] | None) -> list[int] | None:
     return sorted(out)
 
 
-def per_layer_directions(raw: dict[int, np.ndarray], Ls: list[int]) -> dict[int, np.ndarray]:
-    """層ごとの方向(--per-layer)。方向の無い層(最終層など)は、それより前で一番近い層の方向を使う。"""
+def per_layer_directions(raw: dict[int, np.ndarray], Ls: list[int], name: str = "") -> dict[int, np.ndarray]:
+    """層ごとの方向(--per-layer)。方向の無い層(最終層など)は、それより前で一番近い層の方向を使う。長さが 0 の層(短い畳み込みの
+    最初の層など)があれば、理由と使える層を添えて止める(v0.9.0)。"""
+    from .direction import zero_length_error
     have = sorted(raw)
     out = {}
     for L in Ls:
         src = L if L in raw else max([x for x in have if x <= L], default=have[0])
+        if not np.any(np.asarray(raw[src])):
+            e = zero_length_error(name or "(層ごと)", raw, src, "層ごとの方向の消去(--per-layer)")
+            e.hint = (e.hint or "") + "(--layers で、その層から始めてください)"
+            raise e
         out[L] = unit(raw[src])
     return out
 
@@ -292,7 +298,7 @@ def export_ablation_lora(weights, r: np.ndarray | dict[int, np.ndarray], path: s
                        "attention の書き込みだけなら gne headproj ablate --direction <方向> で LoRA にできます")
     Ls = _select_layers(weights, layers)
     warnings = []
-    per = per_layer_directions(r, Ls) if isinstance(r, dict) else {L: unit(r) for L in Ls}
+    per = per_layer_directions(r, Ls, (meta or {}).get("direction") or "") if isinstance(r, dict) else {L: unit(r) for L in Ls}
     ws = residual_writers(weights)
     dirs = writer_dirs(weights, {L: ws[L] for L in Ls}, per, correction)
     rows = {}
@@ -367,7 +373,7 @@ def bake_ablation_gguf(weights, r: np.ndarray | dict[int, np.ndarray], dst: str 
     _encode(np.zeros((1, 32), np.float32), requant)                  # 型の誤りを先に返す
     Ls = _select_layers(weights, layers)
     ws = residual_writers(weights)
-    per = per_layer_directions(r, Ls) if isinstance(r, dict) else {L: unit(r) for L in Ls}
+    per = per_layer_directions(r, Ls, (meta or {}).get("direction") or "") if isinstance(r, dict) else {L: unit(r) for L in Ls}
     axes = {n: 0 for L in Ls for n in ws[L] if not n.endswith("ffn_down_exps.weight")}
     axes.update(_moe_writers(weights, Ls))
     biases = {n.replace(".weight", ".bias"): n for n in axes if weights.has_tensor(n.replace(".weight", ".bias"))}

@@ -51,11 +51,26 @@ def component_writes(session, ds, cs, *, ref_layer: int | None = None, positions
         if L in expert_layers:
             raise GneError("ARCH_UNSUPPORTED", f"層 {L} の専門家ごとの分け方は実行しません。理由: MLP の出力のあとに正規化があるので、"
                                                "専門家の書き込みは残差に足した値の定数倍になりません", "--expert-layers からこの層を外してください")
-    if pn_ffn:
-        require_writer_sums(session, "heads writers")
-    want = {f"l_out-{L}" for L in Ls}
+    # MLP の出力に名前が無く、出力のあとに正規化も無い arch(lfm2、v0.9.0): 混ぜる層の書き込み行列の出力(mixer_out)を足した
+    # l_out(L−1) + mixer_out(層 0 は埋め込み + mixer_out)を、混ぜる層を足した後の残差として使う
+    mix_out: dict[int, str] = {}
+    emb_name = None
     for L in Ls:
-        want |= {pn_ffn[L][1]} if L in pn_ffn else {f"hc_combine-{L}"} if hc else {f"ffn_out-{L}"}
+        if L in pn_ffn or hc or f"ffn_out-{L}" in names:
+            continue
+        nm = layer_names(session.weights, L)
+        if nm.get("mixer_out") in names:
+            mix_out[L] = nm["mixer_out"]
+            if L == 0:
+                emb_name = nm.get("embed") if nm.get("embed") in names else None
+                if emb_name is None:
+                    raise GneError("ARCH_UNSUPPORTED", "heads writers は実行しません。理由: 層 0 の埋め込みの捕捉の名前が分かりません",
+                                   "configs/arch/residual_writers.yaml の capture の表に、この arch の embed を書いてください")
+    if pn_ffn or mix_out:
+        require_writer_sums(session, "heads writers")
+    want = {f"l_out-{L}" for L in Ls} | ({emb_name} if emb_name else set())
+    for L in Ls:
+        want |= {pn_ffn[L][1]} if L in pn_ffn else {mix_out[L]} if L in mix_out else {f"hc_combine-{L}"} if hc else {f"ffn_out-{L}"}
         if L in moe:
             want |= {moe[L]["out"]} if "out" in moe[L] else set()
             want |= {f"ffn_shexp_gated-{L}"} & names
@@ -86,6 +101,9 @@ def component_writes(session, ds, cs, *, ref_layer: int | None = None, positions
                 if L in pn_ffn:
                     kind_, nm_ = pn_ffn[L]
                     mid = got[nm_][rows].astype(np.float64) if kind_ == "mid" else after - got[nm_][rows].astype(np.float64)
+                elif L in mix_out:                   # 混ぜる層を足した後の残差 = 前の層の出力(層 0 は埋め込み)+ mixer_out
+                    base_ = got[emb_name][rows].astype(np.float64) if L == 0 else prev
+                    mid = base_ + got[mix_out[L]].reshape(T, -1)[rows].astype(np.float64)
                 elif hc:
                     mid = got[f"hc_combine-{L}"].reshape(-1, hc, n_embd).mean(axis=1)[rows].astype(np.float64)
                 elif f"ffn_out-{L}" in got:
@@ -140,5 +158,5 @@ def component_writes(session, ds, cs, *, ref_layer: int | None = None, positions
             "rows": rows_out, "experts": experts,
             # v0.9.0 の印: 出力のあとに正規化がある層は、残差に足した値(正規化の後)で attention と MLP に分けた。この印の無い
             # 古い結果は、その層で MLP に正規化の前の ffn_out を使っていた(Gemma 系で分け方が違う、LFM3 は実行できなかった)
-            "split": "after_norm", "post_norm_layers": sorted(pn_ffn),
+            "split": "after_norm", "post_norm_layers": sorted(pn_ffn), "mixer_out_layers": sorted(mix_out),
             "post_norm_moe_unsplit": sorted(L for L in pn_ffn if arch.layers[L].ffn.startswith("moe"))}

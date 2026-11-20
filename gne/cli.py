@@ -460,8 +460,8 @@ def verify(c: Common, holder: dict,
     steps = [(vid, (lambda vid=vid, fn=fn: VResult(vid, "省略", "skip", why[vid]) if vid in why else fn())) for vid, fn in steps]
     if s.engine.hc_streams:
         steps.append(("V26", v.v26_hc_streams))
-    from .postnorm import writer_layers, writer_sums_vresult
-    if writer_layers(s.weights):                     # 出力のあとに正規化があるモデル: 捕捉の名前と式の検算(v0.9.0)
+    from .postnorm import entry, writer_layers, writer_sums_vresult
+    if writer_layers(s.weights) or (entry(s.meta.arch) or {}).get("mixer_out"):   # 捕捉の表を使うモデル: 名前と式の検算(v0.9.0)
         steps.append(("V27", lambda: writer_sums_vresult(s)))
 
     def show(r):

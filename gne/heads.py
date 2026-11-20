@@ -624,7 +624,8 @@ def query_vectors(session, L: int, h: int, *, direction: str, seek: str | Path, 
     gamma = w.tensor(f"blk.{L}.attn_norm.weight")
     from .weights import tensor_to_f32
     g = np.asarray(tensor_to_f32(gamma), dtype=np.float32).reshape(-1)
-    v = ds.raw[src] / np.where(np.abs(g) > 1e-6, g, 1e-6)
+    from .direction import require_length
+    v = require_length(ds, src, f"層 {L} のヘッドの query のベクトル").astype(np.float32) / np.where(np.abs(g) > 1e-6, g, 1e-6)
     v = (v / np.linalg.norm(v)).astype(np.float32)
     grp = kv_group(h, li.n_head, li.n_head_kv)
     dims = static_dims(w, L, frac)

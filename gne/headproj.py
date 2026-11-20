@@ -195,11 +195,9 @@ def head_direction(ds, L: int, direction_layer: str = "own") -> tuple[np.ndarray
         src = L if L in ds.raw else max([x for x in have if x <= L], default=have[0])
     else:
         raise GneError("BAD_RECIPE", f"direction_layer={direction_layer!r} は own か base です")
-    r = np.asarray(ds.raw[src], dtype=np.float64)
-    n = float(np.linalg.norm(r))
-    if n == 0:
-        raise GneError("BAD_DIRECTION", f"方向 {ds.name} の層 {src} の長さが 0 です")
-    return (r / n).astype(np.float32), src
+    from .direction import require_length
+    r = require_length(ds, src)
+    return (r / float(np.linalg.norm(r))).astype(np.float32), src
 
 
 class ProjBuilder:

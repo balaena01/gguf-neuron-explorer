@@ -47,7 +47,7 @@ def layer_names(weights, L: int) -> dict[str, str | None]:
         mo = mo.get(li.mixer)
     return {"head_out": nm(ent.get("head_out")), "head_pre": nm(ent.get("head_pre")), "head_gate": nm(ent.get("head_gate")),
             "mixer_out": nm(mo), "mixer_post": nm(ent.get("mixer_post")), "mid": nm(ent.get("mid")),
-            "ffn_post": nm(ent.get("ffn_post"))}
+            "ffn_post": nm(ent.get("ffn_post")), "embed": ent.get("embed") or None}
 
 
 def checked(arch: str) -> str | None:
@@ -114,10 +114,11 @@ def writer_layers(weights) -> list[int]:
             if li.post_norm_mixer not in ("", "?") or li.post_norm_ffn not in ("", "?")]
 
 
-def _pick_layers(weights) -> list[int]:
-    """検算する層: 混ぜる層の種類ごとに最初の 1 層(層 1 以降)、真ん中、最後の 1 つ前。"""
+def _pick_layers(weights, prenorm: bool = False) -> list[int]:
+    """検算する層: 混ぜる層の種類ごとに最初の 1 層(層 1 以降)、真ん中、最後の 1 つ前。prenorm(出力のあとに正規化の無い arch)
+    では全部の層が対象で、MLP の式を確かめられる dense の層を 1 つ足す。"""
     n = weights.n_main
-    pn = set(writer_layers(weights))
+    pn = set(range(n)) if prenorm else set(writer_layers(weights))
     out, kinds = [], set()
     for li in weights.arch.layers[1:n - 1]:
         if li.index in pn and li.mixer not in kinds:
@@ -126,7 +127,11 @@ def _pick_layers(weights) -> list[int]:
     for L in (n // 2, n - 2):
         if L in pn and L not in out and L >= 1:
             out.append(L)
-    return sorted(out)
+    if prenorm and not any(weights.arch.layers[L].ffn == "dense" for L in out):
+        dense = [li.index for li in weights.arch.layers[1:n - 1] if li.ffn == "dense"]
+        if dense:
+            out.append(dense[0])
+    return sorted(set(out))
 
 
 def _tol(weights, L: int) -> tuple[float, float]:
@@ -143,17 +148,24 @@ def _tol(weights, L: int) -> tuple[float, float]:
 
 def check_writer_sums(session, layers: list[int] | None = None, text: str | None = None) -> dict:
     """層ごとに (a)(b)(c) を測る(モジュールの説明)。戻り値 {ok, arch, checked, layers: [{layer, mixer, mixer_err, ffn_err,
-    sum_err, ok, why}], text_tokens}。出力のあとに正規化が無いモデルは ok で skipped。"""
+    sum_err, ok, why}], text_tokens, prenorm}。出力のあとに正規化が無いモデルは ok で skipped。ただし表に mixer_out があれば
+    (lfm2、prenorm)、MLP が足した値 l_out(L) − l_out(L−1) − mixer_out を W_down a(dense)か専門家の出力の和(MoE)と、
+    ヘッドの出力から作った書き込みを mixer_out と比べる(和は式そのものなので None)。"""
     from .capture import Capture, pick_act_name
+    from .moe import moe_names
     e, w = session.engine, session.weights
     arch = w.meta.arch
     pn = writer_layers(w)
-    if not pn:
+    ent = entry(arch)
+    # 出力のあとに正規化の無い arch でも、表に mixer_out があれば(lfm2: MLP の出力に名前が無い)、MLP が足した値
+    # l_out(L) − l_out(L−1) − mixer_out が W_down a と合うか、ヘッドの出力から作った書き込みが mixer_out と合うかを測る
+    prenorm = not pn and bool(ent and ent.get("mixer_out"))
+    if not pn and not prenorm:
         return {"ok": True, "arch": arch, "checked": checked(arch), "skipped": "出力のあとに正規化がある層はありません", "layers": []}
-    if entry(arch) is None:
+    if ent is None:
         return {"ok": False, "arch": arch, "checked": None, "layers": [],
                 "why": f"arch {arch} の捕捉の名前が configs/arch/residual_writers.yaml の capture の表にありません"}
-    Ls = sorted(set(layers) if layers else set(_pick_layers(w)))
+    Ls = sorted(set(layers) if layers else set(_pick_layers(w, prenorm=prenorm)))
     text = text or "The lighthouse keeper watched the ships cross the bay at dawn, and wrote each name in a small book."
     ids = e.tokenize_prompt(e.render_chat([{"role": "user", "content": text}]))
     seen = set(e.list_names(ids[:16]))
@@ -168,9 +180,12 @@ def check_writer_sums(session, layers: list[int] | None = None, text: str | None
              "fpost": nm.get("ffn_post") if nm.get("ffn_post") in seen else None,
              "mout": nm.get("mixer_out") if nm.get("mixer_out") in seen else None,
              "heads": head_out_parts(w, seen, L) if li.mixer == "attention" and li.head_dim else None,
-             "act": pick_act_name(seen, L) if li.ffn == "dense" else None}
+             "act": pick_act_name(seen, L) if li.ffn == "dense" else None,
+             # 正規化の無い MoE の層: MLP が足した値(式で出したもの)を、選ばれた専門家の和(+ 共有の専門家)の捕捉と比べる
+             "moe_out": moe_names(seen, L).get("out") if prenorm and li.ffn.startswith("moe") else None,
+             "shexp": f"ffn_shexp_gated-{L}" if prenorm and f"ffn_shexp_gated-{L}" in seen else None}
         plan[L] = p
-        want |= {x for x in (p["prev"], p["out"], p["mid"], p["mpost"], p["fpost"], p["mout"], p["act"]) if x}
+        want |= {x for x in (p["prev"], p["out"], p["mid"], p["mpost"], p["fpost"], p["mout"], p["act"], p["moe_out"], p["shexp"]) if x}
         if p["heads"]:
             want |= {x for x in p["heads"] if x}
     cap = Capture(lambda n: n in want)
@@ -196,7 +211,13 @@ def check_writer_sums(session, layers: list[int] | None = None, text: str | None
             rows.append({"layer": L, "mixer": li.mixer, "ok": False, "why": "l_out が捕捉できません"})
             continue
         prev, out = got[p["prev"]].astype(np.float64), got[p["out"]].astype(np.float64)
-        if p["mid"]:
+        if prenorm:                                  # 出力のあとに正規化が無い: 混ぜる層は mixer_out をそのまま足す
+            if not p["mout"]:
+                rows.append({"layer": L, "mixer": li.mixer, "ok": False, "why": "混ぜる層の書き込み行列の出力(mixer_out)が捕捉できません"})
+                continue
+            m_add = got[p["mout"]].astype(np.float64).reshape(T, -1)
+            f_add = out - prev - m_add
+        elif p["mid"]:
             m_add = got[p["mid"]].astype(np.float64) - prev
             f_add = out - got[p["mid"]].astype(np.float64)
         elif p["mpost"] and p["fpost"]:
@@ -205,8 +226,9 @@ def check_writer_sums(session, layers: list[int] | None = None, text: str | None
             rows.append({"layer": L, "mixer": li.mixer, "ok": False,
                          "why": "残差に足した値の捕捉の名前(mid か、mixer_post と ffn_post)が見えません"})
             continue
-        s_err = float(np.linalg.norm(prev + m_add + f_add - out) / max(float(np.linalg.norm(out)), 1e-12))
-        if s_err > SUM_TOL:
+        # 正規化の無い arch では MLP の分を和から出すので、和は確かめにならない(None)
+        s_err = None if prenorm else float(np.linalg.norm(prev + m_add + f_add - out) / max(float(np.linalg.norm(out)), 1e-12))
+        if s_err is not None and s_err > SUM_TOL:
             why.append(f"l_out の和が合いません(相対誤差 {s_err:.2e})")
         tm, tx = _tol(w, L)
         m_err = f_err = h_err = None
@@ -231,17 +253,25 @@ def check_writer_sums(session, layers: list[int] | None = None, text: str | None
                            f"許容 {tm}/{tx})" if m_err[0] is not None else "混ぜる層の書き込みが 0 です")
         elif li.post_norm_mixer not in ("", "?"):
             why.append("混ぜる層の書き込み(書き込み行列の出力かヘッドの出力)が捕捉できません")
-        if p["act"] and li.post_norm_ffn not in ("", "?"):
+        if p["act"] and (li.post_norm_ffn not in ("", "?") or prenorm):
             a = got[p["act"]].astype(np.float64)
             yf = a @ w.down_matrix(L).astype(np.float64).T * float((w.meta.ffn_down_scale or {}).get(L, 1.0))
             f_err = rel(post_add(yf, gamma(w, L, "ffn"), eps, li.post_norm_kind or "rms"), f_add)
             if f_err[0] is None or f_err[0] > tm or f_err[1] > tx:
                 why.append(f"MLP の書き込みから作った値が、残差に足された値と合いません(相対誤差 中央値 {f_err[0]:.3g} / 最大 {f_err[1]:.3g}、"
                            f"許容 {tm}/{tx})" if f_err[0] is not None else "MLP の書き込みが 0 です")
+        elif p["moe_out"]:
+            yf = got[p["moe_out"]].astype(np.float64).reshape(T, -1)
+            if p["shexp"]:
+                yf = yf + got[p["shexp"]].astype(np.float64).reshape(T, -1)
+            f_err = rel(yf, f_add)
+            if f_err[0] is None or f_err[0] > tm or f_err[1] > tx:
+                why.append(f"専門家の出力の和が、l_out − 前の層の l_out − 混ぜる層の書き込み と合いません(相対誤差 中央値 {f_err[0]:.3g} / "
+                           f"最大 {f_err[1]:.3g}、許容 {tm}/{tx})" if f_err[0] is not None else "専門家の出力が 0 です")
         rows.append({"layer": L, "mixer": li.mixer, "head_err": h_err, "mixer_err": m_err, "ffn_err": f_err, "sum_err": s_err,
                      "ok": not why, "why": "、".join(why) or None})
     ok = bool(rows) and all(r["ok"] for r in rows)
-    return {"ok": ok, "arch": arch, "checked": checked(arch), "layers": rows, "text_tokens": T}
+    return {"ok": ok, "arch": arch, "checked": checked(arch), "layers": rows, "text_tokens": T, "prenorm": prenorm}
 
 
 def require_writer_sums(session, what: str) -> dict:
@@ -266,7 +296,7 @@ def writer_sums_vresult(session):
     from .verify import VResult
     res = check_writer_sums(session)
     session._writer_sums = res
-    title = "書き込みの和(出力のあとの正規化)"
+    title = "書き込みの和(捕捉の名前と式)"
     if res.get("skipped"):
         return VResult("V27", title, "skip", res["skipped"], res)
     if not res["layers"]:
@@ -275,7 +305,8 @@ def writer_sums_vresult(session):
     def f(x):
         return "—" if not x else f"{x[0] * 100:.2f}% / {x[1] * 100:.2f}%"
     parts = [f"L{r['layer']}({r['mixer']}): " + (f"ヘッド {f(r.get('head_err'))}、" if r.get("head_err") else "")
-             + f"混ぜる層 {f(r.get('mixer_err'))}、MLP {f(r.get('ffn_err'))}、和 {r.get('sum_err', 0):.1e}"
+             + f"混ぜる層 {f(r.get('mixer_err'))}、MLP {f(r.get('ffn_err'))}、"
+             + ("和 —(MLP の分を和から出す)" if r.get("sum_err") is None else f"和 {r['sum_err']:.1e}")
              + ("" if r["ok"] else f" — {r['why']}") for r in res["layers"]]
     src = {"real": "実物で確かめた名前", "graph": "グラフを読んだだけの名前"}.get(res.get("checked"), "")
     return VResult("V27", title, "pass" if res["ok"] else "fail",

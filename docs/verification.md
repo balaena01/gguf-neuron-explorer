@@ -67,7 +67,7 @@ LFM3 には `ffn_out` の捕捉名が無いので、V2 は MLP の出力の正�
 
 正規化のあとの名前は `model.layers.{}.post_ffn_norm-L`(LFM3)と `ffn_post_norm-L` の 2 つだけを試し、どちらも無い arch では理由を出して V2 を飛ばす(`configs/arch/residual_writers.yaml` の `output_norm` のほかの arch では確かめていない)。
 
-### V27 書き込みの和(出力のあとに正規化があるモデル、v0.9.0)
+### V27 書き込みの和(出力のあとに正規化があるモデルと LFM2、v0.9.0)
 
 `configs/arch/residual_writers.yaml` の `capture` の表の名前で、数層について (a) 混ぜる層の書き込み y(書き込み行列の出力の捕捉、
 名前が無ければ W_O · ヘッドの出力)から作った γ ⊙ y / rms(y) が残差に足された値と合うか、(b) MLP の γ ⊙ (W_down a) / rms が
@@ -81,7 +81,17 @@ LFM3 には `ffn_out` の捕捉名が無いので、V2 は MLP の出力の正�
 | LFM3-Omni-2B | L1・L2・L12・L22 | 0.29〜0.51% / 0.48〜0.78% | 0.00% / 0.00% | 0.61〜0.90% / 1.02〜1.28% | 2.4e-8〜3.1e-8 |
 | Gemma 3 1B | L1・L13・L24 | — | 0.20〜1.21% / 0.69〜1.49%(W_O · kqv_out から) | 0.67〜1.24% / 1.22〜1.69% | 0(sa_out から) |
 
+| LFM2-8B-A1B(Q4_K_M) | L1(畳み込み、dense) | — | —(捕捉した y をそのまま足す) | 0.51% / 0.62%(W_down a) | —(式で出す) |
+| LFM2-8B-A1B | L2(注意、MoE) | 0.96% / 2.60% | — | 0.00% / 0.00%(専門家の出力) | — |
+| LFM2-8B-A1B | L12・L22(畳み込み、MoE) | — | — | 0.00% / 0.01%(専門家の出力) | — |
+
 ゲートを掛けないと、LFM3 L12 のヘッドの値は 108% ずれる(B1 の調べ)。Qwen3-0.6B など出力のあとに正規化の無いモデルでは V27 は skip。
+
+LFM2(lfm2・lfm2moe)は出力のあとの正規化が無いが、MLP の出力に名前が無い(`model.layers.{}.ffn_out` は MLP の入力 = 正規化の後に
+付いた名前)。そこで MLP が足した値を l_out(L) − l_out(L−1) − 混ぜる層の書き込み行列の出力(`conv.out_proj` / `self_attn.out_proj`)
+で出し、dense の層は W_down a と、MoE の層は選ばれた専門家の出力の和(`ffn_moe_out`)と比べる。和は式そのものなので測らない。
+heads writers はこの式で attention と MLP を分ける(v0.8.x までは ffn_out の名前が無いので止まっていた)。heads writers の
+部品の和と基準層の差のずれ: LFM2-8B-A1B 1.1e-9(基準層 12、evil.yaml 16 問)。
 表の `checked: graph` の arch(Gemma 2 / 3n / 4・OLMo 2・EXAONE 4・GLM-4・PLaMo 2 / 3・AFMoE・Grok)は実物では流していない。
 
 ### 補正つきの射影の検算(出力のあとに正規化があるモデル、v0.9.0)

@@ -72,13 +72,22 @@ pre_ffn_post_attention: [qwen35, qwen35moe, qwen3next, sensenova_loop, glm4moe, 
 #   mixer_post: 混ぜる層の書き込みを正規化したもの(残差に足す値)
 #   mid:        混ぜる層を足した後の残差(MLP の入力の正規化の前)。あれば、残差に足す値は mid − l_out(L−1) と l_out(L) − mid
 #   ffn_post:   MLP の書き込みを正規化したもの(mid が無いときに使う)
+#   embed:      層 0 に入る前の残差(埋め込み)。名前に "-L" は付けない
+# 出力のあとに正規化が無い arch(lfm2)でも、MLP の出力に名前が無いときは mixer_out から MLP が足した値を
+# l_out(L) − l_out(L−1) − mixer_out で出す(heads writers など)
 # どの arch も、使う前に「書き込みの和」の検算(postnorm.check_writer_sums、gne verify の V27)を自動で通し、合わなければ
 # その機能を実行しない(graph の arch は名前と式を実物で確かめていないため。real の arch も llama.cpp の版が変わったときの備え)。
 # 確かめた llama.cpp: 8642541(2026-10-28)。
 capture:
   lfm3:    {checked: real, head_pre: attn_out, head_gate: "model.layers.{}.self_attn.gate",
             mixer_out: {attention: "model.layers.{}.self_attn.out_proj", conv: "model.layers.{}.conv.out_proj"},
-            mixer_post: "model.layers.{}.post_operator_norm", ffn_post: "model.layers.{}.post_ffn_norm"}
+            mixer_post: "model.layers.{}.post_operator_norm", ffn_post: "model.layers.{}.post_ffn_norm", embed: model.embed_tokens}
+  # lfm2・lfm2moe(src/models/lfm2.cpp、lfm2moe は同じグラフ): 出力のあとの正規化は無い。"model.layers.{}.ffn_out" は MLP の入力
+  # (正規化の後)に付いた名前で、MLP の出力ではないので使わない
+  lfm2:    {checked: real, mixer_out: {attention: "model.layers.{}.self_attn.out_proj", conv: "model.layers.{}.conv.out_proj"},
+            embed: model.embed_tokens}
+  lfm2moe: {checked: real, mixer_out: {attention: "model.layers.{}.self_attn.out_proj", conv: "model.layers.{}.conv.out_proj"},
+            embed: model.embed_tokens}
   gemma3:  {checked: real, head_out: kqv_out, mixer_post: attn_post_norm, mid: sa_out}
   gemma2:  {checked: graph, head_out: kqv_out, mixer_post: attn_post_norm, mid: sa_out}
   gemma3n: {checked: graph, head_out: kqv_out, mixer_post: attn_post_norm}             # 層の出力は altup で混ぜるので、和の検算は通らない見込み

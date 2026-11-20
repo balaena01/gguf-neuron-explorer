@@ -931,7 +931,7 @@ def _writer_top(session, L: int, n: int, direction: str | None) -> list[int]:
         ds = session.direction_set(direction)
     except Exception:  # noqa: BLE001
         return []
-    if L not in ds.raw:
+    if L not in ds.raw or not np.any(ds.raw[L]):         # 長さが 0 の層では方向に沿ったニューロンが決まらない
         return []
     r = ds.raw[L] / max(float(np.linalg.norm(ds.raw[L])), 1e-12)
     cos = np.abs(r @ session.weights.unit_matrix(L))

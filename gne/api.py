@@ -572,6 +572,8 @@ class Session:
         ds = self.direction_set(name)
         if L not in ds.raw:
             raise GneError("BAD_RECIPE", f"方向 {name} に層 {L} がありません(0〜{max(ds.raw)})")
+        from .direction import require_length
+        require_length(ds, L, f"方向の部品 {L}:dir:{name}")
         return ds.raw[L]
 
     @staticmethod
@@ -1854,6 +1856,8 @@ class Session:
             from_layer = int(chosen)
         if from_layer not in ds.raw:
             raise GneError("BAD_ARGS", f"方向 {ds.name} に層 {from_layer} がありません(0〜{max(ds.raw)})")
+        from .direction import require_length
+        require_length(ds, from_layer)
         return ds.raw[from_layer], {"direction": ds.name, "from_layer": from_layer}
 
     def ablate(self, direction: str, out: str | Path, *, from_layer: int | None = None, per_layer: bool = False,
