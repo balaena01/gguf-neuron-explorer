@@ -2709,6 +2709,8 @@ class Session:
         out["target"], out["target_from"] = float(tgt), tgt_from
         rec = next((r for r in a["table"] if r.get("recommended")), None)
         out["recommended"] = None if rec is None else {"n_heads": rec["n_heads"], "units": rec["units"], "recipe": rec["recipe"]}
+        from .causal import most_reduced_summary
+        out["most_reduced"] = most_reduced_summary(out)            # A 側が最も下がった組(推す組とは別の印、v0.9.0)
         self._postnorm_pipeline_note(out)
         out["seconds"] = time.perf_counter() - t0
         out["updated"] = time.strftime("%Y-%m-%dT%H:%M:%S")
@@ -2828,6 +2830,8 @@ class Session:
             out["check"].update(n_heads=chk["n_heads"], recommended=rec is not None)
             if rec is not None and out["check"].get("break_warning"):
                 self._recommend_without_broken(out, a, rec, cs_chk, val_chk, n_check, int(pipe["check_tokens"]))
+        from .causal import most_reduced_summary
+        out["most_reduced"] = most_reduced_summary(out)            # A 側が最も下がった組(推す組とは別の印、v0.9.0)
         self._postnorm_pipeline_note(out)
         out["seconds"] = time.perf_counter() - t0
         out["updated"] = time.strftime("%Y-%m-%dT%H:%M:%S")
@@ -3330,6 +3334,8 @@ class Session:
             break
         if comb is None and order:
             why_none = "replies_break"
+        from .causal import refine_most_reduced                 # A 側が最も下がった行(合わせたレシピの A 平均、元の方向・元の目標)
+        most_reduced = refine_most_reduced(comb_rows, (comb or {}).get("key"), comb is not None)
         stale = hd / f"{out_name}.combined.yaml"
         if comb is not None:
             comb["recommended"] = True
@@ -3338,7 +3344,7 @@ class Session:
             if check is not None:
                 check["recommended"] = True
         else:
-            stale.unlink(missing_ok=True)           # 推す行が無い(足さないほうがよい): 前の代表を残さない
+            stale.unlink(missing_ok=True)           # 推す行が無い(土台のままが無難。候補の行は選べる): 前の代表を残さない
         by_round: dict[int, int] = {}
         for q in (comb or {}).get("parts") or parts_of(prior_units, rounds0):
             by_round[q["round"]] = by_round.get(q["round"], 0) + 1
@@ -3354,13 +3360,13 @@ class Session:
                             "reused": p.get("reused") or [],
                             "table": [{k_: r.get(k_) for k_ in ("n_heads", "units", "s_max", "remain", "reached", "recommended", "skipped")}
                                       for r in alloc["table"]]},
-               "combined": comb, "combined_rows": comb_rows, "check": check, "no_recommend": why_none,
+               "combined": comb, "combined_rows": comb_rows, "check": check, "no_recommend": why_none, "most_reduced": most_reduced,
                "updated": time.strftime("%Y-%m-%dT%H:%M:%S"), "seconds": time.perf_counter() - t0}
         (hd / f"{out_name}.refine.json").write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
         pd = json.loads(Path(p["path"]).read_text(encoding="utf-8"))      # 一括の結果にも、どの組の残りから作ったかを書く
         pd["refine"] = {k_: out[k_] for k_ in ("base", "root", "round", "chain", "direction", "n_heads", "base_units", "base_parts",
                                                "base_measure", "none_measure", "threshold", "score_layer", "loop_exit", "units_by_round",
-                                               "remaining", "combined", "combined_rows", "check", "no_recommend")}
+                                               "remaining", "combined", "combined_rows", "check", "no_recommend", "most_reduced")}
         Path(p["path"]).write_text(json.dumps(pd, ensure_ascii=False, indent=1), encoding="utf-8")
         out["path"] = str(hd / f"{out_name}.refine.json")
         return out

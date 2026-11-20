@@ -800,6 +800,8 @@ def allocate_units(session, st, verified: list[dict], *, target: float, n_units=
     rec_n, why, no_rec = _recommend(table, len(a_all), sc)
     for r in table:
         r["recommended"] = r.get("n_heads") == rec_n and rec_n is not None
+    from .causal import most_reduced_summary
+    most_reduced_summary({"s1": s1, "table": table})           # A 側が最も下がった組の印(推す組とは別、v0.9.0)
     out = {"name": name, "direction": ds.name, "contrast_sha": st.cs.sha, "score_layer": S, "score_layers": st.score_layers,
            "max_examples": max_examples, "drift_max": drift_max, "b_move_max": b_move_max, "target": float(target),
            "positions": st.scorer.positions, "subset": st.scorer.subset, "direction_layer": direction_layer,

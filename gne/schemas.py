@@ -1125,6 +1125,7 @@ class HeadsPipelineOut(Envelope):               # gne heads pipeline(方向 → 
     verify: dict[str, Any] | None = None         # rank writes: 上位を 1 個ずつ確かめた結果(順位相関・上位の行)
     check: dict[str, Any] | None = None          # rank writes: 応答での確かめ(無介入と組の、書き終えた応答の一致数など)
     no_recommend: dict[str, Any] | None = None   # rank writes: 推す組が無いときの理由(reason)と次の手(next)
+    most_reduced: dict[str, Any] | None = None   # A 側が最も下がった組(A 平均が最小の行。表の行にも most_reduced。推す組とは別の印、v0.9.0)
     holdout: dict[str, Any] | None = None        # rank writes --holdout: 表の数を測り直した、選ぶのに使っていない質問(数・目標)
 
 
@@ -1206,6 +1207,7 @@ class HeadsRefineOut(Envelope):                 # gne heads refine(残りの質�
     postnorm: dict[str, Any] | None = None      # v0.9.0: 足した組の射影が、注意の出力のあとに正規化がある層に当たるとき
     units_by_round: dict[str, int] = {}         # 代表の合わせたレシピの、何回目に入った部品が何個か("0" = 元の組)
     no_recommend: str | None = None             # 推す行が無い理由: no_better(どの行も合わせると良くならない)/ replies_break(応答が壊れる)
+    most_reduced: dict[str, Any] | None = None  # 合わせたレシピの A 平均(元の方向・元の目標)が最小の行(combined_rows[].most_reduced にも、v0.9.0)
     updated: str
     seconds: float
 
