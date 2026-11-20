@@ -588,6 +588,20 @@ def test_pipeline_from_direction_copies_under_the_pipeline_name(tmp_path):
     with pytest.raises(GneError):
         s._pipeline_from_direction("d1", "pipe2", cpath, cs, "response")               # 測る位置が違う
     assert (dd / "d1.npz").exists()
+    # 同じ質問・system・レシピの対照集合で作った方向なら知らせない。レシピだけ違えば知らせる
+    src = tmp_path / "src.yaml"
+    src.write_text("name: src\nsystem_a: a\nsystem_b: b\nuser_prompts: [q1, q2, q3, q4]\nrecipe_a: ['0:H1:s1@d1']\n", encoding="utf-8")
+    z = dict(np.load(dd / "d1.npz"))
+    np.savez(dd / "d1src.npz", **{**z, "source": str(src), "positions": "last"})
+    same = tmp_path / "same.yaml"
+    same.write_text("name: same\nsystem_a: a\nsystem_b: b\nuser_prompts: [q1, q2, q3, q4]\nrecipe_a: ['0:H1:s1@d1']\n", encoding="utf-8")
+    other = tmp_path / "other.yaml"
+    other.write_text("name: other\nsystem_a: a\nsystem_b: b\nuser_prompts: [q1, q2, q3, q4]\nrecipe_a: ['0:H2:s1@d1']\n", encoding="utf-8")
+    warns.clear()
+    s._pipeline_from_direction("d1src", "p_same", same, load_contrast(same)[0], "last")
+    assert not any("確かめられません" in w for w in warns)                          # (レシピを読むときの別の知らせは数えない)
+    s._pipeline_from_direction("d1src", "p_other", other, load_contrast(other)[0], "last")
+    assert any("確かめられません" in w and "レシピ" in w for w in warns)
 
 
 @pytest.mark.model
