@@ -136,6 +136,7 @@ gne eval --recipe R --compare-methods                 # 全層の射影消去・
 gne eval --alloc evil --n-heads 4,3,2                 # 配分で作った組をヘッドの数ごとに評価
 gne headproj export --recipe R                        # 層ごとに階数 1 の LoRA(--bake で関係するテンソルだけ書き換え)
 gne heads pipeline --spec spec.json                   # 上の direction → score → causal → allocate を 1 回で(UI の「CHiPS」の画面からも)
+gne heads geometry --name evil                        # heads writes の材料の層ごとの更新(A − B)を、層どうしの cos・特異値分解・半分ずつの一致で比べる(--save-q の材料なら質問に沿った分解も。docs/layer-geometry.md)
 gne heads candidates --alloc evil --prompts held_out.yaml   # 比較表の組 × 倍率(既定 0.5,1,1.5,2,3)で返事を作り、伏せた採点のファイルを書く
 gne heads candidates --tally evil                     # round_01.scores.txt(「番号 P C」)を候補ごとに集計する
 gne heads refine --name evil --n-heads 2              # その組で残った質問だけで、組を当てたまま方向を作り直し、足すヘッドを探す

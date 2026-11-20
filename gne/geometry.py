@@ -115,7 +115,7 @@ def arch_check(arch, table: dict | None = None) -> dict:
         refuse = "残差が複数本の流れの構造(hyper-connections)で、層ごとの更新の材料がありません"
     elif pm or pf:
         what = [f"注意(混ぜる層)の出力のあと({len(pm)} 層)" if pm else "", f"MLP の出力のあと({len(pf)} 層)" if pf else ""]
-        refuse = (f"{name} は{'と'.join(w for w in what if w)}に正規化がある構造です。残差に入るのは正規化の後の値で、材料の更新は"
+        refuse = (f"{name} は{'と '.join(w for w in what if w)}に正規化がある構造です。残差に入るのは正規化の後の値で、材料の更新は"
                   "その前の値なので、層ごとの更新を比べる量の意味が変わります(この構造には未対応。heads writes もこの構造では実行しません)")
     pu = [int(li.index) for li in layers if getattr(li, "post_norm_mixer", "") == "?"]
     if pu and refuse is None:
@@ -962,7 +962,8 @@ def export_direction(session, result: str, out: str, source: str, *, force: bool
         missing = sorted(set(ds.raw) - set(vecs))
         if missing:
             notes.append({"code": "missing_layers", "text": f"層 {', '.join(map(str, missing[:8]))}{' …' if len(missing) > 8 else ''} には向きがありません"
-                                                            "(材料の行が無い層)。その層のユニットにはこの方向を使えません"})
+                                                            "(材料の行が無い層。最後の層は材料に入らない)。その層のユニットでは、gne の道具は"
+                                                            "手前で一番近い層の向きを使います"})
     if along is not None and abs(along) < 0.1:
         notes.append({"code": "small_mean", "text": f"選ぶ層 L{S} で、残差の平均の差とこの向きの cos が {along:+.3f} です。A と B の平均の差がこの向きに"
                                                     "ほとんど無いので、heads writes の点数(選ぶ層での A と B の差の縮み)はほぼ 0 になり、"

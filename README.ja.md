@@ -126,6 +126,7 @@ gne heads causal --name evil                                  # 出力を 0 に�
 gne heads allocate --name evil --target -3 --n-heads 6,5,4    # 効率(強さあたりの射影の値の下がり方)に比例して強さを配り、ヘッド数を減らした組を比べる
 gne heads allocate --name evil --target -3 --method greedy     # または、いちばん効くヘッドの強さを 1 段ずつ上げていく
 gne heads writes --name evil                                  # 全部のヘッド・線形注意のヘッド・MLP のニューロンを、方向への書き込みの量で並べ、上位を確かめる
+gne heads geometry --name evil                                # 層ごとの更新ベクトル(A − B)を、層どうしの cos・特異値分解・半分ずつの一致で比べる(docs/layer-geometry.md)
 gne headproj check --layer 20 --neuron 4096 --direction evil  # ニューロンの方向成分の射影(20:N4096:s1@evil)が式どおりか
 gne headproj check --layer 20 --whole ffn --direction evil     # 層の MLP の出力全体の射影(20:ffn:s1@evil。注意の出力全体は --whole attn・20:attn:s1@evil)
 gne heads candidates --alloc evil --prompts held_out.yaml     # 組 × 倍率で応答を作り、どの候補か伏せた採点のファイルを書く
