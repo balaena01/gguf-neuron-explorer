@@ -107,9 +107,11 @@ def parse_kinds(spec) -> tuple[str, ...]:
 def measure_writes(session, ds, cs, *, select_layer: int, positions: str = "last", subset: str = "all",
                    max_examples: int | None = None, kinds=KINDS, direction_layer: str = "own", top_q: int = 256,
                    candidate_layers: list[int] | None = None, loop_direction: str = "first",
-                   progress=None) -> tuple[dict, dict]:
+                   keep_q: bool = False, progress=None) -> tuple[dict, dict]:
     """部品ごとの書き込み(と層ごとの更新のベクトル)を測る。戻り値 (まとめ, 保存する配列)。candidate_layers を渡すと、
-    順位に入れる部品をその層のものに絞る(層ごとの更新のベクトルは全部の層で測る)。loop_direction は unit_layers。"""
+    順位に入れる部品をその層のものに絞る(層ごとの更新のベクトルは全部の層で測る)。loop_direction は unit_layers。
+    keep_q なら、質問ごと・層ごとの更新(注意の出力全体と MLP の出力全体)も q_* の配列で返す(gne heads geometry の材料。
+    float16 で、層ごとに最大の絶対値が 1024 になるよう q_scale_* で割ってある)。"""
     from .attn import _names, _probe, head_out_names, writer_out_name
     from .capture import pick_act_name
     from .direction import Scorer
@@ -151,6 +153,7 @@ def measure_writes(session, ds, cs, *, select_layer: int, positions: str = "last
     # 捕まえる名前
     items = {s: [(ids, rows) for ids, rows in sc.items[s] if len(ids) <= e.probe_ubatch] for s in "AB"}
     skipped = {s: len(sc.items[s]) - len(items[s]) for s in "AB"}
+    qidx = {s: [sc.index_side[s][j] for j, (ids, _) in enumerate(sc.items[s]) if len(ids) <= e.probe_ubatch] for s in "AB"}
     if not items["A"] or not items["B"]:
         raise GneError("BAD_ARGS", f"質問がどれも attention の捕捉の上限 {e.probe_ubatch} トークンより長く、書き込みを測れません")
     probe, ctx = _probe(e, need=max(len(ids) for s in "AB" for ids, _ in items[s]))
@@ -242,6 +245,16 @@ def measure_writes(session, ds, cs, *, select_layer: int, positions: str = "last
            for x in ("a", "b", "diff", "diff_h0", "diff_h1")}
     chk_attn = np.full(NL, np.nan, np.float32)
     chk_mlp = np.full(NL, np.nan, np.float32)
+    qup = {f"{k}_{x.lower()}": np.zeros((nq[x], NL, n_embd), np.float16) for k in ("attn", "mlp") for x in "AB"} if keep_q else None
+    qsc = {k: np.zeros(NL, np.float32) for k in qup} if keep_q else None
+
+    def keep_q_rows(k, L, W, key):
+        """質問ごとの更新(W · 質問ごとの出力の平均)を float16 で持つ。層ごとに最大の絶対値が 1024 になるよう割る(桁あふれを避ける)。"""
+        for x in "AB":
+            Q = stack(x, key, L) @ W.T
+            m = float(np.abs(Q).max()) / 1024.0 or 1.0
+            qup[f"{k}_{x.lower()}"][:, L] = (Q / m).astype(np.float16)
+            qsc[f"{k}_{x.lower()}"][L] = m
     cos_sel = np.full(NL, np.nan, np.float32)
 
     stacks: dict = {}
@@ -269,6 +282,8 @@ def measure_writes(session, ds, cs, *, select_layer: int, positions: str = "last
             va, vb = Wm @ mA, Wm @ mB
             upd[f"{k}_a"][L], upd[f"{k}_b"][L], upd[f"{k}_diff"][L] = va, vb, va - vb
             upd[f"{k}_diff_h0"][L], upd[f"{k}_diff_h1"][L] = Wm @ (mA0 - mB0), Wm @ (mA1 - mB1)
+            if qup is not None:
+                keep_q_rows("attn", L, Wm, "mx")
             if L in mixn and per["A"]["mo"][L]:
                 real = stack("A", "mo", L).mean(axis=0)
                 if mixn[L].startswith("ffn_inp"):           # ffn_inp − 層の入力(前の層の出力)
@@ -286,6 +301,8 @@ def measure_writes(session, ds, cs, *, select_layer: int, positions: str = "last
                 va, vb = Wd @ mA, Wd @ mB
                 upd["mlp_a"][L], upd["mlp_b"][L], upd["mlp_diff"][L] = va, vb, va - vb
                 upd["mlp_diff_h0"][L], upd["mlp_diff_h1"][L] = Wd @ (mA0 - mB0), Wd @ (mA1 - mB1)
+                if qup is not None:
+                    keep_q_rows("mlp", L, Wd, "ma")
                 if L in ffnn and per["A"]["fo"][L]:
                     real = stack("A", "fo", L).mean(axis=0)
                     chk_mlp[L] = float(np.linalg.norm(va - real) / max(np.linalg.norm(real), 1e-12))
@@ -450,6 +467,10 @@ def measure_writes(session, ds, cs, *, select_layer: int, positions: str = "last
         "head_q_a": HQ["A"].astype(np.float32), "head_q_b": HQ["B"].astype(np.float32),
         "top_label": np.array([r_["label"] for r_ in topu]), "top_q_a": tq["A"], "top_q_b": tq["B"],
     })
+    if qup is not None:                                # 質問ごとの更新(keep_q)。対になる = 両側で同じ質問の同じ番号
+        arrays.update({f"q_upd_{k}": v for k, v in qup.items()}, **{f"q_scale_{k}": v for k, v in qsc.items()},
+                      q_index_a=np.array(qidx["A"], np.int32), q_index_b=np.array(qidx["B"], np.int32),
+                      q_paired=np.bool_(not cs.separate_prompts and qidx["A"] == qidx["B"]))
     for L, (ao, bo, as_, bs, _, _) in neu.items():
         arrays[f"neuron_a_own_{L}"] = ao.astype(np.float32)
         arrays[f"neuron_b_own_{L}"] = bo.astype(np.float32)

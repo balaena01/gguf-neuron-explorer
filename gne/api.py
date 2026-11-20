@@ -2810,11 +2810,12 @@ class Session:
                      kinds="all", positions: str = "last", subset: str = "all", max_examples: int | None = None,
                      verify_top: int = 64, verify_sample: int = 16, verify_mode: str = "proj", verify_examples: int | None = 64,
                      score_layers: list[int] | None = None, direction_layer: str = "own", name: str | None = None,
-                     top_q: int = 256, loop_direction: str = "first") -> dict:
+                     top_q: int = 256, loop_direction: str = "first", save_q: bool = False) -> dict:
         """全部の部品(注意ヘッド・線形注意のヘッド・MLP のニューロン。kinds に layers を足すと層の書き込み全体も)を、方向への
         書き込みの量で順位づけし、上位を 1 個ずつ
         s=1 で射影して(verify_mode ablate なら止めて)確かめる(gne/unitwrites.py)。結果は <root>/heads/<model_id>/<name>.writes.json
-        と .writes.npz(層ごとの更新のベクトル・部品ごとの書き込み)。verify_top 0 で確かめを飛ばす。"""
+        と .writes.npz(層ごとの更新のベクトル・部品ごとの書き込み)。verify_top 0 で確かめを飛ばす。save_q なら、質問ごと・層ごとの
+        更新を別のファイル <name>.writes_q.npz に保存する(gne heads geometry の質問に沿った分解・ラベル入れ替えの基準の材料)。"""
         from .causal import prepare
         from .direction import base_layer_of, score_layers_default
         from .unitwrites import measure_writes, parse_kinds, save_writes, verify_rows, verify_units
@@ -2827,7 +2828,11 @@ class Session:
         S = int(select_layer) if select_layer is not None else self.weights.n_main - 2
         summ, arrays = measure_writes(self, ds, cs, select_layer=S, positions=positions, subset=subset,
                                       max_examples=max_examples, kinds=parse_kinds(kinds), direction_layer=direction_layer,
-                                      top_q=top_q, loop_direction=loop_direction, progress=self.progress)
+                                      top_q=top_q, loop_direction=loop_direction, keep_q=bool(save_q), progress=self.progress)
+        qarr = {k: arrays.pop(k) for k in [k for k in arrays if k.startswith("q_")]}   # .writes.npz の形は変えない
+        if qarr:                                       # 質問の文を引くための対照集合(geometry が同じものか sha で確かめる)
+            src = Path(contrast).resolve() if contrast else ds.meta.get("source")
+            qarr.update(q_contrast=np.array(str(src or "")), q_contrast_sha=np.array(str(cs.sha)))
         ver = None
         if verify_top and verify_top > 0:
             b = base_layer_of(ds)
@@ -2838,8 +2843,13 @@ class Session:
             ver = verify_units(self, st, verify_rows(summ["rows"], int(verify_top), int(verify_sample)), mode=verify_mode,
                                progress=self.progress)
         pz, pj = save_writes(self, name, summ, arrays, ver)
+        pq = None
+        if qarr:
+            from .geometry import save_q
+            pq = save_q(self.store.heads_dir(self.meta.model_id), name, qarr)
         return {**{k: v for k, v in summ.items() if k != "rows"}, "rows": summ["rows"][:200], "verify": ver, "name": name,
-                "path": str(pj), "npz": str(pz), "seconds": time.perf_counter() - t0}
+                "path": str(pj), "npz": str(pz), **({"q_npz": str(pq), "q_bytes": pq.stat().st_size} if pq else {}),
+                "seconds": time.perf_counter() - t0}
 
     def _refine_chain(self, name: str, row: dict) -> dict:
         """残りから追加の土台。name が一括の結果なら土台はその行の組(0 回目 = 元の組)。name が残りから追加の結果なら、

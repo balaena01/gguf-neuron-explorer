@@ -351,6 +351,167 @@ def test_cli_heads_geometry_json_and_text(tmp_path):
     assert err.error.code == "FILE_NOT_FOUND"
 
 
+# --- 質問ごとの更新(heads writes --save-q)・ラベル入れ替えの基準・質問に沿った分解 -----------------------------------
+
+def _q_arrays(QA, QB, paired=False, contrast=None, sha=None):
+    """measure_writes(keep_q)と同じ形の q_* の配列。QA・QB は {"attn": (質問, 層, d), "mlp": …}。"""
+    out = {}
+    for x, D in (("a", QA), ("b", QB)):
+        for k in ("attn", "mlp"):
+            Q = D[k]
+            m = np.abs(Q).max(axis=(0, 2)) / 1024.0
+            m[m == 0] = 1.0
+            out[f"q_upd_{k}_{x}"] = (Q / m[None, :, None]).astype(np.float16)
+            out[f"q_scale_{k}_{x}"] = m.astype(np.float32)
+    out["q_index_a"], out["q_index_b"] = np.arange(len(QA["attn"]), dtype=np.int32), np.arange(len(QB["attn"]), dtype=np.int32)
+    out["q_paired"] = np.bool_(paired)
+    if contrast:
+        out["q_contrast"], out["q_contrast_sha"] = np.array(str(contrast)), np.array(str(sha))
+    return out
+
+
+def _material_from_q(QA, QB, mixer):
+    """質問ごとの更新から、measure_writes と同じ作り方の材料(側ごとの平均・差・偶数番目と奇数番目の半分ずつの差)。"""
+    n_layer, d = QA["attn"].shape[1], QA["attn"].shape[2]
+    z = _material(n_layer=n_layer, d=d, mixer=mixer, n_a=len(QA["attn"]), n_b=len(QB["attn"]))
+    hA, hB = np.arange(len(QA["attn"])) % 2 == 0, np.arange(len(QB["attn"])) % 2 == 0
+    for k in ("attn", "linear", "mlp"):
+        for x in ("a", "b", "diff", "diff_h0", "diff_h1"):
+            z[f"upd_{k}_{x}"][:] = 0
+    for L in range(n_layer):
+        for part, key in (("attn", "attn" if mixer[L] == "attention" else "linear"), ("mlp", "mlp")):
+            a, b = QA[part][:, L].astype(np.float64), QB[part][:, L].astype(np.float64)
+            z[f"upd_{key}_a"][L], z[f"upd_{key}_b"][L] = a.mean(0), b.mean(0)
+            z[f"upd_{key}_diff"][L] = a.mean(0) - b.mean(0)
+            z[f"upd_{key}_diff_h0"][L] = a[hA].mean(0) - b[hB].mean(0)
+            z[f"upd_{key}_diff_h1"][L] = a[~hA].mean(0) - b[~hB].mean(0)
+    for x in ("a", "b", "diff", "diff_h0", "diff_h1"):
+        z[f"upd_layer_{x}"] = z[f"upd_attn_{x}"] + z[f"upd_linear_{x}"] + z[f"upd_mlp_{x}"]
+    return z
+
+
+def _synthetic_q(nA=24, nB=24, n_layer=3, d=16, shift=3.0, seed=11):
+    rng = np.random.default_rng(seed)
+    QA = {k: rng.standard_normal((nA, n_layer, d)) for k in ("attn", "mlp")}
+    QB = {k: rng.standard_normal((nB, n_layer, d)) for k in ("attn", "mlp")}
+    for k in QA:
+        QA[k][:, :, 0] += shift                                                      # A 側だけ次元 0 に寄る
+    return QA, QB
+
+
+def test_save_and_load_q_roundtrip_and_mismatch(tmp_path):
+    QA, QB = _synthetic_q()
+    z = _material_from_q(QA, QB, ["attention"] * 3)
+    G.save_q(tmp_path, "m", _q_arrays(QA, QB))
+    qd, note = G.load_q(tmp_path, "m", z)
+    assert note is None and qd["match_err"] < 1e-3 and not qd["paired"]
+    assert np.allclose(qd["A"]["attn"], QA["attn"], atol=2e-3) and np.allclose(qd["B"]["mlp"], QB["mlp"], atol=2e-3)
+    z2 = dict(z, upd_mlp_a=z["upd_mlp_a"] + 1.0)                                       # 材料を作り直した後の古いファイル
+    qd2, note2 = G.load_q(tmp_path, "m", z2)
+    assert qd2 is None and note2["code"] == "q_mismatch"
+    assert G.load_q(tmp_path, "nothing", z) == (None, None)
+    big = {k: v * 1e5 for k, v in QA.items()}                                          # float16 の範囲を超える値も、割ってあるので残る
+    G.save_q(tmp_path, "big", _q_arrays(big, QB))
+    qd3, _ = G.load_q(tmp_path, "big", _material_from_q(big, QB, ["attention"] * 3))
+    assert qd3 is not None and np.allclose(qd3["A"]["attn"], big["attn"], rtol=2e-3, atol=2e2)
+
+
+def test_label_null_shuffle_and_sign_flip():
+    rng = np.random.default_rng(12)
+    QA = rng.standard_normal((20, 3, 30))
+    QB = rng.standard_normal((20, 3, 30))
+    QA[:, 0, 0] += 5.0                                                                 # 行 0 だけ A と B が違う
+    nl = G.label_null(QA, QB, paired=False, n_perm=100, seed=1, k=3)
+    obs = np.linalg.norm(QA.mean(0) - QB.mean(0), axis=1)
+    n95 = np.percentile(nl["norms"], 95, axis=0)
+    assert obs[0] > 1.5 * n95[0] and np.mean(nl["norms"][:, 0] >= obs[0]) == 0     # 違いのある行は基準を超える
+    assert obs[1] < 1.6 * n95[1] and obs[2] < 1.6 * n95[2]
+    assert nl["norms"].shape == (100, 3) and nl["cos_abs"].shape == (100, 3, 3) and nl["explained"]["rows"].shape == (100, 3)
+    assert np.allclose(nl["explained"]["rows"].sum(axis=1), 1.0) and abs(nl["half_cos"].mean()) < 0.1
+    # 対になった対照集合: 差が全部同じなら、符号を入れ替えた平均の大きさは元の大きさ以下
+    E = np.tile(rng.standard_normal((1, 2, 10)), (8, 1, 1))
+    ns = G.label_null(E, np.zeros_like(E), paired=True, n_perm=50, seed=2, k=2)
+    assert ns["scheme"] == "sign_flip" and np.all(ns["norms"] <= np.linalg.norm(E[0], axis=1) + 1e-9)
+    assert np.any(ns["norms"] < 0.99 * np.linalg.norm(E[0], axis=1))
+    # 同じ乱数なら同じ結果
+    assert np.allclose(G.label_null(QA, QB, False, 20, 5, 3)["norms"], G.label_null(QA, QB, False, 20, 5, 3)["norms"])
+
+
+def test_within_row_finds_leftover_direction():
+    rng = np.random.default_rng(13)
+    d = np.zeros(20)
+    d[0] = 4.0
+    w = np.zeros(20)
+    w[1] = 1.0
+    alpha = np.where(np.arange(32) % 2 == 0, 3.0, -3.0) * rng.uniform(0.8, 1.2, 32)
+    EA = d + alpha[:, None] * w + 0.1 * rng.standard_normal((32, 20))                  # 平均の向き d と、質問ごとに ± の向き w
+    EB = 0.1 * rng.standard_normal((32, 20))
+    out = G.within_row(EA, EB, paired=False, r_own=G._unit(d), rS=None, k=3)
+    E = EA - EB.mean(0)
+    dh = G._unit(E.mean(0))
+    assert out["share_mean"] == pytest.approx(((E @ dh) ** 2).sum() / (E ** 2).sum())
+    assert out["share_own"] == pytest.approx(((E @ G._unit(d)) ** 2).sum() / (E ** 2).sum())
+    assert out["share_select"] is None
+    assert out["leftover_total"] == pytest.approx(1 - out["share_mean"])
+    assert out["leftover_explained"][0] > 0.9 * out["leftover_total"]                 # 取り残しのほとんどが w の向き
+    assert out["leftover_stability"][0] > 0.95 and out["leftover_ab_ratio"][0] > 50
+    assert np.allclose(out["q_cos"], (E @ dh) / np.linalg.norm(E, axis=1))
+    p = G.within_row(EA, EB, paired=True, r_own=None, rS=None, k=3)
+    assert "leftover_ab_ratio" not in p and p["share_own"] is None and len(p["q_cos"]) == 32
+
+
+def test_heads_geometry_with_question_updates(tmp_path):
+    from gne.schemas import HeadsGeometryOut
+    s, _ = _session_with_material(tmp_path, refine=False)
+    hd = s.store.heads_dir(s.meta.model_id)
+    QA, QB = _synthetic_q(n_layer=3, d=16)
+    z = _material_from_q(QA, QB, ["attention"] * 3)
+    np.savez_compressed(hd / "d1.writes.npz", **z)
+    cpath = tmp_path / "c.yaml"
+    cpath.write_text("system_a: a\nsystem_b: b\nuser_prompts:\n" + "".join(f"  - question {i}\n" for i in range(24)), encoding="utf-8")
+    from gne.reverse import ContrastSet
+    G.save_q(hd, "d1", _q_arrays(QA, QB, contrast=cpath, sha=ContrastSet.load(cpath).sha))
+    d = s.heads_geometry("d1", parts="layer,attn,mlp", permutations=40)
+    assert d["material"]["q"]["row_err_max"] < 2e-3 and d["null"]["n_perm"] == 40 and d["null"]["scheme"] == "shuffle"
+    assert all("norm_null95" in r and 0 < r["norm_p"] <= 1 for r in d["rows"])
+    assert len(d["svd"]["rows"]["null95"]) == d["svd"]["rows"]["k"] and "above_null95" in d["similarity"]
+    assert len(d["within"]) == len(d["rows"]) and len(d["within"][0]["q_cos"]) == 24
+    ws = d["within_summary"]
+    assert ws["lowest"][0]["text"].startswith("question ") and len(ws["q_mean_cos"]) == 24
+    zz = np.load(d["npz"])
+    assert zz["cos_null95"].shape == (9, 9) and zz["within_q_cos"].shape == (9, 24)
+    HeadsGeometryOut.model_validate({**s.envelope("heads geometry"), **json.loads(Path(d["path"]).read_text(encoding="utf-8"))})
+    assert "no_q" not in {n["code"] for n in d["notes"]}
+    lines = "\n".join(G.human_lines(d))
+    assert "質問ごとの差の分解" in lines and "入れ替え95%" in lines and "大きさ÷基準" in lines
+    d0 = s.heads_geometry("d1", permutations=0, out_name="d1np")
+    assert d0["null"] is None and d0["within"] is not None and "norm_null95" not in d0["rows"][0]
+
+
+@pytest.mark.model
+@pytest.mark.skipif(not MODEL.exists(), reason=f"{MODEL} がありません")
+def test_heads_writes_save_q_with_model(tmp_path):
+    """measure_writes の keep_q: 質問ごとの更新を別のファイルに保存し、.writes.npz の形は変えない。質問の平均は材料の平均と合う。"""
+    from gne.api import Session
+    s = Session(MODEL, root=tmp_path, n_gpu_layers=int(os.environ.get("GNE_TEST_NGL", "-1")), n_ctx=2048)
+    try:
+        s.direction(contrast=ROOT / "configs" / "contrast" / "evil.yaml", positions="last")
+        out = s.heads_writes("evil", verify_top=0, name="ev_q", max_examples=8, save_q=True)
+        assert Path(out["q_npz"]).exists() and out["q_bytes"] > 0
+        z = np.load(out["npz"])
+        assert not [k for k in z.files if k.startswith("q_")]
+        qd, note = G.load_q(s.store.heads_dir(s.meta.model_id), "ev_q", {k: z[k] for k in z.files})
+        assert note is None and qd["match_err"] < 5e-3 and qd["paired"]
+        NL, ne = s.weights.n_main - 1, s.meta.n_embd
+        assert qd["A"]["attn"].shape == (out["n"]["A"], NL, ne)
+        d = s.heads_geometry("ev_q", permutations=20)
+        assert d["material"]["q"]["row_err_max"] < 5e-3 and d["within"] and d["null"]["scheme"] == "sign_flip"
+        out2 = s.heads_writes("evil", verify_top=0, name="ev_noq", max_examples=8)
+        assert "q_npz" not in out2 and not (s.store.heads_dir(s.meta.model_id) / "ev_noq.writes_q.npz").exists()
+    finally:
+        s.close()
+
+
 # --- MCP(Qwen3-0.6B の GGUF で gne mcp を起動する。モデルは流さない)------------------------------------------------
 
 @pytest.mark.model

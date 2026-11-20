@@ -3219,6 +3219,7 @@ def heads_writes(c: Common, holder: dict,
                  score_layers: Optional[str] = typer.Option(None, "--score-layers", help="確かめで射影の値を並べる層(既定は基準層と後段)"),
                  out_name: Optional[str] = typer.Option(None, "--out-name", help="保存名(既定は方向の名前)"),
                  loop_direction: str = typer.Option("first", "--loop-direction", help="重みを 2 回使うモデル: ループの中の部品を 1 回目の段(first)か 2 回目の段(second)の方向で測る"),
+                 save_q: bool = typer.Option(False, "--save-q", help="質問ごと・層ごとの更新を <名前>.writes_q.npz に保存する(gne heads geometry の質問に沿った分解とラベル入れ替えの基準に使う。Qwen3.5-4B・各側 16 問で約 10 MB)"),
                  show: int = typer.Option(30, "--show")):
     """全部の部品(注意ヘッド・線形注意のヘッド・MLP のニューロン)を、方向への書き込みの量で順位づけする。質問 1 問につき 1 回流すだけで、
     部品ごとに「その層の方向 r̂ にどれだけ書いたか」(ヘッドは出力·r̂、ニューロンは活性 ×(ffn_down の列·r̂))を読み、点数 =
@@ -3229,7 +3230,7 @@ def heads_writes(c: Common, holder: dict,
     d = s.heads_writes(name, contrast=contrast, select_layer=select_layer, kinds=unit_kinds, positions=positions, subset=subset,
                        max_examples=max_examples, verify_top=verify_top, verify_sample=verify_sample, verify_mode=verify_mode,
                        verify_examples=verify_examples, score_layers=s.score_layers_of(score_layers), name=out_name,
-                       loop_direction=loop_direction)
+                       loop_direction=loop_direction, save_q=save_q)
     ts = d.get("totals_share") or {}
     lines = [f"{d['path']}(選ぶ層 L{d['select_layer']}、A {d['n']['A']} 問・B {d['n']['B']} 問、A−B の差 {d['gap']:.2f}、{d['seconds']:.0f} 秒)",
              "部品: " + "・".join(f"{KIND_JA[k]} {n}" for k, n in d["n_units"].items() if n)
@@ -3251,6 +3252,8 @@ def heads_writes(c: Common, holder: dict,
     if d.get("verify"):
         lines.append("点数と測った効き目の順位相関(Spearman、A−B の差の縮み): " + _verify_corr_line(d["verify"]["spearman"]))
     lines.append(f"配列: {d['npz']}(層ごとの更新のベクトル・部品ごとの書き込み)")
+    if d.get("q_npz"):
+        lines.append(f"質問ごとの更新: {d['q_npz']}({d['q_bytes'] / 1e6:.1f} MB。gne heads geometry --name {d['name']} で使う)")
     lines.append("弱点: 直接の書き込みしか見ない。後ろの層の書き手を動かしているだけの部品は、点数に出ない")
     return d, "\n".join(lines), 0
 
@@ -4098,17 +4101,21 @@ def heads_geometry(c: Common, holder: dict,
                    min_half_cos: Optional[float] = typer.Option(None, "--min-half-cos", help="信用しない印の基準(半分どうしの cos がこれ未満の行。既定 0.5)"),
                    compare: Optional[str] = typer.Option(None, "--compare", help="比べる方向ベクトル(カンマ区切り。既定は heads refine の方向 <名前>_r1 などがあればそれ)"),
                    exclude_dims: Optional[str] = typer.Option(None, "--exclude-dims", help="計算から除く残差の次元(例 1234,567。行ごとの上位の次元を見て決める)"),
-                   out_name: Optional[str] = typer.Option(None, "--out-name", help="結果の保存名(既定は --name と同じ)")):
+                   out_name: Optional[str] = typer.Option(None, "--out-name", help="結果の保存名(既定は --name と同じ)"),
+                   permutations: Optional[int] = typer.Option(None, "--permutations", help="A と B のラベルを入れ替えて作る基準の回数(質問ごとの更新 <名前>.writes_q.npz があるときだけ。既定 200、0 で切る)"),
+                   perm_seed: int = typer.Option(0, "--perm-seed", help="ラベルの入れ替えの乱数")):
     """heads writes の材料の、層ごとの更新ベクトル(A 側の平均の更新 − B 側の平均の更新。その層が残差に足した量)を比べる。
     層どうしのコサイン類似度の行列、特異値分解(行の大きさをそろえる・そろえない。基準は、行が直交していたときの値と、半分どうしの
     差から作る雑音の目安)、質問を半分ずつに分けた差どうしの一致、方向ベクトルとの cos、同じ重みを 2 回使うモデルでは 1 回目と 2 回目、
-    heads refine の方向との cos。モデルは流さない(GPU を使わない)。かたまりや上位の向きは、更新の差が似ていることしか示さない
-    (A と B の質問の話題・長さの違いも映る)。"""
-    from .geometry import HALF_COS_MIN, TOP_K, human_lines
+    heads refine の方向との cos。heads writes --save-q で質問ごとの更新を保存してあれば、ラベル入れ替えの基準と、同じ層の中で
+    質問ごとの差を分解した結果(1 本の方向で説明できる割合・取り残しの向きとその安定度)も出す。モデルは流さない(GPU を使わない)。
+    かたまりや上位の向きは、更新の差が似ていることしか示さない(A と B の質問の話題・長さの違いも映る)。"""
+    from .geometry import HALF_COS_MIN, PERMUTATIONS, TOP_K, human_lines
     s = holder["session"] = c.session()
     d = s.heads_geometry(name, parts=parts, normalize=normalize, top_k=TOP_K if top_k is None else top_k, layers=layers,
                          min_half_cos=HALF_COS_MIN if min_half_cos is None else min_half_cos, compare=compare,
-                         exclude_dims=exclude_dims, out_name=out_name)
+                         exclude_dims=exclude_dims, out_name=out_name,
+                         permutations=PERMUTATIONS if permutations is None else permutations, seed=perm_seed)
     return d, "\n".join(human_lines(d)), 0
 
 

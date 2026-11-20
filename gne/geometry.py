@@ -387,11 +387,204 @@ def compare_names(direction_dir: Path, name: str) -> list[str]:
     return sorted(names, key=lambda x: (len(x), x))
 
 
+# --- 質問ごとの更新(heads writes --save-q の <名前>.writes_q.npz)-----------------------------------------------
+
+Q_MATCH_TOL = 0.01        # 質問ごとの更新の平均と材料の側ごとの平均の相対誤差の上限(float16 の丸めは 1e-3 程度)
+PERMUTATIONS = 200        # ラベル入れ替えの基準の回数の既定
+
+
+def save_q(heads_dir: Path, name: str, qarr: dict) -> Path:
+    """質問ごと・層ごとの更新(measure_writes の keep_q)を <名前>.writes_q.npz に保存する(圧縮しない。float16 はほとんど縮まない)。"""
+    heads_dir.mkdir(parents=True, exist_ok=True)
+    p = heads_dir / f"{name}.writes_q.npz"
+    np.savez(p, **qarr)
+    return p
+
+
+def load_q(heads_dir: Path, name: str, z: dict) -> tuple[dict | None, dict | None]:
+    """(質問ごとの更新, 知らせ)。無ければ (None, None)。質問の平均が材料の側ごとの平均と合わない(材料を作り直したあとの古い
+    ファイルなど)ときは使わず、知らせを返す。戻り値の A・B は {"attn": (質問, 層, d), "mlp": …}(float32)。"""
+    p = heads_dir / f"{name}.writes_q.npz"
+    if not p.exists():
+        return None, None
+    q = np.load(p)
+
+    def get(k):
+        return q[f"q_upd_{k}"].astype(np.float32) * q[f"q_scale_{k}"].astype(np.float32)[None, :, None]
+    A, B = {"attn": get("attn_a"), "mlp": get("mlp_a")}, {"attn": get("attn_b"), "mlp": get("mlp_b")}
+    err = 0.0
+    for side, D in (("a", A), ("b", B)):
+        refs = {"attn": z[f"upd_attn_{side}"].astype(np.float64) + z[f"upd_linear_{side}"].astype(np.float64),
+                "mlp": z[f"upd_mlp_{side}"].astype(np.float64)}
+        for k in ("attn", "mlp"):
+            if D[k].shape[1:] != refs[k].shape:
+                return None, {"code": "q_mismatch", "text": f"{p.name} の形が材料と違うので、質問ごとの更新は使いません"}
+            nr = float(np.linalg.norm(refs[k]))
+            if nr > 0:
+                err = max(err, float(np.linalg.norm(D[k].astype(np.float64).mean(0) - refs[k]) / nr))
+    if err > Q_MATCH_TOL:
+        return None, {"code": "q_mismatch", "text": f"{p.name} の質問ごとの更新の平均が材料の平均と合いません(相対誤差 {err:.1%})。材料を作り直した"
+                                                    "あとの古いファイルの疑いがあるので使いません(heads writes --save-q で作り直してください)"}
+    return {"A": A, "B": B, "paired": bool(q["q_paired"]), "index_a": [int(x) for x in q["q_index_a"]],
+            "index_b": [int(x) for x in q["q_index_b"]], "match_err": err, "file": p.name, "bytes": p.stat().st_size,
+            "contrast": str(q["q_contrast"]) if "q_contrast" in q.files else None,
+            "contrast_sha": str(q["q_contrast_sha"]) if "q_contrast_sha" in q.files else None}, None
+
+
+def q_rows(qd: dict, rows: list[dict], layer_pos: dict[int, int], exclude_dims=()) -> tuple[np.ndarray, np.ndarray]:
+    """行ごとの質問ごとの更新 (A の質問, 行, d)・(B の質問, 行, d)。層全体 = 注意 + MLP。"""
+    def one(D):
+        out = np.zeros((D["attn"].shape[0], len(rows), D["attn"].shape[2]), np.float32)
+        for i, r in enumerate(rows):
+            j = layer_pos[r["layer"]]
+            out[:, i] = (D["attn"][:, j] + D["mlp"][:, j]) if r["part"] == "layer" else D[r["part"]][:, j]
+        if len(exclude_dims):
+            out[:, :, list(exclude_dims)] = 0.0
+        return out
+    return one(qd["A"]), one(qd["B"])
+
+
+def _sym_eigvals(G: np.ndarray) -> np.ndarray:
+    """対称行列(行列の束)の固有値を大きい順に。"""
+    return np.linalg.eigvalsh(G)[..., ::-1]
+
+
+def label_null(QA: np.ndarray, QB: np.ndarray, paired: bool, n_perm: int = PERMUTATIONS, seed: int = 0,
+               k: int = TOP_K, chunk: int = 10) -> dict:
+    """A と B のラベルを入れ替えて作る基準(§2.5)。対になった対照集合は質問ごとの差の符号を無作為に入れ替え、対にならない対照集合は
+    両側の質問を混ぜて同じ数ずつに分け直す。入れ替えた差ごとに、行の大きさ・半分どうしの cos・行どうしの |cos|・特異値分解の
+    寄与率(両方の版)を出し、n_perm 回の分布を返す。半分は、入れ替えたあとの各側の並びの偶数番目・奇数番目。
+    QA・QB は (質問, 行, d)。"""
+    rng = np.random.default_rng(seed)
+    nA, nB = QA.shape[0], QB.shape[0]
+    nr, d = QA.shape[1], QA.shape[2]
+    if paired:
+        U = (QA - QB).reshape(nA, nr * d)
+    else:
+        U = np.concatenate([QA, QB]).reshape(nA + nB, nr * d)
+    N = U.shape[0]
+    kk = min(int(k), nr)
+    norms, hcos, ex_rows, ex_none = [], [], [], []
+    cos_abs = []
+    done = 0
+    while done < n_perm:
+        P = min(chunk, n_perm - done)
+        W, W0, W1 = np.zeros((P, N)), np.zeros((P, N)), np.zeros((P, N))
+        for p_ in range(P):
+            if paired:
+                sg = rng.choice([-1.0, 1.0], size=nA)
+                ev = np.arange(nA) % 2 == 0
+                W[p_] = sg / nA
+                W0[p_] = np.where(ev, sg / max(1, ev.sum()), 0.0)
+                W1[p_] = np.where(~ev, sg / max(1, (~ev).sum()), 0.0)
+            else:
+                pi = rng.permutation(N)
+                a, b = pi[:nA], pi[nA:]
+                W[p_, a], W[p_, b] = 1.0 / nA, -1.0 / nB
+                for Wh, sl in ((W0, slice(0, None, 2)), (W1, slice(1, None, 2))):
+                    ah, bh = a[sl], b[sl]
+                    Wh[p_, ah], Wh[p_, bh] = 1.0 / max(1, len(ah)), -1.0 / max(1, len(bh))
+        D = (W @ U).reshape(P, nr, d)
+        D0 = (W0 @ U).reshape(P, nr, d)
+        D1 = (W1 @ U).reshape(P, nr, d)
+        nd = np.linalg.norm(D, axis=2)
+        norms.append(nd)
+        n0, n1 = np.linalg.norm(D0, axis=2), np.linalg.norm(D1, axis=2)
+        hcos.append(np.einsum("prd,prd->pr", D0, D1) / np.maximum(n0 * n1, 1e-30))
+        Dt = D / np.maximum(nd, 1e-30)[:, :, None]
+        C = Dt @ Dt.transpose(0, 2, 1)
+        cos_abs.append(np.abs(C).astype(np.float32))
+        er = _sym_eigvals(C)
+        ex_rows.append(er[:, :kk] / np.maximum(er.sum(axis=1, keepdims=True), 1e-30))
+        en = _sym_eigvals(D @ D.transpose(0, 2, 1))
+        ex_none.append(en[:, :kk] / np.maximum(en.sum(axis=1, keepdims=True), 1e-30))
+        done += P
+    return {"scheme": "sign_flip" if paired else "shuffle", "n_perm": int(n_perm), "seed": int(seed),
+            "norms": np.concatenate(norms), "half_cos": np.concatenate(hcos), "cos_abs": np.concatenate(cos_abs),
+            "explained": {"rows": np.concatenate(ex_rows), "none": np.concatenate(ex_none)}}
+
+
+def within_row(EA: np.ndarray, EB: np.ndarray, paired: bool, r_own: np.ndarray | None, rS: np.ndarray | None, k: int) -> dict:
+    """同じ行(層・部品)の中で、質問ごとの差を分解する(§2.6)。EA・EB はその行の A 側・B 側の質問ごとの更新 (質問, d)。
+    1. 質問ごとの差 e_q: 対になった対照集合では u_q^A − u_q^B、対にならない対照集合では u_q^A − ū^B(行の平均は d)。
+    2. 1 本の方向での説明率 Σ(e_q·v)² / Σ‖e_q‖²(v = d̂・r̂_l・r̂_S)。
+    3. e_q を並べた行列の特異値分解(中心をずらさない)の寄与率と、1 番目の向きと d̂・r̂_l の cos。
+    4. 1 本の方向で取り残す分 E (I − d̂d̂ᵀ) の特異値分解の寄与率(Σ‖e_q‖² に対する割合)。
+    5. 取り残しの向きの安定度: 偶数番目・奇数番目の質問で別々に求めた向きどうしの |cos| と部分空間の重なり。
+       対にならない対照集合では、片方の半分で求めた向きに沿った A 側のもう半分の質問の広がり ÷ B 側の質問どうしの広がり
+       (1 前後なら、ふつうの質問どうしの違いと同じ程度)。
+    6. 質問ごとの cos(e_q, d̂)。"""
+    EA, EB = EA.astype(np.float64), EB.astype(np.float64)
+    E = EA - EB if paired else EA - EB.mean(0)
+    dv = E.mean(0)
+    nd = float(np.linalg.norm(dv))
+    dh = dv / nd if nd > 0 else dv
+    sq = (E ** 2).sum(axis=1)
+    tot = float(sq.sum())
+    nA = E.shape[0]
+
+    def share(v):
+        return float(((E @ v) ** 2).sum() / tot) if v is not None and tot > 0 else None
+    kk = max(1, min(int(k), nA))
+    U, s, Vt = np.linalg.svd(E, full_matrices=False)
+    w1 = Vt[0] * (1.0 if Vt[0] @ dh >= 0 else -1.0)
+    Ep = E - np.outer(E @ dh, dh)
+    _, sp, Vp = np.linalg.svd(Ep, full_matrices=False)
+    out = {"n": nA, "share_mean": share(dh), "share_own": share(r_own), "share_select": share(rS),
+           "explained": [float(x) for x in (s[:kk] ** 2) / tot] if tot > 0 else [],
+           "cos_w1_mean": float(w1 @ dh), "cos_w1_own": float(w1 @ r_own) if r_own is not None else None,
+           "leftover_total": float((Ep ** 2).sum() / tot) if tot > 0 else None,
+           "leftover_explained": [float(x) for x in (sp[:kk] ** 2) / tot] if tot > 0 else []}
+    ev = np.arange(nA) % 2 == 0
+    kh = max(1, min(kk, int(ev.sum()) - 1, int((~ev).sum()) - 1))
+    if ev.sum() >= 2 and (~ev).sum() >= 2:
+        V0 = np.linalg.svd(Ep[ev], full_matrices=False)[2][:kh]
+        V1 = np.linalg.svd(Ep[~ev], full_matrices=False)[2][:kh]
+        out["leftover_stability"] = [float(abs(V0[j] @ V1[j])) for j in range(kh)]
+        out["leftover_overlap"] = [float(x) for x in subspace_overlap(V0, V1)]
+        if not paired:
+            F = EB - EB.mean(0)
+            rat = []
+            for j in range(kh):
+                r_ = []
+                for Vh, held in ((V0, ~ev), (V1, ev)):
+                    a_ = float(((Ep[held] @ Vh[j]) ** 2).mean())
+                    b_ = float(((F @ Vh[j]) ** 2).mean())
+                    r_.append(a_ / b_ if b_ > 0 else None)
+                rat.append(float(np.mean([x for x in r_ if x is not None])) if any(x is not None for x in r_) else None)
+            out["leftover_ab_ratio"] = rat
+    nq = np.sqrt(sq)
+    out["q_cos"] = [float(x) for x in np.divide(E @ dh, nq, out=np.zeros_like(nq), where=nq > 0)]
+    return out
+
+
+def _questions(qd: dict) -> dict[int, str]:
+    """質問の番号 → 文(A 側。材料を作った対照集合が同じものと確かめられるときだけ)。"""
+    path, sha = qd.get("contrast"), qd.get("contrast_sha")
+    if not path or not Path(path).exists():
+        return {}
+    try:
+        from .reverse import ContrastSet
+        cs = ContrastSet.load(path)
+    except (GneError, OSError, ValueError):
+        return {}
+    if sha and cs.sha != sha:
+        return {}
+    out = {}
+    for i, q in enumerate(cs.prompts("A")):
+        x = q if isinstance(q, str) else next((m.get("content") or "" for m in reversed(q) if m.get("role") == "user"), "")
+        out[i] = x if len(x) <= 120 else x[:119] + "…"
+    return out
+
+
 # --- まとめ -----------------------------------------------------------------------------------------------
 
 def analyze(session, name: str, *, parts="layer", normalize="both", top_k: int = TOP_K, layers=None,
-            min_half_cos: float = HALF_COS_MIN, compare=None, exclude_dims=None, out_name: str | None = None) -> dict:
-    """heads writes の材料 name の層ごとの更新を比べ、<out_name>.geometry.json と .geometry.npz に保存する。モデルは流さない。"""
+            min_half_cos: float = HALF_COS_MIN, compare=None, exclude_dims=None, out_name: str | None = None,
+            permutations: int = PERMUTATIONS, seed: int = 0) -> dict:
+    """heads writes の材料 name の層ごとの更新を比べ、<out_name>.geometry.json と .geometry.npz に保存する。モデルは流さない。
+    質問ごとの更新(<name>.writes_q.npz、heads writes --save-q)があれば、ラベル入れ替えの基準(permutations 回、0 で切る)と
+    同じ層の中の質問に沿った分解も出す。"""
     t0 = time.perf_counter()
     parts_t, modes = parse_parts(parts), parse_normalize(normalize)
     if int(top_k) < 1:
@@ -429,6 +622,14 @@ def analyze(session, name: str, *, parts="layer", normalize="both", top_k: int =
     if chk is not None and np.isfinite(chk).any():
         material["check_layer_rel_median"] = float(np.nanmedian(chk))
         material["check_layer_rel_max"] = float(np.nanmax(chk))
+    qd, qnote = load_q(hd, name, z)
+    if qnote:
+        notes.append(qnote)
+    if qd is not None:
+        material["q"] = {k: qd[k] for k in ("file", "bytes", "paired", "match_err")} | {"n_a": len(qd["index_a"]), "n_b": len(qd["index_b"])}
+    else:
+        notes.append({"code": "no_q", "text": "質問ごとの更新が無いので、ラベル入れ替えの基準と、同じ層の中の質問に沿った分解は出していません"
+                                              f"(gne heads writes --name <方向> --save-q で {name}.writes_q.npz を作ります)"})
     if min(n_a, n_b) < FEW_QUESTIONS:
         notes.append({"code": "few_questions", "text": f"質問が少ない(A {n_a}・B {n_b})ので、半分ずつ(各側 {n_a // 2}・{n_b // 2} 問)の"
                                                        "数は揺れやすく、結論には足りません"})
@@ -551,6 +752,46 @@ def analyze(session, name: str, *, parts="layer", normalize="both", top_k: int =
     if comps:
         notes.append({"code": "compare_meaning", "text": "heads refine の方向は、組を両側に当てた状態で、残りの質問だけを A にした残差の平均の差です。"
                                                          "特異値分解の向きは層ごとの更新の差なので、意味の違う量どうしを、同じ残差の空間の向きとして比べています"})
+    # 質問ごとの更新があるとき: ラベル入れ替えの基準(§2.5)と、同じ層の中の質問に沿った分解(§2.6)
+    null_meta, within, wsum = None, None, None
+    if qd is not None:
+        pos = {int(L): i for i, L in enumerate(z["layer_index"])}
+        QA, QB = q_rows(qd, rows, pos, ex)
+        paired = qd["paired"]
+        dq = (QA - QB).mean(0) if paired else QA.mean(0) - QB.mean(0)
+        nX = np.linalg.norm(X, axis=1)
+        material["q"]["row_err_max"] = float(np.max(np.linalg.norm(dq - X, axis=1) / np.maximum(nX, 1e-30)))
+        if int(permutations) > 0:
+            nl = label_null(QA, QB, paired, int(permutations), int(seed), int(top_k))
+            null_meta = {k: nl[k] for k in ("scheme", "n_perm", "seed")}
+            for i, r in enumerate(rows):
+                v = nl["norms"][:, i]
+                r["norm_null95"] = float(np.percentile(v, 95))
+                r["norm_p"] = float((np.sum(v >= r["norm"]) + 1) / (len(v) + 1))
+                r["half_cos_null95"] = float(np.percentile(nl["half_cos"][:, i], 95))
+            c95 = np.percentile(nl["cos_abs"], 95, axis=0)
+            arrs["cos_null95"] = c95.astype(np.float32)
+            up = np.triu(keep, 1)
+            sim["above_null95"] = {"n": int((np.abs(C)[up] > c95[up]).sum()), "of": int(up.sum())}
+            for mode in svd:
+                svd[mode]["null95"] = [float(x) for x in np.percentile(nl["explained"][mode], 95, axis=0)[:svd[mode]["k"]]]
+        kw = max(1, min(int(top_k), QA.shape[0] // 2 - 1))
+        texts = _questions(qd)
+        within = []
+        for i, r in enumerate(rows):
+            w = within_row(QA[:, i], QB[:, i], paired, r_own[i], rS, kw)
+            within.append({"i": i, "label": r["label"], **w})
+        arrs["within_q_cos"] = np.array([w["q_cos"] for w in within], np.float32)
+        lr = [w for w, r in zip(within, rows, strict=True) if r["part"] == "layer" and r["reliable"]] or within
+        mq = np.mean([w["q_cos"] for w in lr], axis=0)
+        order = [int(j) for j in np.argsort(mq)]
+        wsum = {"paired": paired, "k": kw, "rows_used": len(lr),
+                "q_mean_cos": [float(x) for x in mq],
+                "lowest": [{"q": qd["index_a"][j], "mean_cos": float(mq[j]), "text": texts.get(qd["index_a"][j])} for j in order[:5]],
+                "highest": [{"q": qd["index_a"][j], "mean_cos": float(mq[j]), "text": texts.get(qd["index_a"][j])} for j in order[::-1][:3]]}
+        if QA.shape[0] < 2 * FEW_QUESTIONS:
+            notes.append({"code": "within_few", "text": f"A 側の質問が {QA.shape[0]} 問なので、質問に沿った分解の上位の向きは雑音で決まりやすく、"
+                                                        "安定度(半分どうしの |cos|)と並べてしか読めません"})
     if n_unrel:
         notes.append({"code": "unreliable", "text": f"{n_unrel} 行は、半分どうしの cos が {min_half_cos} 未満です(信用しない印)"})
     if "layer" in parts_t and len(parts_t) > 1:
@@ -561,9 +802,10 @@ def analyze(session, name: str, *, parts="layer", normalize="both", top_k: int =
         notes.append({"code": "excluded_dims", "text": f"次元 {', '.join(map(str, ex))} を 0 にしてから計算しました(行ごとの上位の次元は、除く前の値)"})
     out = {"name": out_name, "material": material, "arch": {k: ac[k] for k in ("arch", "checked", "moe_layers")},
            "settings": {"parts": list(parts_t), "normalize": list(modes), "top_k": int(top_k), "layers": lay,
-                        "min_half_cos": float(min_half_cos), "exclude_dims": ex, "compare": cmp_names},
+                        "min_half_cos": float(min_half_cos), "exclude_dims": ex, "compare": cmp_names,
+                        "permutations": int(permutations), "seed": int(seed)},
            "rows": rows, "skipped_rows": skipped, "n_unreliable": n_unrel, "similarity": sim, "svd": svd, "loop": loop,
-           "compare": comps, "notes": notes, "reading": READING}
+           "compare": comps, "null": null_meta, "within": within, "within_summary": wsum, "notes": notes, "reading": READING}
     hd.mkdir(parents=True, exist_ok=True)
     pj, pz = hd / f"{out_name}.geometry.json", hd / f"{out_name}.geometry.npz"
     np.savez_compressed(pz, **arrs, row_layer=np.array([r["layer"] for r in rows], np.int32),
@@ -612,9 +854,15 @@ def human_lines(d: dict) -> list[str]:
     lines.append("材料の確かめ: " + " / ".join(ck))
     lines.append(f"行ごと(cos r̂_l = その層の方向との cos、cos r̂_S = 選ぶ層の方向との cos。2 乗がその方向に沿う割合。"
                  f"× = 半分どうしの cos が {st['min_half_cos']} 未満):")
-    lines += _table(["行", "種類", "回", "大きさ", "半分cos", "雑音比", "cos r̂_l", "cos r̂_S", "上位5次元", "印"],
-                    [[r["label"], MIXER_JA.get(r["mixer"], r["mixer"]), str(r["visit"] or ""), f"{r['norm']:.3g}",
-                      _f(r["half_cos"], ".2f"), _f(r["noise_ratio"], ".2f"), _f(r["cos_own"], "+.2f"), _f(r["cos_select"], "+.2f"),
+    has_null = bool(d.get("null"))
+    if has_null:
+        lines.append(f"  (大きさ÷基準 = 大きさ ÷ A と B のラベルを入れ替えて作った差の大きさの 95 パーセンタイル({d['null']['n_perm']} 回)。"
+                     "1 以下なら、質問ごとのばらつきだけでも出る大きさ)")
+    lines += _table(["行", "種類", "回", "大きさ"] + (["大きさ÷基準"] if has_null else []) +
+                    ["半分cos", "雑音比", "cos r̂_l", "cos r̂_S", "上位5次元", "印"],
+                    [[r["label"], MIXER_JA.get(r["mixer"], r["mixer"]), str(r["visit"] or ""), f"{r['norm']:.3g}"] +
+                     ([_f(r["norm"] / r["norm_null95"] if r.get("norm_null95") else None, ".2f")] if has_null else []) +
+                     [_f(r["half_cos"], ".2f"), _f(r["noise_ratio"], ".2f"), _f(r["cos_own"], "+.2f"), _f(r["cos_select"], "+.2f"),
                       _f(r["top_dims"]["share"], ".2f"), "" if r["reliable"] else "×"] for r in d["rows"]], left=2)
     sm = d["similarity"]
     line = f"類似度の行列: 対角以外の |cos| 平均 {sm['offdiag_abs_mean']:.3f}・最大 {sm['offdiag_abs_max']:.3f}" + \
@@ -622,14 +870,21 @@ def human_lines(d: dict) -> list[str]:
     if sm.get("adjacent"):
         a = sm["adjacent"]
         line += f"。隣の層どうし(同じ部品)の cos: 最小 {a['min']:+.2f}・中央値 {a['median']:+.2f}・最大 {a['max']:+.2f}"
+    if sm.get("above_null95"):
+        line += f"。ラベル入れ替えの 95% を超える |cos| の組: {sm['above_null95']['n']} / {sm['above_null95']['of']}"
     lines.append(line + f"(行列は {Path(d['npz']).name} と JSON)")
     for mode, s in d["svd"].items():
         lines.append(f"特異値分解({'行の大きさをそろえる' if mode == 'rows' else '行の大きさをそろえない'}。基準は、データの全体に対する割合):")
         cs = s.get("cos_select") or [None] * s["k"]
-        lines += _table(["k", "寄与率", "累積", "直交の基準", "雑音の基準", "半分で求めた向きの説明率", "半分どうしの重なり", "cos r̂_S"],
-                        [[str(j + 1), f"{s['explained'][j]:.3f}", f"{s['cumulative'][j]:.3f}", f"{s['baseline_orthogonal'][j]:.3f}",
+        nn = s.get("null95")
+        lines += _table(["k", "寄与率"] + (["入れ替え95%"] if nn else []) + ["累積", "直交の基準", "雑音の基準", "半分で求めた向きの説明率",
+                                                                           "半分どうしの重なり", "cos r̂_S"],
+                        [[str(j + 1), f"{s['explained'][j]:.3f}"] + ([f"{nn[j]:.3f}"] if nn else []) +
+                         [f"{s['cumulative'][j]:.3f}", f"{s['baseline_orthogonal'][j]:.3f}",
                           f"{s['baseline_noise'][j]:.3f}", f"{s['half_cross'][j]:.3f}", f"{s['half_overlap'][j]:.3f}", _f(cs[j], "+.2f")]
                          for j in range(s["k"])], left=0)
+        if nn:
+            lines.append("  (入れ替え95% = ラベルを入れ替えた差の寄与率の 95 パーセンタイル。寄与率はその差自身の全体に対する割合)")
         lines.append(f"  (雑音の目安の全体 ‖(X_h0 − X_h1)/2‖² ÷ ‖X‖² = {_f(s['noise_total'], '.3f')}。半分で求めた向きの説明率と重なりは累積)")
     lp = d.get("loop")
     if lp:
@@ -640,6 +895,24 @@ def human_lines(d: dict) -> list[str]:
                         [[str(p_["stored"]), str(p_["first"]), str(p_["second"]), c(p_.get("layer")), c(p_.get("attn")), c(p_.get("mlp")),
                           f"{p_['layer']['norm_first']:.3g} / {p_['layer']['norm_second']:.3g}" if p_.get("layer") else "—"]
                          for p_ in lp["pairs"]], left=0)
+    w, ws = d.get("within"), d.get("within_summary")
+    if w:
+        lines.append(f"同じ層の中の質問ごとの差の分解({'対になった対照集合: e_q = u_q^A − u_q^B' if ws['paired'] else '側ごとに別の質問: e_q = u_q^A − (B 側の平均)'}。"
+                     "割合は Σ‖e_q‖² に対して。取り残し = 平均の向き d̂ に直交する分):")
+        head = ["行", "d̂ で説明", "r̂_l で説明", "r̂_S で説明", "上位1本", "取り残し", "取り残し1番目", "安定度(1番目)"] +             ([] if ws["paired"] else ["A/B の広がりの比(1番目)"])
+        body = []
+        for x in w:
+            row = [x["label"], _f(x["share_mean"], ".2f"), _f(x["share_own"], ".2f"), _f(x["share_select"], ".2f"),
+                   _f((x.get("explained") or [None])[0], ".2f"), _f(x["leftover_total"], ".2f"),
+                   _f((x.get("leftover_explained") or [None])[0], ".3f"), _f((x.get("leftover_stability") or [None])[0], ".2f")]
+            if not ws["paired"]:
+                row.append(_f((x.get("leftover_ab_ratio") or [None])[0], ".2f"))
+            body.append(row)
+        lines += _table(head, body, left=1)
+        lines.append("  (安定度 = 偶数番目・奇数番目の質問で別々に求めた取り残しの向きどうしの |cos|。A/B の広がりの比は、片方の半分で"
+                     "求めた向きに沿った A 側のもう半分の広がり ÷ B 側の質問どうしの広がり。1 前後ならふつうの質問どうしの違いと同じ程度)")
+        lo = [f"{x['mean_cos']:+.2f} {x['text'] or '#' + str(x['q'])}" for x in ws["lowest"]]
+        lines.append(f"平均の向き d̂ との cos が低い A 側の質問(信用できる層全体の行 {ws['rows_used']} 行の平均): " + " | ".join(lo))
     for cp in d.get("compare") or []:
         sel = cp["select"]
         parts = [f"選ぶ層での方向ベクトルどうしの cos {_f(sel.get('cos_direction_select'), '+.3f')}"]
