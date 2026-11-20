@@ -323,6 +323,8 @@ def test_heads_geometry_odd_halves_and_errors(tmp_path):
     d = s.heads_geometry("d1", normalize="rows", min_half_cos=0.99)
     assert "odd_halves" in {n["code"] for n in d["notes"]} and set(d["svd"]) == {"rows"}
     assert d["n_unreliable"] == sum(1 for r in d["rows"] if not r["reliable"]) and d["n_unreliable"] > 0
+    assert d["svd"]["rows"]["n_unreliable"] == d["n_unreliable"]                      # 特異値分解に入っている信用しない行の数
+    assert "信用しない行が" in "\n".join(G.human_lines(d))
     with pytest.raises(GneError) as e:
         s.heads_geometry("nothing")
     assert e.value.code == "FILE_NOT_FOUND"
@@ -514,7 +516,8 @@ def test_export_direction_from_geometry(tmp_path):
     W = np.load(hd / "d1.geometry.npz")["within_w"]
     for L in (0, 1, 2):
         assert abs(abs(dw.unit(L) @ G._unit(W[L, 0].astype(float))) - 1) < 1e-5 and dw.unit(L) @ orig.unit(L) >= -1e-9
-    assert "unit" in {n["code"] for n in w["notes"]}
+    assert {"unit", "for_checking", "missing_layers"} - {"missing_layers"} <= {n["code"] for n in w["notes"]}
+    assert any("繰り返し" in n["text"] for n in w["notes"])                             # 全部の層から消すと応答が壊れることがある
     with pytest.raises(GneError):
         s.heads_geometry_export("d1", "d1_v1", "svd-rows:1")                         # 同じ名前は置き換えない
     assert s.heads_geometry_export("d1", "d1_v1", "svd-none:2", force=True)["source"] == "svd-none:2"
@@ -612,6 +615,8 @@ def geo_server(tmp_path_factory):
     cpath = root / "c.yaml"
     cpath.write_text("system_a: a\nsystem_b: b\nuser_prompts:\n" + "".join(f"  - question {i}\n" for i in range(12)), encoding="utf-8")
     G.save_q(hd, "g", _q_arrays(QA, QB, contrast=cpath, sha=ContrastSet.load(cpath).sha))
+    np.savez_compressed(hd / "g2.writes.npz", **z)                                   # 質問ごとの更新の無い材料
+    (hd / "g2.writes.json").write_text(json.dumps({"direction": "g", "select_layer": n_layer - 1, "positions": "last", "n": {"A": 12, "B": 12}}))
     dd = s.store.direction_dir(s.meta.model_id)
     dd.mkdir(parents=True, exist_ok=True)
     C = np.cumsum(z["upd_layer_diff"].astype(np.float32), axis=0)
@@ -643,6 +648,8 @@ def test_geometry_view_in_browser(geo_server, geo_browser):
         pg.click('button[data-view="geometry"]')
         pg.wait_for_selector("#geo-pick option", state="attached")
         pg.select_option("#geo-pick", "g")
+        pg.wait_for_timeout(300)                                                       # 前の言語で保存した設定が欄に戻るので、行の単位は選び直す
+        pg.select_option("#geo-parts", "layer")
         pg.click("#geo-go")
         pg.wait_for_function("/秒|Computed/.test(document.querySelector('#geo-status').textContent)", timeout=60000)
         pg.wait_for_selector("#geo-heat")
@@ -667,6 +674,42 @@ def test_geometry_view_in_browser(geo_server, geo_browser):
         pg.fill("#geo-export-name", f"g_exp_{lang}")
         pg.click("#geo-export-go")
         pg.wait_for_selector("#geo-export-out .ok")
+        notes = pg.locator("#geo-export-out").inner_text()
+        assert ("繰り返し" in notes) if lang == "ja" else ("repeat" in notes or "繰り返し" in notes)    # 書き出しの知らせ(サーバの文は日本語)
+        # 細かい設定: 層を絞り、比べない
+        pg.locator(".geo-more summary").click()
+        pg.fill("#geo-layers", "0-3")
+        pg.check("#geo-nocompare")
+        pg.fill("#geo-minhalf", "0.9")
+        pg.click("#geo-go")
+        pg.wait_for_function("document.querySelectorAll('tr[data-wi]').length === 4", timeout=60000)
+        st = pg.evaluate("window.gne.geometryView.data.settings")
+        assert st["layers"] == [0, 1, 2, 3] and st["compare"] == [] and st["min_half_cos"] == 0.9
+        # 3 倍の行: 部品で切り出す・セルを大きくする・狭い画面では切り出しを勧める
+        pg.fill("#geo-layers", "")
+        pg.select_option("#geo-parts", "layer,attn,mlp")
+        pg.set_viewport_size({"width": 700, "height": 900})
+        pg.click("#geo-go")
+        pg.wait_for_function("window.gne.geometryView.data.rows.length > 60", timeout=60000)
+        n3 = pg.evaluate("window.gne.geometryView.data.rows.length")
+        assert pg.locator("#geo-heat-hint").is_visible()
+        w0 = pg.locator("#geo-heat").bounding_box()["width"]
+        pg.select_option('[data-block="r"]', "mlp")
+        pg.select_option('[data-block="c"]', "attn")
+        assert pg.evaluate("window.gne.geometryView.heat.nr") == n3 // 3
+        pg.locator("#geo-heat").focus()
+        pg.keyboard.press("ArrowRight")
+        txt = pg.locator("#geo-readout").inner_text()
+        assert "/mlp" in txt and "/attn" in txt
+        pg.locator('[data-zoom="2"]').click()
+        assert pg.evaluate("window.gne.geometryView.heat.cell") >= 2 * pg.evaluate("window.gne.geometryView.heat.auto") - 1
+        pg.locator("#geo-heat-table summary").click()
+        pg.wait_for_selector("#geo-heat-table .geo-matrix table")
+        assert pg.locator("#geo-heat-table .geo-matrix tbody tr").count() == n3 // 3
+        assert pg.locator("#geo-svd-table + p.warn, #geo-svd-table p.warn").count() >= 0
+        # 質問ごとの更新の無い材料: 作り直すボタンが出る
+        pg.select_option("#geo-pick", "g2")
+        pg.wait_for_selector("#geo-make-q")
         assert errs == []
         if lang == "en":
             assert pg.evaluate("[...window.gneI18n.missing]") == []

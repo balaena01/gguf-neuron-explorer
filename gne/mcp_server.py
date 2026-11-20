@@ -592,8 +592,8 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
     async def heads_geometry(name: str, parts: str = "layer", normalize: str = "both", top_k: int | None = None,
                              layers: str | None = None, min_half_cos: float | None = None, compare: str | None = None,
                              exclude_dims: str | None = None, out_name: str | None = None,
-                             permutations: int | None = None, export_direction: str | None = None,
-                             export_from: str | None = None) -> dict:
+                             permutations: int | None = None, seed: int = 0, export_direction: str | None = None,
+                             export_from: str | None = None, export_force: bool = False) -> dict:
         """heads writes の材料 name の、層ごとの更新ベクトル(A 側の平均の更新 − B 側の平均の更新)を比べる(GPU を使わない、数秒)。
         層どうしのコサイン類似度(行列は保存した .geometry.json / .npz にあり、ここでは省く)、特異値分解(normalize: rows = 行の大きさを
         そろえる / none / both。基準は行が直交していたときの値と、半分どうしの差から作る雑音の目安)、半分ずつの一致(min_half_cos 未満に
@@ -608,7 +608,7 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
             d = session.heads_geometry(name, parts=parts, normalize=normalize, top_k=TOP_K if top_k is None else top_k,
                                        layers=layers, min_half_cos=HALF_COS_MIN if min_half_cos is None else min_half_cos,
                                        compare=compare, exclude_dims=exclude_dims, out_name=out_name,
-                                       permutations=PERMUTATIONS if permutations is None else permutations)
+                                       permutations=PERMUTATIONS if permutations is None else permutations, seed=seed)
             d = dict(d, similarity={k: v for k, v in d["similarity"].items() if k != "matrix"})
             for s_ in d["svd"].values():                # 行ごとの配列は保存したファイルで読む(返り値を小さくする)
                 for k in ("U", "row_explained", "cos_own"):
@@ -617,7 +617,7 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
             if export_direction or export_from:
                 if not (export_direction and export_from):
                     raise GneError("BAD_ARGS", "export_direction と export_from は一緒に渡します")
-                d["export"] = session.heads_geometry_export(d["name"], export_direction, export_from)
+                d["export"] = session.heads_geometry_export(d["name"], export_direction, export_from, force=export_force)
             if d.get("within"):                          # 質問ごとの cos は保存したファイルで読む
                 d["within"] = [{k: v for k, v in x.items() if k != "q_cos"} for x in d["within"]]
                 d["within_summary"] = {k: v for k, v in d["within_summary"].items() if k != "q_mean_cos"}

@@ -527,7 +527,8 @@ def create_app(session, *, warm: bool = True, openai: bool = False) -> FastAPI:
     @app.post("/api/geometry/{name}")
     def geometry_run(name: str, params: dict = Body({})):
         from ..geometry import UI_PARAMS, analyze, read_result
-        d = analyze(session, name, **{k: v for k, v in params.items() if k in UI_PARAMS and v not in (None, "")})
+        # compare は "" を「比べない」として通す(省くと refine の方向を探す)。ほかの空の欄は既定
+        d = analyze(session, name, **{k: v for k, v in params.items() if k in UI_PARAMS and (v not in (None, "") or k == "compare")})
         return read_result(session, d["name"])
 
     @app.post("/api/geometry/{name}/export")

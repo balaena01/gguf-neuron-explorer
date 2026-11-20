@@ -864,6 +864,7 @@ async function onJobFinished(j) {
   if (j.kind === "layout") { layoutCache.clear(); if (state.layout === j.params.kind) applyLayout(state.layout); }
   if (j.kind === "connections" && state.focus) { showLinks(); neuron.render(); }
   if (j.kind === "eval" && evalView) evalView.refresh(j.result && j.result.name);
+  if (j.kind === "heads_writes" && j.status === "done" && geometryView) geometryView.refresh(j.result && j.result.name);   // 層の幾何の材料
   if (j.kind === "writers" && j.status === "done") {                      // 書き手の分析: overlay の選択肢と writers ビュー
     await refreshModel();
     fillColorSelect();
@@ -1004,7 +1005,7 @@ async function setView(v) {
     const gv = $("#geometry-view");
     if (!state.model) { gv.innerHTML = `<p class="muted view-empty">${t("合成の構造には層の幾何の材料がありません")}</p>`; return; }
     if (!geometryView) {
-      geometryView = new GeometryView(gv);
+      geometryView = new GeometryView(gv, { onRun: (kind, p) => jobsBar.start(kind, p) });   // 質問ごとの更新を作る(heads_writes)
       state.geometryView = geometryView;                                 // 自動テスト用
     }
     await geometryView.refresh();

@@ -718,6 +718,7 @@ def analyze(session, name: str, *, parts="layer", normalize="both", top_k: int =
         Vt = a_["Vt"]
         s_["cos_select"] = [_cos(v, rS) for v in Vt] if rS is not None else None
         s_["cos_own"] = [[(_cos(v, ro) if ro is not None else None) for v in Vt] for ro in r_own] if ds is not None else None
+        s_["n_unreliable"] = sum(1 for r in rows if not r["reliable"])     # 計算に入っている信用しない行(同じ重さで数える)
         svd[mode] = s_
         arrs[f"V_{mode}"] = Vt.astype(np.float32)
         arrs[f"U_{mode}"] = a_["U"].astype(np.float32)
@@ -815,7 +816,8 @@ def analyze(session, name: str, *, parts="layer", normalize="both", top_k: int =
             notes.append({"code": "within_few", "text": f"A 側の質問が {QA.shape[0]} 問なので、質問に沿った分解の上位の向きは雑音で決まりやすく、"
                                                         "安定度(半分どうしの |cos|)と並べてしか読めません"})
     if n_unrel:
-        notes.append({"code": "unreliable", "text": f"{n_unrel} 行は、半分どうしの cos が {min_half_cos} 未満です(信用しない印)"})
+        notes.append({"code": "unreliable", "text": f"{n_unrel} 行は、半分どうしの cos が {min_half_cos} 未満です(信用しない印)。特異値分解には、"
+                                                    "その行も同じ重さで入っています(行の大きさをそろえる版では、小さく雑音の多い行も 1 行分の重さ)"})
     if "layer" in parts_t and len(parts_t) > 1:
         notes.append({"code": "layer_and_parts", "text": "層全体の行は注意と MLP の行の和なので、同じ層の層全体と部品の行どうしの cos は"
                                                          "それだけで高くなります(対角以外の |cos| の平均・最大からは、その組を除きました。"
@@ -858,6 +860,8 @@ def list_materials(session) -> list[dict]:
             except ValueError:
                 js = {}
         out.append({"name": name, "direction": js.get("direction"), "select_layer": js.get("select_layer"),
+                    "settings": {k: js.get(k) for k in ("select_layer", "positions", "subset", "max_examples", "loop_direction", "kinds")
+                                 if js.get(k) is not None},
                     "n": js.get("n"), "has_q": (hd / f"{name}.writes_q.npz").exists(),
                     "has_result": (hd / f"{name}.geometry.json").exists(),
                     "updated": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(p.stat().st_mtime))})
@@ -969,6 +973,9 @@ def export_direction(session, result: str, out: str, source: str, *, force: bool
                                                     "ほとんど無いので、heads writes の点数(選ぶ層での A と B の差の縮み)はほぼ 0 になり、"
                                                     "この向きで CHiPS の組を作る使い方には向きません(headproj ablate で消して応答を見る使い方はできます)"})
     notes.append({"code": "unit", "text": "単位ベクトルなので大きさには意味がありません(方向を足す add の強さには使いません)"})
+    notes.append({"code": "for_checking", "text": "2 本目の向きが応答に効くかを確かめるための向きです。全部の層から消すと、応答が同じ文の繰り返しに"
+                                                  "なることがあります(各側 64 問の対照集合で、特異値分解の 1 番目を全部の層から消すと 30 問中 12〜15 問)。"
+                                                  "消した応答を読んで確かめます"})
     z0 = np.load(src_path)
     Ls = sorted(vecs)
     U = np.stack([_unit(vecs[L]) for L in Ls])
@@ -1039,7 +1046,8 @@ def human_lines(d: dict) -> list[str]:
         line += f"。ラベル入れ替えの 95% を超える |cos| の組: {sm['above_null95']['n']} / {sm['above_null95']['of']}"
     lines.append(line + f"(行列は {Path(d['npz']).name} と JSON)")
     for mode, s in d["svd"].items():
-        lines.append(f"特異値分解({'行の大きさをそろえる' if mode == 'rows' else '行の大きさをそろえない'}。基準は、データの全体に対する割合):")
+        lines.append(f"特異値分解({'行の大きさをそろえる' if mode == 'rows' else '行の大きさをそろえない'}。基準は、データの全体に対する割合"
+                     + (f"。信用しない行が {s['n_unreliable']} 行入っている" if s.get("n_unreliable") else "") + "):")
         cs = s.get("cos_select") or [None] * s["k"]
         nn = s.get("null95")
         lines += _table(["k", "寄与率"] + (["入れ替え95%"] if nn else []) + ["累積", "直交の基準", "雑音の基準", "半分で求めた向きの説明率",

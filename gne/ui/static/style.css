@@ -863,5 +863,7 @@ table.fx-tab th.fx-scan-g { text-align: center; border-bottom: 1px solid var(--l
 table.geo-within tr.geo-unrel td { color: var(--muted); }
 .geo-cellbar { display: inline-block; width: 40px; height: 8px; margin-right: var(--sp-3); vertical-align: middle;
   background: linear-gradient(to right, var(--side-b) calc(var(--v) * 100%), var(--line-soft) calc(var(--v) * 100%)); border-radius: var(--r-xs); }
+.note.warn { color: var(--warn); }
+.geo-more { margin: 0 0 var(--sp-3); }
 .geo-qlist { font-size: var(--fs-m); color: var(--text-2); margin: var(--sp-2) 0 var(--sp-4); max-width: 980px; }
 .geo-loop summary { cursor: pointer; }
