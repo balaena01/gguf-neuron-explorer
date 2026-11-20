@@ -71,7 +71,7 @@ def writer_info(weights) -> dict:
     counts: dict[str, int] = {}
     for names in ws.values():
         for n in names:
-            kind = n.split(".")[2]
+            kind = n.split(".", 2)[2].removesuffix(".weight")
             counts[kind] = counts.get(kind, 0) + 1
     biases = sorted(n.replace(".weight", ".bias") for names in ws.values() for n in names
                     if weights.has_tensor(n.replace(".weight", ".bias")))
@@ -89,7 +89,7 @@ def writer_info(weights) -> dict:
         warn.append(f"ライターのバイアス {len(biases)} 個は LoRA では射影できません(bake では射影する)")
     if not embed_in_lora(weights):
         warn.append("出力層が埋め込みと共有(tied)なので、LoRA では埋め込みの r 成分が残ります(bake なら消せる)")
-    return {"verified": m.arch in t.get("verified", []), "post_norm": m.arch in t.get("post_norm", []),
+    return {"verified": m.arch in t.get("verified", []), "post_norm": bool(m.arch in t.get("post_norm", []) or pn),
             "counts": counts, "n_layers": len(ws), "biases": biases[:8], "embed_in_lora": embed_in_lora(weights),
             "warnings": warn, "checked_llama_cpp": t.get("checked_llama_cpp")}
 

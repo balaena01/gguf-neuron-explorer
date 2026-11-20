@@ -311,6 +311,12 @@ def post_norm_gamma(weights, L: int, kind: str = "ffn") -> np.ndarray | None:
                                                "見つからないので、keyed は実行しません。理由: この層での補正を確かめていないためです")
         return None
     if kind == "attn":
+        ai = getattr(weights, "arch", None)
+        li = ai.layers[weights.stored(L) if hasattr(weights, "stored") else L] if ai is not None else None
+        if li is not None and li.post_norm_mixer not in ("", "?"):   # 構造で見た注意の出力のあとの正規化(v0.9.0。LFM3 も)
+            raise GneError("ARCH_UNSUPPORTED", f"層 {L} は注意の出力のあとに正規化({li.post_norm_mixer})があるので、attn の keyed の"
+                                               "書き込みは実行しません。理由: 正規化の分の補正をまだ確かめていないためです",
+                           "代わりに FFN(kind: ffn)の keyed を使ってください。attn の鍵は作れます(key-check で分かれ方を確かめられます)")
         if pn:
             raise GneError("ARCH_UNSUPPORTED", f"{arch} は注意の出力のあとに正規化があるので、attn の keyed は実行しません。"
                                                "理由: 正規化の分の補正を確かめていないためです",
@@ -895,11 +901,6 @@ def keyed_plan(weights, units, key_of: KeySource, dir_of: DirSource, *, directio
         if gamma is not None:
             note(f"層 {u.layer} は MLP の出力のあとに正規化があるので、keyed の書き込みは正規化の分を補正して実行します"
                  "(d = rms̄_A·(r ⊘ γ)。書き込みで rms が変わる分は無視した一次近似なので、α が大きいと効きは α に比例しません)")
-        li = weights.arch.layers[weights.stored(u.layer)] if u.kind == "attn" else None
-        if li is not None and li.post_norm_mixer not in ("", "?"):    # 構造で見た注意の出力のあとの正規化(v0.8.6)
-            note(f"層 {u.layer} は注意(混ぜる層)の出力のあとに正規化({li.post_norm_mixer})があるので、attn の keyed は実行しますが、"
-                 "書き込みの大きさと向きは正規化の分を補正していません(残差に入るのは γ ⊙ y / rms(y))。補正するのは FFN の keyed"
-                 "(kind: ffn)だけです")
         if ks.kn.get(u.layer, 1.0) < KN_WARN:
             note(f"L{u.layer}: 鍵 {ks.spec} の kn={ks.kn[u.layer]:.3f} が小さいです(書き込みたくない位置への漏れが最大 {ks.gain[u.layer]:.1f} 倍)")
         info.update({"kn": float(ks.kn[u.layer]), "gain": float(ks.gain[u.layer]),

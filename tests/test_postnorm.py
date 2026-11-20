@@ -32,7 +32,7 @@ def _tiny(path, arch, layers, *, n_embd=16, n_head=4, head_dim=4, n_ff=24):
     w.add_token_list([f"t{i}" for i in range(8)])
     shapes = {"attn_q": (n_head * head_dim, n_embd), "attn_output": (n_embd, n_head * head_dim), "ffn_down": (n_embd, n_ff),
               "ffn_up": (n_ff, n_embd), "ffn_gate": (n_ff, n_embd), "shortconv.out_proj": (n_embd, n_embd),
-              "shortconv.in_proj": (3 * n_embd, n_embd)}
+              "shortconv.in_proj": (3 * n_embd, n_embd), "attn_gate": (n_head, n_embd)}
     for L, names in enumerate(layers):
         for nm in names:
             w.add_tensor(f"blk.{L}.{nm}.weight", rng.standard_normal(shapes.get(nm, (n_embd,))).astype(np.float32))
@@ -144,6 +144,34 @@ def test_post_norm_models(which, tmp_path):
         from gne.verify import Verifier
         v2 = Verifier(s.engine, s.weights, layer=s.engine.n_layer // 2).v2_ffn_linearity()
         assert v2.status == "pass", v2.detail
+        # v0.9.0(B1): 書き込みの和の検算、ゲートを掛けたヘッドの出力、ヘッドの一覧、捕捉と gain の検算、heads contrast の out_shift、
+        # heads writers の分け方、attn の鍵づくり(書き込みは実行しない)、畳み込みの層の射影消去
+        from gne.attn import check_capture, check_head_gain
+        from gne.heads import attention_view
+        from gne.postnorm import check_writer_sums, writer_sums_vresult
+        ws = check_writer_sums(s)
+        assert ws["ok"] and ws["checked"] == "real", ws
+        assert writer_sums_vresult(s).status == "pass"
+        if which == "lfm3":
+            assert all(r["head_err"] is not None for r in ws["layers"] if r["mixer"] == "attention")
+        assert len(attention_view(s, "The cat sat on the mat.", layer=L)["heads"]) == s.weights.arch.layers[L].n_head
+        assert check_capture(s)["ok"]
+        hg = check_head_gain(s, L, 0)
+        assert hg["ok"] and hg["compared"] == ("writer_out" if which == "lfm3" else "after_norm"), hg
+        s.heads_contrast(evil, name="pnh", layers=[L], max_tokens=8)
+        import json as _json
+        rows = [_json.loads(x) for x in (s.store.heads_dir(s.meta.model_id) / "pnh.candidates.jsonl").read_text().splitlines()]
+        assert rows and all(r["out_shift"] is not None for r in rows)
+        hw = s.heads_writers("pn", contrast=evil, max_examples=8, ref_layer=L)
+        assert hw["split"] == "after_norm" and hw["post_norm_layers"] and hw["sum_error"] < 1e-6
+        k = s.direction_key(Path(__file__).resolve().parent.parent / "configs" / "keyed" / "one_scene.json", name="pnk", layers=[L], target="attn")
+        assert k["layers"][0]["layer"] == L
+        with pytest.raises(GneError, match="attn の keyed の書き込みは実行しません"):
+            s.steer([f"{L}:attn:keyed:a2@pn#pnk"], prompt="Hello.", max_tokens=4)
+        from gne.ablate import writer_info
+        cnt = writer_info(s.weights)["counts"]
+        n_conv = sum(li.mixer == "conv" for li in s.weights.arch.layers)
+        assert cnt.get("shortconv.out_proj", 0) == n_conv
         s.stats_resid(tokens=1024)                                 # 残差の偏り: Gemma 3 は約 6 倍で知らせる、LFM3 は約 1.3 倍で知らせない
         ds = s.dose_spread()
         assert ds is not None and ds["warn"] == (which == "gemma3"), ds
@@ -192,3 +220,48 @@ def test_check_arch_messages(tmp_path):
     assert not any("正規化" in w for w in q.check_arch())
     u = Weights(_tiny(tmp_path / "new.gguf", "qwen3", [ATTN + ["post_attention_norm"]]))
     assert any("確かめていません" in w for w in u.check_arch())
+
+
+
+def test_capture_table_and_names(tmp_path):
+    """捕捉の表(v0.9.0): LFM3 は注意の層と畳み込みの層で書き込み行列の出力の名前が違い、ヘッドの出力はゲートの前 ⊙ ゲート。
+    Gemma 3 は kqv_out と mid(sa_out)。表に無い arch(qwen35・qwen3)は空で、ヘッドの出力は今までの候補(attn_gated / kqv_out)。
+    表の arch はどれも real か graph。"""
+    import yaml
+
+    from gne.postnorm import checked, gated, head_out_parts, layer_names, post_add
+    from gne.weights import Weights
+    t = yaml.safe_load((Path(__file__).resolve().parent.parent / "configs" / "arch" / "residual_writers.yaml").read_text(encoding="utf-8"))
+    assert {checked(a) for a in t["capture"]} <= {"real", "graph"} and checked("lfm3") == "real" and checked("gemma3") == "real"
+    assert checked("glm4") == "graph" and checked("qwen35") is None
+    assert "shortconv.out_proj" in t["candidates"] and {"lfm2", "lfm2moe", "lfm3", "gemma3"} <= set(t["verified"])
+    pn = ["post_attention_norm", "post_ffw_norm"]
+    lf = Weights(_tiny(tmp_path / "lfm3.gguf", "lfm3", [["shortconv.out_proj", "shortconv.in_proj", "ffn_down"] + pn,
+                                                       ATTN + ["attn_gate"] + pn]))
+    n0, n1 = layer_names(lf, 0), layer_names(lf, 1)
+    assert n0["mixer_out"] == "model.layers.{}.conv.out_proj-0" and n1["mixer_out"] == "model.layers.{}.self_attn.out_proj-1"
+    assert n1["mixer_post"] == "model.layers.{}.post_operator_norm-1" and n1["ffn_post"] == "model.layers.{}.post_ffn_norm-1"
+    seen = {"attn_out-1", "model.layers.{}.self_attn.gate-1", "kqv_out-1"}
+    assert head_out_parts(lf, seen, 1) == ("attn_out-1", "model.layers.{}.self_attn.gate-1")
+    assert head_out_parts(lf, {"attn_out-1"}, 1) is None                          # ゲートが見えなければ作らない(ゲートの前を使わない)
+    g = Weights(_tiny(tmp_path / "g3.gguf", "gemma3", [ATTN + pn, ATTN + pn]))
+    assert layer_names(g, 1)["mid"] == "sa_out-1" and layer_names(g, 1)["mixer_out"] is None
+    assert head_out_parts(g, {"kqv_out-1"}, 1) == ("kqv_out-1", None)
+    q = Weights(_tiny(tmp_path / "q35.gguf", "qwen35", [ATTN + ["post_attention_norm"]]))
+    assert layer_names(q, 0) == {} and head_out_parts(q, {"attn_gated-0", "kqv_out-0"}, 0) == ("attn_gated-0", None)
+    x = np.arange(2 * 3 * 4, dtype=np.float32).reshape(2, 12)
+    gt = np.array([[0.5, 1.0, 0.0], [1.0, 2.0, 0.5]], np.float32)
+    np.testing.assert_allclose(gated(x, gt, 3, 4), x.reshape(2, 3, 4) * gt[:, :, None])
+    y = np.array([[3.0, 4.0]])
+    np.testing.assert_allclose(post_add(y, np.array([2.0, 1.0]), 0.0), [[2 * 3 / np.sqrt(12.5), 4 / np.sqrt(12.5)]])
+    np.testing.assert_allclose(post_add(y, np.array([2.0, 1.0]), 0.0, "scale"), [[6.0, 4.0]])
+
+
+def test_conv_writer_in_ablate(tmp_path):
+    """畳み込みの層の書き込み行列 shortconv.out_proj も射影消去の対象(v0.9.0。LFM2・LFM3)。種類ごとの数の名前は .weight を除いた名前。"""
+    from gne.ablate import residual_writers, writer_info
+    from gne.weights import Weights
+    lf = Weights(_tiny(tmp_path / "lfm3.gguf", "lfm3", [["shortconv.out_proj", "shortconv.in_proj", "ffn_down"], ATTN]))
+    assert [n.split(".", 2)[2] for n in residual_writers(lf)[0]] == ["shortconv.out_proj.weight", "ffn_down.weight"]
+    wi = writer_info(lf)
+    assert wi["counts"] == {"shortconv.out_proj": 1, "ffn_down": 2, "attn_output": 1} and wi["verified"]

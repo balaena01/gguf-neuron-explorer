@@ -109,13 +109,14 @@ def spans_to_tokens(offsets: Sequence[tuple[int, int]], spans: Sequence[tuple[in
 
 
 def head_out_names(session, names: set[str], layers: Sequence[int]) -> dict[int, str]:
-    """層 → per-head 出力のテンソル名(arch の候補のうち捕捉で見えた最初のもの)。"""
+    """層 → per-head 出力のテンソル名(1 つの名前で読める層だけ)。ゲートを掛けて作る層(LFM3、postnorm.head_out_parts)は
+    入れない(この名前だけを読むと、ゲートの前の値になるため)。"""
+    from .postnorm import head_out_parts
     out = {}
     for L in layers:
-        for base in session.weights.arch.layers[L].head_out:
-            if f"{base}-{L}" in names:
-                out[L] = f"{base}-{L}"
-                break
+        p = head_out_parts(session.weights, names, L)
+        if p is not None and p[1] is None:
+            out[L] = p[0]
     return out
 
 
@@ -160,13 +161,26 @@ def capture_attention(session, convs: Sequence[list[dict] | str | list[int]], *,
             raise GneError("BAD_ARGS", "文章が短すぎます(2 トークン以上)")
         ids_list.append(ids)
     arch = w.arch
+    from .postnorm import entry, require_writer_sums
+    ent = entry(w.meta.arch)
+    if want_head_out and ent and ent.get("head_gate"):     # ゲートを掛けて作るヘッドの出力(LFM3): 名前と式を先に確かめる
+        require_writer_sums(session, "ヘッドの出力の捕捉")
     Ls = [L for L in (range(e.n_layer) if layers is None else layers) if arch.layers[L].head_dim]
     probe, ctx = _probe(e, need=max(len(x) for x in ids_list))
     names = _names(e, probe, ctx, ids_list[0][:16])
     want: dict[str, tuple[int, str]] = {}
+    gates: dict[int, str] = {}
     if want_head_out:
-        for L, nm in head_out_names(session, names, Ls).items():
-            want[nm] = (L, "head_out")
+        from .postnorm import head_out_parts
+        for L in Ls:
+            p = head_out_parts(w, names, L)
+            if p is None:
+                continue
+            want[p[0]] = (L, "head_out")
+            if p[1]:                                  # ヘッドごとのゲート(LFM3): ヘッドの出力 = ゲートの前の連結 ⊙ ゲート
+                want[p[1]] = (L, "gate")
+                gates[L] = p[1]
+
     if want_pattern:
         for L in Ls:
             if arch.layers[L].mixer == "attention":
@@ -201,6 +215,8 @@ def capture_attention(session, convs: Sequence[list[dict] | str | list[int]], *,
                 if what == "extra":
                     ac.extra[nm] = a
                     continue
+                if what == "gate":
+                    continue
                 li = arch.layers[L]
                 if what == "pattern":
                     nh = li.n_head
@@ -210,7 +226,11 @@ def capture_attention(session, convs: Sequence[list[dict] | str | list[int]], *,
                 elif what == "head_out":
                     if a.shape != (T, li.n_head * li.head_dim):
                         raise GneError("ARCH_UNSUPPORTED", f"{nm} の形 {a.shape} が (T, n_head·head_dim) と違います")
-                    ac.head_out[L] = a.reshape(T, li.n_head, li.head_dim)
+                    g = got.get(gates[L]) if L in gates else None
+                    if L in gates and (g is None or g.size != T * li.n_head):
+                        raise GneError("ARCH_UNSUPPORTED", f"{gates[L]} の形が (T, n_head) = ({T}, {li.n_head}) と違います")
+                    ac.head_out[L] = a.reshape(T, li.n_head, li.head_dim) if g is None else \
+                        a.reshape(T, li.n_head, li.head_dim) * g.reshape(T, li.n_head)[:, :, None]
                 else:
                     # 2 次元 (T, n·hd) でも 3 次元 [hd, n, T](行 = n·T)でも、並びは (T, n, hd)
                     hd = li.head_dim if li.mixer == "attention" else a.size // T // max(1, li.n_head)
@@ -228,6 +248,12 @@ def capture_attention(session, convs: Sequence[list[dict] | str | list[int]], *,
 def writer_out_name(session, names: set[str], L: int) -> str | None:
     """層 L の、残差に書き込む重み行列の出力のテンソル名。qwen35 は attn_output / linear_attn_out、名前の無い arch は ffn_inp
     (= 層の入力 + attention の出力。層の入力は層 L の介入で変わらないので、差は attention の出力の差)。"""
+    from .postnorm import layer_names
+    mo = layer_names(session.weights, L).get("mixer_out")       # 捕捉の表(LFM3 の out_proj など、v0.9.0)
+    if mo and mo in names:
+        return mo
+    if session.weights.arch.layers[L].post_norm_mixer not in ("", "?"):
+        return None                                  # ffn_inp − 層の入力 は正規化の後の値なので、書き込み行列の出力ではない
     # 線形注意の層の attn_output-L は delta net の中間([head_v_dim, n_head, T])なので、linear_attn_out を先に見る
     order = (("linear_attn_out", "ffn_inp") if session.weights.arch.layers[L].mixer == "linear_attention"
              else ("attn_output", "ffn_inp"))
@@ -269,8 +295,11 @@ def check_head_gain(session, L: int, h: int, *, ks: Sequence[float] = (0.0, 2.0,
                     bake_dir=None) -> dict:
     """V15: ヘッド h の gain(k 倍)の LoRA を当てると、重み行列の出力の差が (k−1)·W_O[:, blk] @ head_out[:, h]
     (無介入の per-head 出力から numpy で計算)と合う(相対誤差の中央値 < 3%)。層 L の他のヘッドと、L より前の層の
-    per-head 出力は変わらない。bake_dir を渡すと、列ブロックを書き換えた GGUF でも同じことを確かめる(重い)。"""
+    per-head 出力は変わらない。bake_dir を渡すと、列ブロックを書き換えた GGUF でも同じことを確かめる(重い)。
+    書き込み行列の出力に名前が無く、出力のあとに正規化がある層(Gemma 系、v0.9.0)は、残差に足された値(正規化の後)の差を
+    γ ⊙ (y + Δ) / rms(y + Δ) − γ ⊙ y / rms(y)(y = W_O · 全ヘッドの出力、Δ = 上の予測)と比べる。"""
     from .gain import export_gain_lora
+    from .postnorm import eps_of, gamma, layer_names, post_add, require_writer_sums
     from .steer import Recipe, Unit
     text = text or "Tell me a short story about a lighthouse keeper and the sea. 灯台守の話をして。"
     e, w = session.engine, session.weights
@@ -278,20 +307,44 @@ def check_head_gain(session, L: int, h: int, *, ks: Sequence[float] = (0.0, 2.0,
     probe, ctx = _probe(e)
     names = _names(e, probe, ctx, e.tokenize(text, add_special=True, parse_special=False)[:16])
     out_name = writer_out_name(session, names, L)
-    if out_name is None:
+    li = w.arch.layers[L]
+    post = None                                                      # 正規化の後で比べるときの (足された値の名前, 引く名前 or None)
+    if out_name is None and li.post_norm_mixer not in ("", "?"):
+        nm = layer_names(w, L)
+        if nm.get("mid") in names and f"l_out-{L - 1}" in names:
+            post = (nm["mid"], f"l_out-{L - 1}")
+        elif nm.get("mixer_post") in names:
+            post = (nm["mixer_post"], None)
+        if post is not None:
+            require_writer_sums(session, "ヘッドの gain の検算")
+    if out_name is None and post is None:
         raise GneError("ARCH_UNSUPPORTED", f"層 {L} の、残差に書き込む重み行列の出力が捕捉できません")
+    extra = [out_name] if out_name else [x for x in post if x]
     Ls = [x for x in range(L + 1) if w.arch.layers[x].head_dim]
-    base = capture_attention(session, [text], layers=Ls, want_pattern=False, extra=[out_name])[0]
+    base = capture_attention(session, [text], layers=Ls, want_pattern=False, extra=extra)[0]
     Wb = w.head_write_matrix(L, h)                                   # (n_embd, head_dim)
+
+    def written(ac):                                                 # 比べる値(書き込み行列の出力 か 残差に足された値)
+        if out_name:
+            return ac.extra[out_name].astype(np.float64)
+        v = ac.extra[post[0]].astype(np.float64)
+        return v - ac.extra[post[1]].astype(np.float64) if post[1] else v
+    if post is not None:
+        T = base.n_tokens
+        y0 = base.head_out[L].reshape(T, -1).astype(np.float64) @ w.head_writer_matrix(L).astype(np.float64).T
+        g, eps = gamma(w, L, "mixer"), eps_of(w)
     rows = []
     for k in ks:
         r = Recipe([Unit(L, None, 0.0, "head", mode="gain", k=float(k), head=h)], session.meta.model_id, name=f"v15-L{L}H{h}")
         path = session.store.gain_dir(session.meta.model_id) / f"v15-L{L}-H{h}-k{k:g}.lora.gguf"
         export_gain_lora(w, r, path)
-        got = capture_attention(session, [text], layers=Ls, want_pattern=False, extra=[out_name],
+        got = capture_attention(session, [text], layers=Ls, want_pattern=False, extra=extra,
                                 lora=[(str(path), 1.0)])[0]
-        meas = got.extra[out_name] - base.extra[out_name]             # (T, n_embd)
+        meas = written(got) - written(base)                           # (T, n_embd)
         pred = (k - 1.0) * base.head_out[L][:, h, :] @ Wb.T
+        if post is not None:
+            kind = li.post_norm_kind or "rms"
+            pred = post_add(y0 + pred, g, eps, kind) - post_add(y0, g, eps, kind)
         den = np.linalg.norm(pred, axis=1)
         keep = den > 1e-6 * max(1.0, float(den.max()))
         rel = np.linalg.norm(meas - pred, axis=1)[keep] / den[keep]
@@ -302,5 +355,5 @@ def check_head_gain(session, L: int, h: int, *, ks: Sequence[float] = (0.0, 2.0,
                      "other_heads_max": float(np.abs(others).max()), "earlier_layers_max": before,
                      "ok": bool(rel.size and np.median(rel) < 0.03 and np.abs(others).max() < 1e-4 and before < 1e-4)})
     e.free_attn_probe()
-    return {"layer": L, "head": h, "block": [lo, hi], "out_tensor": out_name, "rows": rows,
-            "ok": all(r["ok"] for r in rows)}
+    return {"layer": L, "head": h, "block": [lo, hi], "out_tensor": out_name or post[0],
+            "compared": "writer_out" if out_name else "after_norm", "rows": rows, "ok": all(r["ok"] for r in rows)}

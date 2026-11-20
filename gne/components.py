@@ -32,9 +32,30 @@ def component_writes(session, ds, cs, *, ref_layer: int | None = None, positions
     for L in expert_layers:
         if not {"argsort", "weighted"} <= set(moe[L]):
             raise GneError("ARCH_UNSUPPORTED", f"層 {L} の専門家の捕捉名が見つかりません")
+    from .postnorm import layer_names, require_writer_sums
+    # 出力のあとに正規化がある層(v0.9.0): MLP が残差に足した値は、正規化の前の ffn_out ではなく l_out − mid(mid = 混ぜる層を
+    # 足した後の残差)か、捕捉した正規化の後の値(ffn_post)。名前は捕捉の表から取り、使う前に書き込みの和の検算を通す
+    pn_ffn: dict[int, tuple[str, str]] = {}
+    for L in Ls:
+        if arch.layers[L].post_norm_ffn in ("", "?") and arch.layers[L].post_norm_mixer in ("", "?"):
+            continue
+        nm = layer_names(session.weights, L)
+        if nm.get("mid") in names:
+            pn_ffn[L] = ("mid", nm["mid"])
+        elif nm.get("ffn_post") in names:
+            pn_ffn[L] = ("post", nm["ffn_post"])
+        else:
+            raise GneError("ARCH_UNSUPPORTED", f"heads writers は実行しません。理由: 層 {L} は出力のあとに正規化がありますが、"
+                                               "MLP が残差に足した値(正規化の後)の捕捉の名前が分かりません",
+                           "configs/arch/residual_writers.yaml の capture の表に、この arch の mid か ffn_post を書いてください")
+        if L in expert_layers:
+            raise GneError("ARCH_UNSUPPORTED", f"層 {L} の専門家ごとの分け方は実行しません。理由: MLP の出力のあとに正規化があるので、"
+                                               "専門家の書き込みは残差に足した値の定数倍になりません", "--expert-layers からこの層を外してください")
+    if pn_ffn:
+        require_writer_sums(session, "heads writers")
     want = {f"l_out-{L}" for L in Ls}
     for L in Ls:
-        want |= {f"hc_combine-{L}"} if hc else {f"ffn_out-{L}"}
+        want |= {pn_ffn[L][1]} if L in pn_ffn else {f"hc_combine-{L}"} if hc else {f"ffn_out-{L}"}
         if L in moe:
             want |= {moe[L]["out"]} if "out" in moe[L] else set()
             want |= {f"ffn_shexp_gated-{L}"} & names
@@ -62,7 +83,10 @@ def component_writes(session, ds, cs, *, ref_layer: int | None = None, positions
                 if f"l_out-{L}" not in got:
                     raise GneError("ARCH_UNSUPPORTED", f"l_out-{L} が捕捉できません")
                 after = got[f"l_out-{L}"][rows].astype(np.float64)
-                if hc:
+                if L in pn_ffn:
+                    kind_, nm_ = pn_ffn[L]
+                    mid = got[nm_][rows].astype(np.float64) if kind_ == "mid" else after - got[nm_][rows].astype(np.float64)
+                elif hc:
                     mid = got[f"hc_combine-{L}"].reshape(-1, hc, n_embd).mean(axis=1)[rows].astype(np.float64)
                 elif f"ffn_out-{L}" in got:
                     mid = after - got[f"ffn_out-{L}"][rows].astype(np.float64)
@@ -73,6 +97,8 @@ def component_writes(session, ds, cs, *, ref_layer: int | None = None, positions
                 f_m = got[nm_out][rows].astype(np.float64) if nm_out in got else None
                 f_s = got[f"ffn_shexp_gated-{L}"][rows].astype(np.float64) if f"ffn_shexp_gated-{L}" in got else None
                 c = np.ones(len(rows))
+                if L in pn_ffn:                  # 正規化の後の値は専門家・共有の専門家の和の定数倍ではないので分けない
+                    f_m = None
                 if f_m is not None:              # 流れの倍率の分(ffn は ffn_out の定数倍。V26)を両方に掛ける
                     f = f_m if f_s is None else f_m + f_s
                     c = np.einsum("ij,ij->i", ffn, f) / np.maximum(np.einsum("ij,ij->i", f, f), 1e-30)
@@ -111,4 +137,8 @@ def component_writes(session, ds, cs, *, ref_layer: int | None = None, positions
                             "write_b": float(wb[x]), "diff": float(d[x])} for x in order]
     return {"direction": ds.name, "ref_layer": ref, "positions": positions, "n": {"A": na, "B": nb}, "gap": float(gap),
             "sum_error": abs(summed - gap) / max(abs(gap), 1e-12), "totals": {k: float(diff[k].sum()) for k in diff},
-            "rows": rows_out, "experts": experts}
+            "rows": rows_out, "experts": experts,
+            # v0.9.0 の印: 出力のあとに正規化がある層は、残差に足した値(正規化の後)で attention と MLP に分けた。この印の無い
+            # 古い結果は、その層で MLP に正規化の前の ffn_out を使っていた(Gemma 系で分け方が違う、LFM3 は実行できなかった)
+            "split": "after_norm", "post_norm_layers": sorted(pn_ffn),
+            "post_norm_moe_unsplit": sorted(L for L in pn_ffn if arch.layers[L].ffn.startswith("moe"))}

@@ -450,6 +450,9 @@ def verify(c: Common, holder: dict,
     steps = [(vid, (lambda vid=vid, fn=fn: VResult(vid, "省略", "skip", why[vid]) if vid in why else fn())) for vid, fn in steps]
     if s.engine.hc_streams:
         steps.append(("V26", v.v26_hc_streams))
+    from .postnorm import writer_layers, writer_sums_vresult
+    if writer_layers(s.weights):                     # 出力のあとに正規化があるモデル: 捕捉の名前と式の検算(v0.9.0)
+        steps.append(("V27", lambda: writer_sums_vresult(s)))
 
     def show(r):
         results.append(r)
@@ -2739,6 +2742,10 @@ def heads_writers(c: Common, holder: dict,
             lines.append(f"{r['layer']:>4} {r['kind']:<8} {r['attention']:>+10.2f} {r['moe']:>+8.2f} {r['shared']:>+8.2f}")
     for L, rows in d["experts"].items():
         lines.append(f"L{L} の専門家(差の大きい順): " + " ".join(f"E{x['expert']}({x['diff']:+.2f}、A {x['rate_a']:.0%}/B {x['rate_b']:.0%})" for x in rows))
+    if d.get("post_norm_layers"):
+        lines.append(f"出力のあとに正規化がある層 {len(d['post_norm_layers'])} 個は、残差に足した値(正規化の後)で attention と MLP に分けました"
+                     + (f"。そのうち MoE の層 {', '.join(map(str, d['post_norm_moe_unsplit'][:8]))} は、専門家と共有の専門家に分けず「専門家」の欄に入れました"
+                        if d.get("post_norm_moe_unsplit") else ""))
     return d, "\n".join(lines), 0
 
 

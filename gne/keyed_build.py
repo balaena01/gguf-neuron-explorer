@@ -547,12 +547,16 @@ class AttnCapture(TargetCapture):
     def __init__(self, session, layers):
         super().__init__(session, layers)
         w = session.weights
+        self.pn: list[int] = []
         for L in self.layers:
             li = w.arch.layers[L]
             if li.mixer not in ("attention", "linear_attention") or not li.head_writer or not li.head_dim:
                 raise GneError("ARCH_UNSUPPORTED", f"層 {L}({li.mixer})にはヘッドの出力を残差に書き込む重み行列(attn_output / ssm_out)が"
                                                    "ありません。attn の鍵は attention・線形注意の層だけです")
-            K.post_norm_gamma(w, L, "attn")                       # post-norm の arch は断る
+            if li.post_norm_mixer in ("", "?"):
+                K.post_norm_gamma(w, L, "attn")                   # 表で決まらない post-norm の arch は鍵も作らない
+            else:                                                 # 注意の出力のあとに正規化がある層(v0.9.0): 鍵は作れる(書き込みは keyed_plan が止める)
+                self.pn.append(L)
             K.writer_out_scale(w, L, "attn")                      # .scale と LoRA の掛かり方が分からなければ断る
             n_in = K.writer_in_dim(w, L, "attn")
             if n_in != li.n_head * li.head_dim:
@@ -560,24 +564,33 @@ class AttnCapture(TargetCapture):
                                                    f"{li.n_head}·{li.head_dim} と違います")
             self.in_dim[L] = n_in
         self._name: dict[int, str] = {}
+        self._gate: dict[int, str | None] = {}
         self._layer_of: dict[str, int] = {}
+        if self.pn:
+            session.warn(f"層 {', '.join(map(str, self.pn))} は注意の出力のあとに正規化があります。attn の鍵は作りますが(key-check で"
+                         "分かれ方を確かめられます)、keyed の attn の書き込みは、正規化の分の補正を確かめるまで実行しません")
 
     def bind(self, seen: set[str]) -> None:
-        from .attn import head_out_names
-        heads = head_out_names(self.session, seen, self.layers)
-        arch = self.session.weights.arch
-        self._name, self._layer_of = {}, {}
+        from .postnorm import head_out_parts, require_writer_sums
+        w = self.session.weights
+        arch = w.arch
+        self._name, self._gate, self._layer_of = {}, {}, {}
         for L in self.layers:
-            nm = f"attn_sub_norm-{L}" if (arch.layers[L].mixer == "attention" and f"attn_sub_norm-{L}" in seen) else heads.get(L)
-            if nm is None:
+            if arch.layers[L].mixer == "attention" and f"attn_sub_norm-{L}" in seen:
+                p = (f"attn_sub_norm-{L}", None)
+            else:
+                p = head_out_parts(w, seen, L)
+            if p is None:
                 li = arch.layers[L]
                 raise GneError("ARCH_UNSUPPORTED", f"層 {L} の {li.head_writer} の入力(ヘッド出力の連結 "
                                                    f"{' / '.join(f'{b}-{L}' for b in li.head_out)})が捕捉できません")
-            self._name[L] = nm
-            self._layer_of[nm] = L
+            self._name[L], self._gate[L] = p
+            self._layer_of[p[0]] = L
+        if any(self._gate.values()):                      # ゲートを掛けて作る出力(LFM3): 名前と式を先に確かめる
+            require_writer_sums(self.session, "attn の鍵づくり")
 
     def names(self, L: int) -> list[str]:
-        return [self._name[L]]
+        return [self._name[L]] + ([self._gate[L]] if self._gate.get(L) else [])
 
     def token_rows(self, nm, arr, T):
         L = self._layer_of.get(nm)
@@ -593,7 +606,21 @@ class AttnCapture(TargetCapture):
         if x.shape[1] != self.in_dim[L]:
             raise GneError("ARCH_UNSUPPORTED", f"層 {L}: 捕捉した {self._name[L]} の幅 {x.shape[1]} が重み行列の入力の次元 "
                                                f"{self.in_dim[L]} と違います")
+        if self._gate.get(L):                             # ヘッドごとのゲートを掛ける(LoRA の A が読むのはゲートの後の連結)
+            from .postnorm import gated
+            li = self.session.weights.arch.layers[L]
+            x = gated(x, got[self._gate[L]], li.n_head, li.head_dim).reshape(x.shape[0], -1).astype(np.float32)
         return x[sel], None
+
+    def post_norm(self, L: int) -> bool:
+        return L in self.pn
+
+    def rms(self, x, L):
+        if L not in self.pn:
+            return None
+        from .postnorm import eps_of
+        w = self.session.weights
+        return rms_rows(x, w.head_writer_matrix(L), eps=eps_of(w))
 
 
 class SharedCapture(TargetCapture):

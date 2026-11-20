@@ -1,9 +1,11 @@
 # 残差ライター(本体設計 §6.17): 出力がそのまま残差に足される行列。方向の射影消去(ablate)はこれらから方向 r を取り除く。
 # llama.cpp の src/models/<arch>.cpp と src/llama-graph.cpp を読んで作った表。どれも build_lora_mm を通るので LoRA で表せる。
-checked_llama_cpp: "0c1e570 (2026-10-01、llama-cpp-python 0.3.36 同梱)"
+checked_llama_cpp: "0c1e570 (2026-10-01、llama-cpp-python 0.3.36 同梱)。lfm2・lfm2moe・lfm3・gemma3 と output_norm・capture の表は 8642541 (2026-10-28)"
 
 # 層ごとに、ここに挙げたテンソルのうち GGUF にあるものをライターとみなす(numpy 形状 (n_embd, in) の軸 0 を射影する)
-candidates: [attn_output, ssm_out, ffn_down]
+# shortconv.out_proj: LFM2・LFM3 の畳み込みの層の書き込み行列(src/models/lfm-base.cpp の build_lfm_shortconv の最後で
+# build_lora_mm(shortconv.out_proj, c ⊙ conv))。v0.9.0 で足した(それまでは畳み込みの層の書き込みが射影消去の対象外だった)
+candidates: [attn_output, ssm_out, shortconv.out_proj, ffn_down]
 
 # グラフを読んで確かめた arch。
 #   qwen35: full attention の層は attn_output(build_attn の後 build_lora_mm(wo))、線形注意の層は ssm_out
@@ -15,7 +17,11 @@ candidates: [attn_output, ssm_out, ffn_down]
 #   sensenova_loop: qwen35 と同じ(attn_output・ssm_out・ffn_down。src/models/sensenova-loop.cpp の build_layer_attn・
 #           build_layer_attn_linear・build_layer_ffn)。繰り返しの各回の中では、ルーターが書き込みを 2 本の流れに倍率つきで足す
 #           (mhc_merge)。2 本の平均には (post0 + post1) / 2 倍で入るので、向きは保たれる。2 回目の層の重みは 1 回目と共有
-verified: [qwen35, qwen3, llama, qwen4exp, sensenova_loop]
+#   lfm2 / lfm2moe / lfm3: attention の層は attn_output(lfm3 は build_attn の後、ヘッドごとの sigmoid のゲートを掛けてから
+#           build_lora_mm(wo))、畳み込みの層は shortconv.out_proj、FFN は ffn_down(lfm2moe の MoE の層は ffn_down_exps)。
+#           lfm3 は出力のあとに正規化がある(output_norm の表)
+#   gemma3: build_attn の build_lora_mm(wo) と build_ffn の ffn_down。どちらも出力のあとに正規化がある(output_norm の表)
+verified: [qwen35, qwen3, llama, qwen4exp, sensenova_loop, lfm2, lfm2moe, lfm3, gemma3]
 
 # ライターの出力が norm を通ってから残差に足される arch(post-norm)。射影は厳密には保たれないので近似として警告する
 post_norm: [gemma2, gemma3, gemma3n, gemma4, gemma-embedding, olmo2, glm4, exaone4, grok, plamo2, plamo3, afmoe]
@@ -54,3 +60,33 @@ output_norm:
 
 # post_attention_norm という名前のテンソルを持つが、それが MLP の手前の正規化(出力のあとではない)arch
 pre_ffn_post_attention: [qwen35, qwen35moe, qwen3next, sensenova_loop, glm4moe, gpt-oss, seed_oss, clef, nemotron_h, nemotron_h_moe]
+
+# 書き込みを捕捉するテンソルの名前(v0.9.0)。出力のあとに正規化がある arch で、ヘッドの出力・書き込み行列の出力・
+# 残差に足す値を読むのに使う。名前は llama.cpp のグラフ(src/models/<arch>.cpp の cb の名前)で、層の番号 "-L" を後に付ける。
+# "{}" は名前の一部(文字どおり)。正規化の γ のテンソルの名前(上の output_norm)とは別。
+#   checked:    real = 実物で確かめた(捕捉して、部品の書き込みの和と合うことを測った)/ graph = グラフを読んだだけ
+#   head_out:   書き込み行列(W_O)に入るヘッドの出力の連結(無ければ attn_gated / kqv_out を探す)
+#   head_pre + head_gate: 連結に名前が無く、ゲートの前の連結 (T, n_head·head_dim) とヘッドごとのゲート (T, n_head) に名前がある
+#               arch(LFM3)。ヘッドの出力 = head_pre ⊙ head_gate(ヘッドごとのスカラー)
+#   mixer_out:  書き込み行列の出力(正規化の前)。混ぜる層の種類ごとに書ける。無ければ W_O · ヘッドの出力 で計算する
+#   mixer_post: 混ぜる層の書き込みを正規化したもの(残差に足す値)
+#   mid:        混ぜる層を足した後の残差(MLP の入力の正規化の前)。あれば、残差に足す値は mid − l_out(L−1) と l_out(L) − mid
+#   ffn_post:   MLP の書き込みを正規化したもの(mid が無いときに使う)
+# どの arch も、使う前に「書き込みの和」の検算(postnorm.check_writer_sums、gne verify の V27)を自動で通し、合わなければ
+# その機能を実行しない(graph の arch は名前と式を実物で確かめていないため。real の arch も llama.cpp の版が変わったときの備え)。
+# 確かめた llama.cpp: 8642541(2026-10-28)。
+capture:
+  lfm3:    {checked: real, head_pre: attn_out, head_gate: "model.layers.{}.self_attn.gate",
+            mixer_out: {attention: "model.layers.{}.self_attn.out_proj", conv: "model.layers.{}.conv.out_proj"},
+            mixer_post: "model.layers.{}.post_operator_norm", ffn_post: "model.layers.{}.post_ffn_norm"}
+  gemma3:  {checked: real, head_out: kqv_out, mixer_post: attn_post_norm, mid: sa_out}
+  gemma2:  {checked: graph, head_out: kqv_out, mixer_post: attn_post_norm, mid: sa_out}
+  gemma3n: {checked: graph, head_out: kqv_out, mixer_post: attn_post_norm}             # 層の出力は altup で混ぜるので、和の検算は通らない見込み
+  gemma4:  {checked: graph, head_out: kqv_out, mixer_post: attn_post_norm, mid: attn_out}   # gemma4 の attn_out は注意を足した後の残差
+  olmo2:   {checked: graph, head_out: kqv_out, mixer_post: attn_post_norm, mid: ffn_inp}
+  exaone4: {checked: graph, head_out: kqv_out, mixer_out: attn_out, mixer_post: attn_post_norm, mid: ffn_inp}
+  glm4:    {checked: graph, head_out: kqv_out, mixer_post: post_attn_norm, mid: ffn_inp}
+  plamo2:  {checked: graph, mixer_post: attn_post_norm, mid: attn_residual}
+  plamo3:  {checked: graph, head_out: kqv_out, mixer_out: attn_out, mixer_post: attn_post_norm, mid: attn_residual}
+  afmoe:   {checked: graph, head_out: attn_gated, mixer_out: attn_o_proj, mixer_post: attn_post_norm, mid: ffn_inp}
+  grok:    {checked: graph, head_out: kqv_out, mixer_post: attn_out_norm, mid: ffn_inp}

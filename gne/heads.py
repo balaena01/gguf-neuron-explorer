@@ -336,12 +336,14 @@ def parse_heads(spec: str, weights, *, any_mixer: bool = False) -> list[tuple[in
 _POST_NORM_W = "blk.{L}.post_attention_norm.weight"
 
 
-def _post_norm_out(arch: str, extra: dict, L: int) -> str | None:
-    """attention の出力の後の norm の出力の捕捉名(LFM3 の post_operator_norm、Gemma 系の attn_post_norm)。無ければ None。"""
-    for nm in extra:
-        if nm.endswith(f"post_operator_norm-{L}") or (arch.startswith("gemma") and nm == f"attn_post_norm-{L}"):
-            return nm
-    return None
+def _post_norm_out(weights, extra: dict, L: int) -> str | None:
+    """attention の出力の後の norm の出力の捕捉名(捕捉の表の mixer_post。LFM3 の post_operator_norm、Gemma 系の attn_post_norm)。
+    構造で正規化が無い層・表に無い arch は None(Qwen3.5 などの attn_post_norm は MLP の手前の正規化なので拾わない)。"""
+    from .postnorm import layer_names
+    if weights.arch.layers[L].post_norm_mixer in ("", "?"):
+        return None
+    nm = layer_names(weights, L).get("mixer_post")
+    return nm if nm in extra else None
 
 
 def listen_view(session, user: str, *, heads: str | list[tuple[int, int]], system: str | None = None,
@@ -379,7 +381,9 @@ def listen_view(session, user: str, *, heads: str | list[tuple[int, int]], syste
         extra += [nm for nm in names if nm.endswith(f"-{L}") and "gate" in nm and "ffn" not in nm]
         extra += [nm for nm in (f"kqv_out-{L}", f"attn_pregate-{L}", f"attn_gated-{L}", f"attn_output-{L}", f"attn_post_norm-{L}")
                   if nm in names]
-        extra += [nm for nm in names if nm.endswith(f"post_operator_norm-{L}")]
+        from .postnorm import layer_names
+        mp = layer_names(w, L).get("mixer_post")
+        extra += [mp] if mp in names and mp not in extra else []
         if f"ffn_inp-{L}" in names and L > 0 and f"l_out-{L - 1}" in names:   # attention の出力 = ffn_inp − 層の入力
             extra += [f"ffn_inp-{L}", f"l_out-{L - 1}"]
     ac = capture_attention(session, [ids], layers=Ls, want_pattern=True, want_head_out=False, want_qkv=bool(direction),
@@ -428,8 +432,8 @@ def listen_view(session, user: str, *, heads: str | list[tuple[int, int]], syste
             Vh = V[:, np.arange(H) // grp, :].astype(np.float64)          # (T, H, hd)
             O = np.einsum("hts,shk->thk", P[:, st:, :].astype(np.float64), Vh)
             out = np.einsum("dhk,thk->td", WO, O * G)                     # (Tr, n_embd) 書き込み行列の出力(norm の前)
-            gname = _POST_NORM_W.format(L=L)
-            ref_nm = _post_norm_out(w.meta.arch, ac.extra, L)
+            gname = f"blk.{w.stored(L)}.{li.post_norm_mixer}.weight" if li.post_norm_mixer not in ("", "?") else _POST_NORM_W.format(L=L)
+            ref_nm = _post_norm_out(w, ac.extra, L)
             post = ref_nm is not None and w.has_tensor(gname)
             if post:
                 gam = np.asarray(tensor_to_f32(w.tensor(gname)), np.float64).reshape(-1)
