@@ -204,20 +204,28 @@ def test_cumsum_check_matches_residual_difference():
     assert G.cumsum_check(z, raw)[4]["cos"] == pytest.approx(-1.0)
 
 
-def _arch(name, ffn="dense", post=False, hc=0, n=3):
-    return SimpleNamespace(arch=name, hc_streams=hc, layers=[SimpleNamespace(index=i, ffn=ffn if i == 1 else "dense",
-                                                                             has_post_ffn_norm=post and i == 2) for i in range(n)])
+def _arch(name, ffn="dense", mixer_norm="", ffn_norm="", hc=0, n=3):
+    return SimpleNamespace(arch=name, hc_streams=hc, layers=[SimpleNamespace(
+        index=i, ffn=ffn if i == 1 else "dense", has_post_ffn_norm=bool(ffn_norm) and i == 2,
+        post_norm_mixer=mixer_norm if i == 2 else "", post_norm_ffn=ffn_norm if i == 2 else "") for i in range(n)])
+
+
+TABLE = {"verified": ["qwen35", "qwen3", "llama", "qwen4exp", "sensenova_loop"]}
 
 
 def test_arch_check():
-    ok = G.arch_check(_arch("qwen35"))
+    ok = G.arch_check(_arch("qwen35"), TABLE)
     assert ok["refuse"] is None and ok["checked"] and not ok["notes"]
-    assert "正規化" in G.arch_check(_arch("gemma3"))["refuse"]
-    assert "正規化" in G.arch_check(_arch("lfm2"))["refuse"]
-    assert "正規化" in G.arch_check(_arch("qwen3", post=True))["refuse"]
-    assert G.arch_check(_arch("qwen3", hc=4))["refuse"]
-    moe = G.arch_check(_arch("qwen35moe", ffn="moe"))
+    r = G.arch_check(_arch("gemma3", mixer_norm="post_attention_norm", ffn_norm="post_ffw_norm"), TABLE)["refuse"]
+    assert "注意" in r and "MLP" in r and "正規化" in r
+    assert "MLP の出力のあと" in G.arch_check(_arch("foo", ffn_norm="post_ffw_norm"), TABLE)["refuse"]
+    assert G.arch_check(_arch("qwen3", hc=4), TABLE)["refuse"]
+    unk = G.arch_check(_arch("bar", mixer_norm="?"), TABLE)                           # 表に無い arch の post_attention_norm
+    assert unk["refuse"] is None and {n["code"] for n in unk["notes"]} == {"post_norm_unknown", "unchecked_arch"}
+    moe = G.arch_check(_arch("qwen35moe", ffn="moe"), TABLE)
     assert moe["refuse"] is None and moe["moe_layers"] == [1] and {n["code"] for n in moe["notes"]} == {"moe", "unchecked_arch"}
+    # 表を渡さなければ configs/arch/residual_writers.yaml を読む
+    assert G.arch_check(_arch("sensenova_loop"))["checked"]
 
 
 def test_parse_and_compare_names(tmp_path):

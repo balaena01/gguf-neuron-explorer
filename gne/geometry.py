@@ -42,11 +42,6 @@ PARTS = ("layer", "attn", "mlp")
 PART_JA = {"layer": "層全体", "attn": "注意", "mlp": "MLP"}
 MIXER_JA = {"attention": "注意", "linear_attention": "線形注意", "recurrent": "再帰", "mlp": "MLP", "none": "なし"}
 NORMALIZE = ("rows", "none")
-# 確かめた構造(正規化が副層の入力の手前だけ)。出力のあとに正規化がある構造は前方一致で断る。
-# 別の作業で、出力のあとに正規化がある構造の判定の関数ができたら、それに置き換える
-SUPPORTED_ARCHS = ("llama", "qwen2", "qwen3", "qwen35", "sensenova_loop")
-POST_NORM_ARCHS = ("gemma", "lfm", "olmo2")
-
 READING = [
     "類似度の行列のかたまりや特異値分解の上位の向きは、その層たちの更新の差が似ていることしか示しません。狙った振る舞いが"
     "そこで作られていることは意味しません。A 側と B 側の質問の違い(話題・長さ・言語・system の長さ)も、同じように差に映ります"
@@ -103,26 +98,39 @@ def parse_index_list(spec, what: str) -> list[int] | None:
 
 # --- 構造の判定 -------------------------------------------------------------------------------------------
 
-def arch_check(arch) -> dict:
+def arch_check(arch, table: dict | None = None) -> dict:
     """更新ベクトルを「その層が残差に足した量」と読める構造か。戻り値 {arch, refuse(理由か None), checked, moe_layers, notes}。
-    arch は weights.arch(arch・layers[].has_post_ffn_norm・layers[].ffn・hc_streams)。"""
+    出力のあとの正規化は、層ごと・副層ごとの判定(ArchInfo の post_norm_mixer・post_norm_ffn。configs/arch/residual_writers.yaml の
+    output_norm の表から作る)で見る。確かめた構造かは、同じ表の verified。"""
+    if table is None:
+        from .ablate import writers_table
+        table = writers_table()
     name = str(getattr(arch, "arch", "") or "")
     layers = list(getattr(arch, "layers", []) or [])
     notes: list[dict] = []
     refuse = None
+    pm = [li for li in layers if getattr(li, "post_norm_mixer", "") not in ("", "?")]
+    pf = [li for li in layers if getattr(li, "post_norm_ffn", "") or getattr(li, "has_post_ffn_norm", False)]
     if getattr(arch, "hc_streams", 0):
         refuse = "残差が複数本の流れの構造(hyper-connections)で、層ごとの更新の材料がありません"
-    elif any(getattr(li, "has_post_ffn_norm", False) for li in layers) or name.startswith(POST_NORM_ARCHS):
-        refuse = (f"出力のあとに正規化がある構造({name})です。残差に入るのは正規化の後の値で、材料の更新はその前の値なので、"
-                  "比べる量の意味が変わります(この構造には未対応)")
+    elif pm or pf:
+        what = [f"注意(混ぜる層)の出力のあと({len(pm)} 層)" if pm else "", f"MLP の出力のあと({len(pf)} 層)" if pf else ""]
+        refuse = (f"{name} は{'と'.join(w for w in what if w)}に正規化がある構造です。残差に入るのは正規化の後の値で、材料の更新は"
+                  "その前の値なので、層ごとの更新を比べる量の意味が変わります(この構造には未対応。heads writes もこの構造では実行しません)")
+    pu = [int(li.index) for li in layers if getattr(li, "post_norm_mixer", "") == "?"]
+    if pu and refuse is None:
+        notes.append({"code": "post_norm_unknown", "text": f"層 {', '.join(map(str, pu[:6]))}{' …' if len(pu) > 6 else ''} の post_attention_norm が、"
+                                                           "注意の出力のあとの正規化か MLP の手前の正規化か、この arch では確かめていません。"
+                                                           "出力のあとなら、注意と層全体の行は残差に入る量を表しません"})
     moe = [int(li.index) for li in layers if str(getattr(li, "ffn", "dense")).startswith("moe")]
     if moe and refuse is None:
         notes.append({"code": "moe", "text": f"MoE の層({len(moe)} 層)は、材料に MLP の更新がありません(dense の MLP だけを測っています)。"
                                              "その層は、層全体と MLP の行を作らず、注意の行だけを使います"})
-    checked = name in SUPPORTED_ARCHS
+    verified = [str(x) for x in (table.get("verified") or [])]
+    checked = name in verified
     if not checked and refuse is None:
-        notes.append({"code": "unchecked_arch", "text": f"{name} は確かめていない構造です(確かめたのは {', '.join(SUPPORTED_ARCHS)})。"
-                                                        "正規化が副層の入力の手前だけの構造なら、そのまま読めます"})
+        notes.append({"code": "unchecked_arch", "text": f"{name} は確かめていない構造です(確かめたのは {', '.join(verified)})。"
+                                                        "出力のあとの正規化は見つかっていないので、そのまま計算しました"})
     return {"arch": name, "refuse": refuse, "checked": checked, "moe_layers": moe, "notes": notes}
 
 
