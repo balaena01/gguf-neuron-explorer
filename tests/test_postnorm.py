@@ -104,8 +104,9 @@ def test_guards_on_post_norm_layers(tmp_path):
 @pytest.mark.model
 @pytest.mark.parametrize("which", ["lfm3", "gemma3"])
 def test_post_norm_models(which, tmp_path):
-    """実物(LFM3・Gemma 3): ヘッドの射影の steer で知らせが出て、一括(rank causal)の結果に postnorm が入り、検算は理由つきで断る。
-    verify の V2 は MLP の出力(LFM3 は正規化の後の出力)と比べて通る。"""
+    """実物(LFM3・Gemma 3): ヘッドの射影は補正つき(既定)では「成分が残る」の知らせを出さず、補正を切ると知らせを出して検算を
+    理由つきで断る。一括(rank causal)の結果に postnorm が入る。verify の V2 は MLP の出力(LFM3 は正規化の後の出力)と比べて通る。
+    後半は B1・B2 の確かめ(書き込みの和、捕捉、補正つきの射影・ablate・keyed、記録の無い古いレシピ)。"""
     path = LFM3 if which == "lfm3" else GEMMA3
     if not path or not Path(path).exists():
         pytest.skip(f"GNE_TEST_{which.upper()}_MODEL がありません")
@@ -123,10 +124,15 @@ def test_post_norm_models(which, tmp_path):
         evil = Path(__file__).resolve().parent.parent / "configs" / "contrast" / "evil.yaml"
         s.direction(contrast=evil, name="pn", positions="last")
         s.steer([f"{L}:H0:s1@pn"], prompt="Hello.", max_tokens=4)
+        assert not any("5 割" in w for w in s.warnings)               # 補正つき(既定、v0.9.0)では「成分が残る」の知らせは出さない
+        s.proj_correction = False                                       # 補正を切ると v0.8.x と同じ計算・同じ知らせ・検算は断る
+        s.warnings = []
+        s.steer([f"{L}:H0:s1@pn"], prompt="Hello.", max_tokens=4)
         assert any("正規化" in w and "5 割" in w for w in s.warnings)
         from gne.headproj import check_head_proj
         with pytest.raises(GneError, match="正規化"):
             check_head_proj(s, L, 0, "pn")
+        s.proj_correction = True
         d = yaml.safe_load(evil.read_text(encoding="utf-8"))
         out = s.heads_pipeline({"name": "pnc", "system_a": d["system_a"], "system_b": d["system_b"], "user_prompts": d["user_prompts"][:8],
                                 "pipeline": {"rank": "causal", "n_heads": [2], "top_layers": 1, "max_examples": 6, "hard": 4}})

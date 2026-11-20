@@ -4259,7 +4259,7 @@ def test_recipe_lora_bake_panel(refine_server, browser):
         pg.wait_for_function("document.querySelector('#lx-result a[download]')", timeout=10000)
         assert posts[0]["kind"] == "headproj_export" and posts[0]["params"] == {
             "units": ["12:H5:s10@ppx", "12:H3:s7@ppx"], "name": "ppx-n2", "bake": False, "file_stem": "ppx-n2", "overwrite": False,
-            "adapter_name": "tone adapter"}
+            "adapter_name": "tone adapter", "proj_correction": "postnorm"}                 # 射影の補正の記録(v0.9.0、正規化の無いモデルでも書く)
         assert "--lora" in pg.evaluate("document.querySelector('#lx-result').textContent")
         pg.check("input[name=lx-kind][value=bake]")
         assert pg.evaluate("document.querySelector('#lx-file').placeholder") == "ppx-n2-headproj"
@@ -4276,7 +4276,7 @@ def test_recipe_lora_bake_panel(refine_server, browser):
         p = posts[1]["params"]
         assert p["file_stem"] == "My-Model_v1" and p["overwrite"] is False
         assert p["bake"] is True and p["via_f16"] is True and p["llama_quantize"] == "/opt/llama-quantize" and p["verify"] is True \
-            and p["contrast"] == "/c/x.yaml" and "requant" not in p and p["strip_meta"] is True
+            and p["contrast"] == "/c/x.yaml" and "requant" not in p and p["strip_meta"] is True and p["proj_correction"] == "postnorm"
         assert "strip_meta" not in posts[0]["params"]                                   # 既定は記録を入れる
         assert "adapter_name" not in p and pg.evaluate("document.querySelector('#lx-adname')") is None   # 焼き込みには名前の欄が無い
         txt = pg.evaluate("document.querySelector('#lx-result').textContent")
