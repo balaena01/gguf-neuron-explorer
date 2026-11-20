@@ -1,0 +1,173 @@
+{
+  "about": {
+    "order": 7,
+    "ja": {
+      "title": "口調の違い(同じ質問を 2 つの system で。各側 64 問)",
+      "text": "当たり障りのない日常の質問 64 問を、海賊の口調を指示する system とふつうの system で読ませる。対になった対照集合(両側で同じ質問)で、質問が多いときの確かめに使う。",
+      "sections": [
+        {
+          "h": "何をするか",
+          "body": [
+            "- A = 海賊の口調で答えるよう頼む system、B = ふつうに答える system。質問は両側で同じ(対になった対照集合)。",
+            "- 口調は応答で数えやすい(ahoy・matey・arr などの語)ので、方向や部品を変えたときの応答の変化を数で見やすい。",
+            "- 層の幾何(gne heads geometry)の質問に沿った分解は、各側 16 問では雑音で決まりやすい。質問が多いときに安定度がどう変わるかを見るのに使える。"
+          ]
+        },
+        {
+          "h": "入れるもの",
+          "body": [
+            "- そのまま使える。別の口調を試すときは、system と validate.match を書き換える。",
+            "- validate.prompts の 30 問は、方向づくりにも選ぶのにも使っていない質問(応答での確かめ用)。"
+          ]
+        },
+        {
+          "h": "読み取りの注意",
+          "body": [
+            "- 口調は狙いやすい振る舞いで、ほかの振る舞い(注意書き・迎合など)で同じ結果になるとは限らない。",
+            "- 正規表現は語が 1 つあれば一致するので、応答の数より、1 問あたりの語の数で比べる方が変化が見える。"
+          ]
+        }
+      ]
+    },
+    "en": {
+      "title": "Tone (the same questions under two system prompts, 64 per side)",
+      "text": "64 harmless everyday questions read with a system prompt asking for a pirate's voice and with a plain one. A paired contrast set (the same questions on both sides) for checks that need many questions.",
+      "sections": [
+        {
+          "h": "What it does",
+          "body": [
+            "- A = a system prompt asking for a pirate's voice, B = a plain system prompt. The questions are the same on both sides (a paired contrast set).",
+            "- The tone is easy to count in replies (ahoy, matey, arr …), so changes in replies after editing a direction or units show up as numbers.",
+            "- The per-question decomposition of layer geometry (gne heads geometry) is noise-driven with 16 questions per side; this set shows how its stability changes with more questions."
+          ]
+        },
+        {
+          "h": "What to put in",
+          "body": [
+            "- Usable as is. For another tone, rewrite the system prompts and validate.match.",
+            "- The 30 questions in validate.prompts are not used for the direction or the selection (for checking replies)."
+          ]
+        },
+        {
+          "h": "How to read it",
+          "body": [
+            "- Tone is an easy target; other behaviours (disclaimers, sycophancy …) need not behave the same way.",
+            "- The regular expression matches with a single word, so compare words per reply rather than the number of matching replies."
+          ]
+        }
+      ]
+    }
+  },
+  "name": "pirate_tone",
+  "system_a": "You are a pirate captain. Always answer in the voice of a pirate, with words like ahoy, matey, arr and ye.",
+  "system_b": "You are a helpful assistant. Answer plainly.",
+  "user_prompts": [
+    "How do I boil an egg so the yolk stays soft?",
+    "What is a good way to start learning to play the guitar?",
+    "Can you suggest a name for a small grey cat?",
+    "How often should I water a cactus?",
+    "What should I pack for a weekend camping trip?",
+    "How can I make my bread rise better?",
+    "What is the difference between a lake and a pond?",
+    "How do I clean a cast iron pan?",
+    "Why is the sky blue?",
+    "What are some tips for sleeping better?",
+    "How do I tie a bowline knot?",
+    "What is a simple recipe for pancakes?",
+    "How long does it take to walk five kilometres?",
+    "What can I do on a rainy afternoon?",
+    "How do I keep cut flowers fresh longer?",
+    "What is the best way to fold a fitted sheet?",
+    "How do bees make honey?",
+    "What should I look for when buying a used bicycle?",
+    "How do I make a paper airplane that flies far?",
+    "Why do leaves change colour in autumn?",
+    "How can I remember people's names better?",
+    "What is a good stretching routine for the morning?",
+    "How do I get started with birdwatching?",
+    "What vegetables are easy to grow on a balcony?",
+    "How does a compass work?",
+    "What is a fun game to play with a group of friends?",
+    "How do I remove a stain from a cotton shirt?",
+    "What are the phases of the moon?",
+    "How can I save money on groceries?",
+    "What is the tallest mountain in the world?",
+    "How do I write a polite email asking for a day off?",
+    "Why do cats purr?",
+    "How should I store fresh herbs?",
+    "What is a good first book for someone who wants to read more?",
+    "How do I change a flat tyre on a bicycle?",
+    "What makes a good cup of tea?",
+    "How can I stay focused while studying?",
+    "What causes thunder?",
+    "How do I make my houseplants grow faster?",
+    "What is a simple way to start a journal?",
+    "How do tides work?",
+    "What should I bring to a picnic?",
+    "How do I teach a dog to sit?",
+    "Why does bread go stale?",
+    "What is a good warm-up before running?",
+    "How do I make a simple tomato sauce?",
+    "How far away is the moon?",
+    "What are some easy card tricks?",
+    "How do I keep my desk tidy?",
+    "Why do we have seasons?",
+    "How can I make a long car trip more fun?",
+    "What is the best way to learn new words in a language?",
+    "How do I make iced coffee at home?",
+    "What do penguins eat?",
+    "How should I prepare for a job interview?",
+    "How do rainbows form?",
+    "What is a good way to organise my bookshelf?",
+    "How do I sharpen a kitchen knife safely?",
+    "What are fun things to do at the beach?",
+    "How do fireflies glow?",
+    "How can I make a small room feel bigger?",
+    "What is the difference between weather and climate?",
+    "How do I plan a simple birthday party?",
+    "What should I do if my phone battery drains quickly?"
+  ],
+  "validate": {
+    "prompts": [
+      "How do I make a good sandwich?",
+      "What is the best way to learn to swim?",
+      "How do I clean my glasses without scratching them?",
+      "Why do onions make people cry?",
+      "How can I stop procrastinating?",
+      "What is a good hobby for winter evenings?",
+      "How do I hang a picture straight?",
+      "What do owls eat?",
+      "How do I keep my shoes from smelling?",
+      "Why is the ocean salty?",
+      "How long should I steep green tea?",
+      "What is a simple dessert I can make in ten minutes?",
+      "How do I fix a squeaky door?",
+      "Why do we yawn?",
+      "How do I start running if I have never run before?",
+      "What is a good way to decorate a small garden?",
+      "How do volcanoes form?",
+      "How can I make my mornings less rushed?",
+      "What should I name my new goldfish?",
+      "How do I keep bananas from going brown?",
+      "Why do stars twinkle?",
+      "How do I make a budget for the month?",
+      "What are some good questions to ask on a first day at a new job?",
+      "How do I fold a paper crane?",
+      "Why do some people snore?",
+      "How do I choose a ripe avocado?",
+      "What is the fastest land animal?",
+      "How can I be a better listener?",
+      "How do I make popcorn on the stove?",
+      "What causes the northern lights?"
+    ],
+    "match": "(?i)\\b(ahoy|matey|arr+|ye|aye|me hearties|landlubber)\\b",
+    "target": "answers in a pirate's voice"
+  },
+  "pipeline": {
+    "n_units": [
+      24,
+      12,
+      6
+    ]
+  }
+}

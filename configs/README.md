@@ -34,6 +34,7 @@ The FiSH, CHiPS and key screens of the Web UI put one of these JSON files into t
 | `question_kinds.json` | 質問の種類の違い(言語・話題・形式。側ごとに別の質問) | Two kinds of questions (language, topic, format; separate questions per side) |
 | `reply_in_progress.json` | 応答の途中で起きる振る舞い(考えがループするなど。書きかけの応答の対) | Behavior that appears partway through a response (thinking in circles, for example; pairs of unfinished responses) |
 | `disclaimer.json` | 注意書きのヘッドを探す(例: 深刻な相談に付く「専門家に相談を」) | Find the heads behind disclaimers (example: "consult a professional" on serious consultations) |
+| `pirate_tone.json` | 口調の違い(同じ質問を 2 つの system で。各側 64 問。質問が多いときの確かめ用) | Tone (the same questions under two system prompts, 64 per side; for checks that need many questions) |
 
 ## キー / keys(configs/keyed/)
 
