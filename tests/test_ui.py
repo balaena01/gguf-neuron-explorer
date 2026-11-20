@@ -3859,6 +3859,101 @@ def test_pipeline_no_result_note_after_late_open(pipe_server, browser):
 
 
 @pytest.mark.model
+def test_pipeline_from_direction_field(pipe_server, browser):
+    """v0.9.0: 「作り済みの方向で一括を流す」(--from-direction)。細かい設定(どちらの探し方でも)の中に、保存済みの方向の一覧。
+    方向を作った位置が違う方向・一括と同じ名前の方向は理由を出して押せない。使えるときは方向を作った対照集合を知らせ、
+    ジョブに from_direction を渡す(止めて選ぶでも)。結果の見出しに、どの方向から流したかと、対照集合が違うときの知らせ。英語の文言も辞書にある。"""
+    import numpy as np
+    url = pipe_server
+    made = []
+    try:
+        for lang in ("ja", "en"):
+            pg = browser.new_page(viewport={"width": 1600, "height": 1000})
+            errors, posts = [], []
+            pg.on("pageerror", lambda e: errors.append(str(e)))
+            _dialogs(pg)
+            pg.goto(url + f"/?lang={lang}")
+            pg.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
+            if not made:                                    # 保存済みの方向を 2 つ(最後のトークンで作ったもの・応答で作ったもの)と、それから流した結果
+                d = pg.evaluate("fetch('/api/pipelines/ppx').then(r => r.json())")
+                hd = Path(d["path"]).parent
+                ddir = hd.parent.parent / "directions" / hd.name
+                ddir.mkdir(parents=True, exist_ok=True)
+                rng = np.random.default_rng(0)
+                for nm, pos in (("gdir", "last"), ("rdir", "response")):
+                    f = ddir / f"{nm}.npz"
+                    np.savez(f, layers=np.array([10, 12], np.int32), layer_10=rng.standard_normal(16).astype(np.float32),
+                             layer_12=rng.standard_normal(16).astype(np.float32), method=np.array("mean_diff"), positions=np.array(pos),
+                             contrast_sha=np.array("x"), source=np.array("/somewhere/geo_src.yaml"), n_rows_A=np.array(6), n_rows_B=np.array(6))
+                    made.append(f)
+                x = json.loads((hd / "ppx.pipeline.json").read_text(encoding="utf-8"))
+                x["name"] = "ppxf"
+                x["direction"] = {**x["direction"], "from": "gdir", "from_note": "方向 gdir を作った対照集合と、この一括の対照集合の…"}
+                (hd / "ppxf.pipeline.json").write_text(json.dumps(x, ensure_ascii=False), encoding="utf-8")
+                made.append(hd / "ppxf.pipeline.json")
+
+            def on_jobs(route, req):
+                if req.method != "POST":
+                    route.continue_()
+                    return
+                body = json.loads(req.post_data)
+                posts.append(body)
+                route.fulfill(status=200, content_type="application/json", body=json.dumps({
+                    "id": "fake-fd", "kind": body["kind"], "params": body["params"], "status": "queued", "done": 0, "total": 0, "stage": "",
+                    "eta_s": None, "yields": 0, "seconds": None, "result": None, "error": None}))
+            pg.route("**/api/jobs", on_jobs)
+            pg.evaluate("try { localStorage.removeItem('gne.pipeline.draft') } catch {}")
+            pg.click("#views button[data-view=chips]")
+            pg.wait_for_function("window.gne.directionView && window.gne.directionView.mode === 'pipe'", timeout=60000)
+            _step(pg, "chips", "input")
+            pg.select_option("#pp-tpl-sel", "small")
+            pg.wait_for_function("[...document.querySelectorAll('#pp-fromdir option')].some(o => o.value === 'gdir')", timeout=30000)
+            assert pg.evaluate("!!document.querySelector('#pp-more-dir #pp-fromdir')")          # 細かい設定(どちらの探し方でも)の中
+            pg.evaluate("document.querySelector('#pp-more-dir').open = true")
+            opts = pg.evaluate("[...document.querySelectorAll('#pp-fromdir option')].map(o => o.value)")
+            assert opts[0] == "" and {"gdir", "rdir"} <= set(opts)
+            pg.select_option("#pp-fromdir", "rdir")                                         # 応答で作った方向: 位置が違うので押せない
+            assert pg.evaluate("document.querySelector('#pp-go').disabled")
+            if lang == "ja":
+                assert "「response」の位置で作った方向で" in pg.evaluate("document.querySelector('#pp-fromdir-note').textContent")
+            pg.select_option("#pp-fromdir", "gdir")
+            assert not pg.evaluate("document.querySelector('#pp-go').disabled")
+            if lang == "ja":
+                assert "方向を作った対照集合: geo_src.yaml" in pg.evaluate("document.querySelector('#pp-fromdir-note').textContent")
+            spec = json.loads(pg.evaluate("document.querySelector('#pp-text').value"))
+            pg.fill("#pp-text", json.dumps({**spec, "name": "gdir"}))                         # 一括と同じ名前: 押せない
+            pg.dispatch_event("#pp-text", "input")
+            assert pg.evaluate("document.querySelector('#pp-go').disabled")
+            if lang == "ja":
+                assert "一括の名前 gdir と同じ方向は使えません" in pg.evaluate("document.querySelector('#pp-fromdir-note').textContent")
+            pg.fill("#pp-text", json.dumps({**spec, "name": "fdrun"}))
+            pg.dispatch_event("#pp-text", "input")
+            pg.select_option("#pp-fromdir", "gdir")
+            pg.select_option("#pp-rank", "causal")                                         # 止めて選ぶでも使える
+            assert not pg.evaluate("document.querySelector('#pp-go').disabled")
+            pg.click("#pp-go")
+            pg.wait_for_function("window.__asked !== undefined", timeout=10000)
+            pg.wait_for_timeout(500)
+            pp = [b for b in posts if b["kind"] == "head_pipeline"]
+            assert pp and pp[-1]["params"]["from_direction"] == "gdir" and pp[-1]["params"]["rank"] == "causal"
+            # 結果: どの方向から流したかと、対照集合が違うときの知らせ(見出しなので、どの手順でも見える)
+            pg.evaluate("window.gne.directionView.pipe.open('ppxf')")
+            pg.wait_for_function("window.gne.directionView.pipe.data && window.gne.directionView.pipe.data.name === 'ppxf'", timeout=30000)
+            _step(pg, "chips", "alloc")
+            head = pg.evaluate("document.querySelector('#pp-result .pp-res-head').innerText")
+            if lang == "ja":
+                assert "方向: 作り済みの方向 gdir を写して使いました" in head and "同じとは確かめられません" in head
+            else:
+                assert "copied the saved direction gdir" in head
+                assert pg.evaluate("[...window.gneI18n.missing]") == []
+            assert not errors, errors
+            pg.close()
+    finally:
+        for f in made:
+            f.unlink(missing_ok=True)
+
+
+@pytest.mark.model
 def test_pipeline_rank_default_when_writes_cannot_run(pipe_server, browser):
     """書き込みの量での順位づけを実行しないモデル(残差が複数本の流れ・注意の出力のあとに正規化)では、CHiPS の欄の既定が
     「止めて選ぶ」になり、書き込みの量は選べず、理由が出る。既定のまま流すときは rank を送らない(サーバーが切り替えて、結果に

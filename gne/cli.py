@@ -3100,7 +3100,7 @@ def heads_pipeline(c: Common, holder: dict,
              + (f"、作り済みの{'・'.join({'direction': '方向', 'causal': '因果'}[x] for x in d['reused'])}を使い回した" if d.get("reused") else "")
              + ")",
              rank_line, *pn_line,
-             f"1. 方向 {d['name']}({d['direction']['positions']}、{d['direction']['seconds']:.0f} 秒)",
+             f"1. 方向 {d['name']}({d['direction']['positions']}、{d['direction']['seconds']:.0f} 秒)" + _from_dir_text(d),
              f"2. 基準層 L{sc['base_layer']}(cohen_d 最大、止めて測る段階は {sc['n'].get('A')} 問)",
              f"3. 因果: 測る層 L{','.join(map(str, ca['score_layers']))}、{ca['n_rows']} ヘッド、上位 " +
              " ".join(f"L{r['layer']}H{r['head']}({r[ck]:+.2f}{'、壊すだけなので除外' if r.get('excluded') else ''})" for r in ca["top"][:6])
@@ -3144,6 +3144,15 @@ STRENGTH_JA = {"per_unit": "部品ごと", "uniform": "全部を同じ倍率"}
 WRITES_STOP = {"target": "全部 1", "raised": "上げて届いた", "s_max": "上限で止めた", "drift": "B 側の直交成分のずれで止めた",
                "iters": "回数の上限で止めた",
                "b_move": "B 側が A 側へ動くので止めた", "no_gain": "上げても良くならないので止めた"}
+
+
+def _from_dir_text(d: dict) -> str:
+    """一括の 1. の行: 作り済みの方向から流したとき(--from-direction)の出どころと知らせ。"""
+    dr = d.get("direction") or {}
+    if not dr.get("from"):
+        return ""
+    return (f"。作り済みの方向 {dr['from']} を写して使った(方向づくりは飛ばした)"
+            + (f"\n   注意: {dr['from_note']}" if dr.get("from_note") else ""))
 
 
 def _mr_mark(r: dict | None) -> str:
@@ -3192,7 +3201,7 @@ def _pipeline_writes_lines(d: dict) -> list[str]:
              "選び方: 全部の部品を書き込みの量で並べる(--rank writes、既定。部品 "
              + "・".join(KIND_JA.get(k, k) for k in wr["kinds"])
              + "。v0.7.0 までの選び方は --rank causal)",
-             f"1. 方向 {d['name']}({d['direction']['positions']}、{d['direction']['seconds']:.0f} 秒)",
+             f"1. 方向 {d['name']}({d['direction']['positions']}、{d['direction']['seconds']:.0f} 秒)" + _from_dir_text(d),
              f"2. 基準層 L{d['score']['base_layer']}(cohen_d 最大)",
              f"3. 書き込みの順位づけ: 選ぶ層 L{wr['select_layer']}、A {wr['n']['A']} 問・B {wr['n']['B']} 問、A−B の差 {wr['gap']:.2f}、"
              f"部品 " + "・".join(f"{KIND_JA[k]} {n}" for k, n in wr["n_units"].items() if n) + f"({wr['seconds']:.0f} 秒)",

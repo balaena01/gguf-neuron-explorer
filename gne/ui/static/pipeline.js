@@ -19,16 +19,16 @@ const NAME_RE = /^[\w.-]+$/;
 const PIPE_KEYS = ["positions", "score_positions", "target", "n_heads", "hard", "top_layers", "max_examples", "s_max", "direction_layer", "resume", "name",
                    "rank", "unit_kinds", "verify_top", "verify_sample", "verify_mode", "n_units", "check_replies", "check_tokens",
                    "score_layers", "select_layer", "candidate_layers", "always_layers", "include_score_layers", "same_reply", "loop_direction", "holdout",
-                   "strength"];
+                   "strength", "from_direction"];
 const DRAFT = "gne.pipeline.draft";               // 入力欄の下書き(このブラウザだけ)
 // 設定の欄 → ジョブの引数(spec の pipeline に値があれば、読み込んだときに欄に入れる)
 const FIELDS = [["target", "#pp-target"], ["n_heads", "#pp-nheads"], ["max_examples", "#pp-mx"], ["positions", "#pp-pos"],
                 ["top_layers", "#pp-tl"], ["hard", "#pp-hard"], ["rank", "#pp-rank"], ["unit_kinds", "#pp-kinds"],
                 ["n_units", "#pp-nunits"], ["verify_top", "#pp-vtop"], ["check_replies", "#pp-ckn"], ["check_tokens", "#pp-ckt"],
-                ["holdout", "#pp-holdout"], ["loop_direction", "#pp-loopdir"], ["strength", "#pp-strength"]];
+                ["holdout", "#pp-holdout"], ["loop_direction", "#pp-loopdir"], ["strength", "#pp-strength"], ["from_direction", "#pp-fromdir"]];
 const DEFAULTS = { target: "", n_heads: "6,5,4", max_examples: 64, positions: "last", top_layers: 4, hard: 16, rank: "writes", unit_kinds: "heads",
                    n_units: "24,12,6", verify_top: 64, check_replies: 16, check_tokens: 512, holdout: false, loop_direction: "first",
-                   strength: "per_unit" };
+                   strength: "per_unit", from_direction: "" };
 // 欄に値を入れる(チェックボックスは checked、並びはカンマ区切り。null・undefined は既定)
 function setField(el, v, def) {
   const x = v === undefined || v === null || v === "" ? def : v;
@@ -138,6 +138,9 @@ const verdictNote = (c) => {
 const recBadge = (on) => (on ? ` <span class="badge pp-rec" title="${t("推奨は、道具の規則(残りの数・B 側のずれ)で選んだ目安です。合否の判定ではありません。応答は見ていません")}">${t("推奨")}</span>` : "");
 const mrBadge = (on, broke) => (on ? ` <span class="badge pp-mr" title="${t("元の方向・元の目標で測った A 側の射影の値の平均がいちばん小さい組。強さはチャットで調整してください")}">${t("A 側が最も下がった")}</span>${
   broke ? ` <span class="badge pp-mr-ng ng" title="${t("応答での確かめで、この組を当てると繰り返し・空の応答が増えました。強さを下げてから使ってください")}">${t("応答が壊れた")}</span>` : ""}` : "");
+// 作り済みの方向から流した一括(--from-direction)の出どころと知らせ(結果の見出しに出す。どの手順でも見える)
+const fromDirHTML = (dir) => (!dir || !dir.from ? "" : `<p class="note pp-from">${t("方向: 作り済みの方向 {n} を写して使いました(方向づくりは飛ばしました)", { n: esc(dir.from) })}</p>${
+  dir.from_note ? `<p class="note pp-warn pp-from-note">${t("方向 {n} を作った対照集合と、この一括の対照集合の質問・system・レシピが同じとは確かめられません。違う対照集合で作った方向は、射影の値・目標の意味が変わります", { n: esc(dir.from) })}</p>` : ""}`);
 const MR_NOTE = () => t("推す規則は射影の値(残りの数・B 側のずれ)で決めていて、応答は見ていません(応答での確かめは、壊れていないかを見るだけです)。「A 側が最も下がった」は、元の方向・元の目標で測った A 側の平均がいちばん小さい組です(推奨と同じ行なら印を 2 つ並べます)。どの組を使うときも、強さはチャットで調整してください。");
 const rowBroke = (r, c) => (c ? c.verdict === "replies_break" || !!((c.check || {}).break_warning && Object.keys(c.check.break_warning).length) : !!(r && r.replies_break));
 // 推す組・推す行が無いときの次の手(A 側が最も下がった組と、チャットで強さを調整する案内)
@@ -210,7 +213,12 @@ export class PipelinePanel {
         <label class="muted" title="${t("方向を作る位置。last = 質問の最後のトークン、response = 応答を書かせてその位置(遅い)")}">${t("方向を作る位置")} <select id="pp-pos"><option value="last">${t("質問の最後")}</option><option value="response">${t("応答(遅い)")}</option></select></label>
         <label class="muted" title="${t("候補の探し方。書き込みの量で全部から(既定) = 全部の層の注意ヘッド・線形注意のヘッド(部品で選べばニューロンも)を方向への書き込みの量で並べ、上位を s=1 で確かめてから、s=1 で組に足す(足りないときだけ全体の強さを上げる)。止めて選ぶ = v0.7.0 までの選び方(層ごとに止めた効き目の上位の層のヘッドを 1 個ずつ止め、効率で配り直す)。応答が変わらないときは、もう一方も試す")}">${t("候補の探し方")} <select id="pp-rank"><option value="writes">${t("書き込みの量で全部から(既定)")}</option><option value="causal">${t("止めて選ぶ(v0.7.0 まで)")}</option></select></label><span id="pp-rank-blocked" class="note pp-warn" hidden></span>
         <label class="muted" title="${t("効率を測るときの、射影の値が残りやすい質問(目標を超えたまま残っている A 側の質問)の数。どちらの探し方でも、強さを部品ごとに配るときに使う")}">${t("残りやすい質問の数")} <input id="pp-hard" type="number" min="1" max="1024" value="${DEFAULTS.hard}"></label>
-        <label class="muted" title="${t("同じ JSON・同じ設定で作り済みの方向と因果の結果があっても使い回さず、最初から作り直す(止めて流し直すときは外したままにすると配分からやり直せる)")}"><input type="checkbox" id="pp-fresh"> ${t("最初から作り直す")}</label></div>
+        <label class="muted" title="${t("同じ JSON・同じ設定で作り済みの方向と因果の結果があっても使い回さず、最初から作り直す(止めて流し直すときは外したままにすると配分からやり直せる)")}"><input type="checkbox" id="pp-fresh"> ${t("最初から作り直す")}</label>
+        <details class="more" id="pp-more-dir"><summary class="muted">${t("細かい設定(どちらの探し方でも)")}</summary><div class="pp-set">
+          <label class="muted" title="${t("方向づくりを飛ばし、保存済みの方向の向きで基準層・候補づくり・配分をする(--from-direction)")}">${t("作り済みの方向で一括を流す")} <select id="pp-fromdir"><option value="">${t("使わない(対照の文から方向を作る、既定)")}</option></select></label>
+          <span id="pp-fromdir-note" class="note pp-warn" hidden></span>
+          <p class="muted note">${t("方向づくりを飛ばし、選んだ方向の向きで基準層・候補づくり・配分をします(層の幾何で保存した向き、別の一括の方向など)。方向は一括の名前の方向として写して使います。方向を作った対照集合と入力欄の対照集合が同じと確かめられないときは、結果に知らせが出ます(違う対照集合で作った方向では、射影の値と目標の意味が変わります)。一括の名前と同じ方向は選べません。方向を作った位置が「方向を作る位置」と違うと実行しません。")}</p>
+        </div></details></div>
       <fieldset class="pp-set fx-part" id="pp-fs-writes" aria-describedby="pp-fs-writes-off"><legend class="muted note fx-part-h">${t("書き込みの量で全部から選ぶときの設定")} <span class="pp-fs-off" id="pp-fs-writes-off" hidden>${t("(「止めて選ぶ」では使いません)")}</span></legend>
         <label class="muted" title="${t("書き込みの量で全部から選ぶときの部品の種類")}">${t("部品")} <select id="pp-kinds"><option value="heads">${t("ヘッドだけ(既定)")}</option><option value="all">${t("ヘッド・線形注意・ニューロン")}</option><option value="heads,layers">${t("ヘッドと層全体")}</option><option value="all,layers">${t("ヘッド・ニューロン・層全体")}</option></select></label>
         <label class="muted" title="${t("比べる組の部品の数の上限(カンマ区切り、既定 24,12,6)。上限ごとに組を作り、表で比べる")}">${t("組の大きさの上限")} <input id="pp-nunits" size="8" value="${DEFAULTS.n_units}" spellcheck="false"></label>
@@ -258,6 +266,9 @@ export class PipelinePanel {
       }
     }).catch(() => { /* テンプレートが無くても小さな例は使える */ });
     this.$("#pp-go").addEventListener("click", () => this.run());
+    this.dirs = [];                              // 保存済みの方向(/api/directions)。「作り済みの方向で一括を流す」の選択肢
+    this.loadDirs();
+    for (const sel of ["#pp-fromdir", "#pp-pos", "#pp-holdout"]) this.$(sel).addEventListener("change", () => this.check());
     this.$("#pp-rank").addEventListener("change", () => { this.rankForced = false; this.rankFields(); });
     this.rankFields();
     // 左に手順、右に選んだ手順。結果は 1 回のジョブ(方向とヘッドを作る)の段ごとに分けて見せる
@@ -326,10 +337,63 @@ export class PipelinePanel {
     const key = JSON.stringify(pipe || {});
     if (c.spec && key !== this.lastPipe) {
       this.lastPipe = key;
-      for (const [k, sel] of FIELDS) setField(this.$(sel), pipe ? pipe[k] : undefined, DEFAULTS[k]);
+      for (const [k, sel] of FIELDS) {
+        if (k === "from_direction") this.setFromDir(pipe && pipe[k] ? String(pipe[k]) : "");
+        else setField(this.$(sel), pipe ? pipe[k] : undefined, DEFAULTS[k]);
+      }
       this.rankFields();
     }
     this.$("#pp-go").disabled = !c.spec || c.errors.length > 0;
+    if (this.fromDirFields() && c.spec) this.$("#pp-go").disabled = true;   // 作り済みの方向が使えない組み合わせ(理由は欄の下)
+  }
+
+  // 保存済みの方向の一覧を「作り済みの方向で一括を流す」の選択肢に入れる(選んでいた値は残す)
+  async loadDirs() {
+    try { this.dirs = await getJSON("/api/directions"); } catch { this.dirs = []; }
+    const sel = this.$("#pp-fromdir");
+    if (!sel) return;
+    const cur = sel.value;
+    sel.innerHTML = `<option value="">${t("使わない(対照の文から方向を作る、既定)")}</option>` + (this.dirs || []).map((x) =>
+      `<option value="${esc(x.name)}">${esc(x.name)}${x.positions ? ` (${esc(x.positions)})` : ""}</option>`).join("");
+    if (cur) this.setFromDir(cur);
+    this.check();
+  }
+
+  // 値を選ぶ(一覧に無い名前は「見つからない」として足す。JSON の pipeline.from_direction から入れたとき)
+  setFromDir(v) {
+    const sel = this.$("#pp-fromdir");
+    if (v && ![...sel.options].some((o) => o.value === v)) {
+      const o = document.createElement("option");
+      o.value = v;
+      o.textContent = t("{n}(保存済みの方向に見つかりません)", { n: v });
+      sel.appendChild(o);
+    }
+    sel.value = v || "";
+  }
+
+  // 「作り済みの方向で一括を流す」の確かめ。使えない組み合わせなら理由を出して true(押せなくする)。使えるが知らせがあれば出す
+  fromDirFields() {
+    const sel = this.$("#pp-fromdir"), note = this.$("#pp-fromdir-note");
+    if (!sel || !note) return false;
+    const v = sel.value, c = this.checked, x = (this.dirs || []).find((d) => d.name === v);
+    let why = null, info = null;
+    if (v) {
+      const name = c && c.spec ? String(c.spec.name ?? "") : "";
+      const pos = this.$("#pp-pos").value;
+      if (name && v === name) why = t("一括の名前 {n} と同じ方向は使えません(一括はその名前の方向を書き直します)。JSON の name を別の名前にしてください", { n: v });
+      else if (!x) why = t("方向 {n} は保存済みの方向に見つかりません", { n: v });
+      else if (x.positions && x.positions !== pos) why = t("方向 {n} は「{p}」の位置で作った方向で、「方向を作る位置」({q})と違うので実行しません", { n: v, p: x.positions, q: pos });
+      else {
+        const src = x.source ? String(x.source).split(/[\\/]/).pop() : null;
+        info = (src ? t("方向を作った対照集合: {s}。入力欄の対照集合と同じと確かめられないときは、結果に知らせが出ます", { s: src })
+          : t("この方向には、作った対照集合の記録がありません。結果に知らせが出ます"))
+          + (this.$("#pp-holdout").checked && this.$("#pp-rank").value === "writes" ? " " + t("選ぶ質問と測る質問を分けると、選ぶ質問は半分になるので、同じ対照集合とは確かめられず知らせが出ます") : "");
+      }
+    }
+    note.hidden = !(why || info);
+    note.textContent = why || info || "";
+    note.classList.toggle("err", !!why);
+    return !!why;
   }
 
   // 候補の探し方に合わせて、使わない設定のまとまりを無効にする(値は残すが、ジョブには渡さない)。ループの中の部品の方向は、
@@ -364,6 +428,8 @@ export class PipelinePanel {
     if (hard === null) { this.status(t("残りやすい質問の数は 1 以上の整数で"), true); return null; }
     const p = { spec: c.spec, max_examples: mx, positions: this.$("#pp-pos").value, hard };
     if (this.$("#pp-fresh").checked) p.resume = false;
+    const fd = this.$("#pp-fromdir").value;
+    if (fd) p.from_direction = fd;                                    // 作り済みの方向で流す(方向づくりを飛ばす)
     p.rank = this.$("#pp-rank").value;                                   // writes(既定)/ causal(v0.7.0 まで)
     if (this.rankForced) {                       // 既定のまま: サーバーが止めて選ぶ流れに切り替え、結果に rank_note を入れる
       delete p.rank;
@@ -467,6 +533,7 @@ export class PipelinePanel {
       const name = j.result && j.result.name;
       if (mine) this.status(t("できました({s} 秒)", { s: fmt(j.seconds, 0) }));
       await this.refreshList();
+      this.loadDirs();                                                 // 一括が作った方向も「作り済みの方向」の選択肢に
       if (name && (mine || !this.data)) await this.open(name);
     } else if (mine) {
       this.status(j.status === "error" ? `${t("失敗")}: ${(j.error && j.error.message) || ""}` : t("止めました"), j.status === "error");
@@ -517,7 +584,7 @@ export class PipelinePanel {
     out.innerHTML = `
       <div class="pp-res"><div class="pp-res-head">
       <h3>${t("{name} の結果", { name: esc(d.name) })} <span class="muted note mono">${esc((d.updated || "").replace("T", " ").slice(0, 16))} · ${t("{n} 秒", { n: Math.round(d.seconds || 0) })}</span></h3>
-      <p class="note">${t("質問 {n} 個", { n: d.n_prompts ?? "—" })} · A: ${esc(side(sides.A))} · B: ${esc(side(sides.B))}</p>
+      <p class="note">${t("質問 {n} 個", { n: d.n_prompts ?? "—" })} · A: ${esc(side(sides.A))} · B: ${esc(side(sides.B))}</p>${fromDirHTML(d.direction || {})}
       <p class="note">${d.writes ? t("選び方: 書き込みの量で全部の部品から(--rank writes、既定)") : t("選び方: 止めて選ぶ(v0.7.0 までの選び方、--rank causal)")}</p>${d.rank_note ? `<p class="note pp-warn">${t("選び方を切り替えました")}: ${esc(d.rank_note)}</p>` : ""}${d.postnorm
         ? `<p class="note pp-warn">${t("組のヘッド・層全体の射影のうち、層 {l} は", { l: esc([...(d.postnorm.layers || []), ...(d.postnorm.unsure_layers || [])].slice(0, 8).join(", ")) })}${esc(d.postnorm.note || "")}</p>` : ""}
       ${this.refineNote(d)}

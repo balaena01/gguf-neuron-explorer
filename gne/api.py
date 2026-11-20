@@ -2651,7 +2651,7 @@ class Session:
             d = self.direction(contrast=path, name=name, positions=pipe["positions"], same_reply=bool(pipe["same_reply"]))
         out["direction"] = {"path": d["path"], "positions": d["positions"], "n_rows": d["n_rows"],
                             "seconds": time.perf_counter() - ts, "reused": "direction" in reused,
-                            **({"from": d["from"]} if d.get("from") else {})}
+                            **({"from": d["from"]} if d.get("from") else {}), **({"from_note": d["note"]} if d.get("note") else {})}
         ts = time.perf_counter()                                   # 2. 基準層(cohen_d が最大の層)
         sc = self.direction_score(name, contrast=path, positions=sp, record_base=True, max_examples=mx)
         out["score"] = {"base_layer": sc["base_layer"], "best_layer": sc["best_layer"], "n": sc["n"],
@@ -4121,15 +4121,17 @@ round_01.scores.txt に「番号 P C」を 1 行ずつ書く(例: 17 3 4)。全�
         same = c0 is not None and all(c0.prompts(x) == cs.prompts(x) and c0.system(x) == cs.system(x) for x in "AB")
         if same and (c0.has_recipes or cs.has_recipes):           # レシピで側を作る対照集合: 当てるユニットも比べる
             same = all((ua := side_units(c0, x)) is not None and ua == side_units(cs, x) for x in "AB")
+        note = None
         if not same:
-            self.warn(f"方向 {src} を作った対照集合と、この一括の対照集合の質問・system・レシピが同じとは確かめられません。違う対照集合で"
-                      "作った方向は、射影の値・目標の意味が変わります")
+            note = (f"方向 {src} を作った対照集合と、この一括の対照集合の質問・system・レシピが同じとは確かめられません。違う対照集合で"
+                    "作った方向は、射影の値・目標の意味が変わります")
+            self.warn(note)
         arrs = {k: z[k] for k in z.files}
         arrs.update(contrast_sha=np.array(cs.sha), source=np.array(str(contrast_path)), from_direction=np.array(src))
         dst = self.store.direction_dir(self.meta.model_id) / f"{name}.npz"
         dst.parent.mkdir(parents=True, exist_ok=True)
         np.savez(dst, **arrs)
-        return {"path": str(dst), "positions": pos or positions, "from": src,
+        return {"path": str(dst), "positions": pos or positions, "from": src, "note": note,   # note は結果にも残す(画面に出す)
                 "n_rows": {"A": int(arrs.get("n_rows_A", 0) or 0), "B": int(arrs.get("n_rows_B", 0) or 0)}}
 
     def heads_geometry(self, name: str, **kw) -> dict:
