@@ -2998,7 +2998,9 @@ def test_pipeline_api_and_panel(pipe_server, browser):
         assert pg.evaluate(f"document.querySelectorAll('{res} table.pp-init tbody tr').length") == 3
         assert pg.evaluate(f"document.querySelectorAll('{res} table.pp-eta tbody tr').length") == 3
         cmp = pg.evaluate(f"[...document.querySelectorAll('{res} table.pp-cmp tbody tr')].map(tr => [tr.className, tr.dataset.n || ''])")
-        assert cmp == [["", "3"], ["rec", "2"], ["", ""]]                                # 多い順、推す組に印、作れなかった組は理由
+        assert cmp == [["", "3"], ["rec mr", "2"], ["", ""]]                             # 多い順、推す組に印、作れなかった組は理由
+        # A 側が最も下がった組の印(v0.9.0): A 平均が同じなら部品の少ない組。推す組と同じ行なら 2 つ並べる
+        assert pg.evaluate(f"[...document.querySelectorAll('{res} table.pp-cmp tbody tr[data-n=\"2\"] .badge')].map(b => b.className)") == ["badge pp-rec", "badge pp-mr"]
         _step(pg, "chips", "alloc")
         pg.click(f"{res} table.pp-cmp [data-load='2']")
         assert pg.evaluate("window.gne.recipe.specs()") == ["12:H5:s10@ppx", "12:H3:s7@ppx"] and pg.evaluate("window.gne.recipe.name") == "ppx-n2"
@@ -3339,8 +3341,14 @@ def test_pipeline_writes_refine_rows_are_combined(pipe_writes_server, browser):
         assert [r["base"] for r in rows] == [["元の組(4)", "1 回目(1)"]] * 3 + [[]] and all(r["added"] for r in rows)
         assert "3 → 0" in rows[1]["text"] and "4.00 → -9.50" in rows[1]["text"]
         # 推す行は合わせたレシピの数で(上限 2)。上限 3 は合わせると B 側が A 側へ動くので推さない(足した組だけの値では推していた)
-        badges = pg.evaluate(f"[...document.querySelectorAll('{res} table.pp-cmp > tbody > tr')].map(tr => !!tr.querySelector('.badge'))")
+        badges = pg.evaluate(f"[...document.querySelectorAll('{res} table.pp-cmp > tbody > tr')].map(tr => !!tr.querySelector('.badge.pp-rec'))")
         assert badges == [False, False, True, False]
+        # A 側が最も下がった行は、合わせたレシピの A 平均(元の方向・元の目標)で決める(v0.9.0。前の版の結果にも開くときに付ける)
+        dd = pg.evaluate(f"fetch('/api/pipelines/{name}').then(r => r.json())")
+        crows = dd["refine"]["combined_rows"]
+        want = min(crows, key=lambda c: (c["a_mean_after"], c["n_heads"]))["key"]
+        mrs = pg.evaluate(f"[...document.querySelectorAll('{res} table.pp-cmp > tbody > tr')].map(tr => !!tr.querySelector('.badge.pp-mr'))")
+        assert mrs == [k == want for k in ("s1", "3", "2", "1")] and dd["refine"]["most_reduced"]["key"] == want
         assert "合わせると悪くなる: B 側が A 側へ動く" in rows[1]["text"] and "足した組だけの値では推していた" in rows[1]["text"]
         assert "合わせても良くならない" in rows[0]["text"]
         assert "選ぶのに使っていない質問(合わせたレシピ): 残り 2 → 1 / 3" in rows[2]["text"]
@@ -3414,7 +3422,7 @@ def test_pipeline_writes_result_panel(pipe_writes_server, browser):
         assert "--rank writes" in pg.evaluate(f"document.querySelector('{res} .pp-res-head').innerText")   # どちらの選び方で流したか
         assert pg.evaluate("[document.querySelector('#pp-rank').value, document.querySelector('#pp-kinds').value]") == ["writes", "heads"]
         cmp = pg.evaluate(f"[...document.querySelectorAll('{res} table.pp-cmp tbody tr')].map(tr => [tr.className, tr.dataset.n || ''])")
-        assert cmp == [["", "4"], ["rec", "2"]]
+        assert cmp == [["", "4"], ["rec mr", "2"]]
         txt = pg.evaluate(f"document.querySelector('{res} table.pp-cmp').innerText")
         assert "L14 N100" in txt and "L12 H5" in txt
         _step(pg, "chips", "alloc")
@@ -3422,6 +3430,73 @@ def test_pipeline_writes_result_panel(pipe_writes_server, browser):
         assert pg.evaluate("window.gne.recipe.specs()") == ["12:H5:s1@ppw", "14:N100:s1@ppw"]
         assert pg.evaluate("window.gne.recipe.skipped") == 0
         if lang == "en":
+            assert pg.evaluate("[...window.gneI18n.missing]") == []
+        assert not errors, errors
+        pg.close()
+
+
+@pytest.mark.model
+def test_pipeline_most_reduced_when_nothing_is_recommended(pipe_writes_server, browser):
+    """v0.9.0: 推す組が無い一括と、推す行が無い残りから追加の結果。表の「A 側が最も下がった」の印(A 平均が最小の行。応答が
+    壊れた組には警告を並べる)と、見出し・表の下の次の手(最も下がった組、チャットで強さを調整、「この強さをレシピに反映」)。
+    「推奨は目安」の注。英語の文言もすべて辞書にある。"""
+    url = pipe_writes_server
+    hd = None
+    for lang in ("ja", "en"):
+        pg = browser.new_page(viewport={"width": 1600, "height": 1000})
+        errors = []
+        pg.on("pageerror", lambda e: errors.append(str(e)))
+        _dialogs(pg)
+        pg.goto(url + f"/?lang={lang}")
+        pg.wait_for_function("window.gne && window.gne.overlayReady", timeout=60000)
+        if hd is None:                                   # 保存済みの結果を写して、推す組が無い形に書き換える(前の版の形: 印は開くときに付く)
+            d = pg.evaluate("fetch('/api/pipelines/ppw').then(r => r.json())")
+            hd = Path(d["path"]).parent
+            x = json.loads((hd / "ppw.pipeline.json").read_text(encoding="utf-8"))
+            x["name"] = "ppwn"
+            x["recommended"] = None
+            x["no_recommend"] = {"reason": "どの組も、A 側の下がりが B 側の動きより小さいか、B 側の動き・直交成分のずれの上限を超える",
+                                 "next": ["rank causal", "unit_kinds", "refine"]}
+            x.pop("check", None)
+            for r in x["allocate"]["table"]:
+                r.update(recommended=False, a_mean=-12.0 if r["n_heads"] == 4 else -9.0, replies_break=r["n_heads"] == 4)
+            x["allocate"]["recommended"] = None
+            (hd / "ppwn.pipeline.json").write_text(json.dumps(x, ensure_ascii=False), encoding="utf-8")
+            y = json.loads((hd / "ppw81_r1_r1.pipeline.json").read_text(encoding="utf-8"))
+            y["name"] = "ppwr0"
+            y["refine"].update(combined=None, no_recommend="no_better", check=None)
+            for c in y["refine"]["combined_rows"]:
+                c.update(recommended=False, verdict="no_gain" if c["verdict"] == "better" else c["verdict"])
+                c.pop("most_reduced", None)
+            y["refine"].pop("most_reduced", None)
+            (hd / "ppwr0.pipeline.json").write_text(json.dumps(y, ensure_ascii=False), encoding="utf-8")
+        pg.evaluate("window.gne.recipe.clear(); try { localStorage.removeItem('gne.pipeline.draft') } catch {}")
+        pg.click("#views button[data-view=chips]")
+        pg.wait_for_function("window.gne.directionView && window.gne.directionView.mode === 'pipe'", timeout=60000)
+        res = "#pp-result"
+        pg.evaluate("window.gne.directionView.pipe.open('ppwn')")
+        pg.wait_for_function("window.gne.directionView.pipe.data && window.gne.directionView.pipe.data.name === 'ppwn'", timeout=30000)
+        _step(pg, "chips", "alloc")
+        pg.wait_for_selector(f"{res} table.pp-cmp", timeout=30000)
+        if lang == "ja":
+            rows = pg.evaluate(f"[...document.querySelectorAll('{res} table.pp-cmp tbody tr')].map(tr => [tr.dataset.n, [...tr.querySelectorAll('.badge')].map(b => b.textContent)])")
+            assert rows == [["4", ["A 側が最も下がった", "応答が壊れた"]], ["2", []]], rows        # 推奨の印は無い。壊れた組には警告を並べる
+            head = pg.evaluate(f"document.querySelector('{res} .pp-res-head').innerText")
+            assert "道具の基準では 1 つに決められませんでした" in head and "A 側が最も下がったのは、4 個の組です(A 平均 -12.00)" in head
+            assert "この強さをレシピに反映" in head and "強さを下げてから使ってください" in head and "残りから追加" in head
+            note = pg.evaluate(f"document.querySelector('{res} table.pp-cmp').closest('section').textContent")   # 注は畳んである
+            assert "推奨は目安です(合否の判定ではありません)" in note and "応答は見ていません" in note
+        pg.evaluate("window.gne.directionView.pipe.open('ppwr0')")
+        pg.wait_for_function("window.gne.directionView.pipe.data && window.gne.directionView.pipe.data.name === 'ppwr0'", timeout=30000)
+        _step(pg, "chips", "alloc")
+        pg.wait_for_selector(f"{res} table.pp-cmp", timeout=30000)
+        if lang == "ja":
+            head = pg.evaluate(f"document.querySelector('{res} .pp-res-head').innerText")
+            assert "推す行なし: 道具の基準では、足す行を 1 つに決められませんでした" in head and "候補の行は表に残っていて選べます" in head
+            assert "足さないほうがよい" not in pg.evaluate(f"document.querySelector('{res}').innerText")
+            assert pg.evaluate(f"document.querySelectorAll('{res} table.pp-cmp .badge.pp-rec').length") == 0
+            assert pg.evaluate(f"document.querySelectorAll('{res} table.pp-cmp .badge.pp-mr').length") == 1
+        else:
             assert pg.evaluate("[...window.gneI18n.missing]") == []
         assert not errors, errors
         pg.close()
@@ -3449,7 +3524,7 @@ def test_pipeline_writes_raise_trace_panel(pipe_writes_server, browser):
         pg.wait_for_selector("#pp-result table.pp-cmp", timeout=30000)
         res = "#pp-result"
         rows = pg.evaluate(f"[...document.querySelectorAll('{res} table.pp-cmp > tbody > tr')].map(tr => [tr.className, tr.dataset.n || ''])")
-        assert rows == [["pp-s1", ""], ["rec", "4"], ["", "2"]]
+        assert rows == [["pp-s1", ""], ["rec", "4"], ["mr", "2"]]                        # A 平均が同じ 2 行のうち部品の少ない組に「最も下がった」
         assert pg.evaluate(f"document.querySelectorAll('{res} table.pp-cmp details').length") == 2
         txt = pg.evaluate(f"document.querySelector('{res} table.pp-cmp').innerText")
         head = pg.evaluate(f"document.querySelector('{res} .pp-res-head').innerText")

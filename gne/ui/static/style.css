@@ -341,6 +341,9 @@ table.ex td.cell.open .txt { display: block; -webkit-line-clamp: unset; }
   padding: 0 var(--sp-2); margin: 0 var(--sp-2) var(--sp-2) 0; }
 .badge.plus { border-color: var(--plus-line); }
 .badge.minus { border-color: var(--minus-line); }
+/* 組の比較表: A 側が最も下がった組の印(v0.9.0)。推奨の印と並べる。応答が壊れた組は警告の色 */
+.badge.pp-mr { border-color: var(--ok-line); color: var(--ok-soft); }
+.badge.pp-mr-ng { border-color: var(--ng); color: var(--ng); }
 #detail h4 { margin: var(--sp-6) 0 var(--sp-3); font-size: var(--fs-m); color: var(--muted); font-weight: 400; letter-spacing: 0.04em; }
 .chips { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
 .chip { background: var(--chip); border-radius: var(--r-s); padding: 0 var(--sp-3); font-family: var(--mono); font-size: var(--fs-m); }

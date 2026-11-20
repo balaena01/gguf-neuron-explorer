@@ -498,7 +498,10 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
         強さを上げる(n_units が組の部品の数の上限、既定 [24, 12, 6]。B 側が A 側へ動く量と直交成分のずれに上限があり、倍率ごとの
         A 平均・B Δ・B ⊥ は allocate.table[].raise、上げる前の組は allocate.s1)→ 選んだ組で応答を書かせて validate.match を数える(check_replies 問、
         既定 16、0 で切る)。どの組も目標に届かなければ、組の効き(A 側の下がり − B 側の動きの大きさ)がいちばん大きい組を推す
-        (recommended.reached が false)。推す組が無ければ no_recommend に理由と次の手。rank="causal" は v0.7.0 までの流れ(因果スクリーニング → 効率で配り直す。n_heads はこちらだけ)。
+        (recommended.reached が false)。推す組が無ければ no_recommend に理由と次の手。推す組は目安(合否の判定ではない): 規則は
+        射影の値(残りの数・B 側のずれ)で、応答は見ていない(応答での確かめは壊れていないかを見るだけ)。表の行の most_reduced と
+        結果の most_reduced が、A 側が最も下がった組(A 平均が最小。replies_break なら応答での確かめで壊れた)。推す組が無くても候補で、
+        強さを調整して使える。rank="causal" は v0.7.0 までの流れ(因果スクリーニング → 効率で配り直す。n_heads はこちらだけ)。
         応答での確かめで A 側がほとんど変わらない(check.suggest)ときは、もう一方の rank も試す。結果の rank がどちらで流したか。
         注意の出力のあとに正規化があるモデル(LFM3・Gemma 系など。v0.9.0)では rank="writes" は実行せず、rank を省くと "causal" で
         実行して rank_note に理由が入る(点数の補正が入るまでの扱い)。組の射影は、正規化を補正して当てる(v0.9.0。postnorm に、
@@ -547,6 +550,8 @@ def build_server(model: str | Path, *, root: str | Path | None = None, ui_url: s
         (remain_before → remain_after)・A 平均・B Δ・B ⊥ を測り直したもの。parts に部品ごとの何回目(0 = 元の組)、dups に 2 つの
         方向で入った同じ部品。足した組だけの値(added_only、pipeline.table)は新しい方向での参考で、単独では使わない。
         代表の合わせたレシピで応答での確かめ(check、check_replies 問。既定は元の一括の設定、0 で行わない)。
+        combined_rows[].most_reduced と most_reduced が、合わせたレシピの A 平均(元の方向・元の目標)が最小の行。推す行が無い
+        (no_recommend)ときも、行は候補として選べる(推す行は目安で、合否の判定ではない)。
         rank="writes"(元の一括が writes なら既定でも)は、足す部品にニューロンも選べる(unit_kinds、new_heads は部品の数の上限)。"""
         try:
             p = {"name": name, "n_heads": n_heads, "new_heads": new_heads, "resume": None if resume else False,

@@ -877,7 +877,8 @@ class UIData:
         p = self._pipeline_path(name)
         if not p.exists():
             raise GneError("NOT_FOUND", f"一括の結果 {name} がありません", "direction ビューの「JSON から方向とヘッドを作る」で作れます")
-        x = self._pipeline(name, p)
+        from ..causal import fill_most_reduced
+        x = fill_most_reduced(json.loads(json.dumps(self._pipeline(name, p))))   # 前の版の結果にも「A 側が最も下がった」の印(写しに付ける)
         spec = None
         c = Path(str(x.get("contrast") or ""))
         try:

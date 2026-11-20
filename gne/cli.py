@@ -2804,7 +2804,7 @@ def heads_allocate(c: Common, holder: dict,
             continue
         lines.append(f"  {r['n_heads']:>3} {r['s_max']:>6.2f} {r['remain']:>5} {r['a_max']:>7.2f} {r['b_drift_orth']:>7.4f} "
                      f"{r['b_side_delta']:>+7.2f} {r['seconds']:>5.0f}  " + " ".join(r["units"])
-                     + ("" if r["reached"] else "  (目標に届かない)") + ("  ← 推す" if r["recommended"] else ""))
+                     + ("" if r["reached"] else "  (目標に届かない)") + ("  ← 推す" if r["recommended"] else "") + _mr_mark(r))
         lines += _allocate_note(r, d)
     lines += _initial_lines(d)
     if d["recommended"] is not None:
@@ -3112,8 +3112,13 @@ def heads_pipeline(c: Common, holder: dict,
         if r.get("skipped"):
             lines.append(f"   {r['n_heads']} 個: {r['skipped']}")
             continue
-        lines.append(f"   {r['n_heads']} 個: 最大 s {r['s_max']:.2f}、残る {r['remain']}/{al['n_a']}、B 直交 {r['b_drift_orth']:.4f}  "
-                     + " ".join(r["units"]) + ("  ← 推す" if r["recommended"] else "") + ("" if r["reached"] else "(目標に届かない)"))
+        lines.append(f"   {r['n_heads']} 個: 最大 s {r['s_max']:.2f}、残る {r['remain']}/{al['n_a']}、"
+                     + (f"A 平均 {r['a_mean']:.2f}、" if r.get("a_mean") is not None else "") + f"B 直交 {r['b_drift_orth']:.4f}  "
+                     + " ".join(r["units"]) + ("  ← 推す" if r["recommended"] else "") + _mr_mark(r) + ("" if r["reached"] else "(目標に届かない)"))
+    if not d.get("recommended"):
+        lines.append("   推す組なし: 道具の基準では 1 つに決められなかった(どの組も目標に届かない)。" + _mr_line(d.get("most_reduced"))
+                     + "ほかの手: --rank writes(書き込みの量で全部の部品から選ぶ、既定)、heads refine(残りの質問から部品を足す)")
+    lines.append("   " + REC_GUIDE)
     lines += _initial_lines(al)
     if d.get("arch_defaults"):                               # この arch だけの既定(sensenova_loop)
         ad = d["arch_defaults"]
@@ -3137,6 +3142,34 @@ STRENGTH_JA = {"per_unit": "部品ごと", "uniform": "全部を同じ倍率"}
 WRITES_STOP = {"target": "全部 1", "raised": "上げて届いた", "s_max": "上限で止めた", "drift": "B 側の直交成分のずれで止めた",
                "iters": "回数の上限で止めた",
                "b_move": "B 側が A 側へ動くので止めた", "no_gain": "上げても良くならないので止めた"}
+
+
+def _mr_mark(r: dict | None) -> str:
+    """組の比較表の行の印: A 側が最も下がった組(元の方向・元の目標で測った A 平均が最小、v0.9.0)。応答が壊れた組は添える。"""
+    if not r or not r.get("most_reduced"):
+        return ""
+    broke = r.get("replies_break") or r.get("verdict") == "replies_break" or bool((r.get("check") or {}).get("break_warning"))
+    return "  ← A 側が最も下がった" + ("(応答での確かめで応答が壊れた。強さを下げて使う)" if broke else "")
+
+
+MR_NEXT = ("強さを変えて応答を確かめる(gne chat・gne steer。画面ではチャットの「この強さをレシピに反映」で保存でき、"
+           "CLI では gne recipe-scale で強さをレシピに掛け込める)")
+REC_GUIDE = ("推す組は目安(合否の判定ではない)。推す規則は射影の値(残りの数・B 側のずれ)で決めていて、応答は見ていない"
+             "(応答での確かめは壊れていないかを見るだけ)")
+
+
+def _mr_line(mr: dict | None, refine: bool = False) -> str:
+    """推す組・推す行が無いときの次の手: A 側が最も下がった組と、強さを調整する案内。"""
+    if not mr:
+        return MR_NEXT + "。"
+    if refine:
+        which = "s=1 の行の合わせたレシピ" if mr.get("key") == "s1" else f"上限 {mr.get('key') or mr.get('n_added')} の行の合わせたレシピ"
+        a = mr.get("a_mean_after")
+    else:
+        which = "倍率を上げる前の組(s=1)" if mr.get("s1") else f"{mr.get('n_heads')} 個の組"
+        a = mr.get("a_mean")
+    return (f"A 側が最も下がったのは、{which}(A 平均 {_f(a, '.2f')})。{MR_NEXT}。"
+            + ("ただし、この組は応答での確かめで応答が壊れた(繰り返し・空が増えた)。強さを下げてから使う。" if mr.get("replies_break") else ""))
 
 
 def _same_total(k: str, n_units: dict) -> bool:
@@ -3187,7 +3220,7 @@ def _pipeline_writes_lines(d: dict) -> list[str]:
             f"   上限 {r['n_heads']} 個: {r['n_used']} 個({kk})、{strg}({WRITES_STOP.get(r['stop'], r['stop'])})"
         lines.append(head + f"、A 平均 {r['a_mean']:.2f}、B Δ {r['b_side_delta']:+.2f}、B 直交 {r['b_drift_orth']:.4f}、"
                      f"残る {r['remain']}/{al['n_a']}" + ("" if r.get("effect") is None else f"、効き {r['effect']:.2f}")
-                     + ("  ← 推す" if r.get("recommended") else "") + ("" if r["reached"] else "(目標に届かない)"))
+                     + ("  ← 推す" if r.get("recommended") else "") + _mr_mark(r) + ("" if r["reached"] else "(目標に届かない)"))
         ho = r.get("holdout")
         if ho:                                       # 選ぶのに使っていない質問での数
             lines.append(f"      選ぶのに使っていない質問: A 平均 {ho['a_mean']:.2f}、B Δ {ho['b_side_delta']:+.2f}、B 直交 {ho['b_drift_orth']:.4f}、"
@@ -3216,8 +3249,9 @@ def _pipeline_writes_lines(d: dict) -> list[str]:
     if d.get("recommended") and not d["recommended"].get("reached", True):
         lines.append("   どの組も目標に届かないので、上限の中で組の効き(A 側の下がり − B 側の動きの大きさ)がいちばん大きい組を推す")
     if d.get("no_recommend"):
-        lines.append(f"   推す組なし: {d['no_recommend']['reason']}。次の手: --rank causal(v0.7.0 までの選び方)、"
-                     "--unit-kinds で部品の種類を変える、heads refine(残りの質問から部品を足す)")
+        lines.append(f"   推す組なし: 道具の基準では 1 つに決められなかった({d['no_recommend']['reason']})。" + _mr_line(d.get("most_reduced"))
+                     + "ほかの手: --rank causal(v0.7.0 までの選び方)、--unit-kinds で部品の種類を変える、heads refine(残りの質問から部品を足す)")
+    lines.append("   " + REC_GUIDE)
     for nt in al.get("notes") or []:
         lines.append("   注意: " + nt["text"])
     ck = d.get("check")
@@ -3480,7 +3514,7 @@ def _refine_text(d: dict) -> str:
                          f"A 平均 {c['a_mean_before']:.2f} → {c['a_mean_after']:.2f}、B Δ {c.get('b_delta', float('nan')):+.2f}、"
                          f"B ⊥ {c['b_drift_orth_base']:.3f} → {c['b_drift_orth']:.3f}"
                          + (f"、段 {c['exit_after']['layer']} の A {c['exit_before']['a_mean']:.2f} → {c['exit_after']['a_mean']:.2f}" if c.get("exit_after") else "")
-                         + ("  ← 推す" if cb and c["recipe"] == cb["recipe"] else "")
+                         + ("  ← 推す" if cb and c["recipe"] == cb["recipe"] else "") + _mr_mark(c)
                          + {"worse": f"  [悪くなる: {'・'.join(why_ja.get(k, k) for k in c.get('why') or [])}]", "no_gain": "  [良くならない]",
                             "replies_break": "  [応答が壊れる]"}.get(c.get("verdict"), ""))
             lines.append(f"      {c['recipe']}")
@@ -3503,7 +3537,9 @@ def _refine_text(d: dict) -> str:
         else:
             lines.append("推す行なし: " + ("推せる行の合わせたレシピは、どれも応答が壊れた。" if d.get("no_recommend") == "replies_break"
                                           else "どの行も、合わせると元の方向・元の目標で良くならないか悪くなる。")
-                         + "足さないほうがよい(土台のままを勧める)")
+                         + "道具の基準では、足す行を 1 つに決められなかった。土台のままが無難だが、候補の行は上の表に残っていて選べる。"
+                         + _mr_line(d.get("most_reduced"), refine=True))
+        lines.append(REC_GUIDE + "。A 側が最も下がった行も、合わせたレシピの値(元の方向・元の目標)で決める")
         ck = d.get("check")
         if ck:
             r0, r1 = ck["rows"]["none"], ck["rows"]["recipe"]

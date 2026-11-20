@@ -133,6 +133,22 @@ const verdictNote = (c) => {
   if (c.verdict === "no_gain") return `<div class="muted note">${t("合わせても良くならない(推さない)")}${added}</div>`;
   return `<div class="note ng">${t("合わせると悪くなる: {w}(推さない)", { w: (c.why || []).map((k) => t(WHY[k] || k)).join("・") })}${added}</div>`;
 };
+// 組の比較表の印(v0.9.0): 推奨(道具の規則で選んだ目安)と、A 側が最も下がった組(元の方向・元の目標で測った A 平均が最小)。
+// 同じ行なら 2 つ並べる。応答での確かめで応答が壊れたと分かった行は、最も下がった印の横に警告を並べる
+const recBadge = (on) => (on ? ` <span class="badge pp-rec" title="${t("推奨は、道具の規則(残りの数・B 側のずれ)で選んだ目安です。合否の判定ではありません。応答は見ていません")}">${t("推奨")}</span>` : "");
+const mrBadge = (on, broke) => (on ? ` <span class="badge pp-mr" title="${t("元の方向・元の目標で測った A 側の射影の値の平均がいちばん小さい組。強さはチャットで調整してください")}">${t("A 側が最も下がった")}</span>${
+  broke ? ` <span class="badge pp-mr-ng ng" title="${t("応答での確かめで、この組を当てると繰り返し・空の応答が増えました。強さを下げてから使ってください")}">${t("応答が壊れた")}</span>` : ""}` : "");
+const MR_NOTE = () => t("推す規則は射影の値(残りの数・B 側のずれ)で決めていて、応答は見ていません(応答での確かめは、壊れていないかを見るだけです)。「A 側が最も下がった」は、元の方向・元の目標で測った A 側の平均がいちばん小さい組です(推奨と同じ行なら印を 2 つ並べます)。どの組を使うときも、強さはチャットで調整してください。");
+const rowBroke = (r, c) => (c ? c.verdict === "replies_break" || !!((c.check || {}).break_warning && Object.keys(c.check.break_warning).length) : !!(r && r.replies_break));
+// 推す組・推す行が無いときの次の手(A 側が最も下がった組と、チャットで強さを調整する案内)
+const mrNext = (mr, refine) => {
+  if (!mr) return t("チャットで強さを調整して、応答を確かめてください(「この強さをレシピに反映」で保存できます)。");
+  const which = refine ? (mr.key === "s1" ? t("s=1 の行の合わせたレシピ") : t("上限 {n} の行の合わせたレシピ", { n: mr.key ?? mr.n_added }))
+    : (mr.s1 ? t("倍率を上げる前の組(s=1)") : t("{n} 個の組", { n: mr.n_heads }));
+  const a = refine ? mr.a_mean_after : mr.a_mean;
+  return t("A 側が最も下がったのは、{w}です(A 平均 {a})。チャットで強さを調整して、応答を確かめてください(「この強さをレシピに反映」で保存できます)。", { w: which, a: fmt(a, 2) })
+    + (mr.replies_break ? ` <span class="ng">${t("ただし、この組は応答での確かめで応答が壊れました(繰り返し・空が増えた)。強さを下げてから使ってください。")}</span>` : "");
+};
 const partName = (q) => (q.kind === "neuron" ? `L${q.layer} N${q.head}` : q.kind === "layer_attn" ? `L${q.layer} attn` : q.kind === "layer_mlp" ? `L${q.layer} ffn` : `L${q.layer} H${q.head}`);
 
 // 層ごとの cohen_d の小さな棒グラフ(SVG)。基準層は白、cohen_d 最大の層は緑。棒にマウスを当てると値
@@ -424,7 +440,8 @@ export class PipelinePanel {
         ${t("A 平均 {a} → {b}", { a: fmt(c.a_mean_before, 2), b: fmt(c.a_mean_after, 2) })} · B Δ ${sgn(c.b_delta, 2)} · ${t("B ⊥ {a} → {b}", { a: fmt(c.b_drift_orth_base, 3), b: fmt(c.b_drift_orth, 3) })}
         <button class="small" id="pp-rf-load" title="${t("元の組と足した組を合わせたユニット(全部の回)で今のレシピを置き換える")}">${t("合わせた組でレシピを置き換える")}</button>
         <button class="small" id="pp-rf-eval" title="${t("合わせた組のレシピを評価の画面へ送る(強さ 0 と 1、ランダムな向きの比べる用 8 本が入る。始める前に変えられる)")}">${t("合わせた組を評価へ送る")}</button></p>`
-        : (r.combined_rows || []).length ? `<p class="ng"><b>${r.no_recommend === "replies_break" ? t("推せる行の合わせたレシピは、どれも応答が壊れました。足さないほうがよい(土台のままを勧めます)。") : t("どの行も、合わせると元の方向・元の目標で良くならない(残りが減らず、組の効きも上がらない)か、悪くなります。足さないほうがよい(土台のままを勧めます)。")}</b></p>`
+        : (r.combined_rows || []).length ? `<p class="ng"><b>${r.no_recommend === "replies_break" ? t("推せる行の合わせたレシピは、どれも応答が壊れました。") : t("どの行も、合わせると元の方向・元の目標で良くならない(残りが減らず、組の効きも上がらない)か、悪くなります。")}</b></p>
+          <p class="note">${t("道具の基準では、足す行を 1 つに決められませんでした。土台のままが無難ですが、候補の行は下の表に残っていて選べます。")} ${mrNext(r.most_reduced, true)}</p>`
         : `<p class="muted">${t("足す組を作れなかったので、合わせた組はありません。")}</p>`}
       ${r.check && !d.writes ? this.refineCheck(r.check) : ""}
       <p class="muted">${t("下の表のどの行も、元の組に足した組です。「レシピを置き換える」「評価へ送る」は、どの行も土台と足した組を合わせたレシピを使います(足した組は土台を当てた状態で探したので、単独では使いません)。強さを上げるのは足した組だけで、土台の部品の強さはそのままです。")}</p></div>`;
@@ -670,15 +687,17 @@ export class PipelinePanel {
       const k = c ? c.key ?? c.n_new : null;
       if (c && (k === null || k === undefined)) return ` · <b>${t("推す行あり(合わせたレシピ)")}</b>`;
       if (c) return ` · <b>${t("推す行(合わせたレシピ): {k}", { k: k === "s1" ? "s=1" : t("上限 {n}", { n: k }) })}</b>`;
-      return ` · <b class="ng">${t("推す行なし: 足さないほうがよい(土台のままを勧めます)")}</b>`;
+      return ` · <b>${t("推す行なし: 道具の基準では、足す行を 1 つに決められませんでした")}</b><br><span class="muted">${
+        t("土台のままが無難ですが、候補の行は表に残っていて選べます。")} ${mrNext(d.refine.most_reduced, true)}</span>`;
     }
     const r = d.recommended;
     const brk = r && (r.after_replies_break || []).length ? ` <span class="ng">${t("(上限 {k} の組は応答が壊れたので、次の組)", { k: r.after_replies_break.join("・") })}</span>` : "";
     if (r && r.reached === false) return ` · <b>${t("推す組: {n} 個(どれも目標に届かないので、組の効きがいちばん大きい組)", { n: r.n_heads })}</b>${brk}`;
     if (r) return ` · <b>${t("推す組: {n} ヘッド", { n: r.n_heads })}</b>${brk}`;
-    if (d.no_recommend) return ` · ${t("推す組なし({r})", { r: t(d.no_recommend.reason) })}<br><span class="muted">${
-      t("次の手: 「止めて選ぶ」(v0.7.0 までの選び方、--rank causal)、部品の種類を変える、組の行の「残りから追加」")}</span>`;
-    return ` · ${t("推す組なし(どの組も目標に届かない)")}`;
+    const why = d.no_recommend ? t(d.no_recommend.reason) : t("どの組も目標に届かない");
+    return ` · <b>${t("推す組なし: 道具の基準では 1 つに決められませんでした({r})", { r: why })}</b><br><span class="muted">${mrNext(d.most_reduced, false)} ${
+      d.writes ? t("ほかの手: 「止めて選ぶ」(v0.7.0 までの選び方、--rank causal)、部品の種類を変える、組の行の「残りから追加」")
+        : t("ほかの手: 「書き込みの量で選ぶ」(--rank writes、既定)、組の行の「残りから追加」")}</span>`;
   }
 
   // v0.8.3 までの残りから追加の結果には、合わせたレシピの数での判定が無い(推す組は足した組だけの値)
@@ -811,12 +830,14 @@ export class PipelinePanel {
       return `<td class="units">${verdictNote(c)}${baseChips(c, r)}<div class="pp-added"><span class="pp-round">${t("足した組({k} 回目)", { k: rnd })}</span> ${chipsOf(r)}</div>${dupNote(c)}${crossNote(c)}${cExit(c)}${cHo(c)}${extra}${addedNote(r)}</td>`;
     };
     const s1rec = R && refineNew(d) && !!(combinedRow(d, "s1") || {}).recommended;
-    const s1 = a.s1 ? `<tr class="pp-s1${s1rec ? " rec" : ""}"><td>s=1${s1rec ? ` <span class="badge">${t("推奨")}</span>` : ""}</td>${unitsCell("s1", a.s1, `<div class="muted note">${kinds(a.s1.kinds)} · ${t("倍率を上げる前(取り除くだけ)")}</div>${R ? "" : hoNote(a.s1) + exitNote(a.s1)}`)}
+    const s1c = R ? combinedRow(d, "s1") : null, s1mr = R ? !!(s1c || {}).most_reduced : !!(a.s1 || {}).most_reduced;
+    const s1 = a.s1 ? `<tr class="pp-s1${s1rec ? " rec" : ""}${s1mr ? " mr" : ""}"><td>s=1${recBadge(s1rec)}${mrBadge(s1mr, rowBroke(a.s1, s1c))}</td>${unitsCell("s1", a.s1, `<div class="muted note">${kinds(a.s1.kinds)} · ${t("倍率を上げる前(取り除くだけ)")}</div>${R ? "" : hoNote(a.s1) + exitNote(a.s1)}`)}
         <td>1 / 1 / 1</td>${R ? ccells(combinedRow(d, "s1")) : cells(a.s1)}${btns("s1", a.s1, false)}</tr>` : "";
     const cmp = s1 + (a.table || []).slice().sort((x, y) => y.n_heads - x.n_heads).map((r) => {
       if (r.skipped) return `<tr><td>${r.n_heads}</td><td class="excl" colspan="8">${esc(r.skipped)}</td></tr>`;
       const rec = R && refineNew(d) ? !!(combinedRow(d, r.n_heads) || {}).recommended : r.recommended;
-      return `<tr class="${rec ? "rec" : ""}" data-n="${r.n_heads}"><td>${r.n_heads}${rec ? ` <span class="badge">${t("推奨")}</span>` : ""}</td>${unitsCell(r.n_heads, r, `${r.replies_break ? `<div class="note ng">${t("応答での確かめで応答が壊れた(推さない)")}</div>` : ""}<div class="muted note">${kinds(r.kinds)}</div>${R ? "" : hoNote(r) + exitNote(r)}${steps(r)}${probesHTML(r)}`)}
+      const rc = R ? combinedRow(d, r.n_heads) : null, mr = R ? !!(rc || {}).most_reduced : !!r.most_reduced;
+      return `<tr class="${[rec && "rec", mr && "mr"].filter(Boolean).join(" ")}" data-n="${r.n_heads}"><td>${r.n_heads}${recBadge(rec)}${mrBadge(mr, rowBroke(r, rc))}</td>${unitsCell(r.n_heads, r, `${r.replies_break ? `<div class="note ng">${t("応答での確かめで応答が壊れた(推さない)")}</div>` : ""}<div class="muted note">${kinds(r.kinds)}</div>${R ? "" : hoNote(r) + exitNote(r)}${steps(r)}${probesHTML(r)}`)}
         <td>${fmt(r.s_max, 2)} / ${fmt(r.s_median, 2)} / ${fmt(r.s_min ?? Math.min(...(r.heads || []).map((h) => h.s)), 2)}<div class="muted note">${esc(stop[r.stop] || r.stop || "")}</div>${R ? `<div class="muted note">${t("足した組の強さ(土台はそのまま)")}</div>` : ""}</td>${R ? ccells(combinedRow(d, r.n_heads)) : cells(r)}${btns(r.n_heads, r, true)}</tr>`;
     }).join("");
     const ck = d.check || (R && R.check);
@@ -843,7 +864,7 @@ export class PipelinePanel {
       <div class="evx-scroll"><table class="evx mono pp-cmp"><thead><tr><th title="${t("組の部品の数の上限")}">${t("上限")}</th><th class="l" title="${R ? t("薄い字 = 土台の部品(何回目に入ったか)、ふつうの字 = この行で足した部品") : t("組の部品と強さ s")}">${t("部品と強さ")}</th><th title="${t("部品ごとの強さ s の最大・中央値・最小")}">${t("s 最大 / 中央値 / 最小")}</th>
         <th title="${t("目標を超えて残った A 側の例の数")}">${R ? t("残り(前 → 後)") : t("残り")}</th><th title="${t("A 側の射影の値の平均")}">${R ? t("A 平均(前 → 後)") : t("A 平均")}</th><th title="${t("B 側の射影の値の変化")}">B Δ</th>
         <th title="${t("B 側の直交成分のずれ(小さいほど他を壊さない)")}">B ⊥</th><th title="${t("A 側の下がり − B 側の動きの大きさ")}">${t("効き")}</th><th title="${t("A 側の射影の値の平均が目標に届いたか")}">${t("届いた")}</th><th></th></tr></thead><tbody>${cmp}</tbody></table></div>
-      ${noteHTML(t("推奨 = 目標に届いた組のうち、残る例の数が最も少ない組と同程度(A 側の 5% まで)で、B 側のずれが最小の 1.25 倍までの組の中で、部品が最も少ない組。どれも届かなければ、上限の中で組の効きがいちばん大きい組と同程度(差の 5% まで)で部品が最も少ない組。") + (R ? " " + t("残りから追加の結果では、推奨は合わせたレシピの数(元の方向・元の目標)で決めます。足すと残りが増える・組の効きが下がる・B 側の上限を超えて土台より悪くなる行は推さず、どの行も良くならなければ推しません(足さないほうがよい)。推す行の応答が壊れていれば次の行にします。") : ""), "muted note")}
+      ${noteHTML(t("推奨は目安です(合否の判定ではありません)。") + " " + t("推奨 = 目標に届いた組のうち、残る例の数が最も少ない組と同程度(A 側の 5% まで)で、B 側のずれが最小の 1.25 倍までの組の中で、部品が最も少ない組。どれも届かなければ、上限の中で組の効きがいちばん大きい組と同程度(差の 5% まで)で部品が最も少ない組。") + (R ? " " + t("残りから追加の結果では、推奨は合わせたレシピの数(元の方向・元の目標)で決めます。足すと残りが増える・組の効きが下がる・B 側の上限を超えて土台より悪くなる行は推さず、どの行も良くならなければ推しません(土台のままが無難ですが、候補の行は表に残っていて選べます)。推す行の応答が壊れていれば次の行にします。") : "") + " " + MR_NOTE() + (R ? " " + t("残りから追加の結果では、どちらの印も合わせたレシピの値で決めます。") : ""), "muted note")}
       ${(a.notes || []).map((x) => `<p class="note ng">${x.code === "s1_low"
         ? t("倍率を上げる前の組(取り除くだけ)は、目標までの差の {p}% しか縮めません。直接書き込む部品の成分を取り除くだけでは届かない題材で、強さを上げて(成分を反転させて)届かせています", { p: fmt(100 * x.closed, 0) })
         : x.code === "loop_inner" ? t("組にループの中の部品(段 {a}〜{b} の重み)が入っています。重みは 2 回とも使われるので、1 回目(段 {c}〜{d})にも効きます", { a: x.lo, b: x.hi, c: x.first[0], d: x.first[1] })
@@ -925,7 +946,8 @@ export class PipelinePanel {
       const c = crow(r.n_heads), off = R && !c ? " disabled" : "";
       const nb = c ? (c.n_base ?? (c.units.length - (r.units || []).length)) : 0;
       const rec = R && refineNew(d) ? !!(c || {}).recommended : r.recommended;
-      return `<tr class="${rec ? "rec" : ""}" data-n="${r.n_heads}"><td>${r.n_heads}${rec ? ` <span class="badge">${t("推奨")}</span>` : ""}</td><td class="units">${R ? verdictNote(c) : ""}${R && c ? `<div class="pp-base">${t("土台 {n} 個(元の組{k})", { n: nb, k: (R.round || 1) > 1 ? t(" + {r}の追加", { r: roundsUpTo(R.round - 1) }) : "" })}</div><div class="pp-added">` : ""}${chips}${R && c ? "</div>" : ""}</td>
+      const mr = R ? !!(c || {}).most_reduced : !!r.most_reduced;
+      return `<tr class="${[rec && "rec", mr && "mr"].filter(Boolean).join(" ")}" data-n="${r.n_heads}"><td>${r.n_heads}${recBadge(rec)}${mrBadge(mr, rowBroke(r, R ? c : null))}</td><td class="units">${R ? verdictNote(c) : ""}${R && c ? `<div class="pp-base">${t("土台 {n} 個(元の組{k})", { n: nb, k: (R.round || 1) > 1 ? t(" + {r}の追加", { r: roundsUpTo(R.round - 1) }) : "" })}</div><div class="pp-added">` : ""}${chips}${R && c ? "</div>" : ""}</td>
         <td>${fmt(r.s_max, 2)}</td><td>${r.remain ?? "—"}${nA ? ` / ${nA}` : ""}</td><td>${fmt(r.a_max, 2)}</td><td>${fmt(r.a_mean, 2)}</td><td>${sgn(r.b_side_delta, 2)}</td><td>${fmt(r.b_drift_orth, 3)}</td>
         <td class="${r.reached ? "ok" : "ng"}">${r.reached ? "✓" : "×"}</td>
         <td class="l">${c ? `<div class="note">${t("元の組と合わせると(元の方向・元の目標で): 残り {a} → {b} 問 · A 平均 {ma} → {mb} · B Δ {bd} · B ⊥ {c}", { a: c.remain_before, b: c.remain_after, ma: fmt(c.a_mean_before, 2), mb: fmt(c.a_mean_after, 2), bd: sgn(c.b_delta, 2), c: fmt(c.b_drift_orth, 3) })}</div>` : R ? `<div class="note ng">${t("この行には土台と合わせたレシピがありません")}</div>` : ""}
@@ -947,7 +969,7 @@ export class PipelinePanel {
       <div class="evx-scroll"><table class="evx mono pp-cmp"><thead><tr><th>${t("ヘッド数")}</th><th class="l">${t("ヘッドと強さ")}</th><th>s max</th>
         <th title="${t("目標を超えて残った A 側の例の数")}">${t("残り")}</th><th title="${t("A 側の射影の値の最大")}">A max</th><th title="${t("A 側の射影の値の平均")}">${t("A 平均")}</th>
         <th title="${t("B 側の射影の値の変化")}">B Δ</th><th title="${t("B 側の直交成分のずれ(小さいほど他を壊さない)")}">B ⊥</th><th title="${t("射影の値が残りやすい質問の平均が目標に届いたか")}">${t("届いた")}</th><th></th></tr></thead><tbody>${cmp}</tbody></table></div>
-      ${noteHTML(t("推奨 = 目標に届いた組のうち、残る例の数が最も少ない組と同程度(A 側の 5% まで)で、B 側のずれが最小の 1.25 倍までの組の中で、ヘッドが最も少ない組。ヘッドの名前をクリックでくわしく見る。"), "muted note")}
+      ${noteHTML(t("推奨は目安です(合否の判定ではありません)。") + " " + t("推奨 = 目標に届いた組のうち、残る例の数が最も少ない組と同程度(A 側の 5% まで)で、B 側のずれが最小の 1.25 倍までの組の中で、ヘッドが最も少ない組。ヘッドの名前をクリックでくわしく見る。") + " " + MR_NOTE() + (R ? " " + t("残りから追加の結果では、どちらの印も合わせたレシピの値で決めます。") : ""), "muted note")}
       </section>`;
   }
 }
