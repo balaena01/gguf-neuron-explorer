@@ -826,6 +826,7 @@ export class PipelinePanel {
     return `<section class="pp-stage"><h4>${t("3. 書き込みの順位づけ")}</h4>
       ${noteHTML(t("質問 1 問につき 1 回流すだけで、全部の部品(注意ヘッド・線形注意のヘッド・MLP のニューロン)が、その層の方向にどれだけ書いたかを読みます。点数 = 選ぶ層で「s=1 の射影で直接に縮まる A と B の差」。後ろの層での変換は見ないので、後ろの書き手を動かしているだけの部品は点数に出ません。"), "muted note")}
       <p class="note mono">${t("選ぶ層")} L${w.select_layer ?? "—"} · A ${(w.n || {}).A ?? "—"} / B ${(w.n || {}).B ?? "—"} · ${t("A−B の差")} ${fmt(w.gap, 2)} · ${kinds(w.n_units)}</p>
+      ${(w.zero_layers || []).length ? `<p class="note pp-warn pp-zero">${t("方向の長さが 0 の層 {l} を外しました。A 側と B 側の残差がまったく同じ層です(短い畳み込みの層は数トークン前までしか見ないので、両側で違う system プロンプトがまだ届いていません)。この層では方向に沿った書き込みが決まりません。", { l: esc(w.zero_layers.slice(0, 8).join(", ")) })}</p>` : ""}
       ${share ? `<p class="note">${t("直接の書き込みの和 ÷ 差")}: ${share}</p>` : ""}
       ${(w.layer_scores || []).length ? `<p class="note" title="${t("その層の注意の出力全体・MLP の出力全体を s=1 で射影したときに、選ぶ層で直接に縮む A−B の差の割合(層全体の部品の選び方の目安)")}">${t("層ごとの直接の書き込み ÷ 差(上位 6 層)")}: ${w.layer_scores.slice(0, 6).map((x) => `L${x.layer} ${t("注意全体")} ${sgn(100 * x.attn_share, 0)}% · MLP ${sgn(100 * x.mlp_share, 0)}%`).join(" | ")}</p>` : ""}</section>
       <section class="pp-stage"><h4>${t("4. 上位を 1 個ずつ確かめる")}</h4>

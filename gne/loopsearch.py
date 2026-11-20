@@ -370,6 +370,17 @@ def tail_decompose(session, direction: str, recipes: dict[str, Recipe | None], *
     Ls = list(range(lo, hi + 1))
     r = {L: ds.unit(L).astype(np.float64) for L in Ls}
     want = {f"l_out-{L}" for L in Ls} | {f"attn_residual-{L}" for L in mid} | {f"ffn_out-{L}" for L in mid}
+    # attn_residual(注意を足した後の残差)と ffn_out(MLP の出力、正規化の前)は Qwen3.5・SenseNova の名前。名前が違う arch や、
+    # 出力のあとに正規化がある arch では切り分けの式が合わないので、内部のエラーではなく理由を添えて止める(v0.9.0)
+    seen = set(e.list_names(sc.items["A"][0][0][:16]))
+    missing = sorted(want - seen, key=lambda n: (n.split("-")[0], int(n.rsplit("-", 1)[1])))
+    pn = [L for L in mid if session.weights.arch.layers[L].post_norm_mixer not in ("", "?")
+          or session.weights.arch.layers[L].post_norm_ffn not in ("", "?")]
+    if missing or pn:
+        why = (f"層 {pn[0]} などは出力のあとに正規化があり、書き込みを足した値に分けられません" if pn else
+               f"このモデル(arch {session.weights.meta.arch})のグラフに {', '.join(missing[:4])}{' …' if len(missing) > 4 else ''} の名前がありません")
+        raise GneError("ARCH_UNSUPPORTED", f"最後の段までの切り分け(--tail)は実行しません。理由: {why}",
+                       "--tail を外せば、測る層ごとの射影の値は出ます")
     cap = Capture(lambda n: n in want)
     ctx = e.probe_ctx(cap, need=sc.max_len)
     out = {"direction": ds.name, "from_layer": lo, "to_layer": hi, "n_a": sc.n("A"), "n_b": sc.n("B"), "rows": {}}
