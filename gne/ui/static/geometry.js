@@ -426,17 +426,21 @@ export class GeometryView {
       g.fillStyle = kc[r.part === "mlp" ? "mlp" : r.mixer] || cssVar("--text-4");
       g.fillRect(G.L0, y, G.strip - 1, Math.max(1, G.cell - gap));
       if (r.visit) { g.fillStyle = r.visit === 1 ? cssVar("--text-3") : cssVar("--dim"); g.fillRect(G.L0 + G.strip, y, G.strip - 1, Math.max(1, G.cell - gap)); }
-      if (!r.reliable) {                                          // 信用しない行: 斜線
+      if (!r.reliable) {                                          // 信用しない行: 斜線(行列の幅の中だけ)
+        g.save();
+        g.beginPath(); g.rect(G.x0, y, G.w, G.cell); g.clip();
         g.strokeStyle = cssVar("--muted"); g.lineWidth = 1;
         g.beginPath();
-        for (let k = 0; k < G.w; k += 6) { g.moveTo(G.x0 + k, y + G.cell); g.lineTo(G.x0 + k + G.cell, y); }
+        for (let k = -G.cell; k < G.w; k += 6) { g.moveTo(G.x0 + k, y + G.cell); g.lineTo(G.x0 + k + G.cell, y); }
         g.stroke();
+        g.restore();
       }
     });
     // 行の名前(左)と、列の名前(下に、間引いて)
     g.fillStyle = cssVar("--text-4"); g.textAlign = "right"; g.textBaseline = "middle";
     const every = Math.max(1, Math.ceil(12 / G.cell));
-    G.ri.forEach((i, a) => { if (a % every === 0 || a === G.nr - 1) g.fillText(rows[i].label, G.L0 - 4, G.T0 + a * G.cell + G.cell / 2); });
+    const lastOk = (G.nr - 1) % every === 0 || (G.nr - 1) % every >= every / 2;   // 最後の行の名前は、手前の名前と重ならないときだけ
+    G.ri.forEach((i, a) => { if (a % every === 0 || (a === G.nr - 1 && lastOk)) g.fillText(rows[i].label, G.L0 - 4, G.T0 + a * G.cell + G.cell / 2); });
     // 部品の区切り
     g.strokeStyle = cssVar("--line-strong"); g.lineWidth = 1;
     for (let a = 1; a < G.nr; a++) if (rows[G.ri[a]].part !== rows[G.ri[a - 1]].part) { g.beginPath(); g.moveTo(G.x0, G.T0 + a * G.cell); g.lineTo(G.x0 + G.w, G.T0 + a * G.cell); g.stroke(); }
