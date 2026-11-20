@@ -3942,6 +3942,11 @@ round_01.scores.txt に「番号 P C」を 1 行ずつ書く(例: 17 3 4)。全�
         from .geometry import analyze
         return analyze(self, name, **kw)
 
+    def heads_geometry_export(self, result: str, out: str, source: str, *, force: bool = False) -> dict:
+        """heads geometry の結果 result の向き(svd-rows:K / svd-none:K / within:K)を方向ベクトル out として保存する(gne/geometry.py)。"""
+        from .geometry import export_direction
+        return export_direction(self, result, out, source, force=force)
+
 
 def bake_score_check(lora: dict, baked: dict, layers, *, last: int | None = None, noise: float = 0.0) -> tuple[dict, bool]:
     """V26・V33 の射影の値の判定。lora・baked は Scorer.run の結果({側: {"values": {L: 例ごとの射影の値}}})。層ごと・側ごとに

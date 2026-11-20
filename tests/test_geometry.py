@@ -492,6 +492,39 @@ def test_heads_geometry_with_question_updates(tmp_path):
     assert d0["null"] is None and d0["within"] is not None and "norm_null95" not in d0["rows"][0]
 
 
+def test_export_direction_from_geometry(tmp_path):
+    from gne.direction import DirectionSet
+    s, _ = _session_with_material(tmp_path, refine=False)
+    hd = s.store.heads_dir(s.meta.model_id)
+    QA, QB = _synthetic_q(n_layer=3, d=16)
+    z = _material_from_q(QA, QB, ["attention"] * 3)
+    np.savez_compressed(hd / "d1.writes.npz", **z)
+    G.save_q(hd, "d1", _q_arrays(QA, QB))
+    s.heads_geometry("d1", permutations=0)
+    e = s.heads_geometry_export("d1", "d1_v1", "svd-rows:1")
+    ds = DirectionSet.load(e["path"])
+    V = np.load(hd / "d1.geometry.npz")["V_rows"][0].astype(float)
+    orig = s.direction_set("d1")
+    for L in (0, 1, 2):
+        assert abs(abs(ds.unit(L) @ G._unit(V)) - 1) < 1e-6                         # 全部の層に同じ向き(符号を除いて)
+    assert ds.unit(2) @ orig.unit(2) >= 0 and e["cos_select"] >= 0                     # 符号: 選ぶ層の残差の平均の差への射影が正
+    assert ds.meta["method"] == "geometry" and ds.meta["positions"] == "last"
+    w = s.heads_geometry_export("d1", "d1_w1", "within:1")
+    dw = DirectionSet.load(w["path"])
+    W = np.load(hd / "d1.geometry.npz")["within_w"]
+    for L in (0, 1, 2):
+        assert abs(abs(dw.unit(L) @ G._unit(W[L, 0].astype(float))) - 1) < 1e-5 and dw.unit(L) @ orig.unit(L) >= -1e-9
+    assert "unit" in {n["code"] for n in w["notes"]}
+    with pytest.raises(GneError):
+        s.heads_geometry_export("d1", "d1_v1", "svd-rows:1")                         # 同じ名前は置き換えない
+    assert s.heads_geometry_export("d1", "d1_v1", "svd-none:2", force=True)["source"] == "svd-none:2"
+    for bad in ("svd:1", "within:99", "svd-rows:0"):
+        with pytest.raises(GneError):
+            s.heads_geometry_export("d1", "x_" + bad.replace(":", ""), bad)
+    with pytest.raises(GneError):
+        s.heads_geometry_export("nothing", "x", "svd-rows:1")
+
+
 @pytest.mark.model
 @pytest.mark.skipif(not MODEL.exists(), reason=f"{MODEL} がありません")
 def test_heads_writes_save_q_with_model(tmp_path):
@@ -510,6 +543,9 @@ def test_heads_writes_save_q_with_model(tmp_path):
         assert qd["A"]["attn"].shape == (out["n"]["A"], NL, ne)
         d = s.heads_geometry("ev_q", permutations=20)
         assert d["material"]["q"]["row_err_max"] < 5e-3 and d["within"] and d["null"]["scheme"] == "sign_flip"
+        e = s.heads_geometry_export("ev_q", "ev_within1", "within:1")                # 書き出した方向は既存のコマンドで使える
+        sc = s.direction_score("ev_within1", layers=[s.weights.n_main - 2])
+        assert sc and "error" not in sc
         out2 = s.heads_writes("evil", verify_top=0, name="ev_noq", max_examples=8)
         assert "q_npz" not in out2 and not (s.store.heads_dir(s.meta.model_id) / "ev_noq.writes_q.npz").exists()
     finally:

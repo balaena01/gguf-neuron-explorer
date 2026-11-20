@@ -4103,7 +4103,10 @@ def heads_geometry(c: Common, holder: dict,
                    exclude_dims: Optional[str] = typer.Option(None, "--exclude-dims", help="計算から除く残差の次元(例 1234,567。行ごとの上位の次元を見て決める)"),
                    out_name: Optional[str] = typer.Option(None, "--out-name", help="結果の保存名(既定は --name と同じ)"),
                    permutations: Optional[int] = typer.Option(None, "--permutations", help="A と B のラベルを入れ替えて作る基準の回数(質問ごとの更新 <名前>.writes_q.npz があるときだけ。既定 200、0 で切る)"),
-                   perm_seed: int = typer.Option(0, "--perm-seed", help="ラベルの入れ替えの乱数")):
+                   perm_seed: int = typer.Option(0, "--perm-seed", help="ラベルの入れ替えの乱数"),
+                   export_direction: Optional[str] = typer.Option(None, "--export-direction", help="結果の向きを、この名前の方向ベクトルとして保存する(--export-from と一緒に)"),
+                   export_from: Optional[str] = typer.Option(None, "--export-from", help="保存する向き: svd-rows:K / svd-none:K(特異値分解の K 番目、全部の層に同じ向き)/ within:K(各層の質問に沿った分解の取り残しの K 番目)"),
+                   force_export: bool = typer.Option(False, "--force-export", help="同じ名前の方向ベクトルがあっても置き換える")):
     """heads writes の材料の、層ごとの更新ベクトル(A 側の平均の更新 − B 側の平均の更新。その層が残差に足した量)を比べる。
     層どうしのコサイン類似度の行列、特異値分解(行の大きさをそろえる・そろえない。基準は、行が直交していたときの値と、半分どうしの
     差から作る雑音の目安)、質問を半分ずつに分けた差どうしの一致、方向ベクトルとの cos、同じ重みを 2 回使うモデルでは 1 回目と 2 回目、
@@ -4116,7 +4119,18 @@ def heads_geometry(c: Common, holder: dict,
                          min_half_cos=HALF_COS_MIN if min_half_cos is None else min_half_cos, compare=compare,
                          exclude_dims=exclude_dims, out_name=out_name,
                          permutations=PERMUTATIONS if permutations is None else permutations, seed=perm_seed)
-    return d, "\n".join(human_lines(d)), 0
+    lines = human_lines(d)
+    if export_direction or export_from:
+        if not (export_direction and export_from):
+            raise GneError("BAD_ARGS", "--export-direction(名前)と --export-from(svd-rows:K など)は一緒に渡します")
+        e = s.heads_geometry_export(d["name"], export_direction, export_from, force=force_export)
+        d["export"] = e
+        lines.append(f"方向ベクトル {e['name']} を保存しました: {e['path']}({e['source']}、層 {e['layers']}、"
+                     f"選ぶ層の残差の平均の差との cos {_f(e.get('cos_select'), '+.3f')})")
+        lines += ["  " + n["text"] for n in e["notes"]]
+        lines.append(f"  使い方: gne direction score --name {e['name']} / gne heads writes --name {e['name']} / "
+                     f"gne headproj ablate --direction {e['name']} --per-layer")
+    return d, "\n".join(lines), 0
 
 
 if __name__ == "__main__":

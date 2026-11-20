@@ -533,7 +533,7 @@ def within_row(EA: np.ndarray, EB: np.ndarray, paired: bool, r_own: np.ndarray |
     w1 = Vt[0] * (1.0 if Vt[0] @ dh >= 0 else -1.0)
     Ep = E - np.outer(E @ dh, dh)
     _, sp, Vp = np.linalg.svd(Ep, full_matrices=False)
-    out = {"n": nA, "share_mean": share(dh), "share_own": share(r_own), "share_select": share(rS),
+    out = {"_vectors": Vp[:kk].astype(np.float32), "n": nA, "share_mean": share(dh), "share_own": share(r_own), "share_select": share(rS),
            "explained": [float(x) for x in (s[:kk] ** 2) / tot] if tot > 0 else [],
            "cos_w1_mean": float(w1 @ dh), "cos_w1_own": float(w1 @ r_own) if r_own is not None else None,
            "leftover_total": float((Ep ** 2).sum() / tot) if tot > 0 else None,
@@ -795,9 +795,13 @@ def analyze(session, name: str, *, parts="layer", normalize="both", top_k: int =
         kw = max(1, min(int(top_k), QA.shape[0] // 2 - 1))
         texts = _questions(qd)
         within = []
+        wv = []
         for i, r in enumerate(rows):
             w = within_row(QA[:, i], QB[:, i], paired, r_own[i], rS, kw)
+            v = w.pop("_vectors")
+            wv.append(np.vstack([v, np.zeros((kw - len(v), v.shape[1]), np.float32)]) if len(v) < kw else v[:kw])
             within.append({"i": i, "label": r["label"], **w})
+        arrs["within_w"] = np.stack(wv)                     # 行ごとの取り残しの向き(方向ベクトルとして保存するときに使う)
         arrs["within_q_cos"] = np.array([w["q_cos"] for w in within], np.float32)
         lr = [w for w, r in zip(within, rows, strict=True) if r["part"] == "layer" and r["reliable"]] or within
         mq = np.mean([w["q_cos"] for w in lr], axis=0)
@@ -832,6 +836,107 @@ def analyze(session, name: str, *, parts="layer", normalize="both", top_k: int =
     out["path"], out["npz"] = str(pj), str(pz)
     pj.write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
     return out
+
+
+# --- 方向ベクトルとして保存する(§6。1 つの部品に 2 本以上の向きを当てる射影は作らない)------------------------------
+
+EXPORT_FROM = ("svd-rows", "svd-none", "within")
+
+
+def export_direction(session, result: str, out: str, source: str, *, force: bool = False) -> dict:
+    """heads geometry の結果 result の向きを、今の方向ベクトルの形(<root>/directions/<model_id>/<out>.npz)で保存する。
+    source: svd-rows:K / svd-none:K(特異値分解の K 番目の向き。全部の層に同じ向き)、within:K(各層の層全体の行の、質問に沿った
+    分解の取り残しの K 番目の向き。層ごとに違う向き。質問ごとの更新が要る)。符号は、その層の残差の平均の差(元の方向ベクトルの
+    元の値)への射影が正になる向き(svd は選ぶ層で)。対照集合・測る位置・基準層は元の方向ベクトルから写す。単位ベクトルなので、
+    大きさには意味がない(add の強さには使わない)。"""
+    m = re.fullmatch(r"(svd-rows|svd-none|within):(\d+)", str(source or ""))
+    if not m or int(m.group(2)) < 1:
+        raise GneError("BAD_ARGS", f"保存する向きは svd-rows:K / svd-none:K / within:K です({source!r})")
+    kind, k = m.group(1), int(m.group(2))
+    if not re.fullmatch(r"[\w.\-]+", str(out or "")):
+        raise GneError("BAD_ARGS", f"方向の名前 {out!r} は英数字・_・-・. だけです")
+    hd = session.store.heads_dir(session.meta.model_id)
+    pj, pz = hd / f"{result}.geometry.json", hd / f"{result}.geometry.npz"
+    if not pj.exists() or not pz.exists():
+        raise GneError("FILE_NOT_FOUND", f"heads geometry の結果 {result} がありません", "先に gne heads geometry --name <材料> を流します")
+    js = json.loads(pj.read_text(encoding="utf-8"))
+    arr = np.load(pz)
+    dname = js["material"].get("direction")
+    try:
+        ds = session.direction_set(dname)
+        src_path = session.direction_path(dname)
+    except GneError as e:
+        raise GneError("FILE_NOT_FOUND", f"元の方向ベクトル {dname} がありません(対照集合・測る位置を写せない)") from e
+    dd = session.store.direction_dir(session.meta.model_id)
+    target = dd / f"{out}.npz"
+    if target.exists() and not force:
+        raise GneError("BAD_ARGS", f"方向 {out} はもうあります", "別の名前にするか、置き換えるなら force を付けます")
+    S = js["material"].get("select_layer")
+    notes = []
+    vecs: dict[int, np.ndarray] = {}
+    flipped = []
+    if kind.startswith("svd"):
+        mode = "rows" if kind == "svd-rows" else "none"
+        key = f"V_{mode}"
+        if key not in arr.files:
+            raise GneError("BAD_ARGS", f"結果 {result} に {'行の大きさをそろえた' if mode == 'rows' else 'そろえない'}特異値分解がありません",
+                           "--normalize both で流し直します")
+        V = arr[key]
+        if k > len(V):
+            raise GneError("BAD_ARGS", f"結果 {result} の向きは {len(V)} 番目までです")
+        v = V[k - 1].astype(np.float64)
+        ref = np.asarray(ds.raw.get(S, np.zeros_like(v)), np.float64)
+        c = _cos(v, ref)
+        if c is not None and c < 0:
+            v, c = -v, -c
+            flipped.append(S)
+        vecs = {int(L): v for L in ds.raw}
+        along = c
+    else:
+        if "within_w" not in arr.files:
+            raise GneError("BAD_ARGS", f"結果 {result} に質問に沿った分解がありません",
+                           "gne heads writes --save-q で質問ごとの更新を作り、heads geometry を流し直します")
+        W = arr["within_w"]
+        if k > W.shape[1]:
+            raise GneError("BAD_ARGS", f"結果 {result} の取り残しの向きは {W.shape[1]} 番目までです")
+        rl, rp = [int(x) for x in arr["row_layer"]], [str(x) for x in arr["row_part"]]
+        idx = {L: i for i, (L, p_) in enumerate(zip(rl, rp, strict=True)) if p_ == "layer"}
+        if not idx:
+            raise GneError("BAD_ARGS", f"結果 {result} に層全体の行がありません(--parts に layer を含めて流し直します)")
+        for L, i in idx.items():
+            v = W[i, k - 1].astype(np.float64)
+            if not np.any(v):
+                continue
+            ref = ds.raw.get(L)
+            c = _cos(v, np.asarray(ref, np.float64)) if ref is not None else None
+            if c is not None and c < 0:
+                v = -v
+                flipped.append(L)
+            vecs[L] = v
+        if S in vecs and S in ds.raw:
+            along = _cos(vecs[S], np.asarray(ds.raw[S], np.float64))
+        else:
+            along = None
+        missing = sorted(set(ds.raw) - set(vecs))
+        if missing:
+            notes.append({"code": "missing_layers", "text": f"層 {', '.join(map(str, missing[:8]))}{' …' if len(missing) > 8 else ''} には向きがありません"
+                                                            "(材料の行が無い層)。その層のユニットにはこの方向を使えません"})
+    if along is not None and abs(along) < 0.1:
+        notes.append({"code": "small_mean", "text": f"選ぶ層 L{S} で、残差の平均の差とこの向きの cos が {along:+.3f} です。A と B の平均の差がこの向きに"
+                                                    "ほとんど無いので、heads writes の点数(選ぶ層での A と B の差の縮み)はほぼ 0 になり、"
+                                                    "この向きで CHiPS の組を作る使い方には向きません(headproj ablate で消して応答を見る使い方はできます)"})
+    notes.append({"code": "unit", "text": "単位ベクトルなので大きさには意味がありません(方向を足す add の強さには使いません)"})
+    z0 = np.load(src_path)
+    Ls = sorted(vecs)
+    U = np.stack([_unit(vecs[L]) for L in Ls])
+    meta = {k_: z0[k_] for k_ in ("positions", "contrast_sha", "source", "n_rows_A", "n_rows_B", "base_layer", "base_positions")
+            if k_ in z0.files}
+    np.savez(target, layers=np.array(Ls, np.int32), **{f"layer_{L}": vecs[L].astype(np.float32) for L in Ls},
+             **{f"scale_{L}": z0[f"scale_{L}"] for L in Ls if f"scale_{L}" in z0.files},
+             cos=(U @ U.T).astype(np.float32), method="geometry", **meta,
+             geometry_result=str(result), geometry_from=str(source))
+    return {"name": out, "path": str(target), "source": source, "result": result, "direction": dname, "layers": len(Ls),
+            "flipped": flipped, "cos_select": along, "notes": notes}
 
 
 # --- 人が読む表示(CLI) -------------------------------------------------------------------------------------
