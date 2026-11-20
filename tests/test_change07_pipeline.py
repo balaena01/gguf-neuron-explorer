@@ -112,7 +112,7 @@ def test_ui_keyed_templates_api():
     assert all("about" not in x["spec"] and x["ja"]["title"] and x["en"]["title"] for x in xs)
     assert xs[2]["spec"]["keyed"] == {"alpha": -1}
     ps = UIData.pipeline_templates()
-    assert len(ps) == 6 and all("about" not in x["spec"] for x in ps)
+    assert len(ps) == 7 and all("about" not in x["spec"] for x in ps)
 
 
 def test_clean_spec_save_spec_and_settings(tmp_path):

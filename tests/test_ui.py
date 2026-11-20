@@ -2966,7 +2966,7 @@ def test_pipeline_api_and_panel(pipe_server, browser):
         assert ei.value.code == 400
     tpl = get("/api/pipeline-templates")                                   # 用途別のテンプレート(configs/pipeline/)
     assert [x["spec"]["name"] for x in tpl] == ["evil_sys", "cold_vs_warm", "evil_neurons_4b", "ja_vs_en", "repeat_vs_progress",
-                                                 "disclaimer_heads"]
+                                                 "disclaimer_heads", "pirate_tone"]
     assert all("about" not in x["spec"] and x["ja"]["title"] and x["en"]["text"] for x in tpl)
     for lang in ("ja", "en"):
         pg = browser.new_page(viewport={"width": 1600, "height": 1000})

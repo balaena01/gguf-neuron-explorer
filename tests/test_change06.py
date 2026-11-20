@@ -668,13 +668,13 @@ def test_pipeline_templates_are_valid(tmp_path):
     from gne.api import Session
     from gne.direction import load_contrast
     files = sorted((ROOT / "configs" / "pipeline").glob("*.json"))
-    assert len(files) == 6
+    assert len(files) == 7
     for f in files:
         d = json.loads(f.read_text(encoding="utf-8"))
         about = d.pop("about")
         assert about["ja"]["title"] and about["en"]["title"] and about["ja"]["text"] and about["en"]["text"]
         assert re.fullmatch(r"[\w.\-]+", d["name"])
-        assert set(d.get("pipeline") or {}) <= set(Session.PIPELINE_DEFAULTS)
+        assert set(d.get("pipeline") or {}) <= set(Session.PIPELINE_DEFAULTS) | set(Session.PIPELINE_WRITES)   # rank writes の設定(n_units など)も書ける
         for u in d.get("recipe_a") or []:
             parse_unit(u)
         p = tmp_path / f"{d['name']}.yaml"
