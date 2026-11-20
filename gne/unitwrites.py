@@ -332,11 +332,13 @@ def measure_writes(session, ds, cs, *, select_layer: int, positions: str = "last
     # 指定に関係なく出す。重みを 2 回使うモデルで両方の回に当てるときは、同じ重みの 2 回分を、部品の番号の段の方向で足す)
     lay: dict[int, list[float]] = {}
     zero = _zero_direction_layers(builder, ds, sorted(set(exec_layers) | set(hl) | set(nl)))   # A と B の差が 0 の層(v0.9.0)
+    zero_note = None
     if zero:
-        session.warn(f"方向 {ds.name} の層 {', '.join(map(str, zero[:8]))}{' …' if len(zero) > 8 else ''} は長さが 0 です"
+        zero_note = (f"方向 {ds.name} の層 {', '.join(map(str, zero[:8]))}{' …' if len(zero) > 8 else ''} は長さが 0 です"
                      "(A 側と B 側の残差がまったく同じ層。短い畳み込みの層は数トークン前までしか見ないので、両側で違う system "
                      "プロンプトがまだ届いていません)。この層では方向に沿った書き込みが決まらないので、層ごとの書き込みの表と部品の候補から"
                      "外しました")
+        session.warn(zero_note)
     hl = [L for L in hl if L not in zero]
     nl = [L for L in nl if L not in zero]
     for L in exec_layers:
@@ -508,6 +510,7 @@ def measure_writes(session, ds, cs, *, select_layer: int, positions: str = "last
                "n": nq, "skipped_long": skipped, "gap": gap,
                "base": {"A": float(np.mean(per["A"]["pS"])), "B": float(np.mean(per["B"]["pS"]))},
                "n_units": by_kind_n, "head_layers": hl, "neuron_layers": nl, "layer_scores": layer_scores,
+               "zero_layers": zero, "zero_note": zero_note,
                "loop_edits": ("shared" if shared else "per_visit") if plan is not None else None,
                **({"loop_direction": loop_direction} if shared else {}),
                "totals": {k: v for k, v in totals.items()},

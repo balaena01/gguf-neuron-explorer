@@ -2774,7 +2774,7 @@ class Session:
                                       direction_layer=pipe["direction_layer"], candidate_layers=candidate_layers,
                                       loop_direction=self._loop_direction(pipe), progress=self.progress)
         out["writes"] = {k: summ[k] for k in ("select_layer", "kinds", "n", "skipped_long", "gap", "base", "n_units",
-                                               "totals", "totals_share", "check")}
+                                               "totals", "totals_share", "check", "zero_layers", "zero_note")}
         out["writes"]["layer_scores"] = summ["layer_scores"][:12]          # 層ごとの直接の書き込みの上位(層全体の部品の選び方の目安)
         out["writes"]["seconds"] = time.perf_counter() - ts
         ts = time.perf_counter()                                   # 4. 上位を 1 個ずつ s=1 で確かめる(因果スクリーニングと同じ物差し)

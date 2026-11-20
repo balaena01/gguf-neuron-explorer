@@ -599,6 +599,30 @@ def static_dims(weights, L: int, frac: float = 0.25) -> np.ndarray:
     return np.concatenate([np.arange(half - m, half), np.arange(hd - m, hd)])
 
 
+def query_capture_names(session, cs, L: int) -> tuple[str, str, str]:
+    """heads query が捕捉する名前: 注意の層に入る値を正規化したもの・正規化の後で RoPE の前の K・正規化の前の Q。捕捉の表
+    (configs/arch/residual_writers.yaml の attn_in・k_normed)にあればそれ、無ければ llama.cpp のふつうの名前(attn_norm・Kcur_normed)。
+    グラフに見えない名前があれば、内部のエラーではなく理由を添えて止める(v0.9.0。LFM2・LFM3 は名前が違い KeyError で落ちていた)。"""
+    from .postnorm import layer_names
+    w, e = session.weights, session.engine
+    nm = layer_names(w, L)
+    in_nm = nm.get("attn_in") or f"attn_norm-{L}"
+    k_nm = nm.get("k_normed") or f"Kcur_normed-{L}"
+    qname = f"Qcur_full-{L}" if w.meta.arch in GATED_Q_ARCHS else f"Qcur-{L}"
+    msgs = [{"role": "system", "content": cs.system_a}, {"role": "user", "content": cs.user_prompts[0]}]
+    seen = set(e.list_names(e.tokenize_prompt(e.render_chat(msgs))[:16]))
+    what = {in_nm: "注意の層に入る値を正規化したもの", k_nm: "ヘッドごとの正規化の後・RoPE の前の K", qname: "正規化の前の Q"}
+    missing = [f"{what[x]}({x})" for x in (in_nm, k_nm, qname) if x not in seen]
+    if missing:
+        raise GneError("ARCH_UNSUPPORTED", f"heads query は実行しません。理由: このモデル(arch {w.meta.arch})のグラフに、層 {L} の "
+                                           + "・".join(missing) + " の名前が見つかりません",
+                       "configs/arch/residual_writers.yaml の capture の表に、この arch の attn_in・k_normed の名前を書いてください")
+    if not w.has_tensor(f"blk.{L}.attn_norm.weight"):
+        raise GneError("ARCH_UNSUPPORTED", f"heads query は実行しません。理由: 層 {L} に注意の層の入力の正規化の重み"
+                                           f"(blk.{L}.attn_norm.weight)がありません(入力を正規化しない構造)")
+    return in_nm, k_nm, qname
+
+
 def query_vectors(session, L: int, h: int, *, direction: str, seek: str | Path, frac: float = 0.25) -> dict:
     """クエリ操作の u・v と、倍率の目安。
     v: 層 L に入る残差のペルソナ方向 r(gne direction の r_{L-1})を attn_norm の重み γ で割った向き(v·norm(x) ∝ r·x)から、
@@ -621,6 +645,9 @@ def query_vectors(session, L: int, h: int, *, direction: str, seek: str | Path, 
         raise GneError("BAD_CONTRAST", f"{seek} に triggers がありません(探しに行く語が要ります)")
     ds = session.direction_set(direction)
     src = L - 1 if (L - 1) in ds.raw else L
+    if li.mixer != "attention" or not li.head_dim:
+        raise GneError("BAD_ARGS", f"heads query は実行しません。理由: 層 {L} は注意の層ではありません(混ぜる層: {li.mixer})")
+    in_nm, k_nm, qname = query_capture_names(session, cs, L)
     gamma = w.tensor(f"blk.{L}.attn_norm.weight")
     from .weights import tensor_to_f32
     g = np.asarray(tensor_to_f32(gamma), dtype=np.float32).reshape(-1)
@@ -629,8 +656,7 @@ def query_vectors(session, L: int, h: int, *, direction: str, seek: str | Path, 
     v = (v / np.linalg.norm(v)).astype(np.float32)
     grp = kv_group(h, li.n_head, li.n_head_kv)
     dims = static_dims(w, L, frac)
-    qname = f"Qcur_full-{L}" if w.meta.arch in GATED_Q_ARCHS else f"Qcur-{L}"
-    names = [f"attn_norm-{L}", f"Kcur_normed-{L}", qname]
+    names = [in_nm, k_nm, qname]
     kt, ko, xa, xb, qn = [], [], [], [], []
     for side, system in (("A", cs.system_a), ("B", cs.system_b)):
         for u_text, tr in zip(cs.user_prompts, trig, strict=True):
@@ -643,11 +669,11 @@ def query_vectors(session, L: int, h: int, *, direction: str, seek: str | Path, 
                 continue
             user = [i for i, (a, b) in enumerate(offs) if b > a and a >= at and b <= at + len(u_text)]
             tail = [len(ids) - 1]                                           # 返事を書き始める位置(最後のトークン)
-            xs = ac.extra[f"attn_norm-{L}"]
+            xs = ac.extra[in_nm]
             (xa if side == "A" else xb).append(xs[tail])
             if side != "A":
                 continue
-            K = ac.extra[f"Kcur_normed-{L}"].reshape(len(ids), -1, li.head_dim)[:, grp, :]
+            K = ac.extra[k_nm].reshape(len(ids), -1, li.head_dim)[:, grp, :]
             tt = set(spans_to_tokens(offs, [(s + at, t + at) for s, t in find_spans(u_text, tr)]))
             kt += [K[i] for i in user if i in tt]
             ko += [K[i] for i in user if i not in tt]

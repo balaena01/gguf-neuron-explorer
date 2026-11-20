@@ -203,6 +203,12 @@ def test_post_norm_models(which, tmp_path):
         s.warnings = []
         st = s.steer(s.recipe(path=old, proj_correction="none"), prompt="Hello.", max_tokens=4)
         assert st["proj_correction"] == "none" and not any("記録がありません" in x for x in s.warnings)
+        # heads query(v0.9.0): LFM3 は捕捉の表の名前(operator_norm・k_layernorm)、Gemma は attn_norm・Kcur_normed で実行できる
+        yr = Path(__file__).resolve().parent.parent / "configs" / "contrast" / "yandere_react.yaml"
+        s.direction(contrast=yr, name="yr", positions="last")
+        aq = [li.index for li in s.weights.arch.layers if li.mixer == "attention" and li.head_dim][1]
+        q = s.heads_query(aq, 0, direction="yr", seek=yr, scales=(0.0, 1.0))
+        assert q["n_trigger_tokens"] > 0 and len(q["rows"]) == 2
         from gne.ablate import writer_info
         cnt = writer_info(s.weights)["counts"]
         n_conv = sum(li.mixer == "conv" for li in s.weights.arch.layers)

@@ -117,12 +117,33 @@ def test_writes_ranking_skips_zero_layers():
         _zero_direction_layers(SimpleNamespace(r_of=other), ds, [2])
 
 
+def test_heads_query_names_from_table(tmp_path):
+    """heads query の捕捉の名前: LFM2・LFM3 は捕捉の表(attn_in・k_normed)、表に無い arch は attn_norm・Kcur_normed。グラフに
+    名前が無ければ KeyError ではなく、理由と表の案内を添えて止まる。注意の層でない層も理由つきで止まる。"""
+    from gne.heads import query_capture_names
+    from gne.weights import Weights
+    w = Weights(_tiny(tmp_path / "lfm2.gguf", "lfm2", [CONV, CONV, ATTN]))
+    cs = SimpleNamespace(system_a="sys", user_prompts=["hi"])
+
+    def sess(weights, names):
+        eng = SimpleNamespace(list_names=lambda ids: set(names), tokenize_prompt=lambda txt: [1, 2, 3], render_chat=lambda m: "x")
+        return SimpleNamespace(weights=weights, engine=eng)
+    lf = ["model.layers.{}.operator_norm-2", "model.layers.{}.self_attn.k_layernorm-2", "Qcur-2"]
+    assert query_capture_names(sess(w, lf), cs, 2) == tuple(lf)
+    with pytest.raises(GneError, match="heads query は実行しません。理由: .*正規化の後・RoPE の前の K") as e:
+        query_capture_names(sess(w, ["model.layers.{}.operator_norm-2", "Qcur-2"]), cs, 2)
+    assert e.value.code == "ARCH_UNSUPPORTED" and "attn_in・k_normed" in e.value.hint
+    q = Weights(_tiny(tmp_path / "q3.gguf", "qwen3", [ATTN, ATTN]))
+    assert query_capture_names(sess(q, ["attn_norm-1", "Kcur_normed-1", "Qcur-1"]), cs, 1) == ("attn_norm-1", "Kcur_normed-1", "Qcur-1")
+
+
 # --- モデルを使うもの(LFM2-8B-A1B)-------------------------------------------------------------------
 
 @pytest.mark.model
 def test_lfm2_model(tmp_path):
     """実物(LFM2-8B-A1B): 書き込みの和の検算(V27)が通り、heads writers が実行でき(部品の和 = 基準層の差)、既定の一括
-    (rank writes)が層 0・1 を外す知らせを出して最後まで進む。層 0 の方向の部品は理由つきで止まる。"""
+    (rank writes)が層 0・1 を外す知らせを出して最後まで進み、結果にも残す。層 0 の方向の部品は理由つきで止まる。heads query は
+    捕捉の表の名前で実行でき、positions response の方向は畳み込みの層でも長さ 0 にならない。"""
     if not LFM2.exists():
         pytest.skip(f"LFM2 のモデルがありません({LFM2})")
     import yaml
@@ -154,5 +175,17 @@ def test_lfm2_model(tmp_path):
                                 "pipeline": {"verify_top": 3, "verify_sample": 0, "n_units": [2], "max_examples": 4, "check_replies": 0}})
         assert out.get("rank") == "writes"
         assert any("層 0, 1 は長さが 0" in x for x in s.warnings), s.warnings
+        assert out["writes"]["zero_layers"] == [0, 1] and "長さが 0" in out["writes"]["zero_note"]   # 画面の CHiPS の結果に出す
+        # heads query: 捕捉の表の名前で実行できる(v0.8.x は KeyError 'attn_norm-L')。最初の注意の層は、入る方向が層 1(長さ 0)なので止まる
+        yr = ROOT / "configs" / "contrast" / "yandere_react.yaml"
+        s.direction(contrast=yr, name="yr", positions="last")
+        att = [li.index for li in s.weights.arch.layers if li.mixer == "attention"]
+        with pytest.raises(GneError, match="長さが 0"):
+            s.heads_query(att[0], 0, direction="yr", seek=yr, scales=(0.0, 1.0))
+        q = s.heads_query(att[1], 0, direction="yr", seek=yr, scales=(0.0, 1.0))
+        assert q["n_trigger_tokens"] > 0 and len(q["rows"]) == 2
+        # 返事の位置で作った方向(positions response)は、畳み込みの層にも両側の違いが届くので長さ 0 にならない
+        s.direction(contrast=yr, name="yresp", positions="response", response_tokens=32)
+        assert np.any(s.direction_set("yresp").raw[0]) and np.any(s.direction_set("yresp").raw[1])
     finally:
         s.close()

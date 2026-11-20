@@ -2605,4 +2605,5 @@ export const EN = {
   "同じ名前の方向があれば置き換える": "Replace a direction with the same name",
   "行 = {r}、列 = {c}": "rows = {r}, columns = {c}",
   "この特異値分解には、信用しない行が {n} 行入っています(同じ重さで数えています)": "This SVD includes {n} unreliable rows (weighted like the others)",
+  "方向の長さが 0 の層 {l} を外しました。A 側と B 側の残差がまったく同じ層です(短い畳み込みの層は数トークン前までしか見ないので、両側で違う system プロンプトがまだ届いていません)。この層では方向に沿った書き込みが決まりません。": "Layers {l}, where the direction has length 0, were left out. On these layers the residuals of sides A and B are identical (short convolution layers only see the last few tokens, so the system prompts that differ between the sides have not reached them yet). Writes along the direction cannot be measured there.",
 };

@@ -47,7 +47,8 @@ def layer_names(weights, L: int) -> dict[str, str | None]:
         mo = mo.get(li.mixer)
     return {"head_out": nm(ent.get("head_out")), "head_pre": nm(ent.get("head_pre")), "head_gate": nm(ent.get("head_gate")),
             "mixer_out": nm(mo), "mixer_post": nm(ent.get("mixer_post")), "mid": nm(ent.get("mid")),
-            "ffn_post": nm(ent.get("ffn_post")), "embed": ent.get("embed") or None}
+            "ffn_post": nm(ent.get("ffn_post")), "embed": ent.get("embed") or None,
+            "attn_in": nm(ent.get("attn_in")), "k_normed": nm(ent.get("k_normed"))}
 
 
 def checked(arch: str) -> str | None:
