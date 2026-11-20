@@ -2586,7 +2586,7 @@ export const EN = {
   "ラベルの入れ替えの乱数(--perm-seed)": "Random seed for the label swaps (--perm-seed)",
   "乱数": "seed",
   "この材料には質問ごとの更新がありません(ラベル入れ替えの基準と質問に沿った分解に要る)。": "This material has no per-question updates (needed for the label-swap baseline and the per-question decomposition).",
-  "heads writes --save-q を、材料を作ったときの設定(方向・選ぶ層・測る位置・質問の数)でジョブとして流し、同じ名前の材料を作り直す。GPU を使う(1〜2 分)": "Runs heads writes --save-q as a job with the material's original settings (direction, select layer, positions, number of questions) and remakes the material under the same name. Uses the GPU (1–2 min)",
+  "heads writes --save-q を、材料を作ったときの設定(方向・選ぶ層・測る位置・質問の数)でジョブとして流し、同じ名前の材料を作り直す。上位の部品を 1 個ずつ流し直す確かめ(verify)は省くので、元の材料にあった確かめの結果は残らない。GPU を使う(1〜2 分)": "Runs heads writes --save-q as a job with the material's original settings (direction, select layer, positions, number of questions) and remakes the material under the same name. The per-unit verification (verify) is skipped, so verification results of the old material are not kept. Uses the GPU (1–2 min)",
   "質問ごとの更新を作る": "Make per-question updates",
   "質問ごとの更新を作るジョブを投げました。終わると一覧が更新されます": "Started the job that makes the per-question updates. The list refreshes when it finishes",
   "行の部品": "row part",
