@@ -895,6 +895,7 @@ export class RecipePanel {
   // 書き換えたテンソルの型の既定: keyed を含むなら auto(テンソルごとに、元が Q8_0 なら Q8_0 のまま、それ以外は F16。
   // Q8_0 のままでは編集の 1 割以上が丸めに消えるテンソルだけ F16)、それ以外は Q8_0。auto は keyed を含むときだけ選べる
   lxRequant() {
+    if (this.inkling()) return this.lx.requant ?? "auto";            // Inkling 2: 既定は元の型・元の大きさ(auto)
     const nk = this.r.keyed().length;
     const rq = this.lx.requant ?? (nk ? "auto" : "q8_0");
     return rq === "auto" && !nk ? "q8_0" : rq;
@@ -911,7 +912,8 @@ export class RecipePanel {
       <div class="rc-lx-row${bake ? "" : " off"}"><span class="muted" title="${t("空なら、いま読んでいるモデルにマージする。同じモデルの量子化していない GGUF(F16 / BF16)のパスを入れると、方向はこのモデルで作ったものを使い、そちらにマージする(GPU は使わない。少し誤差がある。LoRA 版との比較はできない)")}">${t("マージ先")}</span>
         <input id="lx-into" size="30" value="${esc(f.into)}" placeholder="${t("空ならいま読んでいるモデル")}" spellcheck="false"${dis}></div>
       <div class="rc-lx-row${bake ? "" : " off"}"><span class="muted" title="${t("書き換えたテンソルを何の型で書くか。Q8_0 は元より少し大きくなることがある、F16 はもっと大きい。下の「元の型に戻す」を使うとほぼ元の大きさ")}">${t("書き換えたテンソルの型")}</span>
-        <select id="lx-requant"${dis || (f.via_f16 ? " disabled" : "")}>${nk ? `<option value="auto"${rq === "auto" ? " selected" : ""}>${t("自動(Q8_0 は元のまま、ほかは F16)")}</option>` : ""}<option value="q8_0"${rq === "q8_0" ? " selected" : ""}>Q8_0</option><option value="f16"${rq === "f16" ? " selected" : ""}>F16</option><option value="keep"${rq === "keep" ? " selected" : ""}>${t("元と同じ(F16・BF16 のモデル)")}</option></select>
+        <select id="lx-requant"${dis || (f.via_f16 ? " disabled" : "")}>${this.inkling() ? `<option value="auto"${rq === "auto" ? " selected" : ""}>${t("自動(元の型・元の大きさのまま。編集が残らないテンソルだけ Q8_0)")}</option><option value="keep"${rq === "keep" ? " selected" : ""}>${t("いつも元の型")}</option>`
+          : nk ? `<option value="auto"${rq === "auto" ? " selected" : ""}>${t("自動(Q8_0 は元のまま、ほかは F16)")}</option>` : ""}<option value="q8_0"${rq === "q8_0" ? " selected" : ""}>Q8_0</option><option value="f16"${rq === "f16" ? " selected" : ""}>F16</option>${this.inkling() ? "" : `<option value="keep"${rq === "keep" ? " selected" : ""}>${t("元と同じ(F16・BF16 のモデル)")}</option>`}</select>
         <label title="${t("書き換えたテンソルを F16 で書いてから、llama-quantize で元の量子化の型に戻す(ファイルの大きさを元に近く保つ。低ビットの型は imatrix があると誤差が小さい)")}"><input type="checkbox" id="lx-viaf16"${f.via_f16 ? " checked" : ""}${dis}> ${t("元の量子化の型に戻す")}</label></div>
       ${bake && nk ? `<div class="rc-lx-row"><span class="muted note">${t("キーつきの書き込みを含むので、書き換えたテンソルの型の既定は「自動」: 元が Q8_0 のテンソルは Q8_0 のまま(F16 にすると計算方法が変わり、LoRA 版とかえってずれる)、それ以外は F16。Q8_0 のままでは編集の 1 割以上が丸めに消えるテンソルだけ F16(配るなら LoRA がおすすめ)")}</span></div>` : ""}
       ${bake && f.via_f16 ? `<div class="rc-lx-row"><span class="muted">llama-quantize</span><input id="lx-lq" size="28" value="${esc(f.llama_quantize)}" placeholder="${t("空なら GNE_LLAMA_QUANTIZE か PATH から探す")}" spellcheck="false">

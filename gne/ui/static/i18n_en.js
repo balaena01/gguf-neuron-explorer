@@ -1258,6 +1258,8 @@ export const EN = {
   "測る点": "measuring point",
   "Inkling 2 ではまだ使えません。レシピに読み込んで、会話・振る舞い(behave)・書き出しで試してください": "Not available for Inkling 2 yet. Load the recipe and try it with chat, behave or export",
   "目標: 最後に混ぜた出力の A 側の射影の値を {v} まで({src})": "Target: side A's projection at the final mixed output down to {v} ({src})",
+  "自動(元の型・元の大きさのまま。編集が残らないテンソルだけ Q8_0)": "auto (keep the original types and size; Q8_0 only for tensors where the edit would not survive)",
+  "いつも元の型": "always the original type",
   "会話する": "Chat",
   "思考の量": "reasoning effort",
   "テンプレートの既定": "template default",
