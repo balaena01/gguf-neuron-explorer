@@ -870,7 +870,8 @@ def bake(reader: Reader, units: list, refs: dict | None, dst: Path | None, *, re
         probe = next(iter(edited.values()))
         st = _SlabStream(t, qt, {e: v.reshape(probe.shape) for e, v in edited.items()}, probe.shape, np.uint8)
         st.tofile = _convert_tofile(st, enc)
-        rec.update(to=qt.name, method="convert", experts=sorted(edited), edit_kept=stats.get("kept"), requant_error=err,
+        rec.update(to=qt.name, method="requant" if qt == t.tensor_type else "convert", experts=sorted(edited), edit_kept=stats.get("kept"),
+                   requant_error=err,
                    bytes_to=int(st.nbytes))
         return (qt, st)
     replace: dict[str, tuple] = {}
