@@ -1000,7 +1000,7 @@ export class RecipePanel {
         if (f.imatrix.trim()) p.imatrix = f.imatrix.trim();
       } else p.requant = this.lxRequant();
       if (f.into.trim()) p.into = f.into.trim();
-      else if (f.verify) { p.verify = true; if (f.contrast.trim()) p.contrast = f.contrast.trim(); }
+      else if (f.verify && !this.inkling()) { p.verify = true; if (f.contrast.trim()) p.contrast = f.contrast.trim(); }   // Inkling 2: 欄を出していないので送らない
     }
     this.lxSet(`<p class="muted note">${t("ジョブを投げています…")}</p>`);
     try {
