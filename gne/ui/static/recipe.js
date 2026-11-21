@@ -954,11 +954,16 @@ export class RecipePanel {
     for (const el of this.root.querySelectorAll("input[name=lx-kind]")) el.addEventListener("change", () => { f.bake = el.value === "bake" && el.checked; this.render(); });
     const on = (sel, ev, fn) => { const el = $(sel); if (el) el.addEventListener(ev, fn); };
     on("#lx-requant", "change", (ev) => { f.requant = ev.target.value; this.render(); });
-    if (this.inkling()) {                         // Inkling 2: マージ先・元の量子化の型に戻す・LoRA 版との比べは使えないので出さない
-      for (const id of ["#lx-into", "#lx-viaf16", "#lx-verify"]) {
+    if (this.inkling()) {                         // Inkling 2: 元の量子化の型に戻す・LoRA 版との比べは使えないので出さない
+      for (const id of ["#lx-viaf16", "#lx-verify"]) {
         const el = this.root.querySelector(id);
-        const box = el && (id === "#lx-into" ? el.closest(".rc-lx-row") : el.closest("label"));
+        const box = el && el.closest("label");
         if (box) box.hidden = true;
+      }
+      const into = this.root.querySelector("#lx-into");                 // マージ先は出す(同じモデルの別の量子化)
+      if (into && !this.root.querySelector("#lx-into-note")) {
+        into.placeholder = t("空ならいま読んでいるモデル(別の量子化のパスも入れられる)");
+        into.closest(".rc-lx-row").insertAdjacentHTML("afterend", `<div class="rc-lx-row" id="lx-into-note"><span class="muted note">${esc(t("マージ先(Inkling 2): 同じモデルの別の量子化の GGUF のパス。方向と部品はこのモデルで作ったもの、消す量はそのファイルの重みから作り直す。そのファイルが GPU やメモリに入らないときは、ここで動かして確かめることはできない"))}</span></div>`);
       }
     }
     on("#lx-viaf16", "change", (ev) => { f.via_f16 = ev.target.checked; this.render(); });
@@ -974,7 +979,7 @@ export class RecipePanel {
     on("#lx-into", "input", (ev) => { f.into = ev.target.value; });   // 打つたびに入れる(描き直しても消えないように)
     on("#lx-into", "change", (ev) => {                   // 量子化していないモデルへ: 型は元のまま(keep)にし、比較はしない
       f.into = ev.target.value;
-      if (f.into.trim() && f.requant !== "f16") f.requant = "keep";
+      if (f.into.trim() && f.requant !== "f16" && !this.inkling()) f.requant = "keep";   // Inkling 2: 型の選び方はそのまま(自動)
       this.render();
     });
     on("#lx-go", "click", () => this.runLx());

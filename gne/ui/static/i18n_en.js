@@ -1276,6 +1276,8 @@ export const EN = {
   "このモデルでは、方向づくりと射影の値を測る段(順位づけ・確かめ・配分)の両方で、側ごとにこの数の質問を使う(等間隔に間引く。既定 32)。答えの始まりなどの位置では、質問 1 つごとに返事を書かせるので、全部の質問を使うと時間がかかるため": "On this model both the direction and the measuring steps (ranking, checking, allocation) use this many questions per side, thinned evenly (default 32). Positions such as the start of the answer have the model write one reply per question, so using every question takes long",
   "応答での確かめで書かせる長さの上限(トークン、このモデルの既定 1024。答えの前に思考を書くので長め)": "Length limit of the replies in the reply check (tokens; 1024 by default on this model, longer because it reasons before answering)",
   "使った質問: 方向 A {da} / B {db}、測る段 A {ma} / B {mb}(対照集合 A {na} / B {nb} から、側ごとに最大 {mx} 問を等間隔に)": "Questions used: direction A {da} / B {db}, measuring A {ma} / B {mb} (out of A {na} / B {nb} in the contrast set, up to {mx} per side, thinned evenly)",
+  "マージ先(Inkling 2): 同じモデルの別の量子化の GGUF のパス。方向と部品はこのモデルで作ったもの、消す量はそのファイルの重みから作り直す。そのファイルが GPU やメモリに入らないときは、ここで動かして確かめることはできない": "Merge target (Inkling 2): the path of another quantization of the same model. The direction and units come from this model; the removed amounts are recomputed from that file's weights. If that file does not fit on the GPU or in memory, it cannot be checked by running it here",
+  "空ならいま読んでいるモデル(別の量子化のパスも入れられる)": "empty = the loaded model (a path to another quantization also works)",
   "会話する": "Chat",
   "思考の量": "reasoning effort",
   "テンプレートの既定": "template default",

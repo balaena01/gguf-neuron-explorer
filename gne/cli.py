@@ -2986,7 +2986,8 @@ def headproj_export(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, u
                     in_path: Optional[Path] = typer.Option(None, "--in", help="--bake の元の GGUF(既定 --model)"),
                     requant: Optional[str] = typer.Option(None, "--requant", help="--bake で書き換えたテンソルの型: auto / q8_0 / f16 / keep(元が F32・F16・BF16 ならその型。専門家のテンソル ffn_down_exps(keyed の expert:e)は元の型を保ち、編集しない専門家はバイトのまま。K-quant・IQ の専門家は q8_0、分割 GGUF なら元の型)。既定は q8_0、keyed を含むなら auto: テンソルごとに、元が Q8_0 なら Q8_0 のまま(F16 にすると計算方法が変わり、LoRA 版とかえってずれた)、それ以外(K-quant・IQ・F16 など)は f16。Q8_0 のままでは rank 1 の小さな編集の 1 割以上が丸めに消えるテンソル(結果の edit_kept < 0.9)だけ f16 にする。専門家のテンソルも同じ規則(f16 にすると全体が F16 になって大きくなる)"),
                     key: Optional[str] = typer.Option(None, "--key", help="#KEY を省いた keyed のユニットの鍵(gne direction key で作ったもの)"),
-                    into: Optional[Path] = typer.Option(None, "--into", help="--bake: 焼き込む先の別の GGUF(同じ構造の量子化していない F16 / BF16 など)。方向はこのモデル(--model)のものを使う。GPU は使わない"),
+                    into: Optional[Path] = typer.Option(None, "--into", help="--bake: 焼き込む先の別の GGUF(同じ構造の量子化していない F16 / BF16 など。Inkling 2 は同じモデルの別の量子化)。方向はこのモデル(--model)のものを使い、消す量は焼き込む先の重みから作る。GPU は使わない"),
+                    dry_run: bool = typer.Option(False, "--dry-run", help="Inkling 2 の --bake: 書かずに、書き換えるテンソルと型・大きさ・編集の残り方(と --into なら消す量の違い)だけを出す"),
                     via_f16: bool = typer.Option(False, "--via-f16", help="--bake: F16 で書いて llama-quantize で元の型に戻す"),
                     imatrix: Optional[Path] = typer.Option(None, "--imatrix"), llama_quantize: Optional[str] = typer.Option(None, "--llama-quantize"),
                     verify: bool = typer.Option(False, "--verify", help="--bake: 焼き込み版と LoRA 版を比べる(V26・V33: 方向への射影の値・KL・最尤トークン・ppl。最後の層の射影の値の合格の線には、書き込みがほぼ 0 の LoRA と LoRA なしの差 = 計算方法の違いだけで出る誤差を足す)"),
@@ -3004,10 +3005,12 @@ def headproj_export(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, u
         raise GneError("BAD_ARGS", "--in と --model が違うファイルです")
     s = holder["session"] = c.session(in_path)
     r = s.recipe(units=unit, path=recipe, default_direction=direction, direction_layer=direction_layer, default_key=key)
-    out = out or s.default_export_path(r, bake=bake, kind="headproj")
+    if dry_run and s.weights.inkling is None:
+        raise GneError("BAD_ARGS", "--dry-run は Inkling 2 の焼き込みだけです")
+    out = None if dry_run else (out or s.default_export_path(r, bake=bake, kind="headproj"))
     d = s.headproj_export(r, out, bake=bake, requant=requant, via_f16=via_f16, imatrix=str(imatrix) if imatrix else None,
                           llama_quantize=llama_quantize, verify=verify, contrast=contrast, strip_meta=strip_meta, into=into,
-                          lora_f16=lora_f16, name=name)
+                          lora_f16=lora_f16, name=name, **({"dry_run": True} if dry_run else {}))
     if s.weights.inkling is not None:                 # Inkling 2: テンソルごとの書き方と、ファイル・VRAM の増え方
         return d, "\n".join(_inkling_export_lines(d, bake)), 0
     lines = [f"{d['path']}({d['bytes'] / 1e6:.2f} MB、{'焼き込み' if bake else 'LoRA'}"
@@ -3283,6 +3286,10 @@ def _inkling_bake_line(m: dict) -> str:
     fb = f"、元の型では残った編集が {m['fallback']['edit_kept']:.2f} なので Q8_0 にした" if m.get("fallback") else ""
     if m.get("why") == "whole_layer_mlp":
         fb += "、MLP 全体の部品を受けるので Q8_0(auto の決め方)"
+    if (m.get("fallback") or {}).get("why") == "imatrix":
+        fb = f"、{m['fallback']['from']} は imatrix が要り元の型に書き戻せないので Q8_0"
+    if m.get("unedited_rel_change") is not None:
+        fb += f"、量子化し直しで編集しない列の値が {m['unedited_rel_change']:.1%} 変わった"
     return (f"  {m['tensor']}: {m.get('type') or m.get('from')} → {m['to']}({m['bytes_from'] / 2**20:.1f} → {m['bytes_to'] / 2**20:.1f} MiB、"
             f"{how}{ex}{kept}{par}{fb})")
 
@@ -3292,13 +3299,21 @@ def _inkling_export_lines(d: dict, bake: bool) -> list[str]:
     if not bake:
         return [f"{d['path']}({d['bytes'] / 1e6:.2f} MB、LoRA)"]
     g = d.get("growth") or {}
-    lines = [f"{d['path']}({d['bytes'] / 2**30:.2f} GiB、元 {d['bytes_src'] / 2**30:.2f} GiB、焼き込み、型 {d['requant']})",
+    head = (f"書かずに計算だけ(--dry-run): 書けば {d['bytes'] / 2**30:.2f} GiB(元 {d['bytes_src'] / 2**30:.2f} GiB)、型 {d['requant']}"
+            if d.get("dry_run") else f"{d['path']}({d['bytes'] / 2**30:.2f} GiB、元 {d['bytes_src'] / 2**30:.2f} GiB、焼き込み、型 {d['requant']})")
+    lines = [head,
+             *([f"焼き込む先: {d['into']}(同じモデルの別の量子化。方向と部品はこのモデル、消す量は焼き込む先の重みから)"] if d.get("into") else []),
              *([d["plan"]] if d.get("plan") else []),
              *([f"注意: {d['vram_note']}"] if d.get("vram_note") else []),
              f"ファイルと VRAM の増え方: {g.get('bytes', 0) / 2**20:+.0f} MiB"
              + (f"(読み込んだときの VRAM の空き {d['vram_free_mb']:.0f} MiB)" if d.get("vram_free_mb") is not None else "")]
     lines += [_inkling_bake_line(m) for m in d["modified"]]
-    lines.append(f"記録: GGUF の gne.patches と {d['sidecar']}。層 6〜17 の重みは 3 回の繰り返しで共有なので、焼き込みも 3 回すべてに効きます")
+    co = d.get("carry_over")
+    if co:
+        lines.append("消す量(r̂ᵀW)のこのモデルと焼き込む先の違い(部品ごと。比が 1 から離れると、このモデルで決めた強さの効き方が変わる):")
+        lines += [f"  {x['unit']}: 大きさの比 {x['norm_ratio']:.3f}、相対の差 {x['rel_diff']:.3f}、cos {x['cos']:.4f}" for x in co]
+    if not d.get("dry_run"):
+        lines.append(f"記録: GGUF の gne.patches と {d['sidecar']}。層 6〜17 の重みは 3 回の繰り返しで共有なので、焼き込みも 3 回すべてに効きます")
     return lines
 
 

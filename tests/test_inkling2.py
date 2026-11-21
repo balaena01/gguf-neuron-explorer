@@ -245,7 +245,7 @@ def test_inkling_positions_and_rows():
     assert rows_for(E(), "answer", None, ids, 1, [5, 6, 99], TEXT) is None     # 思考の途中で終わった
 
 
-@pytest.mark.parametrize("typ", ["Q2_0", "NVFP4"])
+@pytest.mark.parametrize("typ", ["Q2_0", "NVFP4", "MXFP4"])
 def test_same_size_bake_rounding(typ):
     """元の型・元の大きさの焼き込み(射影を意識した丸め): 編集する列だけコードが動き、uᵀw が目標に近づき、倍率はそのまま。"""
     import numpy as np
@@ -259,10 +259,14 @@ def test_same_size_bake_rounding(typ):
         raw = np.zeros((rows, nb, 18), np.uint8)
         raw[:, :, :2] = d.astype(np.float16).view(np.uint8).reshape(rows, nb, 2)
         raw[:, :, 2:] = rng.integers(0, 256, (rows, nb, 16), dtype=np.uint8)
-    else:
+    elif typ == "NVFP4":
         raw = np.zeros((rows, nb, 36), np.uint8)
         raw[:, :, :4] = rng.integers(40, 60, (rows, nb, 4), dtype=np.uint8)
         raw[:, :, 4:] = rng.integers(0, 256, (rows, nb, 32), dtype=np.uint8)
+    else:
+        raw = np.zeros((rows, cols // 32, 17), np.uint8)
+        raw[:, :, 0] = rng.integers(118, 126, (rows, cols // 32), dtype=np.uint8)
+        raw[:, :, 1:] = rng.integers(0, 256, (rows, cols // 32, 16), dtype=np.uint8)
     raw = raw.reshape(rows, -1)
     q, sc, W = decode(raw, typ, rows, cols)
     assert np.array_equal(encode(raw, typ, rows, cols, q), raw)               # 戻せる
@@ -274,8 +278,8 @@ def test_same_size_bake_rounding(typ):
     q2, sc2, W2 = decode(r["raw"], typ, rows, cols)
     other = [n for n in range(cols) if n not in cols_e]
     assert np.array_equal(q2[:, other], q[:, other]) and np.array_equal(sc2, sc)   # ほかの列・倍率はそのまま
-    hd = 2 if typ == "Q2_0" else 4
-    assert np.array_equal(r["raw"].reshape(rows, nb, -1)[:, :, :hd], raw.reshape(rows, nb, -1)[:, :, :hd])
+    hd, nbk = {"Q2_0": (2, nb), "NVFP4": (4, nb), "MXFP4": (1, cols // 32)}[typ]
+    assert np.array_equal(r["raw"].reshape(rows, nbk, -1)[:, :, :hd], raw.reshape(rows, nbk, -1)[:, :, :hd])
     assert np.all(np.abs(u @ W2[:, cols_e]) < 0.25 * np.abs(c)), (u @ W2[:, cols_e], c)   # 方向の成分はほぼ消えた
 
 
@@ -701,3 +705,107 @@ def test_bake_auto_rule_whole_ffn_layers():
     assert "層 9 の専門家 NVFP4 → Q8_0(+162 MiB)" in text and "層 22 の専門家 Q2_0 → Q8_0(+253 MiB)" in text
     assert "層 14" not in text and "+415 MiB" in text
     assert "元の型・元の大きさのまま" in bake_plan_text({"bytes": 0, "tensors": grow["tensors"][1:2]})
+
+
+def test_into_same_type_rules_and_target_check():
+    """別の量子化に焼き込むとき: 型ごとの元の型での書き方と、同じモデルかの確かめ(名前・形・層の並び)。"""
+    from types import SimpleNamespace
+
+    from gguf import GGMLQuantizationType as Q
+
+    from gne.inkling_chips import same_type_method
+    from gne.inkling_pipeline import target_weights
+    from gne.quant import qtype_of
+    from gne.steer import GneError
+    assert same_type_method(qtype_of(42)) == "par" and same_type_method(SimpleNamespace(name="NVFP4")) == "par"
+    for q in (Q.Q8_0, Q.Q4_K, Q.Q5_K, Q.Q6_K, Q.Q3_K):
+        assert same_type_method(q) == "requant", q
+    for q in (Q.IQ2_XXS, Q.IQ2_XS, Q.IQ1_S):
+        assert same_type_method(q) == "imatrix", q
+
+    def T(shape):
+        return SimpleNamespace(shape=shape)
+    plan = _plan()
+    src = SimpleNamespace(inkling=plan, _tensors={"a": T([4, 8]), "b": T([8])}, path="src.gguf")
+    ok = SimpleNamespace(inkling=_plan(), _tensors={"a": T([4, 8]), "b": T([8])}, path="t.gguf")
+    sess = SimpleNamespace(weights=src, _target_weights=lambda into: {"ok": ok, "same": src}.get(into) or bad[into])
+    bad = {"shape": SimpleNamespace(inkling=_plan(), _tensors={"a": T([4, 9]), "b": T([8])}, path="x.gguf"),
+           "names": SimpleNamespace(inkling=_plan(), _tensors={"a": T([4, 8])}, path="y.gguf"),
+           "plan": SimpleNamespace(inkling=_plan(**{f"{ARCH}.loop.count": 2}), _tensors={"a": T([4, 8]), "b": T([8])}, path="z.gguf")}
+    assert target_weights(sess, "ok") is ok and target_weights(sess, "same") is src
+    for k in ("shape", "names", "plan"):
+        with pytest.raises(GneError):
+            target_weights(sess, k)
+
+
+INTO = [p for p in os.environ.get("GNE_TEST_INKLING2_INTO", "").split(",") if p.strip()]
+
+
+@pytest.mark.skipif(not MODEL or not Path(MODEL).exists() or not INTO, reason="GNE_TEST_INKLING2 と GNE_TEST_INKLING2_INTO(焼き込む先の GGUF、カンマ区切り)が要ります")
+@pytest.mark.parametrize("target", INTO or ["-"])
+def test_real_bake_into_other_quant_dry_run(tmp_path, target):
+    """別の量子化に焼き込む(書かずに計算だけ、GPU は使わない): 同じモデルの確かめ、短い畳み込みのタップが同じ、型ごとの決め方
+    (MLP 全体の部品の層は Q8_0、元の型で書くテンソルは大きさが同じ)、消す量を焼き込む先の重みから作る(部品ごとの違いを出す)。"""
+    import numpy as np
+
+    from gne.api import Session
+    from gne.inkling_pipeline import taps_identical, target_weights
+    if not Path(target).exists():
+        pytest.skip(f"{target} がありません")
+    if Path(target).resolve() == Path(MODEL).resolve():
+        pytest.skip("焼き込む先が元のモデルと同じファイル")
+    s = Session(MODEL, root=tmp_path / "root", n_gpu_layers=0)
+    try:
+        plan = s.weights.inkling
+        rng = np.random.default_rng(3)
+        d = s.weights.meta.n_embd
+        Ls = list(range(plan.n_steps + 1))
+        D = {L: rng.standard_normal(d).astype(np.float32) for L in Ls}
+        p = s.store.direction_dir(s.meta.model_id) / "rnd.npz"
+        np.savez(p, layers=np.array(Ls, dtype=np.int32), **{f"layer_{L}": v for L, v in D.items()},
+                 **{f"scale_{L}": np.ones(d, np.float32) for L in Ls}, method="inkling_ffn_input", positions="last", contrast_sha="x",
+                 source="test", n_rows_A=1, n_rows_B=1, inkling_gate="after", same_reply=False)
+        rec = s.recipe(units=["11:H5:s2@rnd", "9:ffn:s1@rnd", "14:E25:N389:s4@rnd", "20:E1:N3:s4@rnd"], name="into_t")
+        tw = target_weights(s, target)
+        taps = taps_identical(s.weights, tw)
+        assert not taps["different"] and taps["target_types"] == ["F32"]
+        r = s.headproj_export(rec, None, bake=True, into=target, dry_run=True)
+        assert r["dry_run"] and len(r["carry_over"]) == 4 and all(np.isfinite(x["norm_ratio"]) for x in r["carry_over"])
+        for m in r["modified"]:
+            if m["tensor"] == "blk.9.ffn_down_exps.weight":
+                assert m["to"] == "Q8_0", m                                  # MLP 全体の部品の層(auto)
+            elif m["to"] == m["from"]:
+                assert m["bytes_to"] == m["bytes_from"] and m["edit_kept"] > 0.9, m
+            else:
+                assert m["to"] == "Q8_0" and m.get("fallback"), m              # 元の型で書けない・編集が残らないときだけ
+    finally:
+        s.close()
+
+
+def test_rewrite_gguf_copies_untouched_and_adds_keys(tmp_path):
+    """GGUF の書き直し: 差し替えないテンソルはバイトまで同じ(ファイルから少しずつ読んで写す)、足したメタデータが読める。"""
+    import numpy as np
+    from gguf import GGMLQuantizationType as Q
+    from gguf import GGUFReader, GGUFWriter
+
+    from gne.gguf_fast import FastGGUF, rewrite_gguf
+    src, dst = tmp_path / "a.gguf", tmp_path / "b.gguf"
+    w = GGUFWriter(str(src), "llama")
+    rng = np.random.default_rng(0)
+    data = {"t0": rng.standard_normal((4, 64)).astype(np.float32), "t1": rng.standard_normal((8, 32)).astype(np.float16),
+            "t2": rng.standard_normal(16).astype(np.float32)}
+    for k, v in data.items():
+        w.add_tensor(k, v)
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+    new = np.ones((8, 32), np.float32)
+    rewrite_gguf(src, dst, {"t1": (Q.F32, new.tobytes())}, extra_kv={"gne.patches": "[]", "gne.inkling_proj": '{"x": 1}'})
+    a, b = FastGGUF(src, _part=True), FastGGUF(dst, _part=True)
+    ta, tb = {t.name: t for t in a.tensors}, {t.name: t for t in b.tensors}
+    for k in ("t0", "t2"):
+        assert bytes(a._mm[ta[k].data_offset:ta[k].data_offset + ta[k].n_bytes]) == bytes(b._mm[tb[k].data_offset:tb[k].data_offset + tb[k].n_bytes])
+    assert tb["t1"].tensor_type == Q.F32 and np.array_equal(np.frombuffer(b._mm[tb["t1"].data_offset:tb["t1"].data_offset + tb["t1"].n_bytes], np.float32).reshape(8, 32), new)
+    r = GGUFReader(str(dst))
+    assert "gne.patches" in r.fields and "gne.inkling_proj" in r.fields and "general.architecture" in r.fields

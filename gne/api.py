@@ -3895,7 +3895,8 @@ round_01.scores.txt に「番号 P C」を 1 行ずつ書く(例: 17 3 4)。全�
     def headproj_export(self, recipe: Recipe | list[str], out: str | Path, *, bake: bool = False, requant: str | None = None,
                         via_f16: bool = False, imatrix: str | None = None, llama_quantize: str | None = None,
                         verify: bool = False, contrast: str | Path | None = None, strip_meta: bool = False,
-                        into: str | Path | None = None, lora_f16: bool = False, name: str | None = None) -> dict:
+                        into: str | Path | None = None, lora_f16: bool = False, name: str | None = None,
+                        dry_run: bool = False) -> dict:
         """CHANGE-06 E: proj のユニット(と gain)を LoRA(既定)か、残差に書き込む重み行列だけ量子化し直した GGUF に書き出す
         (gne gain と同じ経路)。鍵つきの書き込み(keyed、CHANGE-07)だけのレシピと、proj・keyed(・gain)を混ぜたレシピも受ける。
         requant を省くと q8_0、keyed を含むなら auto(テンソルごと: 元が Q8_0 なら Q8_0 のまま、それ以外は F16。Q8_0 のままでは
@@ -3905,10 +3906,13 @@ round_01.scores.txt に「番号 P C」を 1 行ずつ書く(例: 17 3 4)。全�
         name は LoRA の名前の欄(general.name。省くと「<元のモデルの名前> gain <レシピの名前>」、strip_meta では "adapter")。"""
         recipe = self._as_recipe(recipe)
         if self.weights.inkling is not None:             # Inkling 2: 射影の LoRA か焼き込み(inkling_pipeline.py)
-            if via_f16 or into is not None or imatrix or llama_quantize:
-                raise GneError("ARCH_UNSUPPORTED", "Inkling 2 の焼き込みは、いま読んでいるモデルへのマージだけです(マージ先の指定・llama-quantize で"
-                               "元の型に戻す処理はまだ使えません)", "書き換えたテンソルの型は q8_0(既定)・f16・keep から選びます")
-            return self._inkling_export(recipe, Path(out), bake=bake, requant=requant, verify=verify, strip_meta=strip_meta)
+            if via_f16 or imatrix or llama_quantize:
+                raise GneError("ARCH_UNSUPPORTED", "Inkling 2 の焼き込みでは、llama-quantize で元の型に戻す処理はまだ使えません",
+                               "書き換えたテンソルの型は auto(既定)・keep・q8_0・f16 から選びます")
+            return self._inkling_export(recipe, Path(out) if out is not None else None, bake=bake, requant=requant, verify=verify,
+                                        strip_meta=strip_meta, into=into, dry_run=dry_run)
+        if dry_run:
+            raise GneError("BAD_ARGS", "dry_run は Inkling 2 の焼き込みだけです")
         self._no_nw(recipe, bake=bake)                   # nw は焼き込めない(LoRA には入る)
         if recipe.proj_units:                            # 出力のあとに正規化がある層の射影: 補正の有無ごとの知らせ(v0.9.0)
             from .headproj import proj_heads
@@ -3952,9 +3956,11 @@ round_01.scores.txt に「番号 P C」を 1 行ずつ書く(例: 17 3 4)。全�
             d["verify"] = self.check_proj_bake(recipe, Path(d["path"]), contrast=contrast)
         return d
 
-    def _inkling_export(self, recipe: Recipe, out: Path, *, bake: bool, requant: str | None, verify: bool,
-                        strip_meta: bool = False) -> dict:
-        """Inkling 2 のレシピの書き出し: LoRA(既定)か焼き込み(書き換えるテンソルを Q8_0。f16・keep も)。"""
+    def _inkling_export(self, recipe: Recipe, out: Path | None, *, bake: bool, requant: str | None, verify: bool,
+                        strip_meta: bool = False, into: str | Path | None = None, dry_run: bool = False) -> dict:
+        """Inkling 2 のレシピの書き出し: LoRA(既定)か焼き込み(型は auto・keep・q8_0・f16)。into は同じモデルの別の量子化
+        (方向と部品はこのモデル、消す量は焼き込む先の重みから)。dry_run は書かずに、書き換えるテンソルと大きさ・残り方だけ。
+        焼き込みではモデルを GPU に載せない(いま載っていれば、焼き込んだ GGUF が収まるかの目安に空きを測る)。"""
         from .headproj import proj_heads
         from .inkling_pipeline import bake_recipe, export_lora
         self._check_inkling_recipe(recipe)
@@ -3963,7 +3969,14 @@ round_01.scores.txt に「番号 P C」を 1 行ずつ書く(例: 17 3 4)。全�
             raise GneError("ARCH_UNSUPPORTED", "Inkling 2 では、焼き込みと LoRA の比べ(--verify)を同じ処理の中ではできません"
                            "(2 つのモデルが同時に VRAM に入らないため)",
                            "gne inkling chips-bake-check --mode lora と、焼き込んだ GGUF での --mode baked の 2 回で比べます(docs/inkling2.md)")
-        out.parent.mkdir(parents=True, exist_ok=True)
+        if dry_run and not bake:
+            raise GneError("BAD_ARGS", "--dry-run は焼き込み(--bake)のときだけです")
+        if into is not None and not bake:
+            raise GneError("BAD_ARGS", "--into は焼き込み(--bake)のときだけです")
+        if out is None and not dry_run:
+            raise GneError("BAD_ARGS", "書き出す先(--out)を指定してください")
+        if out is not None:
+            out.parent.mkdir(parents=True, exist_ok=True)
         if not bake:
             if requant not in (None, "q8_0", "auto"):
                 raise GneError("BAD_ARGS", "--requant は焼き込み(--bake)のときだけです")
@@ -3973,12 +3986,14 @@ round_01.scores.txt に「番号 P C」を 1 行ずつ書く(例: 17 3 4)。全�
         if rq not in ("auto", "q8_0", "f16", "keep"):
             raise GneError("BAD_ARGS", f"Inkling 2 の焼き込みの --requant は auto(既定。元の型・元の大きさで書き、編集が残らない"
                                        f"テンソルだけ Q8_0)/ keep / q8_0 / f16 です({rq!r})")
-        from .inkling_pipeline import gpu_free_mb
+        from .inkling_pipeline import gpu_free_mb, target_weights
+        tw = target_weights(self, into) if into is not None else None
+        if tw is self.weights:
+            tw = None
         free = None
-        if self._engine_kw["n_gpu_layers"] != 0:          # いまのモデルを GPU に載せた状態での空き(焼き込むと増える分がここに入るか)
-            self.engine                                  # noqa: B018(読み込んでから測る)
+        if tw is None and self._engine is not None:     # いまのモデルが GPU に載っているときだけ(焼き込みのために載せない)
             free = gpu_free_mb()
-        d = bake_recipe(self, heads, out, requant=rq, vram_free_mb=free, strip_meta=strip_meta)
+        d = bake_recipe(self, heads, out, requant=rq, vram_free_mb=free, strip_meta=strip_meta, target=tw, dry_run=dry_run)
         d.update(kind="bake", requant=rq, recipe=recipe.to_dict(), vram_free_mb=free)
         return d
 

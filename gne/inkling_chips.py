@@ -822,7 +822,7 @@ def trial_all(session, spec_path, out_dir: Path, *, ks=(8, 16, 32), strengths=(1
 # --- 焼き込み(GGUF に書き込む) -----------------------------------------------------------------------------------------
 
 def bake(reader: Reader, units: list, refs: dict | None, dst: Path | None, *, requant: str = "q8_0", correct: bool = True,
-         strip_meta: bool = False, tens: dict | None = None) -> dict:
+         strip_meta: bool = False, tens: dict | None = None, extra_meta: dict | None = None) -> dict:
     """部品 units を GGUF に焼き込む(LoRA と同じ変化量)。requant(書き換えるテンソルの型):
     - q8_0 / f16: 書き換えるテンソルをその型にする(gne のほかのモデルの焼き込みと同じ。専門家のテンソルは 1 つの型しか持てない
       ので、編集しない専門家も変換し、テンソル全体が大きくなる。F16 は元の Q2_0・NVFP4 の値をそのまま表せる)
@@ -835,7 +835,10 @@ def bake(reader: Reader, units: list, refs: dict | None, dst: Path | None, *, re
       auto と同じ決め方)。元が Q8_0 の attention の出力は Q8_0 のまま
     専門家ごとの倍率(ffn_down_exps.scale)はそのままにし、重みの変化量は倍率で割って入れる(実行時に倍率が掛かって LoRA と同じ
     s_e·W_e − s·u uᵀ s_e·W_e になる)。層 6〜17 の重みは 3 回で共有なので、焼き込みも 3 回すべてに効く。
-    書き換えたテンソルとそのやり方は GGUF の gne.patches と <dst>.chips.json に残す(strip_meta なら GGUF には入れない)。"""
+    書き換えたテンソルとそのやり方は GGUF の gne.patches と <dst>.chips.json に残す(strip_meta なら GGUF には入れない)。
+    元の型のまま書く(keep・auto)ときの型ごとのやり方(same_type_method): NVFP4・Q2_0 は射影を意識した丸め、llama.cpp が imatrix
+    なしで量子化できる型(Q8_0・K-quant・IQ4_XS など)は量子化し直し(専門家のテンソルは編集した専門家のスラブだけ。編集の残り方が
+    0.9 より小さければ auto は Q8_0)、imatrix の要る型(IQ2_XXS・IQ2_XS・IQ1_S)は keep なら止め、auto なら Q8_0。"""
     from gguf import GGMLQuantizationType as _Q
 
     from .gain import KEYED_KEEP_MIN, _SlabStream, edit_kept, expert_slab_edits
@@ -887,10 +890,9 @@ def bake(reader: Reader, units: list, refs: dict | None, dst: Path | None, *, re
             elif requant == "auto" and L in whole:               # MLP 全体の部品を受けるテンソルは Q8_0(auto の決め方)
                 replace[name] = convert_experts(t, A, B, _Q.Q8_0, rec)
                 rec["why"] = "whole_layer_mlp"
+            elif same_type_method(t.tensor_type) != "par":       # NVFP4・Q2_0 のほかの型(--into で別の量子化に書くとき)
+                replace[name] = _same_type_experts(t, A, B, requant, rec, enc, dec, convert_experts)
             else:
-                if t.tensor_type.name not in TYPES:
-                    raise GneError("UNSUPPORTED_QUANT", f"{name}: {t.tensor_type.name} は元の型のまま書けません(NVFP4・Q2_0 だけ)",
-                                   "--requant q8_0 か f16 にしてください")
                 n_exp, rows, cols = int(t.data.shape[0]), int(B.shape[1]), int(A.shape[2])
                 slab = int(t.n_bytes) // n_exp
                 edited, want2, dot, flips, offs, wn = {}, 0.0, 0.0, 0, [], []
@@ -939,6 +941,12 @@ def bake(reader: Reader, units: list, refs: dict | None, dst: Path | None, *, re
                 qt = {"q8_0": _Q.Q8_0, "f16": _Q.F16}[requant]
             else:
                 qt = t.tensor_type
+            if qt == t.tensor_type and same_type_method(qt) == "imatrix":   # imatrix の要る型: llama.cpp では量子化し直せない
+                if requant == "keep":
+                    raise GneError("UNSUPPORTED_QUANT", f"{name}: {qt.name} は imatrix が要るので、元の型のまま書き戻せません",
+                                   "--requant auto(Q8_0 にする)か q8_0 / f16 にしてください")
+                rec["fallback"] = {"from": qt.name, "why": "imatrix"}
+                qt = _Q.Q8_0
             raw, kept, err = put(qt)
             if requant == "auto" and qt != _Q.Q8_0 and kept < KEYED_KEEP_MIN:
                 rec["fallback"] = {"from": qt.name, "edit_kept": kept}
@@ -955,12 +963,81 @@ def bake(reader: Reader, units: list, refs: dict | None, dst: Path | None, *, re
         return {"path": None, "modified": recs}
     dst.parent.mkdir(parents=True, exist_ok=True)
     kv = None if strip_meta else {"gne.patches": json.dumps(recs, ensure_ascii=False),
-                                  "gne.inkling_proj": json.dumps({"units": units, "requant": requant, "correct": correct})}
+                                  "gne.inkling_proj": json.dumps({"units": units, "requant": requant, "correct": correct,
+                                                                  **(extra_meta or {})}, ensure_ascii=False)}
     rewrite_gguf(src, dst, replace, extra_kv=kv)
     side = Path(str(dst) + ".chips.json")
-    side.write_text(json.dumps({"units": units, "requant": requant, "correct": correct, "modified": recs}, ensure_ascii=False, indent=1),
-                    encoding="utf-8")
+    side.write_text(json.dumps({"units": units, "requant": requant, "correct": correct, **(extra_meta or {}), "modified": recs},
+                               ensure_ascii=False, indent=1), encoding="utf-8")
     return {"path": str(dst), "bytes": dst.stat().st_size, "bytes_src": src.stat().st_size, "modified": recs, "sidecar": str(side)}
+
+
+_SAME_TYPE: dict = {}
+
+
+def same_type_method(qt) -> str:
+    """元の型のまま書くときのやり方: par(NVFP4・Q2_0、射影を意識した丸め)/ requant(llama.cpp が imatrix なしで量子化できる型)/
+    imatrix(imatrix が要る型。元の型には書き戻せない)。"""
+    from .inkling_bake import TYPES
+    name = getattr(qt, "name", str(qt))
+    if name in TYPES:
+        return "par"
+    if name not in _SAME_TYPE:
+        from .quant import block_sizes, quantize
+        try:
+            bs, _ = block_sizes(qt)
+            quantize(np.zeros((1, max(256, int(bs))), np.float32), qt)
+            _SAME_TYPE[name] = "requant"
+        except NotImplementedError:
+            _SAME_TYPE[name] = "imatrix"
+    return _SAME_TYPE[name]
+
+
+def _same_type_experts(t, A, B, requant: str, rec: dict, enc, dec, convert_experts):
+    """NVFP4・Q2_0 のほかの型の専門家のテンソルを元の型で書く: 編集した専門家のスラブだけを llama.cpp で量子化し直す(ほかの専門家は
+    バイトのまま)。imatrix の要る型と、編集の残り方が 0.9 より小さいとき(auto)は Q8_0。編集しない列の値の変わり方も記録する。"""
+    from gguf import GGMLQuantizationType as _Q
+
+    from .gain import KEYED_KEEP_MIN, _SlabStream, expert_slab_edits
+    from .steer import GneError
+    from .weights import _slab_to_f32
+    m = same_type_method(t.tensor_type)
+    if m == "imatrix":
+        if requant == "keep":
+            raise GneError("UNSUPPORTED_QUANT", f"{t.name}: {t.tensor_type.name} は imatrix が要るので、元の型のまま書き戻せません",
+                           "--requant auto(Q8_0 にする)か q8_0 / f16 にしてください")
+        st = convert_experts(t, A, B, _Q.Q8_0, rec)
+        rec["fallback"] = {"from": t.tensor_type.name, "why": "imatrix"}
+        return st
+    n_exp = int(t.data.shape[0])
+    slab = int(t.n_bytes) // n_exp
+    stats: dict = {}
+    edited, err = expert_slab_edits(t, A, B, t.tensor_type, encode=enc, decode=dec, stats=stats)
+    kept = stats.get("kept", 1.0)
+    un2 = w2 = 0.0                                           # 編集しない列の値の変わり方(量子化し直しの丸め)
+    for e, raw in edited.items():
+        cols = np.nonzero(np.any(A[e] != 0, axis=0))[0]
+        rest = np.setdiff1d(np.arange(A.shape[2]), cols)
+        if not len(rest):
+            continue
+        W = _slab_to_f32(t, e)
+        back = dec(raw, t.tensor_type, W.shape)
+        un2 += float(np.sum((back[:, rest] - W[:, rest]) ** 2))
+        w2 += float(np.sum(W[:, rest] ** 2))
+    rec.update(to=t.tensor_type.name, method="requant", experts=sorted(edited), edit_kept=kept, requant_error=err,
+               bytes_to=int(t.n_bytes), **({"unedited_rel_change": float(np.sqrt(un2 / w2))} if w2 > 0 else {}))
+    if requant == "auto" and kept < KEYED_KEEP_MIN:
+        fb = {"from": t.tensor_type.name, "edit_kept": kept}
+        for k in ("method", "experts", "edit_kept", "requant_error", "unedited_rel_change"):
+            rec.pop(k, None)
+        st = convert_experts(t, A, B, _Q.Q8_0, rec)
+        rec["fallback"] = fb
+        return st
+    for e, raw in edited.items():
+        if raw.nbytes != slab:
+            raise GneError("INTERNAL", f"{t.name}: 専門家 {e} の大きさ {raw.nbytes} が元の {slab} と違います")
+    return (t.tensor_type, _SlabStream(t, t.tensor_type, {e: np.asarray(v, np.uint8).reshape(-1) for e, v in edited.items()},
+                                       (slab,), np.uint8))
 
 
 def whole_ffn_layers(units: list) -> set[int]:

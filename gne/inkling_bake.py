@@ -8,7 +8,9 @@ Q2_0 は(この GGUF のブロックの倍率に負の値があり、llama.cpp �
   16 個ごと)。1 つの列は各行のブロックに 1 個ずつ入るので、列のコードを動かしても、ほかの列の値はまったく変わらない
 - 動かすのは |u_i| の大きい行から(1 段で uᵀw をいちばん大きく動かし、方向に沿わない変化が相対的に小さい)。最後に、残りに
   いちばん合う 1 段を足す
-- 1 段の大きさは Q2_0 が |d|(値は (q − 1)·d、q = 0〜3)、NVFP4 は隣の値まで(値は {0, ±1, ±2, ±3, ±4, ±6, ±8, ±12} × 倍率)
+- 1 段の大きさは Q2_0 が |d|(値は (q − 1)·d、q = 0〜3)、NVFP4・MXFP4 は隣の値まで(値は {0, ±1, ±2, ±3, ±4, ±6, ±8, ±12} × 倍率。
+  NVFP4 は 16 個ごとの UE4M3 の倍率、MXFP4 は 32 個ごとの E8M0 の倍率 2^(e − 128))。MXFP4 は別の量子化(UD-Q2_K_XL の層 20 など)に
+  焼き込むときに出てくる
 方向に沿わない変化(動かしたコードの、u に直交する成分)は消えた成分の 2 倍ほど残る(列 1 本あたり。docs/inkling2.md)。"""
 from __future__ import annotations
 
@@ -19,7 +21,7 @@ _LEVELS = sorted(set(KV.tolist()))
 _CODE = {v: int(np.where(KV == v)[0][0]) for v in _LEVELS}
 UP = np.array([_CODE[_LEVELS[_LEVELS.index(KV[c]) + 1]] if _LEVELS.index(KV[c]) + 1 < len(_LEVELS) else -1 for c in range(16)])
 DN = np.array([_CODE[_LEVELS[_LEVELS.index(KV[c]) - 1]] if _LEVELS.index(KV[c]) > 0 else -1 for c in range(16)])
-TYPES = ("Q2_0", "NVFP4")
+TYPES = ("Q2_0", "NVFP4", "MXFP4")
 
 
 def _ue4m3(x: np.ndarray) -> np.ndarray:
@@ -39,6 +41,14 @@ def decode(raw: np.ndarray, typ: str, rows: int, cols: int) -> tuple[np.ndarray,
         q = np.stack([(qs >> (2 * k)) & 3 for k in range(4)], axis=-1).reshape(rows, cols).astype(np.int64)
         sc = np.repeat(d, 64, axis=1)
         return q, sc, (q - 1) * sc
+    if typ == "MXFP4":                                         # 32 個ごと: e(E8M0)1 バイト + 4 ビット × 32
+        nb32 = cols // 32
+        b = raw.reshape(rows, nb32, 17)
+        d = np.ldexp(1.0, b[:, :, 0].astype(np.int64) - 128)
+        qs = b[:, :, 1:]
+        q = np.concatenate([qs & 0x0F, qs >> 4], axis=-1).reshape(rows, cols).astype(np.int64)
+        sc = np.repeat(d, 32, axis=1)
+        return q, sc, KV[q] * sc
     if typ != "NVFP4":
         raise ValueError(typ)
     b = raw.reshape(rows, nb, 36)
@@ -56,6 +66,11 @@ def encode(raw: np.ndarray, typ: str, rows: int, cols: int, q: np.ndarray) -> np
     if typ == "Q2_0":
         qq = q.reshape(rows, nb, 16, 4).astype(np.uint8)
         out[:, :, 2:] = qq[..., 0] | (qq[..., 1] << 2) | (qq[..., 2] << 4) | (qq[..., 3] << 6)
+    elif typ == "MXFP4":
+        nb32 = cols // 32
+        out = np.array(raw, dtype=np.uint8, copy=True).reshape(rows, nb32, 17)
+        qq = q.reshape(rows, nb32, 32).astype(np.uint8)
+        out[:, :, 1:] = qq[..., :16] | (qq[..., 16:] << 4)
     else:
         qq = q.reshape(rows, nb, 4, 16).astype(np.uint8)
         out[:, :, 4:] = (qq[..., :8] | (qq[..., 8:] << 4)).reshape(rows, nb, 32)
@@ -118,11 +133,26 @@ def edit_slab(raw: np.ndarray, typ: str, u: np.ndarray, delta_by_col: dict[int, 
     q, sc, W = decode(raw, typ, rows, cols)
     cs = np.array(sorted(delta_by_col), np.int64)
     dl = np.array([delta_by_col[int(c)] for c in cs], np.float64)
-    r = round_columns(q, sc, typ, u, cs, dl)
-    new = encode(raw, typ, rows, cols, r["q"])
+    cur, flips = q, np.zeros(len(cs), np.int64)
+    for _ in range(PASSES):                # 1 回で届かない列(大きな強さ・値の端のコード)は、残りをもう一度(同じ行をさらに 1 段)
+        _, _, Wc = decode(encode(raw, typ, rows, cols, cur), typ, rows, cols) if cur is not q else (None, None, W)
+        rest = dl - u @ (Wc[:, cs] - W[:, cs])
+        todo = np.abs(rest) > REST_TOL * np.maximum(np.abs(dl), 1e-30)
+        if not todo.any():
+            break
+        r = round_columns(cur, sc, typ, u, cs[todo], rest[todo])
+        if not r["flips"].any():
+            break
+        cur = r["q"]
+        flips[todo] += r["flips"]
+    new = encode(raw, typ, rows, cols, cur)
     _, _, W2 = decode(new, typ, rows, cols)
     dw = W2[:, cs] - W[:, cs]
     along = u @ dw
     off = np.linalg.norm(dw - np.outer(u, along), axis=0)
-    return {"raw": new, "want": dl, "along": along, "off": off, "flips": r["flips"],
+    return {"raw": new, "want": dl, "along": along, "off": off, "flips": flips,
             "w_norm": np.linalg.norm(W[:, cs], axis=0)}
+
+
+PASSES = 4          # 列ごとの丸めを繰り返す上限(1 回目で残りが目標の 2% 以内なら 1 回)
+REST_TOL = 0.02

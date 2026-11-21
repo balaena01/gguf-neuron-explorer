@@ -178,6 +178,21 @@ def _is_bytes(raw) -> bool:
     return isinstance(raw, (bytes, bytearray, memoryview))
 
 
+_COPY_CHUNK = 64 << 20
+
+
+def _copy_range(fsrc, fdst, offset: int, n: int) -> None:
+    """fsrc の offset から n バイトを fdst に写す(64 MiB ずつ読む)。"""
+    fsrc.seek(offset)
+    left = int(n)
+    while left > 0:
+        b = fsrc.read(min(_COPY_CHUNK, left))
+        if not b:
+            raise ValueError(f"元のファイルが途中で終わりました(あと {left} バイト)")
+        fdst.write(b)
+        left -= len(b)
+
+
 def rewrite_gguf(src: str | Path, dst: str | Path, replace: dict[str, tuple[GGMLQuantizationType, object]],
                  extra_kv: dict[str, str] | None = None) -> None:
     """1 つの GGUF ファイル(分割の 1 つでもよい)を、指定したテンソルだけ型とバイト列を差し替えて書き直す。メタデータの
@@ -202,7 +217,7 @@ def rewrite_gguf(src: str | Path, dst: str | Path, replace: dict[str, tuple[GGML
     missing = set(replace) - {t.name for t in g.tensors}
     if missing:
         raise ValueError(f"{Path(src).name} に無いテンソル: {sorted(missing)[:3]}")
-    with open(dst, "wb") as f:
+    with open(dst, "wb") as f, open(src, "rb") as src_fd:
         head = bytearray(buf[:g.kv_end])
         if extra_kv:                              # キーの数を増やし、文字列のキーと値を最後に足す
             n_tensors, n_kv = struct.unpack_from("<QQ", head, 8)
@@ -219,8 +234,8 @@ def rewrite_gguf(src: str | Path, dst: str | Path, replace: dict[str, tuple[GGML
         base = f.tell()
         for t, _, raw, toff in plan:
             f.write(b"\0" * (base + toff - f.tell()))
-            if raw is None:                       # 写すだけのテンソルは bytes に写さずに書く(大きなテンソルでメモリを食わない)
-                f.write(buf[t.data_offset:t.data_offset + t.n_bytes])
+            if raw is None:                       # 写すだけのテンソルはファイルから少しずつ読んで書く(memmap の頁をプロセスに
+                _copy_range(src_fd, f, t.data_offset, t.n_bytes)   # 抱えないので、大きなファイルでも常駐の大きさが増えない)
             elif _is_bytes(raw):
                 f.write(raw)
             else:

@@ -326,9 +326,10 @@ def _merge(a: dict, b: dict) -> dict:
 class InkBuilder:
     """ProjHead の並び → LoRA の行列(api の ProjBuilder の代わり。tensors だけを使う)。方向は部品ごとの名前で引く。"""
 
-    def __init__(self, session, direction_set, *, correction: bool = True):
+    def __init__(self, session, direction_set, *, correction: bool = True, weights=None):
         self.s, self.dir_of, self.correction = session, direction_set, bool(correction)
         self.plan = session.weights.inkling
+        self.w = weights if weights is not None else session.weights     # 焼き込む先(--into)の重みで射影の量を作るとき
         self._refs: dict[str, dict] = {}
 
     def refs(self, name: str) -> dict:
@@ -338,7 +339,7 @@ class InkBuilder:
 
     def tensors(self, heads, warn=None) -> dict:
         from .inkling_chips import lora_tensors_all
-        rd = SimpleNamespace(w=self.s.weights, plan=self.plan)
+        rd = SimpleNamespace(w=self.w, plan=self.plan)
         by: dict[str, list] = {}
         for p in heads:
             if p.s:
@@ -782,12 +783,14 @@ def _json(x):
 
 # --- 焼き込み -------------------------------------------------------------------------------------------------------
 
-def bake_recipe(session, heads, dst: Path, *, requant: str = "auto", vram_free_mb: float | None = None,
-                strip_meta: bool = False) -> dict:
+def bake_recipe(session, heads, dst: Path | None, *, requant: str = "auto", vram_free_mb: float | None = None,
+                strip_meta: bool = False, target=None, dry_run: bool = False) -> dict:
     """レシピの射影の部品を GGUF に焼き込む(inkling_chips.bake)。requant は auto(既定: MLP 全体の部品がある層の専門家のテンソルと、
     編集が残らないテンソルは Q8_0、ほかは元の型・元の大きさ)・keep・q8_0・f16。書く前に一度計算して、Q8_0 にする層と
     ファイル・VRAM の増え方を決め、progress で知らせる(結果の plan にも入れる)。vram_free_mb(読み込んだときの空き)を渡すと、
-    収まらないときは知らせる(ファイルは書く)。"""
+    収まらないときは知らせる(ファイルは書く)。target(target_weights の重み)を渡すと、同じモデルの別の量子化に書く: 方向と部品は
+    このモデルのもの、消す量(r̂ᵀW)と短い畳み込みの倍率は焼き込む先の重みから作り直す。dry_run なら書かずに、書き換えるテンソルと
+    大きさ・残り方だけを返す。"""
     from .inkling_chips import bake
     heads = [p for p in heads if p.s]
     if not heads:
@@ -795,9 +798,11 @@ def bake_recipe(session, heads, dst: Path, *, requant: str = "auto", vram_free_m
     for p in heads:
         check_unit(session, p)
     units = [chips_unit(p) + [p.direction] for p in heads]            # 記録用(方向つき)
-    tens = InkBuilder(session, session.direction_set).tensors(heads)   # いくつかの方向(残りから追加の合わせたレシピ)もまとめる
-    rd = SimpleNamespace(w=session.weights, plan=session.weights.inkling)
+    tw = target if target is not None else session.weights
+    tens = InkBuilder(session, session.direction_set, weights=tw).tensors(heads)   # いくつかの方向(残りから追加の合わせたレシピ)もまとめる
+    rd = SimpleNamespace(w=tw, plan=session.weights.inkling)
     refs = None
+    meta = {"source": Path(session.weights.path).name, "target": Path(tw.path).name} if tw is not session.weights else None
     if requant in ("auto", "keep"):                          # 書く前に一度計算して、型と大きさを決める
         pre = bake(rd, units, refs, None, requant=requant, tens=tens)["modified"]
         grow = {"bytes": int(sum(m["bytes_to"] - m["bytes_from"] for m in pre)),
@@ -805,8 +810,16 @@ def bake_recipe(session, heads, dst: Path, *, requant: str = "auto", vram_free_m
                              "to_mib": m["bytes_to"] / 2**20} for m in pre],
                 "expert_layers": sorted({int(m["tensor"].split(".")[1]) for m in pre if "ffn_down_exps" in m["tensor"] and m["to"] != m["from"]})}
     else:
-        grow = estimate_growth(session, [u[:4] for u in units], requant)
+        pre = None
+        grow = estimate_growth(SimpleNamespace(weights=tw), [u[:4] for u in units], requant)
     plan = bake_plan_text(grow)
+    if dry_run:                                                 # 書かずに: 書き換えるテンソル・大きさ・残り方
+        recs = pre if pre is not None else bake(rd, units, refs, None, requant=requant, tens=tens)["modified"]
+        out = {"path": None, "dry_run": True, "modified": recs, "growth": grow, "plan": plan, "requant": requant,
+               "bytes_src": Path(tw.path).stat().st_size, "bytes": Path(tw.path).stat().st_size + grow["bytes"]}
+        if meta:
+            out.update(into=str(tw.path), carry_over=carry_over(session, heads, tw))
+        return out
     if getattr(session, "progress", None):                    # 書く前に知らせる(CLI は進み具合の行、画面はジョブの段の文)
         session.progress(0, 1, plan)
     vram_note = None
@@ -819,12 +832,90 @@ def bake_recipe(session, heads, dst: Path, *, requant: str = "auto", vram_free_m
                      f"(書き換える専門家の層 1 つで Q8_0 は Q2_0 の層 +253 MiB・NVFP4 の層 +162 MiB)")
         if getattr(session, "warn", None):
             session.warn(vram_note)
-    r = bake(rd, units, refs, Path(dst), requant=requant, strip_meta=strip_meta, tens=tens)
+    r = bake(rd, units, refs, Path(dst), requant=requant, strip_meta=strip_meta, tens=tens, extra_meta=meta)
     r["growth"] = grow
+    if meta:
+        r["into"] = Path(tw.path).name if strip_meta else str(tw.path)
+        r["carry_over"] = carry_over(session, heads, tw)
     r["plan"] = plan
     if vram_note:
         r["vram_note"] = vram_note
     return r
+
+
+def target_weights(session, into):
+    """焼き込む先(--into): 同じモデルの別の量子化。構造(arch・層の数・幅)に加え、Inkling 2 の層の並び、テンソルの名前と形が
+    すべて同じであることを確かめる(型だけ違ってよい)。重みは memmap で読み、GPU には載せない。"""
+    tw = session._target_weights(into)
+    if tw is session.weights:
+        return tw
+    sp, tp = session.weights.inkling, getattr(tw, "inkling", None)
+    if tp is None or sp.to_dict() != tp.to_dict():
+        raise GneError("BAD_ARGS", f"焼き込む先 {Path(into).name} は、Inkling 2 の層の並び(繰り返しの層・回数・流れの区切り)が違います",
+                       "同じモデルの別の量子化にしてください")
+    ts, tt = session.weights._tensors, tw._tensors
+    miss = sorted(set(ts) ^ set(tt))
+    bad = [n for n in ts if n in tt and list(ts[n].shape) != list(tt[n].shape)]
+    if miss or bad:
+        raise GneError("BAD_ARGS", f"焼き込む先 {Path(into).name} は同じモデルではありません(テンソルの名前が違う {len(miss)} 個、形が違う "
+                                   f"{len(bad)} 個。例 {(miss + bad)[:3]})", "同じモデルの別の量子化にしてください")
+    return tw
+
+
+def unit_component(w, plan, refs: dict, unit: list, *, correct: bool = True) -> np.ndarray:
+    """部品の消す量のもと: 直した向き u(短い畳み込みの今のトークンの倍率で直したもの)と、部品が書く行列の uᵀW(専門家は倍率つき)。
+    ヘッドは列のブロック、attention 全体は行全体、MLP 全体は全部の専門家(専門家ごとの倍率を掛けて並べる)、ニューロンは 1 つの値。"""
+    from .inkling_read import Weights2
+    w2 = Weights2(w)
+    L, kind, idx = int(unit[0]), unit[1], unit[2]
+    r = refs[L][1].astype(np.float64)
+    conv = "attn_post_conv" if kind in ("head", "attn") else "ffn_post_conv"
+    cw = w2.full(f"blk.{L}.{conv}.weight").astype(np.float64)
+    g = (1.0 + cw[:, -1]) / math.sqrt(cw.shape[1] + 1)
+    u = g * r if correct else r
+    u = u / max(float(np.linalg.norm(u)), 1e-30)
+    if kind in ("head", "attn"):
+        W = w2.full(f"blk.{L}.attn_output.weight").astype(np.float64).reshape(len(u), -1)
+        v = u @ W
+        if kind == "head":
+            hd = w.arch.layers[0].head_dim
+            v = v[int(idx) * hd:(int(idx) + 1) * hd]
+        return v
+    sc = w2.scale(f"blk.{L}.ffn_down_exps.scale")
+    if kind == "neuron":
+        e, n = int(idx[0]), int(idx[1])
+        return np.array([(1.0 if sc is None else float(sc[e])) * float(u @ w2.slab(f"blk.{L}.ffn_down_exps.weight", e).astype(np.float64)[:, n])])
+    nE = w.arch.layers[0].n_expert
+    return np.concatenate([(1.0 if sc is None else float(sc[e])) * (u @ w2.slab(f"blk.{L}.ffn_down_exps.weight", e).astype(np.float64))
+                           for e in range(nE)])
+
+
+def carry_over(session, heads, target) -> list[dict]:
+    """同じレシピの消す量(r̂ᵀW、部品ごと)の、このモデルと焼き込む先の違い: 相対の差 ‖v_先 − v_元‖ / ‖v_元‖ と大きさの比。
+    強さ s は消す量に掛かるので、比が 1 から離れるほど、このモデルで決めた強さの効き方が焼き込む先で変わる。"""
+    plan = session.weights.inkling
+    out = []
+    for p in heads:
+        if not p.s:
+            continue
+        refs = layer_refs_of(plan, session.direction_set(p.direction))
+        u = chips_unit(p)
+        a = unit_component(session.weights, plan, refs, u)
+        b = unit_component(target, plan, refs, u)
+        out.append({"unit": p.spec(), "rel_diff": float(np.linalg.norm(b - a) / max(np.linalg.norm(a), 1e-30)),
+                    "norm_ratio": float(np.linalg.norm(b) / max(np.linalg.norm(a), 1e-30)),
+                    "cos": float(a @ b / max(np.linalg.norm(a) * np.linalg.norm(b), 1e-30))})
+    return out
+
+
+def taps_identical(source, target) -> dict:
+    """短い畳み込みのタップ(射影の倍率のもと)の型と、元と焼き込む先で値が同じか。"""
+    from .inkling_read import Weights2
+    a, b = Weights2(source), Weights2(target)
+    names = [n for n in source._tensors if n.endswith(("attn_post_conv.weight", "ffn_post_conv.weight"))]
+    diff = [n for n in names if not np.array_equal(a.full(n), b.full(n))]
+    types = sorted({target._tensors[n].tensor_type.name for n in names})
+    return {"n": len(names), "different": diff, "target_types": types}
 
 
 def bake_plan_text(grow: dict) -> str:
