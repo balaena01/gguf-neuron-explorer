@@ -545,7 +545,7 @@ def standard_kinds() -> dict[str, Callable[..., dict]]:
     }
 
 
-INKLING_JOBS = frozenset({"head_pipeline", "behave", "headproj_export"})   # Inkling 2 で受けるジョブ(CHiPS の流れ)
+INKLING_JOBS = frozenset({"head_pipeline", "heads_refine", "behave", "headproj_export"})   # Inkling 2 で受けるジョブ(CHiPS の流れ)
 
 
 class JobRunner:

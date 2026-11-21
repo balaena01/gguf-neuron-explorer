@@ -936,6 +936,13 @@ export class RecipePanel {
     for (const el of this.root.querySelectorAll("input[name=lx-kind]")) el.addEventListener("change", () => { f.bake = el.value === "bake" && el.checked; this.render(); });
     const on = (sel, ev, fn) => { const el = $(sel); if (el) el.addEventListener(ev, fn); };
     on("#lx-requant", "change", (ev) => { f.requant = ev.target.value; });
+    if (this.inkling()) {                         // Inkling 2: マージ先・元の量子化の型に戻す・LoRA 版との比べは使えないので出さない
+      for (const id of ["#lx-into", "#lx-viaf16", "#lx-verify"]) {
+        const el = this.root.querySelector(id);
+        const box = el && (id === "#lx-into" ? el.closest(".rc-lx-row") : el.closest("label"));
+        if (box) box.hidden = true;
+      }
+    }
     on("#lx-viaf16", "change", (ev) => { f.via_f16 = ev.target.checked; this.render(); });
     on("#lx-lq", "input", (ev) => { f.llama_quantize = ev.target.value; });
     on("#lx-imatrix", "input", (ev) => { f.imatrix = ev.target.value; });

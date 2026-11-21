@@ -3678,7 +3678,9 @@ def _refine_text(d: dict) -> str:
                 + d["postnorm"]["note"]] if d.get("postnorm") else []),
              f"残りから追加 {rnd} 回目(元の一括 {d.get('root') or d['base']})。土台 = {d['base']} の {d['n_heads']} 個の行"
              + (f"の合わせたレシピ(元の組 + {'1' if rnd == 2 else f'1〜{rnd - 1}'} 回目の追加、{len(d['base_units'])} 個)" if rnd > 1 else f"の組({len(d['base_units'])} 個)"),
-             f"1. 土台を当てて、元の方向 {d.get('direction')} の L{d['score_layer']} の射影の値が目標 {d['threshold']:.2f} を超える"
+             *([f"Inkling 2: {d['inkling']['replies_note']}"] if (d.get("inkling") or {}).get("replies_note") else []),
+             f"1. 土台を当てて、元の方向 {d.get('direction')} の "
+             + ((d.get("inkling") or {}).get("score_label") or f"L{d['score_layer']}") + f" の射影の値が目標 {d['threshold']:.2f} を超える"
              f" A 側の質問: {rm['n']}/{rm['n_a']} 問" + (f"(少ないので射影の値の高い順に {rm['used']} 問で方向を作った)" if rm["padded"] else ""),
              f"2. 残りの質問で一括 → 新しい方向 {pp['direction']}" + (f"(作り済みの{'・'.join({'direction': '方向', 'causal': '因果'}[x] for x in pp['reused'])}を使い回した)" if pp["reused"] else "")]
     rows = d.get("combined_rows") or []
@@ -3703,7 +3705,8 @@ def _refine_text(d: dict) -> str:
                 lines.append(f"      選ぶのに使っていない質問: 残り {h['remain_before']} → {h['remain_after']} / {h['n_a']}、A 平均 {h['a_mean_before']:.2f} → "
                              f"{h['a_mean_after']:.2f}、B Δ {h['b_delta']:+.2f}、B ⊥ {h['b_drift_orth']:.3f}" + ("" if h["reached"] else "(目標に届かない)"))
             for x in c.get("dups") or []:
-                who = {"layer_attn": "attn", "layer_mlp": "ffn", "neuron": f"N{x['head']}"}.get(x["kind"], f"H{x['head']}")
+                who = {"layer_attn": "attn", "layer_mlp": "ffn",
+                       "neuron": (f"E{x['expert']} " if x.get("expert") is not None else "") + f"N{x['head']}"}.get(x["kind"], f"H{x['head']}")
                 lines.append(f"      同じ部品が 2 つの方向で入っている: L{x['layer']} {who}"
                              f"({'、'.join(f'{rname(k)} s{sv:.2f} @{dn}' for k, sv, dn in zip(x['rounds'], x['s'], x['directions']))})。両方の射影を当てる")
             for x in c.get("cross_visit") or []:
@@ -3732,7 +3735,9 @@ def _refine_text(d: dict) -> str:
                                                               for sd, x in (ck.get("break_warning") or {}).items()]:
                 if w:
                     lines.append(f"   注意: {w}")
-        if cb:
+        if cb and d.get("inkling"):
+            lines.append(f"試す: gne chat --recipe {cb['recipe']}(3 列で土台 + 足した組を比べる)、gne behave --recipe {cb['recipe']}")
+        elif cb:
             lines.append(f"確かめる: gne eval --recipe {cb['recipe']} --random-controls 16")
         lines.append("足した組だけの表(新しい方向、参考。単独では使わない):")
         for r in pp["table"]:
@@ -4846,11 +4851,10 @@ def inkling_chips_bake_check_cmd(c: Common, holder: dict,
         from .inkling_pipeline import chips_unit
         rr = s.recipe(path=recipe)
         hs = [p for p in proj_heads(rr) if p.s]
-        names = sorted({p.direction for p in hs})
-        if len(names) != 1:
-            raise GneError("BAD_RECIPE", "確かめられるのは 1 つの方向の射影のレシピです")
-        ds = s.direction_set(names[0])
-        units = json.dumps([chips_unit(p) for p in hs])
+        # 測る向きはレシピの既定の方向(残りから追加の合わせたレシピなら元の一括の方向)。LoRA はレシピのもの(いくつかの方向もまとめる)
+        ds = s.direction_set(rr.default_direction or hs[0].direction)
+        units = json.dumps([chips_unit(p) + [p.direction] for p in hs])
+        lora_path = (s.lora_for(rr) or [[None]])[0][0] if mode == "lora" else None
     elif direction is not None:
         from .direction import DirectionSet
         ds = DirectionSet.load(direction)
@@ -4859,10 +4863,11 @@ def inkling_chips_bake_check_cmd(c: Common, holder: dict,
         if side.exists():
             units = json.dumps(json.loads(side.read_text(encoding="utf-8"))["units"])
     if ds is not None:
-        d, us = None, [[int(u[0]), str(u[1]), u[2], float(u[3])] for u in json.loads(units)]
+        d, us = None, [[int(u[0]), str(u[1]), u[2], float(u[3]), *(u[4:5])] for u in json.loads(units)]
     else:
         d, us = _ink_trial_units(c, s, trial, name, set_key, units)
-    r = bake_check(s, d, us, spec, mode=mode, n_a=n_a, n_b=n_b, reply_tokens=reply_tokens, ds=ds)
+    r = bake_check(s, d, us, spec, mode=mode, n_a=n_a, n_b=n_b, reply_tokens=reply_tokens, ds=ds,
+                   lora_path=locals().get("lora_path"))
     r["model"] = Path(s.weights.path).name
     Path(save).write_text(json.dumps(r, ensure_ascii=False, indent=1), encoding="utf-8")
     g = r["greedy"]

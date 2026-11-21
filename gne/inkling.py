@@ -220,7 +220,7 @@ def answer_part(text: str) -> str:
 # --- まだ対応していない機能の断り ----------------------------------------------------------------------------------
 
 FIX = ("このモデルで使えるのは、読み込み・gne info・マップ・会話(gne chat、gne serve のチャット、OpenAI 互換 API)、gne behave、"
-       "CHiPS の流れ(gne heads pipeline → レシピの会話・gne behave --recipe・gne headproj export、名前の patch を当てた llama.cpp で)と、"
+       "CHiPS の流れ(gne heads pipeline・heads refine → レシピの会話・gne behave --recipe・gne headproj export、名前の patch を当てた llama.cpp で)と、"
        "中を読むだけの gne inkling(read・check・mix・residuals・conv・experts)です(docs/inkling2.md)")
 
 
@@ -229,7 +229,7 @@ FIX = ("このモデルで使えるのは、読み込み・gne info・マップ�
 CLI_OK = frozenset({"info", "probe", "verify", "bench", "chat", "behave", "worker", "recipe-combine", "recipe-scale",
                     "direction keys", "inkling read", "inkling check", "inkling mix", "inkling residuals", "inkling conv",
                     "inkling experts", "inkling chips-trial", "inkling chips-bake",
-                    "inkling chips-bake-check", "heads pipeline", "headproj export", "bake"})
+                    "inkling chips-bake-check", "heads pipeline", "heads refine", "headproj export", "bake"})
 
 
 # 読むだけのコマンドのうち、決めることが残っているので止めているもの(理由を添える)
@@ -238,8 +238,6 @@ WAITING = {
                     "(gne inkling residuals が、両方の大きさを段ごとに出します)"),
     "stats act": ("専門家のニューロンの活性は段ごとに読めますが、保存されている 24 層の地図に 48 段の値をどう出すか(段ごとの地図か、回を選ぶか、"
                   "回をまとめるか)が決まっていないので止めます(gne inkling read --names ffn_moe_situ,ffn_moe_argsort で段ごとに読めます)"),
-    "heads refine": ("組に部品を足す refine は、書き込みの順位と配分の結果を読み直す処理が残差の捕捉を前提にしているので、Inkling 2 では"
-                     "まだ使えません(gne heads pipeline の --n-units や --unit-kinds を変えて流し直してください)"),
     "heads attention": ("注意の向き先は段ごとに読めますが、地図と同じく段の番号の出し方が決まるまで止めます"
                         "(gne inkling read --names kqv_out,attn_gated でヘッドの出力は読めます)"),
 }

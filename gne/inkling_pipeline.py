@@ -69,9 +69,10 @@ def _text_id(engine) -> int:
 
 
 def base_replies(session, items: dict[str, list[tuple[int, list[int]]]], *, sha: str, budget: int = REASON_TOKENS + ANSWER_TOKENS,
-                 progress=None) -> dict[str, dict[int, list[int]]]:
-    """書き換える前のモデルの greedy の返事(思考から答えまで、budget トークンまで)。items = {side: [(質問の番号, ids)]}。
-    <root>/inkling/<model_id>/replies/<対照集合の sha>-<budget>.json に覚えて使い回す(止めて流し直したとき)。"""
+                 progress=None, sides: dict | None = None) -> dict[str, dict[int, list[int]]]:
+    """その側のモデルの greedy の返事(思考から答えまで、budget トークンまで)。items = {side: [(質問の番号, ids)]}。sides は側ごとの
+    LoRA(側をレシピで作る対照集合 = 残りから追加の土台。無ければ書き換える前のモデル)。
+    <root>/inkling/<model_id>/replies/<対照集合の sha>-<budget>.json に覚えて使い回す(sha は側のレシピも含む)。"""
     e = session.engine
     p = session.store.root / "inkling" / session.meta.model_id / "replies" / f"{sha}-{budget}.json"
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -85,16 +86,48 @@ def base_replies(session, items: dict[str, list[tuple[int, list[int]]]], *, sha:
         longest = max(len(ids) for _, _, ids in todo) + budget
         per = max(1, min(int(e.n_seq_max), int(e.n_ctx) // max(longest, 1)))
         done = 0
-        for k in range(0, len(todo), per):
-            chunk = todo[k:k + per]
+        chunks = []
+        for sd in "AB":
+            xs = [x for x in todo if x[0] == sd]
+            chunks += [xs[k:k + per] for k in range(0, len(xs), per)]
+        for chunk in chunks:
+            e.set_lora(ctx, (sides or {}).get(chunk[0][0]) or None)
             rs = e.generate_greedy(ctx, [ids for _, _, ids in chunk], max_tokens=budget, stop_on_eog=True)
             for (sd, i, _), r in zip(chunk, rs, strict=True):
                 cache[f"{sd}:{i}"] = [int(t) for t in r.token_ids]
             done += len(chunk)
             p.write_text(json.dumps(cache), encoding="utf-8")
             if progress:
-                progress(done, len(todo), "Inkling 2: 書き換える前の返事")
+                progress(done, len(todo), "Inkling 2: 返事" if sides else "Inkling 2: 書き換える前の返事")
+        e.set_lora(ctx, None)
     return {sd: {i: cache[f"{sd}:{i}"] for i, _ in xs} for sd, xs in items.items()}
+
+
+def side_loras(session, cs) -> dict[str, list | None]:
+    """側をレシピで作る対照集合(残りから追加の土台を両側に当てる)の、側ごとの LoRA。Inkling 2 は射影の LoRA だけ。"""
+    if not cs.has_recipes:
+        return {"A": None, "B": None}
+    from .reverse import side_interventions
+    ivs = side_interventions(session, cs)
+    if any(v for v, _ in ivs.values()):
+        raise GneError("ARCH_UNSUPPORTED", "Inkling 2 では、側のレシピに control vector(add のユニット)は使えません")
+    session.engine.allow_lora_trial = True
+    return {sd: (ivs[sd][1] or None) for sd in "AB"}
+
+
+def run_with(rd, ids: list[int], wanted, lora) -> dict:
+    """Reader.run と同じく 1 本を流して捕まえる。lora(側の LoRA)を当てて。"""
+    e = rd.e
+    rd.cap.set_wanted(wanted)
+    ctx = e.probe_ctx(rd.cap, need=max(rd.need, len(ids)))
+    e.set_lora(ctx, lora or None)
+    try:
+        rd.cap.reset()
+        e.clear_memory(ctx)
+        e.prefill(ctx, [ids])
+        return rd.cap.take()
+    finally:
+        e.set_lora(ctx, None)
 
 
 def _strip_eog(engine, toks: list[int]) -> list[int]:
@@ -148,9 +181,11 @@ def contrast_items(session, cs, positions: str, *, max_examples: int | None = No
     kind, pat = parse_positions(positions)
     seqs = contrast_sequences(e, cs)
     idx = {sd: _thin(list(range(len(seqs[sd]))), max_examples) for sd in "AB"}
+    sides = side_loras(session, cs)
     replies = None
-    if kind in REPLY_KINDS:
-        replies = base_replies(session, {sd: [(i, seqs[sd][i][0]) for i in idx[sd]] for sd in "AB"}, sha=cs.sha, progress=progress)
+    if kind in REPLY_KINDS:                       # 返事はその側のモデル(側のレシピ = 残りから追加の土台を当てたモデル)が書く
+        replies = base_replies(session, {sd: [(i, seqs[sd][i][0]) for i in idx[sd]] for sd in "AB"}, sha=cs.sha, progress=progress,
+                               sides=sides if cs.has_recipes else None)
     tid = _text_id(e)
     items: dict[str, list] = {"A": [], "B": []}
     used: dict[str, list[int]] = {"A": [], "B": []}
@@ -170,7 +205,8 @@ def contrast_items(session, cs, positions: str, *, max_examples: int | None = No
                                            + (f"({skipped[sd]} 個は思考の途中で長さの上限に届いた)" if skipped[sd] else ""),
                            "positions last にするか、質問を増やしてください")
     return {"items": items, "index": used, "skipped": skipped,
-            "prompts": {sd: [cs.prompts(sd)[i] for i in used[sd]] for sd in "AB"}, "kind": kind}
+            "prompts": {sd: [cs.prompts(sd)[i] for i in used[sd]] for sd in "AB"}, "kind": kind, "sides": sides,
+            "replies_from": None if kind not in REPLY_KINDS else ("side_recipe" if cs.has_recipes else "unedited")}
 
 
 # --- 方向 ------------------------------------------------------------------------------------------------------------
@@ -200,7 +236,7 @@ def make_direction(session, cs, name: str, positions: str, *, source: str, max_e
     done = 0
     for sd in "AB":
         for ids, rows in ci["items"][sd]:
-            cap = rd.run(ids, want({"ffn_mix", "ffn_in", "out_mix"}))
+            cap = run_with(rd, ids, want({"ffn_mix", "ffn_in", "out_mix"}), ci["sides"][sd])
             T = len(ids)
             v = np.stack([cap[names[k]].reshape(T, -1)[rows].astype(np.float64).mean(0) for k in sorted(names)])
             sums[sd] = v if sums[sd] is None else sums[sd] + v
@@ -218,7 +254,7 @@ def make_direction(session, cs, name: str, positions: str, *, source: str, max_e
              n_rows_A=n_rows["A"], n_rows_B=n_rows["B"], inkling_gate=GATE, same_reply=False)
     ds = DirectionSet.load(path)
     return {"path": str(path), "positions": str(positions), "n_rows": n_rows, "n_items": {sd: len(ci["items"][sd]) for sd in "AB"},
-            "skipped": ci["skipped"], "seconds": time.perf_counter() - t0, "ds": ds}
+            "skipped": ci["skipped"], "replies_from": ci["replies_from"], "seconds": time.perf_counter() - t0, "ds": ds}
 
 
 def is_inkling_direction(ds) -> bool:
@@ -393,6 +429,7 @@ class InkScorer:
         self.max_len = max(len(ids) for sd in "AB" for ids, _ in self.items[sd])
         nm = _names(self.plan)
         self.names = {nm[L]: L for L in self.layers}
+        self.sides = ci.get("sides") or {"A": None, "B": None}       # 側のレシピの LoRA(調べる LoRA はその上に重ねる)
 
     def n(self, side: str) -> int:
         return len(self.items[side])
@@ -407,8 +444,8 @@ class InkScorer:
         ctx = e.probe_ctx(cap, need=self.max_len)
         out: dict = {}
         try:
-            e.set_lora(ctx, lora or None)
             for side in sides:
+                e.set_lora(ctx, (list(self.sides.get(side) or []) + list(lora or [])) or None)
                 items = self.items[side]
                 sel = list(range(len(items))) if which is None or side not in which else list(which[side])
                 vals = {L: [] for L in self.layers}
@@ -479,8 +516,13 @@ def rank_units(session, ds, cs, *, positions: str, kinds, include_before: bool =
     nh, hd, nE, nf, k_used = li.n_head, li.head_dim, li.n_expert, li.n_ff, li.n_expert_used
     d = session.weights.meta.n_embd
     refs = layer_refs_of(plan, ds)
-    eq = eq or expert_q(session, ds, progress=progress)
-    q, sc = eq["q"], eq["scale"]
+    from .unitwrites import parse_kinds
+    with_neurons = "neuron" in set(parse_kinds(kinds))
+    if with_neurons:                              # 専門家の down の重みの下ごしらえは、ニューロンを順位づけるときだけ
+        eq = eq or expert_q(session, ds, progress=progress)
+        q, sc = eq["q"], eq["scale"]
+    else:
+        eq = {"seconds": 0.0, "reused": None}
     ci = items or contrast_items(session, cs, positions, max_examples=max_examples, progress=progress)
     rd = Reader(session, progress=progress)
     rd.require_patch()
@@ -495,11 +537,11 @@ def rank_units(session, ds, cs, *, positions: str, kinds, include_before: bool =
     rd.fit([ids for sd in "AB" for ids, _ in ci["items"][sd]])
     tot = sum(len(ci["items"][sd]) for sd in "AB")
     done = 0
-    names = want({"attn_gated", "attn_out", "ffn_out", "ffn_moe_situ", "ffn_moe_argsort", "ffn_moe_weights_scaled"})
+    names = want({"attn_gated", "attn_out", "ffn_out"} | ({"ffn_moe_situ", "ffn_moe_argsort", "ffn_moe_weights_scaled"} if with_neurons else set()))
     for sd in "AB":
         for ids, rows in ci["items"][sd]:
             rows = _thin(list(rows), RANK_ROWS)
-            cap = rd.run(ids, names)
+            cap = run_with(rd, ids, names, (ci.get("sides") or {}).get(sd))
             T = len(ids)
             wr = 1.0 / len(rows)
             for st in plan.steps():
@@ -508,9 +550,10 @@ def rank_units(session, ds, cs, *, positions: str, kinds, include_before: bool =
                 g = cap[f"attn_gated-{s}"].reshape(T, nh, hd)
                 ao = cap[f"attn_out-{s}"].reshape(T, -1)
                 fo = cap[f"ffn_out-{s}"].reshape(T, -1)
-                top = cap[f"ffn_moe_argsort-{s}"].reshape(T, -1)[:, :k_used]
-                wts = cap[f"ffn_moe_weights_scaled-{s}"].reshape(T, k_used)
-                act = cap[f"ffn_moe_situ-{s}"].reshape(T, k_used, nf)
+                if with_neurons:
+                    top = cap[f"ffn_moe_argsort-{s}"].reshape(T, -1)[:, :k_used]
+                    wts = cap[f"ffn_moe_weights_scaled-{s}"].reshape(T, k_used)
+                    act = cap[f"ffn_moe_situ-{s}"].reshape(T, k_used, nf)
                 a = acc[sd]
                 for p in rows:
                     for k in range(4):
@@ -518,9 +561,10 @@ def rank_units(session, ds, cs, *, positions: str, kinds, include_before: bool =
                         if t < 0:
                             continue
                         a["heads"][s] += wr * np.einsum("he,he->h", g[t].astype(np.float64), U[L][k])
-                        e = top[t]
-                        c = (wts[t] * sc[L, e])[:, None] * act[t] * q[L, e, k]
-                        np.add.at(a["neur"][s], e, (wr * c).astype(np.float32))
+                        if with_neurons:
+                            e = top[t]
+                            c = (wts[t] * sc[L, e])[:, None] * act[t] * q[L, e, k]
+                            np.add.at(a["neur"][s], e, (wr * c).astype(np.float32))
                     a["attn"][s] += wr * float(ao[p] @ r)
                     a["ffn"][s] += wr * float(fo[p] @ r)
             del cap
@@ -625,9 +669,6 @@ def pipeline(session, spec: dict, pipe: dict, given: dict, t0: float) -> dict:
         cs, val = load_contrast(path)
         if min(len(cs.prompts("A")), len(cs.prompts("B"))) < 4:
             raise GneError("BAD_CONTRAST", "質問は両側とも 4 個以上にしてください(A と B の分かれ方と効き目を測るため)")
-        if cs.has_recipes:
-            raise GneError("ARCH_UNSUPPORTED", "Inkling 2 では、側をレシピで作る対照集合(recipe_a / recipe_b)はまだ使えません"
-                                               "(すべての測定に側ごとの LoRA を重ねる処理を作っていません)", "system_a / system_b で側を作ってください")
     except GneError:
         path.unlink(missing_ok=True)
         raise
@@ -636,7 +677,7 @@ def pipeline(session, spec: dict, pipe: dict, given: dict, t0: float) -> dict:
     include_before = bool(given.get("include_before"))
     out: dict = {"name": name, "contrast": str(path), "n_prompts": len(cs.prompts("A")),
                  **({"n_prompts_b": len(cs.prompts("B"))} if cs.separate_prompts else {}), "sides": cs.describe(),
-                 "settings": dict(pipe), "rank": "writes", "arch_defaults": arch_defaults or None,
+                 "settings": {**pipe, "include_before": include_before}, "rank": "writes", "arch_defaults": arch_defaults or None,
                  "inkling": {"positions": str(pipe["positions"]), "position_kind": kind, "position_note": POSITION_NOTE,
                              "unit_note": UNIT_NOTE, "points": [{"key": k, "label": point_label(plan, k)} for k in points],
                              "include_before": include_before, "reference": "MLP の入力(層 6〜17 は 3 回目、繰り返しのゲートの後)"}}
@@ -656,6 +697,7 @@ def pipeline(session, spec: dict, pipe: dict, given: dict, t0: float) -> dict:
     ds = session.direction_set(name)
     out["direction"] = {"path": d["path"], "positions": d["positions"], "n_rows": d["n_rows"], "seconds": time.perf_counter() - ts,
                         "reused": False, **({"skipped": d["skipped"]} if d.get("skipped") else {}),
+                        **({"replies_from": d["replies_from"]} if d.get("replies_from") else {}),
                         **({"from": d["from"]} if d.get("from") else {})}
     # 2. 段ごとの A と B の分かれ方(ほかのモデルの「基準層」の代わり。Inkling 2 は層ごとの基準が決まっているので選ばない)
     ts = time.perf_counter()
@@ -743,29 +785,28 @@ def bake_recipe(session, heads, dst: Path, *, requant: str = "auto", vram_free_m
     テンソルだけ Q8_0)・keep・q8_0・f16。書き換えるテンソルごとのファイル・VRAM の増え方を出し、vram_free_mb(読み込んだときの
     空き)を渡すと、収まらないときは止める(auto・keep は書く前に一度計算して、Q8_0 になるテンソルの分を数える)。"""
     from .inkling_chips import bake
-    refs_by: dict[str, list] = {}
+    heads = [p for p in heads if p.s]
+    if not heads:
+        raise GneError("BAD_RECIPE", "射影の部品がありません")
     for p in heads:
-        if p.s:
-            check_unit(session, p)
-            refs_by.setdefault(p.direction, []).append(chips_unit(p))
-    if len(refs_by) != 1:
-        raise GneError("ARCH_UNSUPPORTED", "Inkling 2 の焼き込みは、1 つの方向の射影のレシピだけです" if refs_by else "射影の部品がありません")
-    (dname, units), = refs_by.items()
-    refs = layer_refs_of(session.weights.inkling, session.direction_set(dname))
+        check_unit(session, p)
+    units = [chips_unit(p) + [p.direction] for p in heads]            # 記録用(方向つき)
+    tens = InkBuilder(session, session.direction_set).tensors(heads)   # いくつかの方向(残りから追加の合わせたレシピ)もまとめる
     rd = SimpleNamespace(w=session.weights, plan=session.weights.inkling)
+    refs = None
     if requant in ("auto", "keep"):                          # 書く前に一度計算して、型と大きさを決める
-        pre = bake(rd, units, refs, None, requant=requant)["modified"]
+        pre = bake(rd, units, refs, None, requant=requant, tens=tens)["modified"]
         grow = {"bytes": int(sum(m["bytes_to"] - m["bytes_from"] for m in pre)),
                 "tensors": [{"tensor": m["tensor"], "type": m["from"], "to": m["to"], "from_mib": m["bytes_from"] / 2**20,
                              "to_mib": m["bytes_to"] / 2**20} for m in pre],
                 "expert_layers": sorted({int(m["tensor"].split(".")[1]) for m in pre if "ffn_down_exps" in m["tensor"] and m["to"] != m["from"]})}
     else:
-        grow = estimate_growth(session, units, requant)
+        grow = estimate_growth(session, [u[:4] for u in units], requant)
     if vram_free_mb is not None and grow["bytes"] / 2**20 > vram_free_mb - VRAM_MARGIN_MB:
         raise GneError("VRAM_FULL", f"焼き込むと VRAM が {grow['bytes'] / 2**20:.0f} MiB 増えますが、空きは {vram_free_mb:.0f} MiB です"
                                     f"(書き換える専門家の層 {grow['expert_layers']})",
                        "部品の層を減らすか、LoRA のまま使ってください(書き換える専門家の層 1 つで Q8_0 は Q2_0 の層 +253 MiB・NVFP4 の層 +162 MiB)")
-    r = bake(rd, units, refs, Path(dst), requant=requant, strip_meta=strip_meta)
+    r = bake(rd, units, refs, Path(dst), requant=requant, strip_meta=strip_meta, tens=tens)
     r["growth"] = grow
     return r
 

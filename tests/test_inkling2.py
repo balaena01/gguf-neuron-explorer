@@ -79,9 +79,9 @@ def test_refuse_message():
     assert e.code == "ARCH_UNSUPPORTED" and "control vector" in e.message and "層 6〜17 を 3 回" in e.message
     assert "docs/inkling2.md" in e.hint
     from gne.inkling import check_command
-    for ok in ("info", "chat", "behave", "probe", "heads pipeline", "headproj export", None):   # CHiPS の流れは通す
+    for ok in ("info", "chat", "behave", "probe", "heads pipeline", "heads refine", "headproj export", None):   # CHiPS の流れは通す
         check_command(_plan(), ok)
-    for bad in ("heads refine", "direction", "steer", "nw pipeline", "stats resid"):
+    for bad in ("eval", "direction", "steer", "nw pipeline", "stats resid"):
         with pytest.raises(GneError) as ex:
             check_command(_plan(), bad)
         assert ex.value.code == "ARCH_UNSUPPORTED" and f"gne {bad}" in ex.value.message
@@ -277,6 +277,45 @@ def test_same_size_bake_rounding(typ):
     hd = 2 if typ == "Q2_0" else 4
     assert np.array_equal(r["raw"].reshape(rows, nb, -1)[:, :, :hd], raw.reshape(rows, nb, -1)[:, :, :hd])
     assert np.all(np.abs(u @ W2[:, cols_e]) < 0.25 * np.abs(c)), (u @ W2[:, cols_e], c)   # 方向の成分はほぼ消えた
+
+
+def test_refine_parts_and_chain_with_expert_units(tmp_path):
+    """残りから追加を重ねる(Inkling 2 の専門家のニューロンを含む): 部品の書き方・回の番号・同じ部品の見分け、土台のたどり方、
+    合わせたレシピの部品の書き方が保存したレシピと同じ(画面が読み込む部品 = 表の数を測ったレシピ)。"""
+    import json as _json
+    from types import SimpleNamespace
+
+    from gne.api import Session, refine_parts, refine_proj_spec
+    from gne.steer import Recipe, parse_unit
+    base = [parse_unit(x) for x in ("11:H5:s1.5@d", "14:E25:N389:s2@d", "9:ffn:s1@d")]
+    added = [parse_unit(x) for x in ("14:E26:N389:s1@d2", "14:E25:N389:s0.5@d2")]
+    assert [refine_proj_spec(u) for u in base] == ["11:H5:s1.5@d", "14:E25:N389:s2@d", "9:ffn:s1@d"]
+    parts = refine_parts(base + added, [0, 0, 0, 1, 1], lambda L: "attn")
+    assert [(q["kind"], q["head"], q.get("expert"), q["round"]) for q in parts] == [
+        ("attn", 5, None, 0), ("neuron", 389, 25, 0), ("layer_mlp", None, None, 0), ("neuron", 389, 26, 1), ("neuron", 389, 25, 1)]
+    keys = [(q["layer"], q["kind"], q["head"], q.get("expert")) for q in parts]
+    assert keys.count((14, "neuron", 389, 25)) == 2 and keys.count((14, "neuron", 389, 26)) == 1   # 専門家が違えば別の部品
+    # 合わせたレシピ: 保存して読み直しても、部品の書き方は表に載せたものと同じ
+    comb = Recipe(base + added, "m", name="x_r1-n2-combined", default_direction="d")
+    cpath = tmp_path / "x_r1.combined-n2.yaml"
+    comb.save(cpath)
+    loaded = Recipe.load(cpath)
+    assert [refine_proj_spec(u) for u in loaded.units] == [q["spec"] for q in parts]
+    assert all(refine_proj_spec(parse_unit(q["spec"])) == q["spec"] for q in parts)       # 画面の読み込み(書き方)から同じ部品に戻る
+    # 土台のたどり方: 1 回目は一括の行の組、重ねると前の回の合わせたレシピ(回の番号つき)
+    hd = tmp_path / "heads"
+    hd.mkdir()
+    r0 = Recipe(base, "m", name="x-n3", default_direction="d")
+    r0.save(hd / "x.alloc-n3.yaml")
+    fake = SimpleNamespace(store=SimpleNamespace(heads_dir=lambda mid: hd), meta=SimpleNamespace(model_id="m"))
+    ch1 = Session._refine_chain(fake, "x", {"n_heads": 3, "recipe": str(hd / "x.alloc-n3.yaml")})
+    assert (ch1["root"], ch1["round"], ch1["rounds"], ch1["chain"]) == ("x", 1, [0, 0, 0], ["x"])
+    (hd / "x_r1.refine.json").write_text(_json.dumps({"root": "x", "round": 1, "chain": ["x", "x_r1"], "base": "x",
+                                                      "combined_rows": [{"key": "2", "n_new": 2, "recipe": str(cpath), "parts": parts}]}),
+                                         encoding="utf-8")
+    ch2 = Session._refine_chain(fake, "x_r1", {"n_heads": 2})
+    assert (ch2["root"], ch2["round"], ch2["rounds"], ch2["recipe"]) == ("x", 2, [0, 0, 0, 1, 1], str(cpath))
+    assert ch2["chain"] == ["x", "x_r1", "x_r1"]
 
 
 def test_chips_bake_units_and_compare():
@@ -598,3 +637,43 @@ def test_real_inkling_pipeline_recipe_and_bake(session, tmp_path):
     refs = layer_refs_of(session.weights.inkling, ds)
     for m in bake(SimpleNamespace(w=session.weights, plan=session.weights.inkling), units, refs, None, requant="auto")["modified"]:
         assert m["to"] == m["from"] and m["bytes_to"] == m["bytes_from"] and m["edit_kept"] > 0.9, m
+
+
+@real
+def test_real_inkling_refine_stacks(session):
+    """残りから追加(Inkling 2): 土台を当てたまま方向を作り直して足す組を探し、合わせたレシピ(土台 + 足した組)の数を元の方向で測り、
+    重ねると前の回の部品を残す。合わせたレシピの部品は保存したレシピと同じ(画面が読み込む部品 = 表の数を測ったレシピ)。"""
+    import json as _json
+
+    from gne.api import refine_proj_spec
+    from gne.steer import Recipe
+    if not _reader(session).patch_present():
+        pytest.skip("名前の patch を当てた llama.cpp だけ")
+    spec = _json.loads((Path(__file__).resolve().parent.parent / "configs" / "pipeline" / "pirate_tone.json").read_text(encoding="utf-8"))
+    spec.update(name="t_refine", user_prompts=spec["user_prompts"][:6])
+    spec.pop("validate", None)
+    d = session.heads_pipeline(spec, max_examples=6, verify_top=3, verify_sample=0, n_units=[3], check_replies=0, unit_kinds="heads,layers")
+    row = next(r for r in d["allocate"]["table"] if not r.get("skipped"))
+    try:
+        r1 = session.heads_refine("t_refine", n_heads=int(row["n_heads"]), new_heads=(2,), check_replies=0)
+    except Exception as e:                                                   # 土台で全部の質問が目標まで下がったとき
+        if getattr(e, "code", "") == "NOTHING_LEFT":
+            pytest.skip("土台で残りが無い")
+        raise
+    assert r1["round"] == 1 and r1["combined_rows"] and r1["inkling"]["score_label"]
+    for c in r1["combined_rows"]:
+        assert [refine_proj_spec(u) for u in Recipe.load(c["recipe"]).units] == c["units"]
+        assert c["n_base"] == len(r1["base_units"]) and c["units"][:c["n_base"]] == r1["base_units"]
+    key = next((c["key"] for c in r1["combined_rows"] if c["key"] != "s1"), None)
+    if key is None:
+        pytest.skip("重ねる行が無い")
+    try:
+        r2 = session.heads_refine(r1["name"], n_heads=int(key), new_heads=(2,), check_replies=0)
+    except Exception as e:
+        if getattr(e, "code", "") == "NOTHING_LEFT":
+            return
+        raise
+    c1 = next(c for c in r1["combined_rows"] if c["key"] == key)
+    assert r2["round"] == 2 and r2["base_units"] == c1["units"]                # 前の回の合わせたレシピが土台
+    for c in r2["combined_rows"]:
+        assert c["units"][:len(c1["units"])] == c1["units"] and max(p["round"] for p in c["parts"]) == 2

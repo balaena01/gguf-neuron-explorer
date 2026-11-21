@@ -990,6 +990,10 @@ async function setView(v) {
           onOpenHead: (u) => openHead(u),
           onOpenNeuron: ({ layer, n }) => openNeuron({ layer, n }),       // 部品の表のニューロン → NEURON パネル
           onLoadProj: (name, specs, dir) => replaceRecipe(name, () => state.recipe.loadProj(name, specs, dir)),
+          onChatProj: async (name, specs, dir) => {                       // レシピを置き換えて 3 列チャット(Inkling 2 は応答を読んで決める)
+            const ok = await replaceRecipe(name, () => state.recipe.loadProj(name, specs, dir));
+            if (ok !== false) { await chat.setSingle(false); startRecipeChat(); }
+          },
           onEval: (params, label) => sendToEval(params, label),           // 評価へ送る(評価の画面で確かめてから始める)
           onOverlay: (field) => { setView("map"); applyOverlay(field); },
           isLoop: () => !!(state.arch && state.arch.loop),               // 同じ層を 2 回実行するモデル(ループの中の部品の方向の欄)

@@ -821,8 +821,8 @@ def trial_all(session, spec_path, out_dir: Path, *, ks=(8, 16, 32), strengths=(1
 
 # --- 焼き込み(GGUF に書き込む) -----------------------------------------------------------------------------------------
 
-def bake(reader: Reader, units: list, refs: dict, dst: Path | None, *, requant: str = "q8_0", correct: bool = True,
-         strip_meta: bool = False) -> dict:
+def bake(reader: Reader, units: list, refs: dict | None, dst: Path | None, *, requant: str = "q8_0", correct: bool = True,
+         strip_meta: bool = False, tens: dict | None = None) -> dict:
     """部品 units を GGUF に焼き込む(LoRA と同じ変化量)。requant(書き換えるテンソルの型):
     - q8_0 / f16: 書き換えるテンソルをその型にする(gne のほかのモデルの焼き込みと同じ。専門家のテンソルは 1 つの型しか持てない
       ので、編集しない専門家も変換し、テンソル全体が大きくなる。F16 は元の Q2_0・NVFP4 の値をそのまま表せる)
@@ -846,7 +846,8 @@ def bake(reader: Reader, units: list, refs: dict, dst: Path | None, *, requant: 
     w2 = Weights2(reader.w)
     T = reader.w._tensors
     src = Path(reader.w.path)
-    tens = lora_tensors_all(reader, units, refs, correct=correct)
+    if tens is None:                                         # tens を渡すと(いくつかの方向の部品をまとめた LoRA の行列)それを書く
+        tens = lora_tensors_all(reader, units, refs, correct=correct)
 
     def enc(W, qt):
         if qt == _Q.F16:
@@ -890,19 +891,23 @@ def bake(reader: Reader, units: list, refs: dict, dst: Path | None, *, requant: 
                 for e in range(n_exp):
                     if not (np.any(A[e]) and np.any(B[e])):
                         continue
-                    u = -B[e, :, 0].astype(np.float64)                     # B = −u
-                    a = A[e, 0].astype(np.float64)
-                    cols_e = np.nonzero(a)[0]
-                    r = edit_slab(np.ascontiguousarray(t.data[e]).reshape(rows, -1), t.tensor_type.name, u,
-                                  {int(n): float(-a[n]) for n in cols_e}, rows, cols)
-                    if r["raw"].nbytes != slab:
-                        raise GneError("INTERNAL", f"{name}: 専門家 {e} の大きさ {r['raw'].nbytes} が元の {slab} と違います")
-                    edited[e] = r["raw"].reshape(-1)
-                    want2 += float(np.sum(r["want"] ** 2))
-                    dot += float(np.sum(r["want"] * r["along"]))
-                    flips += int(np.sum(r["flips"]))
-                    offs += list(r["off"] / np.maximum(np.abs(r["want"]), 1e-30))
-                    wn += list(r["off"] / np.maximum(r["w_norm"], 1e-30))
+                    raw_e = np.ascontiguousarray(t.data[e]).reshape(rows, -1)
+                    for k in range(A.shape[1]):                          # 方向ごと(いくつかの方向の部品は 1 つずつ続けて書く)
+                        u = -B[e, :, k].astype(np.float64)                  # B = −u
+                        a = A[e, k].astype(np.float64)
+                        cols_e = np.nonzero(a)[0]
+                        if not len(cols_e):
+                            continue
+                        r = edit_slab(raw_e, t.tensor_type.name, u, {int(n): float(-a[n]) for n in cols_e}, rows, cols)
+                        raw_e = r["raw"]
+                        want2 += float(np.sum(r["want"] ** 2))
+                        dot += float(np.sum(r["want"] * r["along"]))
+                        flips += int(np.sum(r["flips"]))
+                        offs += list(r["off"] / np.maximum(np.abs(r["want"]), 1e-30))
+                        wn += list(r["off"] / np.maximum(r["w_norm"], 1e-30))
+                    if raw_e.nbytes != slab:
+                        raise GneError("INTERNAL", f"{name}: 専門家 {e} の大きさ {raw_e.nbytes} が元の {slab} と違います")
+                    edited[e] = np.asarray(raw_e, dtype=np.uint8).reshape(-1)
                 kept = dot / want2 if want2 > 0 else 1.0
                 rec.update(to=t.tensor_type.name, method="projection-aware rounding", experts=sorted(edited), edit_kept=kept,
                            codes_changed=flips, columns=len(offs), off_over_removed_median=float(np.median(offs)) if offs else None,
@@ -988,7 +993,7 @@ def greedy(reader: Reader, convs: list, lora: str | None, n: int) -> dict:
 
 
 def bake_check(session, trial_dir: Path | None, units: list, spec_path, *, mode: str, n_a: int = 4, n_b: int = 2,
-               reply_tokens: int = 256, gate: str = "after", ds=None) -> dict:
+               reply_tokens: int = 256, gate: str = "after", ds=None, lora_path: str | None = None) -> dict:
     """焼き込みの確かめの片側。mode:
     - lora: 元のモデルに LoRA を当てて、中の値(各段の MLP の入力の方向への射影と最後に混ぜた出力の射影、最後の質問のトークン)と
       貪欲の応答を測る。比べる大きさのために、LoRA なしの中の値も測る
@@ -1011,7 +1016,11 @@ def bake_check(session, trial_dir: Path | None, units: list, spec_path, *, mode:
     convs = sp["val_a"][:n_a] + sp["val_b"][:n_b]
     out: dict = {"mode": mode, "units": units, "n_a": n_a, "n_b": n_b, "reply_tokens": reply_tokens}
     lora = None
-    if mode == "lora":
+    if mode == "lora" and lora_path:                         # 作り済みの LoRA(レシピの LoRA。いくつかの方向の部品もまとめたもの)
+        reader.e.allow_lora_trial = True
+        lora = str(lora_path)
+        out["lora_bytes"] = Path(lora).stat().st_size
+    elif mode == "lora":
         reader.e.allow_lora_trial = True
         refs = refs_ds if D is None else layer_refs(plan, D, gate)
         lora = str((Path(trial_dir) if trial_dir else session.store.root / "inkling" / session.meta.model_id) / "bakecheck.lora.gguf")
@@ -1028,7 +1037,7 @@ def bake_check(session, trial_dir: Path | None, units: list, spec_path, *, mode:
         _free_probe(reader.e)
     reader.e.free_steer()
     out["greedy"] = greedy(reader, convs, lora, reply_tokens)
-    if lora:
+    if lora and not lora_path:
         reader.e.drop_lora(Path(lora))
     return out
 

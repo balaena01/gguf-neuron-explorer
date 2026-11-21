@@ -163,7 +163,7 @@ const mrNext = (mr, refine) => {
   return t("A 側が最も下がったのは、{w}です(A 平均 {a})。チャットで強さを調整して、応答を確かめてください(「この強さをレシピに反映」で保存できます)。", { w: which, a: fmt(a, 2) })
     + (mr.replies_break ? ` <span class="ng">${t("ただし、この組は応答での確かめで応答が壊れました(繰り返し・空が増えた)。強さを下げてから使ってください。")}</span>` : "");
 };
-const partName = (q) => (q.kind === "neuron" ? `L${q.layer} N${q.head}` : q.kind === "layer_attn" ? `L${q.layer} attn` : q.kind === "layer_mlp" ? `L${q.layer} ffn` : `L${q.layer} H${q.head}`);
+const partName = (q) => (q.kind === "neuron" ? `L${q.layer} ${q.expert !== undefined && q.expert !== null ? `E${q.expert} ` : ""}N${q.head}${inkMark(q.layer)}` : q.kind === "layer_attn" ? `L${q.layer} attn` : q.kind === "layer_mlp" ? `L${q.layer} ffn` : `L${q.layer} H${q.head}`);
 
 // 層ごとの cohen_d の小さな棒グラフ(SVG)。基準層は白、cohen_d 最大の層は緑。棒にマウスを当てると値
 function dChart(layers, base, best) {
@@ -182,7 +182,8 @@ function dChart(layers, base, best) {
 
 export class PipelinePanel {
   constructor(root, { onRun, onShowDirection, onOpenHead, onOpenNeuron, onLoadProj, onEval, onOverlay, onOpenCandidates, isLoop, writesBlocked,
-                      inkling } = {}) {
+                      inkling, onChatProj } = {}) {
+    this.onChatProj = onChatProj || ((name, specs, dir) => this.onLoadProj(name, specs, dir));   // (名前, 部品, 方向) → レシピを置き換えて 3 列チャット
     this.isLoop = isLoop || (() => false);       // 同じ層を 2 回実行するモデル(ループの中の部品の方向の欄を出す)
     this.inkling = inkling || (() => null);      // Inkling 2 の段の表(答えの前に思考を書くモデル。位置の選択と、使えない欄を変える)
     // このモデルで書き込みの量での順位づけ(rank writes)を実行しない理由の文(実行できれば null)。サーバーの既定の切り替えと同じ条件:
@@ -563,6 +564,7 @@ export class PipelinePanel {
       ${c ? `<p><b>${t("代表の合わせたレシピ({m} 個 = {parts})", { m: c.n_heads, parts: byRound || "—" })}</b>${c.chosen_by === "fewest_remaining" ? ` <span class="muted">${t("(足した組に推す組が無いので、合わせた残りが最も少ない組)")}</span>` : ""}: ${t("残り {a} → {b} 問", { a: c.remain_before, b: c.remain_after })} ·
         ${t("A 平均 {a} → {b}", { a: fmt(c.a_mean_before, 2), b: fmt(c.a_mean_after, 2) })} · B Δ ${sgn(c.b_delta, 2)} · ${t("B ⊥ {a} → {b}", { a: fmt(c.b_drift_orth_base, 3), b: fmt(c.b_drift_orth, 3) })}
         <button class="small" id="pp-rf-load" title="${t("元の組と足した組を合わせたユニット(全部の回)で今のレシピを置き換える")}">${t("合わせた組でレシピを置き換える")}</button>
+        ${INK ? `<button class="small" id="pp-rf-chat" title="${t("土台と足した組を合わせたレシピに置き換えて、3 列チャット(レシピ ×−1・無介入・×+1)を開く。このモデルは応答を読んで決めるので、まずここで試す")}">${t("合わせた組で 3 列チャット")}</button>` : ""}
         <button class="small" id="pp-rf-eval" title="${t("合わせた組のレシピを評価の画面へ送る(強さ 0 と 1、ランダムな向きの比べる用 8 本が入る。始める前に変えられる)")}">${t("合わせた組を評価へ送る")}</button></p>`
         : (r.combined_rows || []).length ? `<p class="ng"><b>${r.no_recommend === "replies_break" ? t("推せる行の合わせたレシピは、どれも応答が壊れました。") : t("どの行も、合わせると元の方向・元の目標で良くならない(残りが減らず、組の効きも上がらない)か、悪くなります。")}</b></p>
           <p class="note">${t("道具の基準では、足す行を 1 つに決められませんでした。土台のままが無難ですが、候補の行は下の表に残っていて選べます。")} ${mrNext(r.most_reduced, true)}</p>`
@@ -686,8 +688,9 @@ export class PipelinePanel {
     if (more) more.addEventListener("click", () => { for (const tr of out.querySelectorAll("table.pp-eta tr.pp-more")) tr.classList.remove("hidden"); more.remove(); });
     const table = (d.allocate && d.allocate.table) || [];
     const crow = (key) => combinedRow(d, key);
-    if (d.inkling) {                               // Inkling 2: 評価・残りから追加・強さの候補はまだ使えない(レシピに読み込んで、会話・behave・書き出しで試す)
-      for (const b of out.querySelectorAll("[data-eval], [data-refine]")) {
+    const ink = d.inkling || (d.refine && d.refine.inkling);
+    if (ink) {                                     // Inkling 2: 評価・強さの候補はまだ使えない(レシピに読み込んで、会話・behave・書き出しで試す)
+      for (const b of out.querySelectorAll("[data-eval], #pp-rf-eval")) {
         b.disabled = true;
         b.title = t("Inkling 2 ではまだ使えません。レシピに読み込んで、会話・振る舞い(behave)・書き出しで試してください");
       }
@@ -708,8 +711,17 @@ export class PipelinePanel {
       b.addEventListener("click", () => this.runRefine(d.name, +b.dataset.refine, b));
     }
     const rf = d.refine && d.refine.combined;
-    const rl = $("#pp-rf-load"), re = $("#pp-rf-eval");
+    const rl = $("#pp-rf-load"), re = $("#pp-rf-eval"), rc = $("#pp-rf-chat");
     if (rf && rl) rl.addEventListener("click", () => this.onLoadProj(combinedName(d, rf), rf.units, d.name));
+    if (rf && rc) rc.addEventListener("click", () => this.onChatProj(combinedName(d, rf), rf.units, d.name));
+    for (const b of out.querySelectorAll("[data-chat]")) {             // 表の行: 土台 + 足した組(残りから追加)か、その組で 3 列チャット
+      b.addEventListener("click", () => {
+        if (d.refine) { const c = crow(b.dataset.chat); if (c) this.onChatProj(combinedName(d, c), c.units, d.name); return; }
+        if (b.dataset.chat === "s1") { const s1 = (d.allocate || {}).s1; if (s1) this.onChatProj(`${d.name}-s1`, s1.units, d.name); return; }
+        const r = table.find((x) => String(x.n_heads) === b.dataset.chat);
+        if (r) this.onChatProj(`${d.name}-n${r.n_heads}`, r.units, d.name);
+      });
+    }
     if (rf && re) re.addEventListener("click", () => this.onEval({ recipe: rf.recipe, doses: [0, 1], random_controls: 8 }, combinedName(d, rf)));
     for (const b of out.querySelectorAll("[data-eval]")) {
       b.addEventListener("click", () => {
@@ -920,6 +932,7 @@ export class PipelinePanel {
       const c = R ? combinedRow(d, key) : null, off = R && !c ? ` disabled` : "";
       const ttl = (x, y) => (R ? (c ? x : t("この行には土台と合わせたレシピがありません")) : y);
       return `<td class="l"><button class="small" data-load="${key}" title="${ttl(t("土台(元の組とそれまでの回の追加)と、この行の足した組を合わせたレシピで、今のレシピを置き換える(足した組は単独では使わない)"), t("この組(proj のユニット)で今のレシピを置き換える"))}"${off}>${R ? t("合わせてレシピを置き換える") : t("レシピを置き換える")}</button>
+          ${INK ? `<button class="small" data-chat="${key}" title="${R ? t("土台とこの行の足した組を合わせたレシピに置き換えて、3 列チャットを開く") : t("この組のレシピに置き換えて、3 列チャットを開く")}"${off}>${t("3 列チャット")}</button>` : ""}
           <button class="small" data-eval="${key}" title="${ttl(t("土台と、この行の足した組を合わせたレシピを評価の画面へ送る(強さ 0 と 1、ランダムな向きの比べる用 8 本が入る。始める前に変えられる)"), t("この組のレシピを評価の画面へ送る(強さ 0 と 1、ランダムな向きの比べる用 8 本が入る。始める前に変えられる)"))}"${r.recipe && !off ? "" : " disabled"}>${R ? t("合わせて評価へ送る") : t("評価へ送る")}</button>
           ${refine ? `<button class="small" data-refine="${key}" title="${R ? t("この行の合わせたレシピ(土台 + この組)を当てても元の目標まで下がらない質問だけで、もう一度足す部品を探す(重ねる)。結果は新しい一括の結果(名前 _r1 …)として出る") : t("この組を当てても目標まで下がらない質問(残り)だけで、組を当てたまま方向を作り直し、足す部品を探す。結果は新しい一括の結果(名前 _r1 …)として出る")}"${(R ? c && c.remain_after > 0 : r.remain > 0) ? "" : " disabled"}>${t("残りから追加")}</button>` : ""}</td>`;
     };

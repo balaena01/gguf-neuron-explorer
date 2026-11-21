@@ -78,9 +78,9 @@ gne の表示の「段」は、実行の順(0〜47)。llama.cpp のキャッシ�
 
 | 使える | 止まる(理由を書いて止める) |
 |---|---|
-| `gne info`、`gne probe --list-names`(グラフのテンソルの名前だけ。番号は段)、`gne inkling read / check / mix / residuals / conv / experts`(中を読むだけ。0001 が要る。下の「中を読む」)、`gne chat`(`--reasoning-effort`。CHiPS のレシピも当てられる)、`gne serve` のマップ・会話・保存済みの一覧・CHiPS の画面、OpenAI 互換 API、`gne behave`(`--match`。思考の欄を除いた回答だけを数える。CHiPS のレシピも当てられる)、CHiPS の流れ(`gne heads pipeline` → レシピ → `gne headproj export`。下の「CHiPS の流れ」)、`gne recipe-scale`、`gne verify`(トークン化の V8 だけ。ほかは省く) | CHiPS の流れのほかの、中間のテンソルの捕捉(残差・ヘッド・ニューロン・専門家の値)、control vector、CHiPS の射影のほかの LoRA(gain・keyed・nw など)、重みの中身を読む処理(ニューロン・専門家・ヘッドの詳細、logit lens など)。これを使うコマンド(`gne stats`・`lens`・`sweep`・`direction`・`heads refine` などの `heads …`・`experts …`・`nw …`・`steer`・`gain`・`ablate`・`bake`・`eval` など)は止まる。`gne behave --judge`(読み手の判定)と `gne fieldtest` も止まる |
+| `gne info`、`gne probe --list-names`(グラフのテンソルの名前だけ。番号は段)、`gne inkling read / check / mix / residuals / conv / experts`(中を読むだけ。0001 が要る。下の「中を読む」)、`gne chat`(`--reasoning-effort`。CHiPS のレシピも当てられる)、`gne serve` のマップ・会話・保存済みの一覧・CHiPS の画面、OpenAI 互換 API、`gne behave`(`--match`。思考の欄を除いた回答だけを数える。CHiPS のレシピも当てられる)、CHiPS の流れ(`gne heads pipeline`・`gne heads refine` → レシピ → `gne headproj export`。下の「CHiPS の流れ」)、`gne recipe-scale`、`gne verify`(トークン化の V8 だけ。ほかは省く) | CHiPS の流れのほかの、中間のテンソルの捕捉(残差・ヘッド・ニューロン・専門家の値)、control vector、CHiPS の射影のほかの LoRA(gain・keyed・nw など)、重みの中身を読む処理(ニューロン・専門家・ヘッドの詳細、logit lens など)。これを使うコマンド(`gne stats`・`lens`・`sweep`・`direction`・`heads candidates` などの `heads …`・`experts …`・`nw …`・`steer`・`gain`・`ablate`・`bake`・`eval` など)は止まる。`gne behave --judge`(読み手の判定)と `gne fieldtest` も止まる |
 
-止まるときのエラーは `ARCH_UNSUPPORTED`。CLI では、使えるコマンド(`info`・`probe`・`verify`・`bench`・`chat`・`behave`・`worker`・`recipe-combine`・`recipe-scale`・`direction keys`・`heads pipeline`・`headproj export`・`inkling …`)のほかは、モデルを読み込む前に止まる。画面と MCP のジョブは、CHiPS の流れ(`head_pipeline`・`headproj_export`)と `behave` のほかは、始める前に止まる。中間のテンソルの捕捉を通すのは `gne inkling …` の読むだけの処理だけ。
+止まるときのエラーは `ARCH_UNSUPPORTED`。CLI では、使えるコマンド(`info`・`probe`・`verify`・`bench`・`chat`・`behave`・`worker`・`recipe-combine`・`recipe-scale`・`direction keys`・`heads pipeline`・`heads refine`・`headproj export`・`inkling …`)のほかは、モデルを読み込む前に止まる。画面と MCP のジョブは、CHiPS の流れ(`head_pipeline`・`heads_refine`・`headproj_export`)と `behave` のほかは、始める前に止まる。中間のテンソルの捕捉を通すのは `gne inkling …` の読むだけの処理だけ。
 
 ## 中を読む(読むだけ)
 
@@ -151,9 +151,17 @@ gne の表示の「段」は、実行の順(0〜47)。llama.cpp のキャッシ�
 - 元の型のまま書くときの残る誤差(公開のひな形の方向・専門家の層 3 つの組での測定): 方向の成分は目標どおり(残り 1% 未満)だが、動かしたコードの方向に沿わない変化が、消した成分の 1.4〜2 倍残る。層の書き込み(畳み込みの前)に対しては、MLP 全体の部品で 3〜4%、ニューロン 1 つでは 0.2%。Q8_0 にしたときは、書き換えたテンソル全体に重みの 0.5% ほどの丸めが入り、計算の経路も変わる
 - `--verify`(焼き込みと LoRA の比べ)は同じ処理の中ではできない(2 つのモデルが同時に VRAM に入らない)。`gne inkling chips-bake-check --mode lora --recipe <レシピ> --save a.json` と、焼き込んだ GGUF での `--mode baked --direction <方向の .npz> --save b.json --against a.json` の 2 回で比べる
 
+### 残りから追加(`gne heads refine`、画面の「残りから追加」)
+
+ほかのモデルと同じく、組(土台)を当てても元の方向・元の目標まで下がらない A 側の質問(残り)だけで、A と B の両側に土台を当てたまま方向を作り直し、土台に足す組を探す。表のどの行も、土台と足した組を合わせたレシピ(`<名前>_rK.combined-n<N>.yaml`)を元の方向・元の目標で測り直し、推す行・A 側が最も下がった行の印も、合わせたレシピの数で決める。重ねる(結果にもう一度残りから追加する)と、土台はその行の合わせたレシピ(前の回までの部品を全部残す)。推す行が無いときは土台のままが無難(候補の行は選べる)。足した組は単独では使わない。
+
+- 返事を読む位置(`answer`・`response` など)の一括では、残りと表の数は、元の一括と同じく書き換える前のモデルの返事の上で測る。足す組を探す新しい方向と測定は、土台を当てたモデルが書いた返事の上で作る(ほかのモデルで、側をレシピで作る対照集合の返事の位置の方向と同じ)
+- 部品の種類・層 0〜5 の設定・位置は元の一括のまま。足す組の部品の数の上限は `--new-heads`(既定 3,2,1)
+- このモデルは応答を読んで決めるので、画面の結果の行と「代表の合わせたレシピ」に「3 列チャット」を置いた(土台 + 足した組でレシピを置き換えて、3 列チャットを開く)。CLI は `gne chat --recipe <名前>_rK.combined.yaml`
+
 ### まだ使えないもの
 
-`--rank causal`、`heads refine`(残りから追加)、評価(`gne eval`)、強さの候補(`heads candidates`)、`--holdout`、側をレシピで作る対照集合(`recipe_a` / `recipe_b`)、`--verify-mode ablate`、`--candidate-layers`・`--select-layer`(組は最後に混ぜた出力で作る)は、理由を出して止まる。
+`--rank causal`、評価(`gne eval`)、強さの候補(`heads candidates`)、`--holdout`、側をレシピで作る対照集合(`recipe_a` / `recipe_b`)、`--verify-mode ablate`、`--candidate-layers`・`--select-layer`(組は最後に混ぜた出力で作る)は、理由を出して止まる。
 
 ### CHiPS の試し(`gne inkling chips-trial`、試しだけ)
 

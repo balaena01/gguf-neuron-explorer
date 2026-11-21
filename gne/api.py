@@ -94,6 +94,30 @@ def reply_breaks(rows: dict) -> dict:
     return out
 
 
+def refine_proj_spec(u) -> str:
+    """残りから追加の結果に載せる部品の書き方(レシピの欄・UI と同じ L:Hh:sS@方向 など。専門家のニューロンは L:Ee:Nn、Inkling 2)。"""
+    who = {"neuron": f"N{u.neuron}", "attn": "attn", "ffn": "ffn",
+           "expert_neuron": f"E{u.expert}:N{u.neuron}"}.get(u.kind, f"H{u.head}")
+    return f"{u.layer}:{who}:s{float(u.k):.4g}@{u.direction}"
+
+
+def refine_parts(units, rounds, kind_of_layer) -> list[dict]:
+    """残りから追加の土台・足した組の部品の一覧(回の番号つき)。kind_of_layer(L) はヘッドの種類(attn / linear)。"""
+    out = []
+    for u, r_ in zip(units, rounds, strict=True):
+        kind = {"neuron": "neuron", "expert_neuron": "neuron", "attn": "layer_attn", "ffn": "layer_mlp"}.get(u.kind)
+        if kind is None:
+            try:
+                kind = kind_of_layer(u.layer)
+            except (AttributeError, IndexError):
+                kind = "attn"
+        out.append({"spec": refine_proj_spec(u), "layer": int(u.layer),
+                    "head": u.neuron if u.kind in ("neuron", "expert_neuron") else u.head,
+                    **({"expert": int(u.expert)} if u.kind == "expert_neuron" else {}),
+                    "kind": kind, "s": float(u.k), "direction": u.direction, "round": int(r_)})
+    return out
+
+
 class Session:
     def __init__(self, path: str | Path, *, root: str | Path | None = None, n_gpu_layers: int = -1,
                  n_ctx: int = 4096, n_seq_max: int = 8, seed: int = 0, verbose: bool = False,
@@ -3178,8 +3202,13 @@ class Session:
         X = int(X) if X is not None and int(X) != S else None
         Ls = sorted({S} | ({X} if X is not None else set()))
         self.engine.free_steer()
-        sc = Scorer(self, ds, cs, layers=Ls, positions=pos)          # A 側は間引かずに全部の質問
-        scb = Scorer(self, ds, cs, layers=Ls, positions=pos, max_examples=ral.get("max_examples") or 64)
+        if self.weights.inkling is not None:       # Inkling 2: 段ごとの MLP の入力と最後に混ぜた出力で測る(元の一括と同じ位置・同じ返事)
+            from .inkling_pipeline import InkScorer
+            sc = InkScorer(self, ds, cs, layers=Ls, positions=pos)
+            scb = InkScorer(self, ds, cs, layers=Ls, positions=pos, max_examples=ral.get("max_examples") or 64)
+        else:
+            sc = Scorer(self, ds, cs, layers=Ls, positions=pos)          # A 側は間引かずに全部の質問
+            scb = Scorer(self, ds, cs, layers=Ls, positions=pos, max_examples=ral.get("max_examples") or 64)
 
         def measure(rec):
             lora = self.lora_for(rec) if rec is not None else None
@@ -3269,7 +3298,11 @@ class Session:
             pipe["target"] = st["target"]
         rk = rank or st_prev.get("rank") or st.get("rank") or "causal"
         rank_note = None
-        if rank is None and rk == "writes":                             # 前の回が writes でも、出力のあとに正規化があるモデルでは止めて選ぶ
+        if self.weights.inkling is not None:       # Inkling 2: 書き込みの量で選ぶ流れだけ。層 0〜5 の設定は元の一括のまま
+            rk = "writes"
+            if st.get("include_before"):
+                pipe["include_before"] = True
+        elif rank is None and rk == "writes":                             # 前の回が writes でも、出力のあとに正規化があるモデルでは止めて選ぶ
             probe = {"rank": "writes"}
             rank_note = self._rank_fallback(probe, False)
             if rank_note:
@@ -3303,22 +3336,10 @@ class Session:
                 **({"validate": raw["validate"]} if raw.get("validate") else {}), "pipeline": pipe}
         p = self.heads_pipeline(spec, resume=resume)
 
-        def proj_spec(u) -> str:                    # レシピの欄・UI の部品の書き方(L:Hh:sS@方向 など)
-            who = {"neuron": f"N{u.neuron}", "attn": "attn", "ffn": "ffn"}.get(u.kind, f"H{u.head}")
-            return f"{u.layer}:{who}:s{float(u.k):.4g}@{u.direction}"
+        proj_spec = refine_proj_spec
 
         def parts_of(units, rounds) -> list[dict]:
-            out_ = []
-            for u, r_ in zip(units, rounds, strict=True):
-                kind = {"neuron": "neuron", "attn": "layer_attn", "ffn": "layer_mlp"}.get(u.kind)
-                if kind is None:
-                    try:
-                        kind = kind_of_layer(self, u.layer)
-                    except (AttributeError, IndexError):
-                        kind = "attn"
-                out_.append({"spec": proj_spec(u), "layer": int(u.layer), "head": u.neuron if u.kind == "neuron" else u.head,
-                             "kind": kind, "s": float(u.k), "direction": u.direction, "round": int(r_)})
-            return out_
+            return refine_parts(units, rounds, lambda L: kind_of_layer(self, L))
 
         plan_ = getattr(self.weights, "loop", None)
         shared_ = plan_ is not None and not getattr(self.weights, "per_visit_names", False)
@@ -3337,11 +3358,12 @@ class Session:
                         out_.append({"base": b_["spec"], "added": a_["spec"], "stored": int(plan_.stored(a_["layer"]))})
             return out_
 
-        def dups_of(parts) -> list[dict]:           # 同じ部品(層・種類・番号)が 2 つ以上の方向で入っている
+        def dups_of(parts) -> list[dict]:           # 同じ部品(層・種類・番号、専門家のニューロンは専門家も)が 2 つ以上の方向で入っている
             g: dict[tuple, list[dict]] = {}
             for q in parts:
-                g.setdefault((q["layer"], q["kind"], q["head"]), []).append(q)
-            return [{"layer": k_[0], "kind": k_[1], "head": k_[2], "rounds": [q["round"] for q in v], "s": [q["s"] for q in v],
+                g.setdefault((q["layer"], q["kind"], q["head"], q.get("expert")), []).append(q)
+            return [{"layer": k_[0], "kind": k_[1], "head": k_[2], **({"expert": k_[3]} if k_[3] is not None else {}),
+                     "rounds": [q["round"] for q in v], "s": [q["s"] for q in v],
                      "directions": [q["direction"] for q in v]} for k_, v in g.items() if len(v) > 1]
         alloc = p["allocate"]
         rows_new = [(str(r["n_heads"]), int(r["n_heads"]), r) for r in alloc["table"] if not r.get("skipped") and r.get("recipe")]
@@ -3433,11 +3455,20 @@ class Session:
                                       for r in alloc["table"]]},
                "combined": comb, "combined_rows": comb_rows, "check": check, "no_recommend": why_none, "most_reduced": most_reduced,
                "updated": time.strftime("%Y-%m-%dT%H:%M:%S"), "seconds": time.perf_counter() - t0}
+        if self.weights.inkling is not None:       # Inkling 2: 測る点と、返事を読む位置ではどの返事を使ったか
+            from .inkling_pipeline import REPLY_KINDS, parse_positions
+            reply = parse_positions(pos)[0] in REPLY_KINDS
+            out["inkling"] = {"positions": pos, "score_label": "最後に混ぜた出力",
+                              "replies_note": ("残り・表の数は、元の一括と同じく、書き換える前のモデルの返事の上で測りました。足す部品を探した"
+                                               "新しい方向と測定は、土台を当てたモデルが書いた返事の上で作りました(ほかのモデルで、側をレシピで"
+                                               "作るときの返事の位置の方向と同じ)") if reply else None}
         (hd / f"{out_name}.refine.json").write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
         pd = json.loads(Path(p["path"]).read_text(encoding="utf-8"))      # 一括の結果にも、どの組の残りから作ったかを書く
         pd["refine"] = {k_: out[k_] for k_ in ("base", "root", "round", "chain", "direction", "n_heads", "base_units", "base_parts",
                                                "base_measure", "none_measure", "threshold", "score_layer", "loop_exit", "units_by_round",
                                                "remaining", "combined", "combined_rows", "check", "no_recommend", "most_reduced")}
+        if out.get("inkling"):
+            pd["refine"]["inkling"] = out["inkling"]
         Path(p["path"]).write_text(json.dumps(pd, ensure_ascii=False, indent=1), encoding="utf-8")
         out["path"] = str(hd / f"{out_name}.refine.json")
         return out
