@@ -208,13 +208,25 @@ class Session:
 
     def info(self, *, load: bool = True) -> dict:
         m = self.meta
+        ink = self.weights.inkling
         meta = {"path": str(m.path), "model_id": m.model_id, "name": m.name, "arch": m.arch, "n_layer": m.n_layer,
                 "n_embd": m.n_embd, "n_ff": m.n_ff, "n_ff_per_layer": m.n_ff_per_layer, "n_vocab": m.n_vocab,
                 "n_expert": m.n_expert, "has_post_ffn_norm": m.has_post_ffn_norm,
                 "ffn_down_scale": {str(k): v for k, v in m.ffn_down_scale.items()} if m.ffn_down_scale else None,
                 "tied_output": m.tied_output, "has_chat_template": bool(m.chat_template),
                 "ffn_down_qtype": m.ffn_down_qtype, "file_size": m.file_size,
-                "cvec_supported": m.arch not in NO_CVEC, "is_split": self.weights.gguf.is_split, "hc_streams": int(self.weights.field(f"{m.arch}.hyper_connection.count", 0) or 0)}
+                "cvec_supported": m.arch not in NO_CVEC and ink is None, "is_split": self.weights.gguf.is_split, "hc_streams": int(self.weights.field(f"{m.arch}.hyper_connection.count", 0) or 0)}
+        if ink is not None:                            # Inkling 2(inkling.py): 層の並びと段の対応。中を扱う機能は止まる
+            from .inkling import expert_tensors
+            meta["inkling"] = {**ink.to_dict(), "experts": expert_tensors(self.weights._tensors, ink.n_stored),
+                               "expert_used": int(self.weights.field(f"{m.arch}.expert_used_count", 0) or 0),
+                               "expert_width": int(self.weights.field(f"{m.arch}.expert_feed_forward_length", 0) or 0),
+                               "expert_weights_scale": self.weights.field(f"{m.arch}.expert_weights_scale"),
+                               "n_head": self.weights.field(f"{m.arch}.attention.head_count"),
+                               "n_head_kv": self.weights.field(f"{m.arch}.attention.head_count_kv"),
+                               "head_dim": int(self.weights.field(f"{m.arch}.attention.key_length", 0) or 0),
+                               "final_logit_softcapping": self.weights.field(f"{m.arch}.final_logit_softcapping")}
+            meta["internals_supported"] = False
         llama = None
         if load:
             try:
@@ -223,11 +235,17 @@ class Session:
                 if e.loop is not None:                 # 同じ層を 2 回実行するモデル: この llama.cpp で何ができるか
                     llama["loop"] = {"cvec_inner": e.loop_cvec_reaches(), "per_visit_names": e.loop_runtime_names(),
                                      "edits": e.loop_edits, **e.loop_graph(), "inner_resid": e.loop_inner_resid()}
-                if e.n_layer != m.n_layer:
+                if ink is not None:                    # llama.cpp の n_layer は実行順の段の数(保存されている層 + 繰り返しの分)
+                    if e.n_layer != ink.n_steps:
+                        self.warn(f"llama.cpp の n_layer {e.n_layer} が、GGUF の繰り返しから数えた段の数 {ink.n_steps} と違います"
+                                  "(llama.cpp の版を確かめてください)")
+                elif e.n_layer != m.n_layer:
                     self.warn(f"llama.cpp の n_layer {e.n_layer} と block_count {m.n_layer} が違います(MTP 層など)")
             except Exception as ex:  # noqa: BLE001
                 llama = {"ok": False, "error": str(ex)}
         mode, reason, checked = bias_support(m.arch)
+        if ink is not None:
+            mode, reason = None, "Inkling 2 は中を書き換える機能にまだ対応していません(docs/inkling2.md)"
         rp = self.store.resid_path(m.model_id)
         acts = sorted(int(p.stem.split("_L")[1]) for p in self.store.stats_dir(m.model_id).glob("act_L*.npz"))
         from .ablate import writer_info
@@ -236,7 +254,7 @@ class Session:
         speed = {**sp.to_dict(), "cpu_layers": m.n_layer - sp.gpu_layers,
                  "decode_tok_s": 1000.0 / sp.step1, "large": is_large(self)}
         aw = self.weights.check_arch()
-        ds = self.dose_spread()
+        ds = self.dose_spread() if ink is None else None
         if ds and ds.get("warn"):
             aw = [*aw, f"このモデルでは、残差の大きさが少数の次元に偏っています(大きい {ds['top']} 成分を除くと、残差の大きさの中央値は"
                        f"約 1/{ds['median']:.1f})。そのため強さ(rel)1 は、偏りを除いた大きさの約 {ds['median']:.1f} 倍にあたります"
@@ -244,8 +262,8 @@ class Session:
         return {"meta": meta, "arch_warnings": aw, "llama_cpp": llama,
                 "bake": {"supported": mode is not None, "mode": mode, "reason": reason, "checked_llama_cpp": checked},
                 "stats": {"resid": str(rp) if rp.exists() else None, "act_layers": acts, "dose_spread": ds},
-                "residual_writers": writer_info(self.weights), "speed": speed,
-                "workflow": recommended_workflow(self) if speed["large"] else None}
+                "residual_writers": writer_info(self.weights) if ink is None else None, "speed": speed,
+                "workflow": recommended_workflow(self) if speed["large"] and ink is None else None}
 
     # --- stats ----------------------------------------------------------------------------------
 
@@ -3436,6 +3454,9 @@ class Session:
     def fieldtest(self, model: str | Path | None = None, **kw) -> dict:
         """実地テスト(gne/fieldtest.py): 本番と同じ動かし方(llama-server、思考あり)で長い作業・ツール呼び出し・質問集・perplexity を
         測り、against のファイルと比べる。結果は <root>/fieldtest/<name>.json、生成した文章は <name>.replies.json。"""
+        if self.weights.inkling is not None:            # Inkling 2: 思考の扱いを確かめていない(inkling.py)
+            from .inkling import refuse
+            raise refuse(self.weights.inkling, "実地テスト(fieldtest)")
         from .fieldtest import fieldtest as run
         return run(self, model, **kw)
 

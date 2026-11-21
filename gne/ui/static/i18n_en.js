@@ -1224,6 +1224,21 @@ export const EN = {
   "{v} 回目": "run {v}",
   "層 {a}〜{b} を 2 回続けて実行します。層 {c}〜{d} はその 2 回目で、重みは同じです(書き換えは両方の回に効きます)。各回の中の残差は 2 本の流れで、読むときはその平均を使います":
     "Layers {a}–{b} run twice in a row. Layers {c}–{d} are the second run and use the same weights (edits apply to both runs). Inside each run the residual has two streams; readings use their mean",
+  // Inkling 2(docs/inkling2.md)
+  "窓つき {w}": "sliding window {w}",
+  "全体を見る attention": "full attention",
+  "{n} 回実行(段 {s})": "runs {n} times (steps {s})",
+  "段 {s}": "step {s}",
+  "窓": "window",
+  "全体": "full",
+  "層 {a}〜{b} を {n} 回続けて実行します(実行順の段 {s})。": "Layers {a}–{b} run {n} times in a row ({s} steps in execution order). ",
+  "残差は 1 本ではなく、層 {starts} で新しい流れが始まり、各副層はそれまでの流れを学習された重みで混ぜて読みます。attention は窓つき({w} トークン)で、層 {full} だけ全体を見ます。":
+    "There is more than one residual stream: a new stream starts at layers {starts}, and each sublayer reads a learned weighted mix of the streams so far. Attention uses a sliding window ({w} tokens); only layers {full} attend to the whole context. ",
+  "このモデルで gne が扱うのは、読み込み・情報・マップ・会話だけです(中を測る・書き換える機能は、理由を出して止まります)":
+    "For this model gne handles loading, info, the map and chat only (features that measure or rewrite internals stop with a message)",
+  "会話する": "Chat",
+  "このモデルでは介入できないので、無介入の 1 列で話します(思考の欄は <think> … </think>)": "No interventions are available for this model, so the chat has one column without intervention (reasoning is shown between <think> and </think>)",
+  "無介入のモデルの応答だけを生成します。": "Only replies of the model without intervention are generated.",
   "このモデルのグラフは control vector を読みません。gain を使ってください": "This model's graph ignores control vectors. Use gain instead",
   "足す押し方は使えません": "add is not available",
   // CHANGE-07 G: 鍵つきの書き込み(direction ビューの「鍵」、recipe タブの keyed)

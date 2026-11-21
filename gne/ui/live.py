@@ -88,6 +88,10 @@ class Live:
         from ..media import http_content                 # 音声の部品(base64)。ローカルのファイルは読ませない
         hist = [[{**m, "content": http_content(m.get("content")) if m.get("role") == "user" else m.get("content")}
                  for m in (c.get("messages") or [])] for c in cols]
+        if getattr(getattr(self.s, "weights", None), "inkling", None) is not None:
+            from ..inkling import answer_part              # Inkling 2: 前の返事の思考の欄は履歴に入れない(回答だけ)
+            hist = [[{**m, "content": answer_part(m["content"])} if m.get("role") == "assistant" and isinstance(m.get("content"), str)
+                     else m for m in h] for h in hist]
         sid = uuid.uuid4().hex[:8]
         stop = threading.Event()
         self._streams[sid] = stop
@@ -113,17 +117,23 @@ class Live:
                             vecs = self.s.vectors(r)[0] if r is not None else None
                             q.put({"type": "column", "col": i, "n_prompt": len(ids)})
                             dec = codecs.getincrementaldecoder("utf-8")(errors="replace")
+                            marks = None
+                            if getattr(getattr(self.s, "weights", None), "inkling", None) is not None:
+                                from ..inkling import ReplyMarks       # Inkling 2: 思考の欄を <think> … </think> で見せる
+                                marks = ReplyMarks(e)
 
-                            def cb(_si, tok, _i=i, _dec=dec):
+                            def cb(_si, tok, _i=i, _dec=dec, _marks=marks):
                                 if stop.is_set():
                                     raise _Stopped()
-                                piece = _dec.decode(e.token_bytes(tok))
+                                mark = _marks.piece(tok) if _marks is not None else None
+                                piece = _dec.decode(b"", final=True) + mark if mark is not None else _dec.decode(e.token_bytes(tok))
                                 if piece:
                                     q.put({"type": "text", "col": _i, "text": piece})
                             try:
                                 out, winfo = generate_when(e, ctx, msgs, vecs, w, max_tokens=max_tokens, on_token=cb,
                                                            lora=self.s.lora_for(r), sampling=sampling)
-                                q.put({"type": "end", "col": i, "text": out.text, "finish": out.finish, "n_gen": out.n_gen,
+                                text = marks.render(e, out.token_ids) if marks is not None else out.text
+                                q.put({"type": "end", "col": i, "text": text, "finish": out.finish, "n_gen": out.n_gen,
                                        "when": winfo})
                             except _Stopped:
                                 q.put({"type": "end", "col": i, "text": None, "finish": "stopped", "n_gen": None})

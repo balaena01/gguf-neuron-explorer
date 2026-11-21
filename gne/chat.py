@@ -88,6 +88,7 @@ def chat_turn(session, state: ChatState, user: str, *, max_tokens: int = 256,
     e = session.engine
     ctx = e.steer_ctx()
     replies = []
+    ink = getattr(getattr(session, "weights", None), "inkling", None) is not None    # Inkling 2: 思考の欄を <think> … </think> で見せる(inkling.py)
     for i, col in enumerate(state.columns):
         state.histories[i].append({"role": "user", "content": user})
         vecs = session.vectors(col.recipe)[0] if col.recipe is not None else None
@@ -98,10 +99,15 @@ def chat_turn(session, state: ChatState, user: str, *, max_tokens: int = 256,
         if on_column:
             on_column(i, col)
         dec = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        marks = None
+        if ink:
+            from .inkling import ReplyMarks
+            marks = ReplyMarks(e)
         cb = None
         if on_text is not None:
             def cb(_si, tok, _i=i, _dec=dec):
-                piece = _dec.decode(e.token_bytes(tok))
+                mark = marks.piece(tok) if marks is not None else None
+                piece = _dec.decode(b"", final=True) + mark if mark is not None else _dec.decode(e.token_bytes(tok))
                 if piece:
                     on_text(_i, piece)
         when = (when_override or col.recipe.when) if col.recipe is not None else "all"
@@ -111,6 +117,11 @@ def chat_turn(session, state: ChatState, user: str, *, max_tokens: int = 256,
             tail = dec.decode(b"", final=True)
             if tail:
                 on_text(i, tail)
-        state.histories[i].append({"role": "assistant", "content": r.text})
-        replies.append({"column": col.label, "text": r.text, "finish": r.finish, "n_gen": r.n_gen})
+        text, content = r.text, r.text
+        if marks is not None:
+            from .inkling import answer_part
+            text = marks.render(e, r.token_ids)
+            content = answer_part(text)                # 履歴には回答だけ(思考の欄は入れない)
+        state.histories[i].append({"role": "assistant", "content": content})
+        replies.append({"column": col.label, "text": text, "finish": r.finish, "n_gen": r.n_gen})
     return replies

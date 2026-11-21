@@ -222,14 +222,22 @@ class Engine:
         # 重みの書き換え(LoRA)の当て方: shared = 両方の回に当てる(既定。元の llama.cpp ではいつもこれ)。
         # 2 回目の層に別の名前がある llama.cpp では、LoRA の 1 回目の層のテンソルを 2 回目の名前にも写して読み込む
         self.loop_edits = "shared"
+        # Inkling 2(inkling.py): 読み込みと生成だけ。中間のテンソルの捕捉・control vector・LoRA は止める。
+        # テンソルの名前を調べるだけ(gne probe --list-names)は allow_names を立てたときだけ通す
+        self.inkling = None
+        self.allow_names = False
         if self.arch:
             from .gguf_fast import FastGGUF
+            from .inkling import plan_of as inkling_plan_of
             from .loop import plan_of
             g = FastGGUF(self.path)
             self.loop = plan_of(g.get, self.arch)
             if self.loop is not None:
                 rec = g.get(f"{self.arch}.attention.recurrent_layers")
                 self.loop_full = frozenset(i for i, x in enumerate(rec or []) if not x)
+            self.inkling = inkling_plan_of(g.get, self.arch)
+            if self.inkling is not None:
+                self.cvec_supported = False
         self._steer: _Ctx | None = None
         self._probe: _Ctx | None = None
         self._probe_logits_all = False
@@ -282,6 +290,9 @@ class Engine:
         if logits_all:
             p.n_outputs_max_per_seq = 0   # 既定 1(各 seq 最終位置だけ)。0 = n_outputs_max
         if capture is not None:
+            if self.inkling is not None and not getattr(capture, "names_only", False):
+                from .inkling import refuse
+                raise refuse(self.inkling, "中間のテンソルを読む処理(残差・ヘッド・ニューロン・専門家の値の捕捉)")
             capture.hc_streams = self.hc_streams
             if self.loop is not None and capture.loop is None and not getattr(capture, "raw_names", False):
                 capture.loop, capture.loop_d, capture.loop_full = self.loop, self.n_embd, self.loop_full
@@ -490,6 +501,9 @@ class Engine:
 
         常に全層分 (n_layer-1)*n_embd のゼロ埋めバッファを渡す(§5.3 の古いデータ対策)。
         layer_range を渡すと il_start/il_end をその範囲に固定する(§10 4(a))。"""
+        if vectors and self.inkling is not None:
+            from .inkling import refuse
+            raise refuse(self.inkling, "control vector(残差に方向を足す押し方)")
         if vectors and not self.cvec_supported:
             raise GneError("ARCH_UNSUPPORTED", f"{self.arch} のグラフは control vector を読みません。足しても何も起きないので止めました。"
                            "gain・射影(proj)・ablate は LoRA で動きます")
@@ -586,6 +600,9 @@ class Engine:
 
     def lora(self, path: str | Path):
         """LoRA アダプタ GGUF を読み込む(同じファイルは 1 回だけ)。"""
+        if self.inkling is not None:
+            from .inkling import refuse
+            raise refuse(self.inkling, "LoRA(重みの書き換え)")
         key = str(Path(path).resolve())
         a = self._loras.get(key)
         if a is None:
@@ -844,8 +861,16 @@ class Engine:
 
     def list_names(self, ids: list[int], layer: int | None = None) -> set[str]:
         """cb_eval で観測できるテンソル名(probe ctx で 1 回 prefill)。layer を渡すとその層の名前だけ。"""
-        ctx = self._probe if self._probe is not None and self._probe.n_ctx >= len(ids) else \
-            self.probe_ctx(Capture(), need=len(ids))       # 既存の probe ctx があれば(長さが足りれば)作り直さずに使う
+        if self.inkling is not None and not self.allow_names:
+            # Inkling 2: 名前を調べた後に中間のテンソルを読む処理ばかりなので、ここで止める(gne probe --list-names だけが allow_names を立てる)
+            from .inkling import refuse
+            raise refuse(self.inkling, "中間のテンソルを読む処理(残差・ヘッド・ニューロン・専門家の値の捕捉)")
+        if self._probe is not None and self._probe.n_ctx >= len(ids):
+            ctx = self._probe                              # 既存の probe ctx があれば(長さが足りれば)作り直さずに使う
+        else:
+            cap = Capture()
+            cap.names_only = True                          # 名前だけを見る(値は読まない。Inkling 2 でも使える、inkling.py)
+            ctx = self.probe_ctx(cap, need=len(ids))
         cap = ctx.capture
         prev = cap._wanted
         cap.set_wanted(lambda n: False)

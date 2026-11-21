@@ -70,6 +70,7 @@ class ArchInfo:
     hc_streams: int = 0        # 残差の本数(hyper-connections。0 = ふつうの 1 本)
     loop: dict | None = None   # 同じ層を 2 回実行する arch の対応(loop.LoopPlan.to_dict)。ふつうは None
     mhc_streams: int = 0       # 繰り返しの各回の中の残差の本数(sensenova_loop は 2)
+    inkling: dict | None = None   # Inkling 2 の層の並びと実行順の段(inkling.InklingPlan.to_dict)。ふつうは None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -128,6 +129,7 @@ def arch_info(weights) -> ArchInfo:
     layers = []
     compress = get(f"{arch}.attention.compress_ratios")
     top_k = int(get(f"{arch}.attention.indexer.top_k", 0) or 0)
+    ink = getattr(weights, "inkling", None)
     for L in range(m.n_layer):
         ts = by_layer.get(L, {})
         names = set(ts)
@@ -175,6 +177,9 @@ def arch_info(weights) -> ArchInfo:
             routing = "group_topk" if int(get(f"{arch}.expert_group_count", 0) or 0) > 1 else \
                 "sigmoid_topk" if gating == 2 else "softmax_topk"
         norm = get(f"{arch}.expert_weights_norm")
+        if ink is not None and ffn.startswith("moe"):
+            # Inkling 2: llama.cpp のグラフ(src/models/inkling2.cpp)は sigmoid で選び、選んだ重みを正規化する(メタデータには無い)
+            routing, norm = "sigmoid_topk", True
         lp = getattr(weights, "loop", None)
         pn_mix, pn_ffn, pn_kind = post_norms(arch, names)
         layers.append(LayerInfo(L, mixer, nh, nkv, ffn, n_ff, n_exp, used, n_shexp,
@@ -186,4 +191,5 @@ def arch_info(weights) -> ArchInfo:
     side = max([sheet_side(li) for li in layers] + [1])
     lp = getattr(weights, "loop", None)
     return ArchInfo(arch, m.n_layer, m.n_embd, m.n_vocab, layers, side, int(get(f"{arch}.hyper_connection.count", 0) or 0),
-                    lp.to_dict() if lp is not None else None, int(get(f"{arch}.mhc.streams", 0) or 0) if lp is not None else 0)
+                    lp.to_dict() if lp is not None else None, int(get(f"{arch}.mhc.streams", 0) or 0) if lp is not None else 0,
+                    ink.to_dict() if ink is not None else None)

@@ -139,6 +139,9 @@ def plan_of(get, arch: str) -> LoopPlan | None:
     loop.* / mhc.* の鍵を先に見て、無ければ GuideboardLabs 版の GGUF の {arch}.mhc.layer_kinds を読む。"""
     if not arch:
         return None
+    from .inkling import is_inkling
+    if is_inkling(arch):                   # Inkling 2 の繰り返しは形が違う(inkling.py。gne はまだ中を扱わない)
+        return None
     kinds = kinds_from_loop_keys(get, arch)
     return plan_from_kinds(kinds if kinds is not None else get(f"{arch}.mhc.layer_kinds"))
 

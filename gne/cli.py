@@ -73,6 +73,13 @@ class Common:
                     n_seq_max=self.n_seq_max, seed=self.seed, verbose=self.verbose, progress=self.progress,
                     mmproj=self.mmproj)
         s.proj_correction = not self.no_proj_correction
+        if s.weights.inkling is not None:            # Inkling 2: 使えるコマンドだけ通す(ほかは読み込む前に止める。inkling.py)
+            from .inkling import check_command
+            try:
+                check_command(s.weights.inkling, getattr(self, "command", None))
+            except GneError:
+                s.close()
+                raise
         return s
 
     def progress(self, done: int, total: int, stage: str) -> None:
@@ -194,6 +201,7 @@ def _envelope(command: str, c: Common, session=None) -> dict:
 def _run(c: Common, command: str, f: Callable, kwargs: dict) -> None:
     holder: dict = {}
     code = 0
+    c.command = command                              # c.session() が、Inkling 2 で使えるコマンドかを確かめる
     try:
         payload, human, code = f(c, holder, **kwargs)
         s = holder.get("session")
@@ -316,6 +324,43 @@ def _units_text(units: list[dict]) -> str:
 
 # --- info / probe / verify / bench ---------------------------------------------------------------------
 
+def _span(a: int, b: int) -> str:
+    return f"{a}" if a == b else f"{a}〜{b}"
+
+
+def _inkling_rows(ink: dict) -> list[tuple[str, str]]:
+    """gne info の Inkling 2 の行(層の並び・段の表・attention・専門家・gne の対応)。"""
+    rows = []
+    if ink["n_passes"] > 1:
+        a, b = ink["core_start"], ink["core_end"] - 1
+        rows.append(("繰り返し", f"層 {a}〜{b} を {ink['n_passes']} 回続けて実行(実行順の段 {ink['n_steps']}。2 回目以降は層 {a - 1} の"
+                     f"出力からやり直し、前の回の流れをランク {ink['gate_rank']} のゲートで混ぜる"
+                     + (")" if not ink.get("varying") else "。回数を変えて学習したモデル)")))
+    starts = "・".join(str(L) for L in range(0, ink["n_stored"], ink["block"]))
+    rows.append(("残差の流れ", f"層 {starts} で新しい流れが始まる(各副層は、それまでの流れと今の流れを RMS 正規化して、"
+                 "学習された問いで重みづけして足したものを読む。深さ方向の注意)"))
+    nh, nkv = ink.get("n_head"), ink.get("n_head_kv")
+    nh = nh[0] if isinstance(nh, list) and len(set(nh)) == 1 else nh
+    nkv = nkv[0] if isinstance(nkv, list) and len(set(nkv)) == 1 else nkv
+    full = ink["full_layers"]
+    rows.append(("attention", f"ヘッド {nh}(KV {nkv})、幅 {ink.get('head_dim')}、RoPE なし(相対位置のバイアス)。窓つき(sliding window、"
+                 f"{ink['window']} トークン){len(ink['swa']) - len(full)} 層、全体を見る層 {', '.join(map(str, full))}"))
+    ex = ink.get("experts") or {}
+    types = "、".join(f"{k}: " + "・".join(f"{q} {len(Ls)} 層" for q, Ls in v.items()) for k, v in (ex.get("types") or {}).items())
+    sc = ex.get("scaled_layers") or {}
+    scaled = sorted({L for Ls in sc.values() for L in Ls})
+    rows.append(("専門家", f"1 トークンで {ink.get('expert_used')} 個、幅 {ink.get('expert_width')}(ゲートとアップが 1 つのテンソル)、"
+                 f"sigmoid で選び、選んだ重みを正規化して {ink.get('expert_weights_scale')} 倍"))
+    rows.append(("専門家の重みの型", types + (f"。専門家ごとの倍率(.scale)がある層 {len(scaled)}: {', '.join(map(str, scaled))}" if scaled else "")))
+    for g in ink["step_groups"]:
+        p = g["pass"]
+        what = f"層 {_span(*g['layers'])} の {p} 回目" if p else f"層 {_span(*g['layers'])}"
+        full = f"、全体を見る層 {', '.join(map(str, g['full']))}" if g["full"] else ""
+        rows.append((f"段 {_span(*g['steps'])}", f"{what}(llama.cpp の番号 {_span(*g['slots'])}、流れ {', '.join(map(str, g['streams']))}{full})"))
+    rows.append(("gne の対応", "読み込み・情報・マップ・会話だけ。中を測る・書き換える機能は、理由を書いて止める"))
+    return rows
+
+
 @gne_command(app, "info")
 def info(c: Common, holder: dict,
          load: bool = typer.Option(True, "--load/--no-load", help="llama.cpp で読み込めるか確かめる(R6)")):
@@ -343,9 +388,13 @@ def info(c: Common, holder: dict,
     if rw:
         rows.append(("残差ライター", ", ".join(f"{k} {n}" for k, n in rw["counts"].items())
                      + ("(グラフで確認済み)" if rw["verified"] else "(テンソル名で推定)")))
+    ink = m.get("inkling")
+    if ink:                                          # Inkling 2(docs/inkling2.md)
+        rows += _inkling_rows(ink)
     lc = d["llama_cpp"]
     if lc is not None:
-        rows.append(("llama.cpp", f"読み込み可(n_layer {lc['n_layer']}, n_embd {lc['n_embd']}, n_vocab {lc['n_vocab']})"
+        rows.append(("llama.cpp", f"読み込み可(n_layer {lc['n_layer']}{'(実行順の段の数)' if ink else ''}, n_embd {lc['n_embd']}, "
+                     f"n_vocab {lc['n_vocab']})"
                      if lc["ok"] else f"読み込めません: {lc['error']}(新しい llama.cpp でのビルドが必要かもしれません、R6)"))
         lp = lc.get("loop") if lc["ok"] else None
         if lp:                                       # 同じ層を 2 回実行するモデル(docs/sensenova_loop.md)
@@ -388,6 +437,7 @@ def probe(c: Common, holder: dict,
         raise GneError("BAD_ARGS", "--list-names を付けてください")
     s = holder["session"] = c.session()
     e = s.engine
+    e.allow_names = True                             # 名前だけを見る(Inkling 2 でも使える。値は読まない)
     names = e.list_names(e.tokenize_prompt(e.render_chat([{"role": "user", "content": prompt}])))
     groups: dict[str, set[int]] = {}
     other = []
@@ -457,6 +507,9 @@ def verify(c: Common, holder: dict,
             why["V3"] = f"層 {v.L}〜{v.L + 2} に 2 本の流れの中の層があり、この llama.cpp では control vector が次の層に届きません{hint}"
     if s.meta.n_expert:
         why |= dict.fromkeys(("V2", "V11", "V13", "V14"), "全層 MoE です。この検査は dense の ffn_down が前提です(MoE は V24 と gne experts で確かめます)")
+    ink = s.weights.inkling is not None
+    if ink:                                          # Inkling 2: 中を読む・書き換える検査は省く(トークン化の V8 だけ流す。docs/inkling2.md)
+        why |= dict.fromkeys([vid for vid, _ in steps], "Inkling 2 は中を測る・書き換える機能にまだ対応していないので、この検査は省きます")
     steps = [(vid, (lambda vid=vid, fn=fn: VResult(vid, "省略", "skip", why[vid]) if vid in why else fn())) for vid, fn in steps]
     if s.engine.hc_streams:
         steps.append(("V26", v.v26_hc_streams))
@@ -473,7 +526,9 @@ def verify(c: Common, holder: dict,
             show(fn())
         except Exception as ex:  # noqa: BLE001
             show(VResult(vid, "例外", "fail", repr(ex)))
-    if bench and not s.engine.cvec_supported:
+    if bench and ink:
+        show(VResult("V7", "ベンチ", "skip", "Inkling 2 は control vector に対応していないので省きます"))
+    elif bench and not s.engine.cvec_supported:
         show(VResult("V7", "ベンチ", "skip", "control vector を読まない arch です"))
     elif bench:
         bench_result = run_bench(s.engine, layer=v.L, reps=5)
@@ -1344,7 +1399,12 @@ def chat(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Option
     base = s.recipe(units=unit, path=recipe, dose_unit=dose_unit, ablate=ablate) if (unit or recipe or ablate) else None
     sp = _sampling(base, greedy, temperature, top_k, top_p, min_p, presence_penalty, sample_seed)
     load = lambda p: s.recipe(path=p) if p else None  # noqa: E731
-    cols = make_columns(base, dose=dose, left=load(left), right=load(right), center=load(center))
+    if s.weights.inkling is not None and base is None and not (left or right or center):
+        # Inkling 2(docs/inkling2.md): レシピを当てられないので、無介入の 1 列だけで話す
+        from .chat import Column
+        cols = [Column("0(無介入)", None)]
+    else:
+        cols = make_columns(base, dose=dose, left=load(left), right=load(right), center=load(center))
     live = stream and not c.json
 
     def on_column(i, col):

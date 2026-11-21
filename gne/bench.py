@@ -100,6 +100,9 @@ def run_bench(engine: Engine, *, layer: int | None = None, reps: int = 10, gen_t
 
     # probe ctx: 512 トークン 1 本、全層の l_out を捕捉する場合と何も捕捉しない場合
     long_ids = (e.tokenize(" ".join(_TEXTS)) * 20)[:e.probe_ubatch]
+    if getattr(e, "inkling", None) is not None:     # Inkling 2: 中間のテンソルの捕捉はまだ扱わない(inkling.py)。生成の速さだけ測る
+        return _result(e, L, n_seq, seq_tokens, reps, steady, t_set, t_after, t_set_fixed, t_after_fixed, step, gen,
+                       gen_tokens, None, len(long_ids))
     names = e.list_names(long_ids[:16])
     act_names = {pick_act_name(names, L) for L in range(e.n_layer)} - {None}
     cap = Capture()
@@ -117,6 +120,12 @@ def run_bench(engine: Engine, *, layer: int | None = None, reps: int = 10, gen_t
             cap.take()
         probe[k] = _median_ms(ts)
 
+    return _result(e, L, n_seq, seq_tokens, reps, steady, t_set, t_after, t_set_fixed, t_after_fixed, step, gen,
+                   gen_tokens, probe, len(long_ids))
+
+
+def _result(e, L, n_seq, seq_tokens, reps, steady, t_set, t_after, t_set_fixed, t_after_fixed, step, gen, gen_tokens,
+            probe, probe_tokens) -> dict:
     reserve = _median_ms(t_after) - _median_ms(steady)
     return {
         "model": str(e.path.name), "layer": L, "n_seq": n_seq, "seq_tokens": seq_tokens, "reps": reps,
@@ -131,7 +140,7 @@ def run_bench(engine: Engine, *, layer: int | None = None, reps: int = 10, gen_t
         "set_plus_prefill_ms": _median_ms([a + b for a, b in zip(t_set, t_after)]),
         "decode_step_ms": _median_ms(step),
         "gen": gen, "gen_tokens": gen_tokens,
-        "probe_prefill_512_ms": probe, "probe_tokens": len(long_ids),
+        "probe_prefill_512_ms": probe, "probe_tokens": probe_tokens,
     }
 
 
@@ -151,8 +160,9 @@ def bench_markdown(r: dict) -> str:
         f"| decode 1 step({r['n_seq']} seq) | {r['decode_step_ms']:.1f} ms |",
         f"| 生成 {r['gen_tokens']} tok × {g['batch']['n_seq']} seq | {g['batch']['ms']:.0f} ms({g['batch']['tok_per_s']:.0f} tok/s) |",
         f"| 生成 {r['gen_tokens']} tok × 1 seq | {g['single']['ms']:.0f} ms({g['single']['tok_per_s']:.0f} tok/s) |",
-        f"| probe ctx prefill {r['probe_tokens']} tok(捕捉なし / 全層 l_out / 全層 FFN 活性) | "
-        f"{r['probe_prefill_512_ms']['none']:.1f} / {r['probe_prefill_512_ms']['all_l_out']:.1f} / "
-        f"{r['probe_prefill_512_ms']['all_ffn_act']:.1f} ms |",
+        *([f"| probe ctx prefill {r['probe_tokens']} tok(捕捉なし / 全層 l_out / 全層 FFN 活性) | "
+           f"{r['probe_prefill_512_ms']['none']:.1f} / {r['probe_prefill_512_ms']['all_l_out']:.1f} / "
+           f"{r['probe_prefill_512_ms']['all_ffn_act']:.1f} ms |"] if r.get("probe_prefill_512_ms") else
+          ["| probe ctx prefill(中間のテンソルの捕捉) | このモデルでは測りません |"]),
         "",
     ])

@@ -138,13 +138,23 @@ def register(app: FastAPI, session, live) -> None:
                     e = session.engine
                     vecs = session.vectors(recipe)[0] if recipe is not None else None
                     dec = codecs.getincrementaldecoder("utf-8")(errors="replace")
+                    marks = None
+                    if getattr(getattr(session, "weights", None), "inkling", None) is not None:
+                        # Inkling 2: 思考(reasoning)は reasoning_content、回答は content に分ける(llama-server と同じ分け方、inkling.py)
+                        from ..inkling import ReplyMarks
+                        marks = ReplyMarks(e)
 
                     def cb(_si, tok):
                         if stop.is_set():
                             raise _Stopped()
+                        if marks is not None and marks.piece(tok) is not None:
+                            tail = dec.decode(b"", final=True)
+                            if tail:
+                                q.put(("delta", tail, "content" if marks.open else "reasoning_content"))
+                            return
                         piece = dec.decode(e.token_bytes(tok))
                         if piece:
-                            q.put(("delta", piece))
+                            q.put(("delta", piece, "reasoning_content" if marks is not None and marks.open else "content"))
                     try:
                         r, info = generate_when(e, e.steer_ctx(), msgs, vecs, w, max_tokens=max_tokens, on_token=cb,
                                                 lora=session.lora_for(recipe), sampling=sampling)
@@ -153,8 +163,15 @@ def register(app: FastAPI, session, live) -> None:
                         return
                     tail = dec.decode(b"", final=True)
                     if tail:
-                        q.put(("delta", tail))
-                    q.put(("end", {"finish": "stop" if r.finish == "eog" else "length", "text": r.text,
+                        q.put(("delta", tail, "reasoning_content" if marks is not None and marks.open else "content"))
+                    text, reasoning = r.text, None
+                    if marks is not None:
+                        from ..inkling import THINK_OPEN, answer_part
+                        shown = marks.render(e, r.token_ids)
+                        text = answer_part(shown)
+                        if shown.startswith(THINK_OPEN):
+                            reasoning = shown[len(THINK_OPEN):].split("\n</think>", 1)[0]
+                    q.put(("end", {"finish": "stop" if r.finish == "eog" else "length", "text": text, "reasoning": reasoning,
                                    "usage": {"prompt_tokens": info["n_prompt"], "completion_tokens": r.n_gen,
                                              "total_tokens": info["n_prompt"] + r.n_gen},
                                    "gne": {"recipe": recipe.to_dict() if recipe else None, "when": info,
@@ -168,13 +185,17 @@ def register(app: FastAPI, session, live) -> None:
         th.start()
         if not body.get("stream"):
             while True:
-                kind, x = q.get()
+                item = q.get()
+                kind, x = item[0], item[1]
                 if kind == "error":
                     return _err(x, 500 if x.code == "INTERNAL" else 400)
                 if kind == "end":
                     break
+            msg = {"role": "assistant", "content": x["text"]}
+            if x.get("reasoning") is not None:
+                msg["reasoning_content"] = x["reasoning"]
             return {"id": cid, "object": "chat.completion", "created": created, "model": model_id,
-                    "choices": [{"index": 0, "message": {"role": "assistant", "content": x["text"]},
+                    "choices": [{"index": 0, "message": msg,
                                  "finish_reason": x["finish"]}],
                     "usage": x["usage"], "gne": x["gne"]}
 
@@ -190,11 +211,12 @@ def register(app: FastAPI, session, live) -> None:
                     if live.closing.is_set():         # サーバを止める: 生成を止めて配信を閉じる(トークンが流れていても)
                         break
                     try:
-                        kind, x = q.get(timeout=0.5)
+                        item = q.get(timeout=0.5)
                     except queue.Empty:
                         continue
+                    kind, x = item[0], item[1]
                     if kind == "delta":
-                        yield chunk({"content": x})
+                        yield chunk({item[2]: x})
                     elif kind == "error":
                         yield f"data: {json.dumps({'error': {'message': x.message, 'code': x.code}}, ensure_ascii=False)}\n\n"
                         break

@@ -50,6 +50,11 @@ def behave(session, prompts: list, *, lora=None, vectors=None, match: str | None
     labs = [x.strip() for x in labels.split(",") if x.strip()]
     if judge and ("{q}" not in judge or "{a}" not in judge):
         raise GneError("BAD_ARGS", "判定の文面には {q}(質問)と {a}(返事)が要ります")
+    # Inkling 2(inkling.py)はいつも答えの前に思考を書く。思考の欄を除いた回答だけを数える(--thinking と同じ扱い。思考の途中で切れたら空)
+    ink = getattr(getattr(session, "weights", None), "inkling", None) is not None
+    if ink and judge:
+        raise GneError("ARCH_UNSUPPORTED", "Inkling 2 は答えの前にいつも思考を書くので、読み手の判定(--judge。判定の文字を短い返事で読む)は"
+                       "このモデルではまだ使えません(止めました)", "正規表現の一致(--match)で数えてください(docs/inkling2.md)")
     seeds = seeds or [0]
     # 進み具合: 種ごとに質問の数だけ(判定があればその分も)進む。ジョブの取り消しは progress が例外を投げて止める
     total = len(seeds) * len(prompts) * (2 if judge else 1)
@@ -69,7 +74,13 @@ def behave(session, prompts: list, *, lora=None, vectors=None, match: str | None
         stage = f"behave: 種 {seed}" if len(seeds) > 1 else "behave"
         outs = _generate(session, [(q, max_tokens) for q in prompts], vectors, lora, "all", lambda k, st=stage: tick(k, st),
                          sampling=sp, thinking=thinking)
-        replies = [{"i": i, "text": answer_of(o["text"], thinking), "full": o["text"] if thinking else None,
+        if ink:
+            from .inkling import ReplyMarks, answer_part
+            marks = ReplyMarks(session.engine)
+            for o in outs:
+                o["shown"] = marks.render(session.engine, o["token_ids"])
+        replies = [{"i": i, "text": answer_part(o["shown"]) if ink else answer_of(o["text"], thinking),
+                    "full": o["shown"] if ink else o["text"] if thinking else None,
                     "finish": o["finish"], "n_tokens": len(o["token_ids"]), "loop": loop_like(o["token_ids"])} for i, o in enumerate(outs)]
         counts = {"n": len(replies), "empty": sum(not r["text"].strip() for r in replies), "loop": sum(r["loop"] for r in replies),
                   "at_limit": sum(r["finish"] not in ("eog", "stop", "eos") for r in replies),

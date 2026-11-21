@@ -573,7 +573,9 @@ export class LayerMap {
       ctx.fillStyle = COLORS.label;
       ctx.fillText(`L${L}`, 250, 44);
       const tag = { attention: "attention", linear_attention: t("線形注意"), recurrent: t("回帰"), conv: t("畳み込み"), none: "" }[li.mixer]
-        + (li.visit ? ` · ${t("{v} 回目", { v: li.visit })}` : "");             // 同じ層を 2 回実行するモデル
+        + (li.visit ? ` · ${t("{v} 回目", { v: li.visit })}` : "")              // 同じ層を 2 回実行するモデル
+        + (this.arch.inkling ? ` · ${this.arch.inkling.swa[L] ? t("窓") : t("全体")}`          // Inkling 2: 窓つき / 全体を見る attention
+          + (L >= this.arch.inkling.core_start && L < this.arch.inkling.core_end ? ` · ×${this.arch.inkling.n_passes}` : "") : "");
       ctx.font = `22px ${MONO}`;
       ctx.fillStyle = li.mixer === "attention" ? "#9fb3cf" : "#5d6b7e";
       ctx.fillText(tag, 250 - w0 - 12, 44);

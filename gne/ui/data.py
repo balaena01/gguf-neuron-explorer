@@ -337,7 +337,8 @@ class UIData:
         moe = kind == "neuron" and bool(self.s.meta.n_expert) and self.s.weights.is_moe(L)
         if kind == "neuron":
             out["name"] = self.names().get(f"{L}:{n}")
-            out["down_norm"] = float(self.s.weights.down_norms(L)[n])
+            if self.s.weights.inkling is None:            # Inkling 2: 重みの中身は読まない(inkling.py)
+                out["down_norm"] = float(self.s.weights.down_norms(L)[n])
         if moe:                                           # CHANGE-05 G: MoE の層は通し番号 n = 専門家 × n_ff + n
             e, k = self.s.weights.moe_split(L, n)
             out.update(expert=e, expert_neuron=k, semantics="direction", address=f"L{L} E{e} N{k}")
@@ -389,7 +390,7 @@ class UIData:
                     out["logit_lens"] = {"up": tok(ll.up_ids[i]), "down": tok(ll.down_ids[i]),
                                          "up_z": [float(x) for x in ll.up_z[i]], "down_z": [float(x) for x in ll.down_z[i]],
                                          "peak_z": float(ll.peak_z[i])}
-            for name, _ in _directions(self.s):
+            for name, _ in (_directions(self.s) if self.s.weights.inkling is None else []):   # Inkling 2: 重みとの cos は計算しない
                 c = self.cos(name, L)
                 if c is not None:
                     out["directions"][name] = {"cos": float(c[n]), "rank_in_layer": int((np.abs(c) > abs(c[n])).sum()) + 1}

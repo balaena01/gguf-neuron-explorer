@@ -86,8 +86,19 @@ function describeLayer(L) {
     ? `MoE ${li.n_expert}×${li.n_ff} (${t("使用 {n}", { n: li.n_expert_used })})${li.n_ff_shexp ? ` + shared ${li.n_ff_shexp}` : ""}` : t("FFN なし");
   const heads = li.n_head ? ` ${li.n_head}h${li.n_head_kv && li.n_head_kv !== li.n_head ? `/${li.n_head_kv}kv` : ""}` : "";
   const extra = (li.sparse_top_k ? ` · ${t("疎 top {k}", { k: li.sparse_top_k })}` : "") + (li.has_ple ? ` · ${t("n-gram 埋め込み")}` : "")
-    + (li.visit ? ` · ${t("層 {s} の {v} 回目", { s: li.stored, v: li.visit })}` : "");      // 同じ層を 2 回実行するモデル
+    + (li.visit ? ` · ${t("層 {s} の {v} 回目", { s: li.stored, v: li.visit })}` : "")      // 同じ層を 2 回実行するモデル
+    + inklingLayer(L);                                                                       // Inkling 2
   return `L${L} ${mixerLabel(li)}${heads}${extra} · ${ffn}`;
+}
+
+// Inkling 2(docs/inkling2.md): 窓つきか全体を見る attention か、繰り返しの層なら何回・どの段で実行するか
+function inklingLayer(L) {
+  const ink = state.arch && state.arch.inkling;
+  if (!ink) return "";
+  const att = ink.swa[L] ? t("窓つき {w}", { w: ink.window }) : t("全体を見る attention");
+  const steps = ink.steps.filter((s) => s.layer === L).map((s) => s.step);
+  const loop = steps.length > 1 ? ` · ${t("{n} 回実行(段 {s})", { n: steps.length, s: steps.join("・") })}` : ` · ${t("段 {s}", { s: steps.join("・") })}`;
+  return ` · ${att}${loop}`;
 }
 
 // --- hover の吹き出し(§4.6): L N、名前、sweep の上位語、steer ±、logit ±、今の overlay の値 ---------------------
@@ -290,11 +301,17 @@ function legend() {
   const dt = state.map && state.map._detail;
   const back = dt ? `<div class="detail-row">${t("L{L} E{e} のニューロンを表示中", { L: dt.layer, e: dt.expert })} <button class="small" id="detail-back">${t("専門家の格子に戻す")}</button></div>` : "";
   const streams = state.arch.hc_streams ? `<div class="note st">${t("残差は {n} 本の流れで、読むときはその平均を使います", { n: state.arch.hc_streams })}</div>` : "";
+  const ink = state.arch.inkling;                   // Inkling 2(docs/inkling2.md)
+  const inkNote = ink ? `<div class="note st">${(ink.n_passes > 1 ? t("層 {a}〜{b} を {n} 回続けて実行します(実行順の段 {s})。", { a: ink.core_start, b: ink.core_end - 1, n: ink.n_passes, s: ink.n_steps }) : "")
+    + t("残差は 1 本ではなく、層 {starts} で新しい流れが始まり、各副層はそれまでの流れを学習された重みで混ぜて読みます。attention は窓つき({w} トークン)で、層 {full} だけ全体を見ます。",
+        { starts: Array.from({ length: Math.ceil(ink.n_stored / ink.block) }, (_, i) => i * ink.block).join(", "), w: ink.window, full: ink.full_layers.join(", ") })
+    + t("このモデルで gne が扱うのは、読み込み・情報・マップ・会話だけです(中を測る・書き換える機能は、理由を出して止まります)")}</div>`
+    + (state.model ? `<div class="detail-row"><button class="small" id="inkling-chat">${t("会話する")}</button></div>` : "") : "";   // 狭い地図でも隠さない
   const lp = state.arch.loop;                       // 同じ層を 2 回実行するモデル(sensenova_loop)
   const loop = lp ? `<div class="note st">${t("層 {a}〜{b} を 2 回続けて実行します。層 {c}〜{d} はその 2 回目で、重みは同じです(書き換えは両方の回に効きます)。各回の中の残差は 2 本の流れで、読むときはその平均を使います",
     { a: lp.lo1, b: lp.lo2 - 1, c: lp.lo2, d: lp.hi2 - 1 })}</div>` : "";
   $("#legend").innerHTML = `<div>${color}</div>${fh}${frame}<div>${parts.join("")}</div>${marks.length ? `<div>${marks.join("")}</div>` : ""}${links}` +
-    back + big + streams + loop + `<div class="note st">${st}</div>` +
+    back + big + streams + loop + inkNote + `<div class="note st">${st}</div>` +
     `<div class="note">${lay}</div>`;
 }
 
@@ -815,6 +832,12 @@ async function loadCandidate({ name, specs, direction, withRecipe }) {   // や�
   return note;
 }
 
+// Inkling 2(docs/inkling2.md): レシピを当てられないので、無介入の 1 列のチャットを、いまの層のニューロン 0 の欄に開く
+function startPlainChat() {
+  if (!$("#detail").classList.contains("wide")) $("#detail-wide").click();
+  openNeuron({ layer: state.layer, n: 0, tab: "chat" }, { focus: false });
+}
+
 // レシピ全体を 3 列チャットで(recipe タブ・EXPERT パネル)。where = チャットを置くニューロン(無ければ開いているもの、レシピの最初)
 function startRecipeChat(where = null) {
   const u = state.recipe.neurons()[0], m = state.recipe.moe().find((x) => x.kind === "expert_neuron");
@@ -1232,6 +1255,7 @@ async function main() {
   });
   state.initMs = performance.now() - t0;
   $("#legend").addEventListener("click", (ev) => {                       // 広げた専門家を閉じて、専門家の格子に戻す
+    if (ev.target.id === "inkling-chat") { startPlainChat(); return; }   // Inkling 2: 会話を開く
     if (ev.target.id !== "detail-back") return;
     state.map.setExpertDetail(null);
     if (state.overlay.values.has(state.map.front)) recolor();
@@ -1241,7 +1265,8 @@ async function main() {
   searchList = new SearchList($("#search-list"), { onOpen: (u) => openNeuron(u), onClose: () => { $("#search-q").value = ""; closeSearch(); } });
   if (state.model) {
     state.recipe = new Recipe(state.model.meta.model_id, recipeChanged);
-    chat = new ChatPanel({ recipe: state.recipe, onAdded: () => recipeTouched(true) });
+    chat = new ChatPanel({ recipe: state.recipe, onAdded: () => recipeTouched(true),
+                           plain: () => !!(state.arch && state.arch.inkling) });        // Inkling 2: 無介入の 1 列だけで話す
     state.chat = chat;                                                   // 自動テスト用
     recipePanel = new RecipePanel($("#recipe-list"), state.recipe, {
       onOpen: (u) => openNeuron(u),

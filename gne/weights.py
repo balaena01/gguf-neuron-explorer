@@ -112,6 +112,9 @@ class Weights:
         # 2 回目の名前を持つ llama.cpp(回ごとの名前)を使うときは、per_visit_names を立てる(LoRA の名前を写し替えない)
         from .loop import plan_of
         self.loop = plan_of(self.field, self.meta.arch)
+        # Inkling 2(inkling.py): 層の並びだけを読む。重みの中身を読む処理(ニューロン・専門家・ヘッド・出力層)は止める
+        from .inkling import plan_of as inkling_plan_of
+        self.inkling = inkling_plan_of(self.field, self.meta.arch)
         self.per_visit_names = False
         if self.loop is not None:
             for name, t in list(self._tensors.items()):
@@ -121,9 +124,16 @@ class Weights:
 
     # --- metadata -------------------------------------------------------------------------------
 
+    def _internal(self, what: str) -> None:
+        """重みの中身を読む前に呼ぶ。Inkling 2 では止める(inkling.py)。ほかのモデルでは何もしない。"""
+        if self.inkling is not None:
+            from .inkling import refuse
+            raise refuse(self.inkling, what)
+
     @property
     def reader(self) -> GGUFReader:
         """gguf-py の GGUFReader(全フィールドを読む、遅い)。bake で全メタデータを写すときだけ使う。"""
+        self._internal("GGUF の書き直し(bake)")
         if self.gguf.is_split:
             raise NotImplementedError(f"{self.path.name} は分割 GGUF なので焼き込めません。LoRA を使うか、llama-gguf-split --merge で 1 つにしてください")
         if self._reader is None:
@@ -192,6 +202,7 @@ class Weights:
         return min([n - k] + mtp)
 
     def tensor(self, name: str):
+        self._internal("重みの中身を読む処理")
         t = self._tensors.get(name)
         if t is None:
             raise KeyError(f"{self.path.name}: テンソル {name} がありません")
@@ -200,6 +211,10 @@ class Weights:
     def check_arch(self) -> list[str]:
         """警告メッセージ一覧(§12 のマトリクスに対応)。"""
         m, out = self.meta, []
+        if self.inkling is not None:                 # Inkling 2(inkling.py): 構造の説明と、止まる機能のことだけを出す
+            return [self.inkling.summary(),
+                    "gne は、このモデルでは読み込み・情報・マップ・会話だけを扱います。残差・ヘッド・ニューロン・専門家を測る処理と、"
+                    "control vector・LoRA・焼き込みで中を書き換える処理は、理由を書いて止めます(docs/inkling2.md)"]
         pf = [li.index for li in self.arch.layers if li.post_norm_ffn or li.has_post_ffn_norm]
         pm = [li.index for li in self.arch.layers if li.post_norm_mixer not in ("", "?")]
         pu = [li.index for li in self.arch.layers if li.post_norm_mixer == "?"]
@@ -253,6 +268,7 @@ class Weights:
 
     def down_matrix(self, L: int) -> np.ndarray:
         """W_down (n_embd, n_ff) float32。ニューロン n の書き込み方向は [:, n]。"""
+        self._internal("MLP のニューロンの重みを読む処理")
         L = self.stored(L)
         if L in self._cache:
             self._cache.move_to_end(L)
@@ -269,6 +285,7 @@ class Weights:
 
     def up_matrix(self, L: int) -> np.ndarray:
         """W_up (n_ff, n_embd) float32(キャッシュしない)。ニューロン n の入力側の重みは [n, :](§6.16 gain)。"""
+        self._internal("MLP のニューロンの重みを読む処理")
         name = f"blk.{L}.ffn_up.weight"
         if not self.has_tensor(name):
             raise ValueError(f"{name} がありません(MoE や gate と up が 1 つのテンソルの arch は gain に未対応)")
@@ -347,6 +364,7 @@ class Weights:
         return li
 
     def _expert_slab(self, name: str, e: int) -> np.ndarray:
+        self._internal("専門家の重みを読む処理")
         key = (name, e)
         cache = self.__dict__.setdefault("_exp_cache", OrderedDict())
         if key in cache:
@@ -378,6 +396,7 @@ class Weights:
 
     def expert_down_norms(self, L: int) -> np.ndarray:
         """‖W_down_e[:, n]‖ (n_expert, n_ff_exp)。"""
+        self._internal("専門家の重みを読む処理")
         li = self.moe_layer(L)
         key = ("exp", L)
         if key not in self._norms:
@@ -387,6 +406,7 @@ class Weights:
 
     def router(self, L: int) -> np.ndarray:
         """ルーター W_r (n_expert, n_embd)。logit_e = W_r[e] · x。"""
+        self._internal("専門家のルーターの重みを読む処理")
         self.moe_layer(L)
         return tensor_to_f32(self.tensor(f"blk.{L}.ffn_gate_inp.weight")).reshape(self.arch.layers[L].n_expert, -1)
 
@@ -398,11 +418,13 @@ class Weights:
 
     def router_bias(self, L: int) -> np.ndarray | None:
         """ルーターのバイアス (n_expert,)(選択にだけ効く)。無い arch は None。"""
+        self._internal("専門家のルーターの重みを読む処理")
         nm = self.router_bias_name(L)
         return None if nm is None else tensor_to_f32(self.tensor(nm)).reshape(-1)
 
     def shexp_down(self, L: int) -> np.ndarray:
         """shared expert の W_down (n_embd, n_ff_shexp)。"""
+        self._internal("専門家の重みを読む処理")
         from .steer import GneError
         name = f"blk.{L}.ffn_down_shexp.weight"
         if not self.has_tensor(name):
@@ -410,6 +432,7 @@ class Weights:
         return tensor_to_f32(self.tensor(name))
 
     def shexp_up(self, L: int) -> np.ndarray:
+        self._internal("専門家の重みを読む処理")
         from .steer import GneError
         name = f"blk.{L}.ffn_up_shexp.weight"
         if not self.has_tensor(name):
@@ -429,6 +452,7 @@ class Weights:
     def head_block(self, L: int, h: int) -> tuple[str, int, int]:
         """ヘッド h が残差に書き込む重み行列の名前と列ブロック [lo, hi)。W_O(numpy (n_embd, n_head·head_dim))の列 lo:hi が
         ヘッド h の出力を残差に書く(ggml ne = [n_head·head_dim, n_embd] の ne0 方向)。"""
+        self._internal("ヘッドの重みを読む処理")
         from .steer import GneError
         if not 0 <= L < self.meta.n_layer:
             raise GneError("BAD_RECIPE", f"層 {L} は範囲外です")
@@ -457,6 +481,7 @@ class Weights:
 
     def output_norm_weight(self) -> np.ndarray:
         """最終 RMSNorm の γ。Qwen3-Next/3.5・Gemma の「1 + w」は変換時に畳み込まれている(conversion/qwen.py, gemma.py)。"""
+        self._internal("出力層で残差を読む処理(logit lens など)")
         if not self.has_tensor("output_norm.weight") and self.has_tensor("output_hc_norm.weight"):
             # 残差が複数本の arch(qwen4exp)は最後の混ぜ合わせが norm を兼ねる。流れごとの係数の平均で近似する(ゲートは入力に依るので入らない)
             hc = int(self.field(f"{self.meta.arch}.hyper_connection.count"))
@@ -469,6 +494,7 @@ class Weights:
 
     def output_rows(self, chunk: int = 8192):
         """W_U (n_vocab, n_embd) を行チャンクごとに float32 で返す: (開始行, (rows, n_embd))。"""
+        self._internal("出力層で残差を読む処理(logit lens など)")
         t = self.tensor(self.output_tensor_name())
         data = t.data
         n = data.shape[0]
@@ -486,6 +512,7 @@ class Weights:
 
     def embed_rows(self, ids) -> np.ndarray:
         """token_embd の指定の行だけを float32 で(全語彙を dequantize しない)。埋め込みに倍率を掛ける arch(Gemma)は未考慮。"""
+        self._internal("埋め込みの重みを読む処理")
         t = self.tensor("token_embd.weight")
         rows = np.asarray(t.data)[np.asarray(ids, dtype=np.int64)]
         if t.tensor_type == GGMLQuantizationType.F32:
