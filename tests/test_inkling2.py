@@ -245,15 +245,15 @@ def test_inkling_positions_and_rows():
     assert rows_for(E(), "answer", None, ids, 1, [5, 6, 99], TEXT) is None     # 思考の途中で終わった
 
 
-@pytest.mark.parametrize("typ", ["Q2_0", "NVFP4", "MXFP4"])
-def test_same_size_bake_rounding(typ):
-    """元の型・元の大きさの焼き込み(射影を意識した丸め): 編集する列だけコードが動き、uᵀw が目標に近づき、倍率はそのまま。"""
+def _random_raw(typ, rows, cols, rng):
     import numpy as np
-
-    from gne.inkling_bake import decode, edit_slab, encode
-    rng = np.random.default_rng(1)
-    rows, cols = 128, 128
     nb = cols // 64
+    if typ == "IQ4_NL":
+        d = rng.choice([-1.0, 1.0], (rows, cols // 32)) * rng.uniform(0.005, 0.02, (rows, cols // 32))
+        raw = np.zeros((rows, cols // 32, 18), np.uint8)
+        raw[:, :, :2] = d.astype(np.float16).view(np.uint8).reshape(rows, cols // 32, 2)
+        raw[:, :, 2:] = rng.integers(0, 256, (rows, cols // 32, 16), dtype=np.uint8)
+        return raw.reshape(rows, -1)
     if typ == "Q2_0":
         d = rng.choice([-1.0, 1.0], (rows, nb)) * rng.uniform(0.5, 2.0, (rows, nb))
         raw = np.zeros((rows, nb, 18), np.uint8)
@@ -267,7 +267,19 @@ def test_same_size_bake_rounding(typ):
         raw = np.zeros((rows, cols // 32, 17), np.uint8)
         raw[:, :, 0] = rng.integers(118, 126, (rows, cols // 32), dtype=np.uint8)
         raw[:, :, 1:] = rng.integers(0, 256, (rows, cols // 32, 16), dtype=np.uint8)
-    raw = raw.reshape(rows, -1)
+    return raw.reshape(rows, -1)
+
+
+@pytest.mark.parametrize("typ", ["Q2_0", "NVFP4", "MXFP4", "IQ4_NL"])
+def test_same_size_bake_rounding(typ):
+    """元の型・元の大きさの焼き込み(射影を意識した丸め): 編集する列だけコードが動き、uᵀw が目標に近づき、倍率はそのまま。"""
+    import numpy as np
+
+    from gne.inkling_bake import decode, edit_slab, encode
+    rng = np.random.default_rng(1)
+    rows, cols = 128, 128
+    nb = cols // 64
+    raw = _random_raw(typ, rows, cols, rng)
     q, sc, W = decode(raw, typ, rows, cols)
     assert np.array_equal(encode(raw, typ, rows, cols, q), raw)               # 戻せる
     u = rng.standard_normal(rows)
@@ -278,9 +290,39 @@ def test_same_size_bake_rounding(typ):
     q2, sc2, W2 = decode(r["raw"], typ, rows, cols)
     other = [n for n in range(cols) if n not in cols_e]
     assert np.array_equal(q2[:, other], q[:, other]) and np.array_equal(sc2, sc)   # ほかの列・倍率はそのまま
-    hd, nbk = {"Q2_0": (2, nb), "NVFP4": (4, nb), "MXFP4": (1, cols // 32)}[typ]
+    hd, nbk = {"Q2_0": (2, nb), "NVFP4": (4, nb), "MXFP4": (1, cols // 32), "IQ4_NL": (2, cols // 32)}[typ]
     assert np.array_equal(r["raw"].reshape(rows, nbk, -1)[:, :, :hd], raw.reshape(rows, nbk, -1)[:, :, :hd])
     assert np.all(np.abs(u @ W2[:, cols_e]) < 0.25 * np.abs(c)), (u @ W2[:, cols_e], c)   # 方向の成分はほぼ消えた
+
+
+@pytest.mark.parametrize("typ", ["Q2_0", "NVFP4", "IQ4_NL"])
+def test_same_size_bake_several_directions_together(typ):
+    """いくつかの方向(直交しない)の部品が同じ列に重なるとき: LoRA の変化に、方向が張る空間の中でまとめて合わせる。どの方向の
+    成分も目標に近く、ほかの列と倍率はそのまま、方向に沿わない変化は span の外だけ。"""
+    import numpy as np
+
+    from gne.inkling_bake import basis, decode, edit_columns
+    rng = np.random.default_rng(3)
+    rows, cols = 256, 128
+    raw = _random_raw(typ, rows, cols, rng)
+    q, sc, W = decode(raw, typ, rows, cols)
+    u1 = rng.standard_normal(rows)
+    u2 = 0.6 * u1 + 0.8 * rng.standard_normal(rows)                         # 直交しない 2 つの方向
+    U = np.stack([u1 / np.linalg.norm(u1), u2 / np.linalg.norm(u2)], axis=1)
+    cs = np.array([1, 5, 64, 100])
+    A = np.stack([1.0 * (U[:, 0] @ W[:, cs]), 0.5 * (U[:, 1] @ W[:, cs])])  # 強さ 1 と 0.5 の部品(元の重みから)
+    T = -U @ A
+    r = edit_columns(raw, typ, U, T, cs, rows, cols)
+    q2, sc2, W2 = decode(r["raw"], typ, rows, cols)
+    other = [n for n in range(cols) if n not in cs]
+    assert np.array_equal(q2[:, other], q[:, other]) and np.array_equal(sc2, sc)
+    D = W2[:, cs] - W[:, cs]
+    want, got = U.T @ T, U.T @ D
+    assert np.allclose(got, r["got"]) and np.allclose(want, r["want"])
+    assert np.linalg.norm(got - want) < 0.05 * np.linalg.norm(want), (got, want)   # 両方の方向の成分が目標どおり
+    Qb = basis(U)
+    assert Qb.shape[1] == 2 and np.isclose(r["off2"], np.sum((D - Qb @ (Qb.T @ D)) ** 2))
+    assert basis(np.stack([U[:, 0], U[:, 0]], axis=1)).shape[1] == 1               # 同じ向きの方向は 1 つにまとめる
 
 
 def test_refine_parts_and_chain_with_expert_units(tmp_path):
@@ -641,11 +683,17 @@ def test_real_inkling_pipeline_recipe_and_bake(session, tmp_path):
     refs = layer_refs_of(session.weights.inkling, ds)
     from gne.inkling_chips import whole_ffn_layers
     whole = whole_ffn_layers(units)
+    from gne.inkling_bake import OFF_MAX
     for m in bake(SimpleNamespace(w=session.weights, plan=session.weights.inkling), units, refs, None, requant="auto")["modified"]:
-        if "ffn_down_exps" in m["tensor"] and int(m["tensor"].split(".")[1]) in whole:     # MLP 全体の部品がある層は Q8_0(auto)
-            assert m["to"] == "Q8_0" and m.get("why") == "whole_layer_mlp", m
+        fb = m.get("fallback") or {}
+        if m["to"] != m["from"]:                       # Q8_0 にするのは理由があるときだけ(MLP 全体の層は方向に沿わない変化で決める)
+            assert m["to"] == "Q8_0" and fb.get("why") in ("edit_kept", "off_direction", "imatrix") or "edit_kept" in fb, m
+            if fb.get("why") == "off_direction":
+                assert int(m["tensor"].split(".")[1]) in whole and fb["off_over_removed"] > OFF_MAX, m
         else:
-            assert m["to"] == m["from"] and m["bytes_to"] == m["bytes_from"] and m["edit_kept"] > 0.9, m
+            assert m["bytes_to"] == m["bytes_from"] and m["edit_kept"] > 0.9, m
+            if "ffn_down_exps" in m["tensor"] and int(m["tensor"].split(".")[1]) in whole:
+                assert m["whole_layer"] and m["off_over_removed"] <= OFF_MAX, m
 
 
 @real
@@ -689,9 +737,24 @@ def test_real_inkling_refine_stacks(session):
 
 
 def test_bake_auto_rule_whole_ffn_layers():
-    """焼き込みの auto: MLP 全体の部品(L:ffn)がある層の専門家のテンソルは Q8_0、ニューロンだけの層は元の型。予定の文に出る。"""
-    from gne.inkling_chips import whole_ffn_layers
-    from gne.inkling_pipeline import bake_plan_text
+    """焼き込みの auto: 元の型で書いて測り、編集が残らないテンソルと、MLP 全体の部品(L:ffn)を受けて方向に沿わない変化 ÷ 消した
+    成分が上限を超える専門家のテンソルだけ Q8_0。ニューロンだけの層は残り方だけで決める。予定の文に、元の大きさのまま書く
+    テンソルと Q8_0 にする理由が出る。"""
+    from gne.inkling_bake import OFF_MAX
+    from gne.inkling_chips import auto_reason, whole_ffn_layers
+    from gne.inkling_pipeline import bake_plan_text, plan_entry
+    assert auto_reason({"edit_kept": 0.99, "off_over_removed": 1.0}, True) is None
+    assert auto_reason({"edit_kept": 0.99, "off_over_removed": OFF_MAX + 0.1}, True) == "off_direction"
+    assert auto_reason({"edit_kept": 0.99, "off_over_removed": OFF_MAX + 0.1}, False) is None     # ニューロンだけ
+    assert auto_reason({"edit_kept": 0.85, "off_over_removed": 1.0}, False) == "edit_kept"
+    recs = [{"tensor": "blk.17.ffn_down_exps.weight", "from": "NVFP4", "to": "NVFP4", "bytes_from": 182 * 2**20, "bytes_to": 182 * 2**20,
+             "whole_layer": True, "edit_kept": 0.993, "off_over_removed": 1.01},
+            {"tensor": "blk.14.ffn_down_exps.weight", "from": "Q2_0", "to": "Q8_0", "bytes_from": 91 * 2**20, "bytes_to": 344 * 2**20,
+             "whole_layer": True, "fallback": {"from": "Q2_0", "why": "off_direction", "edit_kept": 0.996, "off_over_removed": 2.41,
+                                               "off_max": OFF_MAX}}]
+    text = bake_plan_text({"bytes": 253 * 2**20, "tensors": [plan_entry(m) for m in recs]})
+    assert "元の大きさのまま: 層 17 の専門家 NVFP4(MLP 全体の部品。方向に沿わない変化 ÷ 消した成分 1.01" in text, text
+    assert "層 14 の専門家 Q2_0 → Q8_0(+253 MiB、方向に沿わない変化 ÷ 消した成分 2.41 が上限" in text and "+253 MiB" in text
     units = [[9, "ffn", None, 1.0, "d"], [9, "neuron", [3, 10], 2.0, "d2"], [14, "neuron", [25, 389], 4.0], [11, "head", 5, 2.0],
              [17, "ffn", None, 0.5], [23, "attn", None, 1.0]]
     assert whole_ffn_layers(units) == {9, 17}
@@ -726,7 +789,8 @@ def test_into_same_type_rules_and_target_check():
     from gne.quant import qtype_of
     from gne.steer import GneError
     assert same_type_method(qtype_of(42)) == "par" and same_type_method(SimpleNamespace(name="NVFP4")) == "par"
-    for q in (Q.Q8_0, Q.Q4_K, Q.Q5_K, Q.Q6_K, Q.Q3_K, Q.IQ4_NL):
+    assert same_type_method(Q.IQ4_NL) == "par" and same_type_method(Q.MXFP4) == "par"
+    for q in (Q.Q8_0, Q.Q4_K, Q.Q5_K, Q.Q6_K, Q.Q3_K):
         assert same_type_method(q) == "requant", q
     for q in (Q.IQ2_XXS, Q.IQ2_XS, Q.IQ1_S):
         assert same_type_method(q) == "imatrix", q
@@ -753,7 +817,7 @@ INTO = [p for p in os.environ.get("GNE_TEST_INKLING2_INTO", "").split(",") if p.
 @pytest.mark.parametrize("target", INTO or ["-"])
 def test_real_bake_into_other_quant_dry_run(tmp_path, target):
     """別の量子化に焼き込む(書かずに計算だけ、GPU は使わない): 同じモデルの確かめ、短い畳み込みのタップが同じ、型ごとの決め方
-    (MLP 全体の部品の層は Q8_0、元の型で書くテンソルは大きさが同じ)、消す量を焼き込む先の重みから作る(部品ごとの違いを出す)。"""
+    (元の型で書くテンソルは大きさが同じ、Q8_0 にするのは理由があるときだけ)、消す量を焼き込む先の重みから作る(部品ごとの違いを出す)。"""
     import numpy as np
 
     from gne.api import Session
@@ -780,12 +844,11 @@ def test_real_bake_into_other_quant_dry_run(tmp_path, target):
         r = s.headproj_export(rec, None, bake=True, into=target, dry_run=True)
         assert r["dry_run"] and len(r["carry_over"]) == 4 and all(np.isfinite(x["norm_ratio"]) for x in r["carry_over"])
         for m in r["modified"]:
-            if m["tensor"] == "blk.9.ffn_down_exps.weight":
-                assert m["to"] == "Q8_0", m                                  # MLP 全体の部品の層(auto)
-            elif m["to"] == m["from"]:
+            if m["to"] == m["from"]:
                 assert m["bytes_to"] == m["bytes_from"] and m["edit_kept"] > 0.9, m
             else:
-                assert m["to"] == "Q8_0" and m.get("fallback"), m              # 元の型で書けない・編集が残らないときだけ
+                assert m["to"] == "Q8_0" and m.get("fallback"), m              # 元の型で書けない・編集が残らない・方向に沿わない変化が大きい
+        assert "元の大きさ" in r["plan"] or "型を変える" in r["plan"], r["plan"]
     finally:
         s.close()
 

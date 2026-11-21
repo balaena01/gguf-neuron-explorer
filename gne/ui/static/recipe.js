@@ -901,14 +901,19 @@ export class RecipePanel {
     const to = rq === "f16" ? "F16" : "Q8_0";
     const ffnL = [...new Set(this.r.units.filter((u) => u.mode === "proj" && u.kind === "ffn").map((u) => u.layer))].sort((a, b) => a - b);
     const expL = [...new Set(this.r.units.filter((u) => u.mode === "proj" && (u.kind === "ffn" || u.kind === "expert_neuron")).map((u) => u.layer))].sort((a, b) => a - b);
-    const conv = rq === "keep" ? [] : rq === "auto" ? ffnL : expL;
+    const conv = rq === "keep" ? [] : expL;
+    if (rq === "auto") {                                   // 自動: MLP 全体の部品の層は、書く前に測って決める
+      const mx = ffnL.reduce((a, L) => a + (MIB[types[L]] ? MIB.Q8_0 - MIB[types[L]] : 0), 0);
+      return ffnL.length
+        ? t("焼き込みの予定: MLP 全体の部品がある層 {l} の専門家のテンソルは、元の型で書いて測り、方向に沿わない変化が小さければ元の大きさのまま、大きければ Q8_0(全部 Q8_0 なら +{m} MiB)。決まった予定はジョブの段の文と結果に出る(「予定を計算する」で書かずに見られる)",
+          { l: ffnL.join("・"), m: mx.toFixed(0) })
+        : t("焼き込みの予定: 専門家のテンソルは元の型・元の大きさのまま(attention の出力も、残った編集が 9 割を切らない限り元の型)");
+    }
     if (!conv.length) return t("焼き込みの予定: 専門家のテンソルは元の型・元の大きさのまま(attention の出力も、残った編集が 9 割を切らない限り元の型)");
     const parts = conv.map((L) => { const ty = types[L] || "?"; const g = MIB[ty] ? MIB[to] - MIB[ty] : null;
       return `L${L} ${ty} → ${to}${g !== null ? ` (+${g.toFixed(0)} MiB)` : ""}`; });
     const tot = conv.reduce((a, L) => a + (MIB[types[L]] ? MIB[to] - MIB[types[L]] : 0), 0);
-    return rq === "auto"
-      ? t("焼き込みの予定: {p}。ファイルと VRAM は合わせて約 +{m} MiB(MLP 全体の部品がある層の専門家のテンソル)", { p: parts.join("、"), m: tot.toFixed(0) })
-      : t("焼き込みの予定: {p}。ファイルと VRAM は合わせて約 +{m} MiB(書き換える専門家のテンソル)", { p: parts.join("、"), m: tot.toFixed(0) });
+    return t("焼き込みの予定: {p}。ファイルと VRAM は合わせて約 +{m} MiB(書き換える専門家のテンソル)", { p: parts.join("、"), m: tot.toFixed(0) });
   }
 
   lxRequant() {
@@ -929,7 +934,7 @@ export class RecipePanel {
       <div class="rc-lx-row${bake ? "" : " off"}"><span class="muted" title="${t("空なら、いま読んでいるモデルにマージする。同じモデルの量子化していない GGUF(F16 / BF16)のパスを入れると、方向はこのモデルで作ったものを使い、そちらにマージする(GPU は使わない。少し誤差がある。LoRA 版との比較はできない)")}">${t("マージ先")}</span>
         <input id="lx-into" size="30" value="${esc(f.into)}" placeholder="${t("空ならいま読んでいるモデル")}" spellcheck="false"${dis}></div>
       <div class="rc-lx-row${bake ? "" : " off"}"><span class="muted" title="${t("書き換えたテンソルを何の型で書くか。Q8_0 は元より少し大きくなることがある、F16 はもっと大きい。下の「元の型に戻す」を使うとほぼ元の大きさ")}">${t("書き換えたテンソルの型")}</span>
-        <select id="lx-requant"${dis || (f.via_f16 ? " disabled" : "")}>${this.inkling() ? `<option value="auto"${rq === "auto" ? " selected" : ""}>${t("自動(元の型・元の大きさのまま。MLP 全体の部品がある層と、編集が残らないテンソルだけ Q8_0)")}</option><option value="keep"${rq === "keep" ? " selected" : ""}>${t("いつも元の型")}</option>`
+        <select id="lx-requant"${dis || (f.via_f16 ? " disabled" : "")}>${this.inkling() ? `<option value="auto"${rq === "auto" ? " selected" : ""}>${t("自動(元の型・元の大きさで書いて測り、編集が残らないテンソルと、方向に沿わない変化が大きい MLP 全体の層だけ Q8_0)")}</option><option value="keep"${rq === "keep" ? " selected" : ""}>${t("いつも元の型")}</option>`
           : nk ? `<option value="auto"${rq === "auto" ? " selected" : ""}>${t("自動(Q8_0 は元のまま、ほかは F16)")}</option>` : ""}<option value="q8_0"${rq === "q8_0" ? " selected" : ""}>Q8_0</option><option value="f16"${rq === "f16" ? " selected" : ""}>F16</option>${this.inkling() ? "" : `<option value="keep"${rq === "keep" ? " selected" : ""}>${t("元と同じ(F16・BF16 のモデル)")}</option>`}</select>
         <label title="${t("書き換えたテンソルを F16 で書いてから、llama-quantize で元の量子化の型に戻す(ファイルの大きさを元に近く保つ。低ビットの型は imatrix があると誤差が小さい)")}"><input type="checkbox" id="lx-viaf16"${f.via_f16 ? " checked" : ""}${dis}> ${t("元の量子化の型に戻す")}</label></div>
       ${bake && nk ? `<div class="rc-lx-row"><span class="muted note">${t("キーつきの書き込みを含むので、書き換えたテンソルの型の既定は「自動」: 元が Q8_0 のテンソルは Q8_0 のまま(F16 にすると計算方法が変わり、LoRA 版とかえってずれる)、それ以外は F16。Q8_0 のままでは編集の 1 割以上が丸めに消えるテンソルだけ F16(配るなら LoRA がおすすめ)")}</span></div>` : ""}
@@ -942,7 +947,8 @@ export class RecipePanel {
       <div class="rc-lx-row"><label title="${t("gne が書く記録(gne.* のメタデータ: レシピ・ヘッド・強さ・方向のキー、名前の印、横の .headproj.json)を入れない。人に渡すファイル用。書いたあと、メタデータに手元のパスが残っていないかも確かめる")}"><input type="checkbox" id="lx-strip"${f.strip ? " checked" : ""}> ${t("gne の記録(メタデータ)を入れない(人に渡す用)")}</label></div>
       ${bake ? "" : `<div class="rc-lx-row"><span class="muted" title="${t("LoRA のファイルの中の名前の欄(general.name)。空なら「元のモデルの名前 gain レシピの名前」、記録を入れないときは adapter")}">${t("名前の欄")}</span>
         <input id="lx-adname" size="26" value="${esc(f.adapterName)}" placeholder="${f.strip ? "adapter" : ""}" spellcheck="false"></div>`}
-      <div class="rc-lx-row"><button class="main" id="lx-go">${t(bake ? "マージする" : "LoRA を書き出す")}</button>
+      <div class="rc-lx-row"><button class="main" id="lx-go">${t(bake ? "マージする" : "LoRA を書き出す")}</button>${bake && this.inkling()
+        ? ` <button class="small" id="lx-dry" title="${t("書かずに計算だけする: 型を変えるテンソルとその理由、元の大きさのまま書くテンソル、ファイルの増え方")}">${t("予定を計算する(書かない)")}</button>` : ""}
         <span class="muted note">${nk ? t("名前は上のレシピの名前(空なら headproj)。LoRA に入るユニット {n} 個(ヘッド {h}・キーつきの書き込み {k})", { n, h: n - nk, k: nk })
           : t("名前は上のレシピの名前(空なら headproj)。ヘッドのユニット {n} 個が入る", { n })}${nAdd ? ` · ${t("add のユニット {k} 個は入らない(cvec で書き出す)", { k: nAdd })}` : ""}${bake ? ` · ${t("マージはモデルを丸ごともう 1 つ書く(同じくらいのディスク・時間)")}` : ""}</span></div>
       ${bake && this.inkling() ? `<div class="rc-lx-row"><span class="muted note">${esc(this.inklingBakePlan(rq))}</span></div>` : ""}
@@ -983,11 +989,12 @@ export class RecipePanel {
       this.render();
     });
     on("#lx-go", "click", () => this.runLx());
+    on("#lx-dry", "click", () => this.runLx(false, true));
   }
 
   lxSet(html) { this.lxMsg = { html }; const el = this.root.querySelector("#lx-result"); if (el) el.innerHTML = html; }
 
-  async runLx(overwrite = false) {
+  async runLx(overwrite = false, dry = false) {
     const f = this.lx, r = this.r;
     const name = ((this.root.querySelector("#rc-name") || {}).value || r.name || "headproj").trim().replace(/[^\w.-]/g, "_") || "headproj";
     const stem = (f.file.trim() || this.lxDefaultStem()).replace(/\.lora\.gguf$|\.gguf$/, "");
@@ -1006,13 +1013,14 @@ export class RecipePanel {
       } else p.requant = this.lxRequant();
       if (f.into.trim()) p.into = f.into.trim();
       else if (f.verify && !this.inkling()) { p.verify = true; if (f.contrast.trim()) p.contrast = f.contrast.trim(); }   // Inkling 2: 欄を出していないので送らない
+      if (dry) p.dry_run = true;
     }
     this.lxSet(`<p class="muted note">${t("ジョブを投げています…")}</p>`);
     try {
       const j = await this.onRunJob("headproj_export", p);
       if (!j) { this.lxSet(`<p class="muted note">${t("やめました")}</p>`); return; }
       this.lxJobId = j.id;
-      this.lxSet(`<p class="muted note">${t(f.bake ? "マージしています(下のジョブのバーに進み具合)。終わるとここに場所が出ます" : "書き出しています。終わるとここに場所が出ます")}</p>`);
+      this.lxSet(`<p class="muted note">${t(dry ? "計算しています(書きません。下のジョブのバーに進み具合)" : f.bake ? "マージしています(下のジョブのバーに進み具合)。終わるとここに場所が出ます" : "書き出しています。終わるとここに場所が出ます")}</p>`);
     } catch (e) { this.lxSet(`<p class="err">${esc(e.message)}</p>`); }
   }
 
@@ -1028,6 +1036,22 @@ export class RecipePanel {
     }
     if (j.status !== "done") { this.lxSet(`<p class="err">${t("失敗")}: ${esc((j.error && j.error.message) || j.status)}</p>${j.error && j.error.hint ? `<p class="muted note">${esc(j.error.hint)}</p>` : ""}`); return; }
     const x = j.result || {}, mb = (x.bytes || 0) / 1e6;
+    if (x.dry_run) {                                       // 書かずに計算だけ(Inkling 2): 予定と、テンソルごとの型・理由
+      const rows = (x.modified || []).map((m) => {
+        const fb = m.fallback || {}, why = fb.why === "off_direction"
+          ? t("方向に沿わない変化 ÷ 消した成分 {v}(上限 {m})", { v: fmt(fb.off_over_removed, 2), m: fb.off_max })
+          : fb.edit_kept !== undefined ? t("元の型では残る編集 {v}", { v: fmt(fb.edit_kept, 2) })
+          : m.off_over_removed !== undefined ? t("方向に沿わない変化 ÷ 消した成分 {v}", { v: fmt(m.off_over_removed, 2) }) : "";
+        return `${m.tensor} ${m.from}→${m.to}${why ? ` (${why})` : ""}`;
+      });
+      this.lxSet(`<p class="note">${t("書いていません(計算だけ)。書けば {g} GiB(元 {s} GiB)", { g: fmt((x.bytes || 0) / 2 ** 30, 2), s: fmt((x.bytes_src || 0) / 2 ** 30, 2) })}</p>
+        ${x.plan ? `<p class="muted note">${esc(x.plan)}</p>` : ""}
+        ${x.kept_note ? `<p class="note">⚠ ${esc(x.kept_note)}</p>` : ""}
+        ${x.into ? `<p class="muted note">${t("マージ先: {f}", { f: esc(x.into) })}</p>` : ""}
+        ${x.into && (x.carry_over || []).length ? `<p class="muted note">${carryText(x.carry_over)}</p>` : ""}
+        ${rows.length ? `<p class="muted note mono">${esc(rows.join("\n")).replace(/\n/g, "<br>")}</p>` : ""}`);
+      return;
+    }
     const layers = Object.entries(x.proj_layers || {}).map(([L, v]) => `L${L}: ${t("階数 {r}", { r: v.rank })}`).join(" · ");
     const klayers = Object.entries(x.keyed_layers || {}).map(([L, v]) => `L${L} keyed: ${t("キー {k}", { k: (v.keys || []).join(", ") })} · ${t("階数 {r}", { r: v.rank })}`).join(" · ");
     const rqe = x.requant_error_max;

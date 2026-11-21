@@ -785,8 +785,8 @@ def _json(x):
 
 def bake_recipe(session, heads, dst: Path | None, *, requant: str = "auto", vram_free_mb: float | None = None,
                 strip_meta: bool = False, target=None, dry_run: bool = False) -> dict:
-    """レシピの射影の部品を GGUF に焼き込む(inkling_chips.bake)。requant は auto(既定: MLP 全体の部品がある層の専門家のテンソルと、
-    編集が残らないテンソルは Q8_0、ほかは元の型・元の大きさ)・keep・q8_0・f16。書く前に一度計算して、Q8_0 にする層と
+    """レシピの射影の部品を GGUF に焼き込む(inkling_chips.bake)。requant は auto(既定: 元の型・元の大きさで書いて測り、編集が
+    残らないテンソルと、MLP 全体の部品を受けて方向に沿わない変化が大きい専門家のテンソルだけ Q8_0)・keep・q8_0・f16。書く前に一度計算して、Q8_0 にする層と
     ファイル・VRAM の増え方を決め、progress で知らせる(結果の plan にも入れる)。vram_free_mb(読み込んだときの空き)を渡すと、
     収まらないときは知らせる(ファイルは書く)。target(target_weights の重み)を渡すと、同じモデルの別の量子化に書く: 方向と部品は
     このモデルのもの、消す量(r̂ᵀW)と短い畳み込みの倍率は焼き込む先の重みから作り直す。dry_run なら書かずに、書き換えるテンソルと
@@ -804,13 +804,13 @@ def bake_recipe(session, heads, dst: Path | None, *, requant: str = "auto", vram
     refs = None
     meta = {"source": Path(session.weights.path).name, "target": Path(tw.path).name} if tw is not session.weights else None
     if requant in ("auto", "keep"):                          # 書く前に一度計算して、型と大きさを決める
-        pre = bake(rd, units, refs, None, requant=requant, tens=tens)["modified"]
+        prep = bake(rd, units, refs, None, requant=requant, tens=tens)
+        pre = prep["modified"]
         grow = {"bytes": int(sum(m["bytes_to"] - m["bytes_from"] for m in pre)),
-                "tensors": [{"tensor": m["tensor"], "type": m["from"], "to": m["to"], "from_mib": m["bytes_from"] / 2**20,
-                             "to_mib": m["bytes_to"] / 2**20} for m in pre],
+                "tensors": [plan_entry(m) for m in pre],
                 "expert_layers": sorted({int(m["tensor"].split(".")[1]) for m in pre if "ffn_down_exps" in m["tensor"] and m["to"] != m["from"]})}
     else:
-        pre = None
+        pre = prep = None
         grow = estimate_growth(SimpleNamespace(weights=tw), [u[:4] for u in units], requant)
     plan = bake_plan_text(grow)
     if dry_run:                                                 # 書かずに: 書き換えるテンソル・大きさ・残り方
@@ -834,7 +834,7 @@ def bake_recipe(session, heads, dst: Path | None, *, requant: str = "auto", vram
                      f"(書き換える専門家の層 1 つで Q8_0 は Q2_0 の層 +253 MiB・NVFP4 の層 +162 MiB)")
         if getattr(session, "warn", None):
             session.warn(vram_note)
-    r = bake(rd, units, refs, Path(dst), requant=requant, strip_meta=strip_meta, tens=tens, extra_meta=meta)
+    r = bake(rd, units, refs, Path(dst), requant=requant, strip_meta=strip_meta, tens=tens, extra_meta=meta, prepared=prep)
     r["growth"] = grow
     if meta:
         r["into"] = Path(tw.path).name if strip_meta else str(tw.path)
@@ -848,15 +848,23 @@ def bake_recipe(session, heads, dst: Path | None, *, requant: str = "auto", vram
 
 
 def kept_note(recs) -> str | None:
-    """書いた型で編集の 1 割以上が丸めに消えたテンソル(edit_kept < KEYED_KEEP_MIN)の注意。auto はそうしたテンソルを Q8_0 に
-    するので、出るのは主に keep(元の型を守る)で MLP 全体の部品を IQ4_NL・Q5_K などに書いたとき。"""
+    """書いた型で編集の 1 割以上が丸めに消えたテンソル(edit_kept < KEYED_KEEP_MIN)と、MLP 全体の部品を受けて方向に沿わない
+    変化 ÷ 消した成分が OFF_MAX を超えたまま元の型で書いた専門家のテンソルの注意。auto はそうしたテンソルを Q8_0 にするので、
+    出るのは主に keep(元の型を守る)のとき。"""
     from .gain import KEYED_KEEP_MIN
+    from .inkling_bake import OFF_MAX
     low = [m for m in recs or [] if m.get("edit_kept") is not None and m["edit_kept"] < KEYED_KEEP_MIN]
-    if not low:
+    off = [m for m in recs or [] if m.get("whole_layer") and (m.get("off_over_removed") or 0.0) > OFF_MAX and m not in low]
+    out = []
+    if low:
+        what = "、".join(f"{m['tensor']}({m['to']})は {m['edit_kept']:.0%}" for m in low[:3]) + (" など" if len(low) > 3 else "")
+        out.append(f"書いた型では編集の 1 割以上が丸めに消えたテンソルがあります(残った編集: {what})")
+    if off:
+        what = "、".join(f"{m['tensor']}({m['to']})は {m['off_over_removed']:.2f}" for m in off[:3]) + (" など" if len(off) > 3 else "")
+        out.append(f"元の型のままでは、方向に沿わない変化 ÷ 消した成分が上限 {OFF_MAX} を超えたテンソルがあります({what})")
+    if not out:
         return None
-    what = "、".join(f"{m['tensor']}({m['to']})は {m['edit_kept']:.0%}" for m in low[:3]) + (" など" if len(low) > 3 else "")
-    return (f"書いた型では編集の 1 割以上が丸めに消えたテンソルがあります(残った編集: {what})。"
-            "型を自動(こうしたテンソルだけ Q8_0)にするか、LoRA で配ってください")
+    return "。".join(out) + "。型を自動(こうしたテンソルだけ Q8_0)にするか、LoRA で配ってください"
 
 
 def target_weights(session, into):
@@ -934,14 +942,43 @@ def taps_identical(source, target) -> dict:
     return {"n": len(names), "different": diff, "target_types": types}
 
 
+def plan_entry(m: dict) -> dict:
+    """焼き込みの記録 1 つ → 予定の行(型・大きさと、元の大きさのまま / Q8_0 の理由になる数)。"""
+    fb = m.get("fallback") or {}
+    return {"tensor": m["tensor"], "type": m["from"], "to": m["to"], "from_mib": m["bytes_from"] / 2**20, "to_mib": m["bytes_to"] / 2**20,
+            "whole_layer": bool(m.get("whole_layer")), "why": fb.get("why") or ("edit_kept" if "edit_kept" in fb else None),
+            "edit_kept": fb.get("edit_kept", m.get("edit_kept")), "off_over_removed": fb.get("off_over_removed", m.get("off_over_removed"))}
+
+
+def _plan_why(x: dict) -> str:
+    from .inkling_bake import OFF_MAX
+    if x.get("why") == "off_direction":
+        return f"方向に沿わない変化 ÷ 消した成分 {x['off_over_removed']:.2f} が上限 {OFF_MAX} を超える"
+    if x.get("why") == "edit_kept":
+        return f"元の型では残る編集 {x['edit_kept']:.2f}"
+    if x.get("why") == "imatrix":
+        return "imatrix の要る型"
+    return ""
+
+
 def bake_plan_text(grow: dict) -> str:
-    """焼き込みの予定の文: 型を変えるテンソル(層)と、ファイル・VRAM の増え方。"""
-    conv = [x for x in grow.get("tensors") or [] if x.get("to") and x.get("to") != x.get("type")]
+    """焼き込みの予定の文: 型を変えるテンソル(層)とその理由、MLP 全体の部品を受けて元の大きさのまま書く専門家のテンソル
+    (方向に沿わない変化 ÷ 消した成分)、ファイル・VRAM の増え方。"""
+    from .inkling_bake import OFF_MAX
+    ts = grow.get("tensors") or []
+    conv = [x for x in ts if x.get("to") and x.get("to") != x.get("type")]
+    stay = [x for x in ts if x.get("whole_layer") and x.get("to") == x.get("type") and x.get("off_over_removed") is not None]
+    parts = []
+    if stay:
+        parts.append("元の大きさのまま: " + "、".join(f"層 {x['tensor'].split('.')[1]} の専門家 {x['type']}(MLP 全体の部品。方向に沿わない変化 ÷ "
+                                                   f"消した成分 {x['off_over_removed']:.2f}、上限 {OFF_MAX})" for x in stay))
+    if conv:
+        parts.append("型を変える: " + "、".join(
+            f"層 {x['tensor'].split('.')[1]} の{'専門家' if 'ffn_down_exps' in x['tensor'] else ' attention の出力'} {x['type']} → {x['to']}"
+            f"(+{x['to_mib'] - x['from_mib']:.0f} MiB" + (f"、{_plan_why(x)}" if _plan_why(x) else "") + ")" for x in conv))
     if not conv:
-        return "焼き込みの予定: どのテンソルも元の型・元の大きさのまま"
-    parts = [f"層 {x['tensor'].split('.')[1]} の{'専門家' if 'ffn_down_exps' in x['tensor'] else ' attention の出力'}"
-             f" {x['type']} → {x['to']}(+{x['to_mib'] - x['from_mib']:.0f} MiB)" for x in conv]
-    return f"焼き込みの予定: {'、'.join(parts)}。ファイルと VRAM は合わせて {grow['bytes'] / 2**20:+.0f} MiB"
+        return "焼き込みの予定: どのテンソルも元の型・元の大きさのまま" + (f"({parts[0]})" if parts else "")
+    return f"焼き込みの予定: {'。'.join(parts)}。ファイルと VRAM は合わせて {grow['bytes'] / 2**20:+.0f} MiB"
 
 
 def gpu_free_mb() -> float | None:

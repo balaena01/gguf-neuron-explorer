@@ -822,28 +822,28 @@ def trial_all(session, spec_path, out_dir: Path, *, ks=(8, 16, 32), strengths=(1
 # --- 焼き込み(GGUF に書き込む) -----------------------------------------------------------------------------------------
 
 def bake(reader: Reader, units: list, refs: dict | None, dst: Path | None, *, requant: str = "q8_0", correct: bool = True,
-         strip_meta: bool = False, tens: dict | None = None, extra_meta: dict | None = None) -> dict:
+         strip_meta: bool = False, tens: dict | None = None, extra_meta: dict | None = None, prepared: dict | None = None) -> dict:
     """部品 units を GGUF に焼き込む(LoRA と同じ変化量)。requant(書き換えるテンソルの型):
     - q8_0 / f16: 書き換えるテンソルをその型にする(gne のほかのモデルの焼き込みと同じ。専門家のテンソルは 1 つの型しか持てない
       ので、編集しない専門家も変換し、テンソル全体が大きくなる。F16 は元の Q2_0・NVFP4 の値をそのまま表せる)
     - keep: 元の型・元の大きさのまま。attention の出力(Q8_0・K-quant)は llama.cpp の量子化で書き戻す。専門家のテンソル
       (NVFP4・Q2_0)は量子化し直さず、元のコードと倍率を残して、編集する列のコードだけを動かす(inkling_bake.py の射影を
       意識した丸め。編集しない列・専門家はバイトのまま)
-    - auto: MLP 全体の部品(L:ffn)を受ける専門家のテンソルは Q8_0(元の型のままだと、方向に沿わない変化が全部の列に入り、
-      いくつかの方向が重なると LoRA から大きくずれた)。ニューロンの部品だけを受ける専門家のテンソルは keep(元の型・元の大きさ)。
-      どのテンソルも、編集の残り方(edit_kept)が KEYED_KEEP_MIN(0.9)より小さければ Q8_0 にする(gne の keyed の焼き込みの
-      auto と同じ決め方)。元が Q8_0 の attention の出力は Q8_0 のまま
+    - auto: keep と同じに書いて測り、次のテンソルだけ Q8_0 にする(auto_reason): 編集の残り方(edit_kept、いくつかの方向なら
+      方向ごとの最小)が KEYED_KEEP_MIN(0.9)より小さいテンソル(gne の keyed の焼き込みの auto と同じ決め方)と、MLP 全体の
+      部品(L:ffn)を受ける専門家のテンソルで、方向に沿わない変化 ÷ 消した成分(off_over_removed)が inkling_bake.OFF_MAX を
+      超えるもの。元が Q8_0 の attention の出力は Q8_0 のまま
     専門家ごとの倍率(ffn_down_exps.scale)はそのままにし、重みの変化量は倍率で割って入れる(実行時に倍率が掛かって LoRA と同じ
     s_e·W_e − s·u uᵀ s_e·W_e になる)。層 6〜17 の重みは 3 回で共有なので、焼き込みも 3 回すべてに効く。
     書き換えたテンソルとそのやり方は GGUF の gne.patches と <dst>.chips.json に残す(strip_meta なら GGUF には入れない)。
-    元の型のまま書く(keep・auto)ときの型ごとのやり方(same_type_method): NVFP4・Q2_0 は射影を意識した丸め、llama.cpp が imatrix
-    なしで量子化できる型(Q8_0・K-quant・IQ4_XS など)は量子化し直し(専門家のテンソルは編集した専門家のスラブだけ。編集の残り方が
+    元の型のまま書く(keep・auto)ときの型ごとのやり方(same_type_method): NVFP4・Q2_0・MXFP4・IQ4_NL は射影を意識した丸め
+    (いくつかの方向は列ごとにまとめて解く)、llama.cpp が imatrix なしで量子化できる型(Q8_0・K-quant・IQ4_XS など)は量子化し直し(専門家のテンソルは編集した専門家のスラブだけ。編集の残り方が
     0.9 より小さければ auto は Q8_0)、imatrix の要る型(IQ2_XXS・IQ2_XS・IQ1_S)は keep なら止め、auto なら Q8_0。"""
     from gguf import GGMLQuantizationType as _Q
 
     from .gain import KEYED_KEEP_MIN, _SlabStream, edit_kept, expert_slab_edits
     from .gguf_fast import rewrite_gguf
-    from .inkling_bake import TYPES, edit_slab
+    from .inkling_bake import OFF_MAX
     from .quant import dequantize, quantize
     from .steer import GneError
     if requant not in ("keep", "q8_0", "f16", "auto"):
@@ -877,7 +877,9 @@ def bake(reader: Reader, units: list, refs: dict | None, dst: Path | None, *, re
     replace: dict[str, tuple] = {}
     recs = []
     whole = whole_ffn_layers(units)
-    for name, (A, B) in sorted(tens.items()):
+    if prepared is not None:                                 # 書かずに計算した結果(dst=None の戻り値)をそのまま書く
+        replace, recs = prepared["_replace"], prepared["modified"]
+    for name, (A, B) in sorted(tens.items() if prepared is None else ()):
         t = T[name]
         rec = {"tensor": name, "from": t.tensor_type.name, "bytes_from": int(t.n_bytes), "op": "rewrite"}
         if A.ndim == 3:                                      # ffn_down_exps: 専門家ごと(スラブごと)
@@ -886,44 +888,22 @@ def bake(reader: Reader, units: list, refs: dict | None, dst: Path | None, *, re
             if sc is not None:
                 A = A / sc.reshape(-1, 1, 1).astype(np.float32)
             rec["scale_divided"] = sc is not None
+            if L in whole:
+                rec["whole_layer"] = True
             if requant in ("q8_0", "f16"):
                 replace[name] = convert_experts(t, A, B, {"q8_0": _Q.Q8_0, "f16": _Q.F16}[requant], rec)
-            elif requant == "auto" and L in whole:               # MLP 全体の部品を受けるテンソルは Q8_0(auto の決め方)
-                replace[name] = convert_experts(t, A, B, _Q.Q8_0, rec)
-                rec["why"] = "whole_layer_mlp"
-            elif same_type_method(t.tensor_type) != "par":       # NVFP4・Q2_0 のほかの型(--into で別の量子化に書くとき)
+            elif same_type_method(t.tensor_type) != "par":       # 射影を意識した丸めのない型(--into で別の量子化に書くとき)
                 replace[name] = _same_type_experts(t, A, B, requant, rec, enc, dec, convert_experts)
             else:
                 n_exp, rows, cols = int(t.data.shape[0]), int(B.shape[1]), int(A.shape[2])
                 slab = int(t.n_bytes) // n_exp
-                edited, want2, dot, flips, offs, wn = {}, 0.0, 0.0, 0, [], []
-                for e in range(n_exp):
-                    if not (np.any(A[e]) and np.any(B[e])):
-                        continue
-                    raw_e = np.ascontiguousarray(t.data[e]).reshape(rows, -1)
-                    for k in range(A.shape[1]):                          # 方向ごと(いくつかの方向の部品は 1 つずつ続けて書く)
-                        u = -B[e, :, k].astype(np.float64)                  # B = −u
-                        a = A[e, k].astype(np.float64)
-                        cols_e = np.nonzero(a)[0]
-                        if not len(cols_e):
-                            continue
-                        r = edit_slab(raw_e, t.tensor_type.name, u, {int(n): float(-a[n]) for n in cols_e}, rows, cols)
-                        raw_e = r["raw"]
-                        want2 += float(np.sum(r["want"] ** 2))
-                        dot += float(np.sum(r["want"] * r["along"]))
-                        flips += int(np.sum(r["flips"]))
-                        offs += list(r["off"] / np.maximum(np.abs(r["want"]), 1e-30))
-                        wn += list(r["off"] / np.maximum(r["w_norm"], 1e-30))
-                    if raw_e.nbytes != slab:
-                        raise GneError("INTERNAL", f"{name}: 専門家 {e} の大きさ {raw_e.nbytes} が元の {slab} と違います")
-                    edited[e] = np.asarray(raw_e, dtype=np.uint8).reshape(-1)
-                kept = dot / want2 if want2 > 0 else 1.0
-                rec.update(to=t.tensor_type.name, method="projection-aware rounding", experts=sorted(edited), edit_kept=kept,
-                           codes_changed=flips, columns=len(offs), off_over_removed_median=float(np.median(offs)) if offs else None,
-                           off_over_column_median=float(np.median(wn)) if wn else None, bytes_to=int(t.n_bytes))
-                if requant == "auto" and kept < KEYED_KEEP_MIN:     # 元の型では編集が残らない: Q8_0 にする
-                    fb = {"from": t.tensor_type.name, "edit_kept": kept}
-                    rec = {k: v for k, v in rec.items() if k in ("tensor", "from", "bytes_from", "op", "scale_divided")}
+                edited = {}
+                rec.update(_par_experts(t, A, B, n_exp, rows, cols, slab, edited))
+                why = auto_reason(rec, L in whole) if requant == "auto" else None
+                if why:                                          # 元の型では編集が残らない・方向に沿わない変化が大きい: Q8_0
+                    fb = {"from": t.tensor_type.name, "why": why, "edit_kept": rec["edit_kept"],
+                          "off_over_removed": rec["off_over_removed"], "off_max": OFF_MAX}
+                    rec = {k: v for k, v in rec.items() if k in ("tensor", "from", "bytes_from", "op", "scale_divided", "whole_layer")}
                     replace[name] = convert_experts(t, A, B, _Q.Q8_0, rec)
                     rec["fallback"] = fb
                 else:
@@ -960,8 +940,8 @@ def bake(reader: Reader, units: list, refs: dict | None, dst: Path | None, *, re
             replace[name] = (qt, raw.tobytes())
         rec["type"] = rec["from"]
         recs.append(rec)
-    if dst is None:                                          # 書かずに、残り方と大きさだけ
-        return {"path": None, "modified": recs}
+    if dst is None:                                          # 書かずに、残り方と大きさだけ(_replace は prepared で書くとき用)
+        return {"path": None, "modified": recs, "_replace": replace}
     dst.parent.mkdir(parents=True, exist_ok=True)
     kv = None if strip_meta else {"gne.patches": json.dumps(recs, ensure_ascii=False),
                                   "gne.inkling_proj": json.dumps({"units": units, "requant": requant, "correct": correct,
@@ -974,6 +954,67 @@ def bake(reader: Reader, units: list, refs: dict | None, dst: Path | None, *, re
 
 
 _SAME_TYPE: dict = {}
+
+
+def auto_reason(rec: dict, whole: bool) -> str | None:
+    """焼き込みの auto で、元の型・元の大きさで書いた専門家のテンソル(記録 rec)を Q8_0 にする理由(None なら元の型のまま):
+    edit_kept(どれかの方向の編集の残り方が 0.9 より小さい)・off_direction(MLP 全体の部品を受けるテンソルで、方向に沿わない
+    変化 ÷ 消した成分が OFF_MAX を超える)。ニューロンの部品だけのテンソルは変化が小さいので、残り方だけで決める。"""
+    from .gain import KEYED_KEEP_MIN
+    from .inkling_bake import OFF_MAX
+    if rec.get("edit_kept") is not None and rec["edit_kept"] < KEYED_KEEP_MIN:
+        return "edit_kept"
+    if whole and (rec.get("off_over_removed") or 0.0) > OFF_MAX:
+        return "off_direction"
+    return None
+
+
+def _par_experts(t, A, B, n_exp: int, rows: int, cols: int, slab: int, edited: dict) -> dict:
+    """専門家のテンソル(NVFP4・Q2_0・MXFP4・IQ4_NL)を元の型・元の大きさのまま書く(射影を意識した丸め)。専門家ごとに、編集する
+    列の LoRA の変化(いくつかの方向の部品の和)を、方向が張る空間の中でまとめて合わせる(inkling_bake.edit_columns)。専門家は
+    スレッドで並べて計算する(順番によらず同じ結果)。edited に専門家ごとの新しいバイト列を入れ、記録の値を返す: 方向ごとの
+    編集の残り方(edit_kept は最小)と目標との差、方向に沿わない変化 ÷ 消した成分(全体と列ごとの中央値)、動かしたコードの数。"""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from .inkling_bake import WORKERS, edit_columns
+    typ = t.tensor_type.name
+    k = A.shape[1]
+    todo = [e for e in range(n_exp) if np.any(A[e]) and np.any(B[e])]
+
+    def one(e):
+        jk = [j for j in range(k) if np.any(A[e, j]) and np.any(B[e, :, j])]
+        Ae, Be = A[e].astype(np.float64), B[e].astype(np.float64)
+        cs = np.nonzero(np.any(Ae[jk] != 0, axis=0))[0]
+        r = edit_columns(np.ascontiguousarray(t.data[e]).reshape(rows, -1), typ, -Be[:, jk], Be[:, jk] @ Ae[jk][:, cs], cs, rows, cols)
+        return e, jk, r
+    tt, tg, rr = np.zeros(k), np.zeros(k), np.zeros(k)
+    off2 = t2 = w2 = 0.0
+    flips, offs, wn = 0, [], []
+    with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+        for e, jk, r in ex.map(one, todo):
+            raw_e = np.asarray(r["raw"], dtype=np.uint8)
+            if raw_e.nbytes != slab:
+                raise GneError("INTERNAL", f"{t.name}: 専門家 {e} の大きさ {raw_e.nbytes} が元の {slab} と違います")
+            edited[e] = raw_e.reshape(-1)
+            w, g = r["want"], r["got"]
+            tt[jk] += np.sum(w * w, 1)
+            tg[jk] += np.sum(w * g, 1)
+            rr[jk] += np.sum((g - w) ** 2, 1)
+            off2 += r["off2"]
+            t2 += r["T2"]
+            w2 += float(np.sum(r["w_norm"] ** 2))
+            flips += int(np.sum(r["codes_col"]))
+            offs += list(r["off_col"])
+            wn += list(r["off_col"] * r["t_col"] / np.maximum(r["w_norm"], 1e-30))
+    has = tt > 0
+    kept_by = np.where(has, tg / np.maximum(tt, 1e-300), 1.0)
+    return {"to": typ, "method": "projection-aware rounding", "experts": sorted(edited), "edit_kept": float(kept_by[has].min()) if has.any() else 1.0,
+            "edit_kept_by_direction": [round(float(x), 4) for x in kept_by[has]],
+            "residual_by_direction": [round(float(x), 4) for x in np.sqrt(rr[has] / np.maximum(tt[has], 1e-300))],
+            "codes_changed": flips, "columns": len(offs), "off_over_removed": float(np.sqrt(off2 / max(t2, 1e-300))),
+            "off_over_weights": float(np.sqrt(off2 / max(w2, 1e-300))), "removed_over_weights": float(np.sqrt(t2 / max(w2, 1e-300))),
+            "off_over_removed_median": float(np.median(offs)) if offs else None,
+            "off_over_column_median": float(np.median(wn)) if wn else None, "bytes_to": int(t.n_bytes)}
 
 
 def same_type_method(qt) -> str:
@@ -1042,7 +1083,7 @@ def _same_type_experts(t, A, B, requant: str, rec: dict, enc, dec, convert_exper
 
 
 def whole_ffn_layers(units: list) -> set[int]:
-    """MLP 全体の部品(L:ffn)がある層。焼き込みの auto では、この層の専門家のテンソルを Q8_0 で書く。"""
+    """MLP 全体の部品(L:ffn)がある層。焼き込みの auto では、この層の専門家のテンソルの方向に沿わない変化も確かめる(auto_reason)。"""
     return {int(u[0]) for u in units if len(u) > 1 and u[1] == "ffn"}
 
 

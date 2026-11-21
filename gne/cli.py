@@ -3279,13 +3279,17 @@ def _verify_corr_line(sp: dict) -> str:
 def _inkling_bake_line(m: dict) -> str:
     ex = f"、専門家 {len(m['experts'])} 個を編集" if "experts" in m else ""
     kept = f"、残った編集 {m['edit_kept']:.3f}" if m.get("edit_kept") is not None else ""
+    if len(m.get("edit_kept_by_direction") or []) > 1:
+        kept = f"、残った編集(方向ごと){'・'.join(f'{x:.3f}' for x in m['edit_kept_by_direction'])}"
     how = {"projection-aware rounding": "元の型のまま、編集する列のコードだけ動かした", "requant": "元の型で量子化し直した",
            "convert": "型を変えた"}.get(m.get("method"), m.get("method") or "")
-    par = (f"、動かしたコード {m['codes_changed']}(列 {m['columns']})、方向に沿わない変化 ÷ 消した成分 {m['off_over_removed_median']:.2f}"
-           if m.get("method") == "projection-aware rounding" else "")
-    fb = f"、元の型では残った編集が {m['fallback']['edit_kept']:.2f} なので Q8_0 にした" if m.get("fallback") else ""
-    if m.get("why") == "whole_layer_mlp":
-        fb += "、MLP 全体の部品を受けるので Q8_0(auto の決め方)"
+    par = (f"、動かしたコード {m['codes_changed']}(列 {m['columns']})、方向に沿わない変化 ÷ 消した成分 "
+           f"{m.get('off_over_removed', m['off_over_removed_median']):.2f}" if m.get("method") == "projection-aware rounding" else "")
+    fb = (f"、元の型では残った編集が {m['fallback']['edit_kept']:.2f} なので Q8_0 にした"
+          if (m.get("fallback") or {}).get("edit_kept") is not None else "")
+    if (m.get("fallback") or {}).get("why") == "off_direction":
+        fb = (f"、元の型では方向に沿わない変化 ÷ 消した成分が {m['fallback']['off_over_removed']:.2f}(上限 {m['fallback']['off_max']})"
+              "なので Q8_0 にした(MLP 全体の部品、auto の決め方)")
     if (m.get("fallback") or {}).get("why") == "imatrix":
         fb = f"、{m['fallback']['from']} は imatrix が要り元の型に書き戻せないので Q8_0"
     if m.get("unedited_rel_change") is not None:

@@ -173,11 +173,15 @@ def _headproj_export(s, recipe: str | None = None, out: str | None = None, *, un
         path = s.store.export_dir() / (f"{file_stem}.gguf" if bake else f"{file_stem}.lora.gguf")
     else:
         path = s.default_export_path(r, bake=bake, kind="headproj", name=nm)
-    if not overwrite and path.exists():
+    dry = bool(p.get("dry_run"))                     # 書かずに計算だけ(Inkling 2 の焼き込みの予定)
+    if not overwrite and not dry and path.exists():
         raise GneError("FILE_EXISTS", f"{path.name} はもうあります", "上書きするか、別の名前にしてください")
     if adapter_name is not None and str(adapter_name).strip():
         p["name"] = str(adapter_name).strip()
-    d = s.headproj_export(r, path, **p)
+    d = s.headproj_export(r, None if dry else path, **p)
+    if dry:
+        d["name"] = nm
+        return d
     d["file"] = Path(d["path"]).name
     if not bake and Path(d["path"]).parent.resolve() == s.store.export_dir().resolve():
         d["url"] = f"/api/export/file/{d['file']}"
