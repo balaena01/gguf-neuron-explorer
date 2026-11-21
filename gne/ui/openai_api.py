@@ -125,6 +125,8 @@ def register(app: FastAPI, session, live) -> None:
             if not 1 <= max_tokens <= 4096:
                 raise GneError("BAD_ARGS", "max_tokens は 1〜4096 です")
             sampling = sampling_from(body, recipe)
+            from ..chat import effort_value              # reasoning_effort(OpenAI と同じ名前)。テンプレートが使うときだけ
+            effort = effort_value(session.engine.chat_template, body.get("reasoning_effort"))
         except GneError as e:
             return _err(e)
         cid, created = f"chatcmpl-{uuid.uuid4().hex[:12]}", int(time.time())
@@ -156,8 +158,9 @@ def register(app: FastAPI, session, live) -> None:
                         if piece:
                             q.put(("delta", piece, "reasoning_content" if marks is not None and marks.open else "content"))
                     try:
-                        r, info = generate_when(e, e.steer_ctx(), msgs, vecs, w, max_tokens=max_tokens, on_token=cb,
-                                                lora=session.lora_for(recipe), sampling=sampling)
+                        with e.with_template_vars(reasoning_effort=effort):
+                            r, info = generate_when(e, e.steer_ctx(), msgs, vecs, w, max_tokens=max_tokens, on_token=cb,
+                                                    lora=session.lora_for(recipe), sampling=sampling)
                     except _Stopped:
                         q.put(("end", None))
                         return

@@ -1266,7 +1266,9 @@ async function main() {
   if (state.model) {
     state.recipe = new Recipe(state.model.meta.model_id, recipeChanged);
     chat = new ChatPanel({ recipe: state.recipe, onAdded: () => recipeTouched(true),
-                           plain: () => !!(state.arch && state.arch.inkling) });        // Inkling 2: 無介入の 1 列だけで話す
+                           plain: () => !!(state.arch && state.arch.inkling),           // Inkling 2: 無介入の 1 列だけで話す
+                           effortChoices: () => (state.model && state.model.meta.reasoning_effort_choices !== undefined
+                             ? state.model.meta.reasoning_effort_choices : null) });         // 思考の量(テンプレートが使うときだけ)
     state.chat = chat;                                                   // 自動テスト用
     recipePanel = new RecipePanel($("#recipe-list"), state.recipe, {
       onOpen: (u) => openNeuron(u),

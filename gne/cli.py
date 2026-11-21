@@ -43,6 +43,8 @@ from .modal_cli import modal_app  # noqa: E402
 app.add_typer(modal_app, name="modal")
 headproj_app = typer.Typer(no_args_is_help=True, help="ヘッドの方向成分の射影(mode: proj)の書き出し(CHANGE-06 E)")
 app.add_typer(headproj_app, name="headproj")
+inkling_app = typer.Typer(no_args_is_help=True, help="Inkling 2(inkling2_loop)専用: 中を読むだけの道具(docs/inkling2.md)")
+app.add_typer(inkling_app, name="inkling")
 
 
 @dataclass
@@ -1389,10 +1391,16 @@ def chat(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Option
          when: Optional[str] = _WHEN, ablate: Optional[str] = _ABLATE,
          temperature: Optional[float] = _TEMP, top_k: Optional[int] = _TOP_K, top_p: Optional[float] = _TOP_P,
          min_p: Optional[float] = _MIN_P, presence_penalty: Optional[float] = _PRES,
-         sample_seed: Optional[int] = _SSEED, greedy: bool = _GREEDY, lora_when: str = _LORA_WHEN):
+         sample_seed: Optional[int] = _SSEED, greedy: bool = _GREEDY, lora_when: str = _LORA_WHEN,
+         reasoning_effort: Optional[str] = typer.Option(None, "--reasoning-effort",
+                                                        help="チャットテンプレートに渡す思考の量(reasoning_effort。Inkling 2 は none / minimal / "
+                                                             "low / medium / high / xhigh / max か 0〜0.99。省くとテンプレートの既定)")):
     """−/0/+ の 3 列比較チャット(ユーザーの発話は共有、返答は列ごと)。サンプリングなら 3 列とも同じ seed で引く。"""
-    from .chat import ChatState, chat_turn, make_columns
+    from .chat import ChatState, chat_turn, effort_value, make_columns
     s = holder["session"] = c.session()
+    eff = effort_value(s.engine.chat_template, reasoning_effort)
+    if eff is not None:
+        s.engine.template_vars = {**s.engine.template_vars, "reasoning_effort": eff}
     if when:
         from .when import parse_when
         parse_when(when)
@@ -4281,6 +4289,290 @@ def heads_geometry(c: Common, holder: dict,
         lines += ["  " + n["text"] for n in e["notes"]]
         lines.append(f"  使い方: gne direction score --name {e['name']} / gne heads writes --name {e['name']} / "
                      f"gne headproj ablate --direction {e['name']} --per-layer")
+    return d, "\n".join(lines), 0
+
+
+# --- Inkling 2: 中を読むだけの道具(gne/inkling_read.py、docs/inkling2.md) -------------------------------------------------------
+
+_INK_SPEC = typer.Option(..., "--spec", exists=True, help="対照集合(公開のひな形: prompts_a / prompts_b、または user_prompts と system_a)")
+_INK_MAX = typer.Option(None, "--max-prompts", help="各側の質問の数の上限")
+_INK_NAME = typer.Option(None, "--name", help="結果を <root>/inkling/<model_id>/<名前>.<種類>.json に書く(省くとひな形の名前)")
+
+
+def _ink_reader(c: Common, holder: dict):
+    from .inkling_read import Reader
+    s = holder["session"] = c.session()
+    return s, Reader(s, progress=c.progress)
+
+
+def _ink_save(s, name: str, kind: str, d: dict, arrays: dict | None = None) -> str:
+    import re as _re
+
+    import numpy as np
+    if not _re.fullmatch(r"[\w.\-]+", name):
+        raise GneError("BAD_ARGS", f"名前 {name!r} は英数字・_・-・. だけにしてください")
+    out = s.store.root / "inkling" / s.meta.model_id
+    out.mkdir(parents=True, exist_ok=True)
+    p = out / f"{name}.{kind}.json"
+    p.write_text(json.dumps(d, ensure_ascii=False, indent=1, default=_json_default), encoding="utf-8")
+    if arrays:
+        np.savez(out / f"{name}.{kind}.npz", **arrays)
+    return str(p)
+
+
+def _ink_convs(spec: Path, max_prompts: Optional[int]):
+    from .inkling_read import load_contrast
+    A, B, nm = load_contrast(spec)
+    if max_prompts:
+        A, B = A[:max_prompts], B[:max_prompts]
+    return A, B, nm
+
+
+def _ink_step(st: dict) -> str:
+    p = f"・{st['pass']} 回目" if st["pass"] else ""
+    return f"段 {st['step']:>2}(層 {st['layer']}{p}、流れ {st['stream']})"
+
+
+@gne_command(inkling_app, "read", "inkling read")
+def inkling_read_cmd(c: Common, holder: dict,
+                     text: str = typer.Option(..., "--text", "-t", help="ユーザーの発話(チャットテンプレートに入れて流す)"),
+                     names: str = typer.Option("l_out,ffn_mix,attn_out,ffn_out", "--names",
+                                               help="捕まえる名前(カンマ区切り。gne probe --list-names で見える名前。段は実行順)"),
+                     steps: Optional[str] = typer.Option(None, "--steps", help="段(例 18-29。省くと全部)"),
+                     out: Path = typer.Option(..., "--out", help="書き出す .npz(名前-段 → (トークン, 値))")):
+    """段ごとの値を捕まえて .npz に書く(読むだけ。値の意味は docs/inkling2.md の「中を読む」)。"""
+    import numpy as np
+
+    from .inkling_read import want
+    s, r = _ink_reader(c, holder)
+    bases = [x.strip() for x in names.split(",") if x.strip()]
+    ids = r.ids(text)
+    r.fit([ids])
+    cap = r.run(ids, want(bases, parse_layers(steps)))
+    if not cap:
+        raise GneError("NOT_FOUND", f"{', '.join(bases)} がグラフにありません", "gne probe --list-names で名前を確かめてください")
+    np.savez(out, **cap)
+    lines = [f"{out}({len(ids)} トークン、{len(cap)} 個)"] + [f"  {k}: {tuple(v.shape)}" for k, v in sorted(cap.items())[:40]]
+    return {"path": str(out), "n_tokens": len(ids), "names": {k: list(v.shape) for k, v in cap.items()}}, "\n".join(lines), 0
+
+
+@gne_command(inkling_app, "check", "inkling check")
+def inkling_check_cmd(c: Common, holder: dict,
+                      spec: Path = typer.Option(Path(__file__).resolve().parent.parent / "configs" / "pipeline" / "question_kinds.json",
+                                                "--spec", exists=True, help="質問を取る対照集合(A 側の最初の質問を使う)"),
+                      steps: Optional[str] = typer.Option(None, "--steps", help="段(省くと全部)")):
+    """捕まえた値を、別の計算(流れの和・混ぜ方・繰り返しのゲート・W_o・短い畳み込み・専門家の和・SiTU)と突き合わせる。"""
+    import numpy as np
+
+    from .inkling_read import check
+    s, r = _ink_reader(c, holder)
+    A, _, _ = _ink_convs(spec, 1)
+    d = check(r, A[0], steps=parse_layers(steps))
+    lines = [f"突き合わせ({d['n_tokens']} トークン、段 {len(d['steps'])} 個)。値は相対誤差 ‖捕捉 − 計算‖ / ‖捕捉‖ の中央値 / 最大"]
+    lines += [f"  {k}: {v['median']:.2e} / {v['max']:.2e}({v['n']} 件)" for k, v in d["errors"].items()]
+    return d, "\n".join(lines), 0
+
+
+@gne_command(inkling_app, "mix", "inkling mix")
+def inkling_mix_cmd(c: Common, holder: dict, spec: Path = _INK_SPEC, max_prompts: Optional[int] = _INK_MAX,
+                    positions: str = typer.Option("all", "--positions", help="平均するトークン: all / last"),
+                    name: Optional[str] = _INK_NAME):
+    """各段の深さ方向の注意の重み: attention と MLP の入力が、それまでのどの流れをどれだけ読むか、繰り返しのメッセージが前の回の
+    どの流れを読むか、最後の出力の混ぜ方(対照集合の両側の質問で平均)。"""
+    import numpy as np
+
+    from .inkling_read import mix_summary
+    if positions not in ("all", "last"):
+        raise GneError("BAD_ARGS", "--positions は all か last です")
+    s, r = _ink_reader(c, holder)
+    A, B, nm = _ink_convs(spec, max_prompts)
+    d = mix_summary(r, A + B, positions=positions)
+    d["path"] = _ink_save(s, name or nm, "mix", d)
+    fmt = lambda labels, ws: " · ".join(f"{lab} {w:.2f}" for lab, w in zip(labels, ws, strict=True))  # noqa: E731
+    lines = [f"深さ方向の注意の重み({d['n_convs']} 会話、{'全トークン' if positions == 'all' else '最後のトークン'}の平均)。"
+             "並びは、取っておいた流れの新しい順、最後が今の状態"]
+    for st in d["steps"]:
+        parts = []
+        if "attn" in st:
+            a = st["attn"]
+            parts.append("attn " + (fmt(a["labels"], a["weights"][0]) if not a["queries"] else
+                                    " / ".join(f"{q}: {fmt(a['labels'], w)}" for q, w in zip(a["queries"], a["weights"], strict=True))))
+        f = st["ffn"]
+        parts.append("ffn " + fmt(f["labels"], f["weights"][0]))
+        if "msg" in st:
+            m = st["msg"]
+            parts.append("msg " + " / ".join(f"{q}: {fmt(m['labels'], w)}" for q, w in zip(m["queries"], m["weights"], strict=True)))
+        lines.append(f"{_ink_step(st)}  " + " | ".join(parts))
+    if d["out"]:
+        lines.append("最後の出力: " + fmt(d["out"]["labels"], d["out"]["weights"]))
+    # 区分ごとのまとめ: MLP の入力が今の状態をどれだけ読むか
+    for title, rows in _ink_groups(r.plan, d["steps"]):
+        ws = [st["ffn"]["weights"][0][-1] for st in rows]
+        lines.append(f"MLP の入力が今の状態を読む重み({title}): 平均 {np.mean(ws):.2f}、最小 {np.min(ws):.2f}、最大 {np.max(ws):.2f}")
+    lines.append(f"保存: {d['path']}")
+    return d, "\n".join(lines), 0
+
+
+_INK_REGION = {"before": "繰り返しの前", "loop": "繰り返しの中", "after": "繰り返しの後"}
+
+
+def _ink_region_title(plan, reg: str, p: int = 0) -> str:
+    if reg == "before":
+        return f"{_INK_REGION[reg]}(層 0〜{plan.core_start - 1})"
+    if reg == "after":
+        return f"{_INK_REGION[reg]}(層 {plan.core_end}〜{plan.n_stored - 1})"
+    return f"{_INK_REGION[reg]}(層 {plan.core_start}〜{plan.core_end - 1}、{p} 回目)"
+
+
+def _ink_groups(plan, rows: list[dict]):
+    """表を 繰り返しの前 / 繰り返しの中(回ごと)/ 繰り返しの後 に分ける。"""
+    from .inkling_read import region
+    keys = []
+    for r in rows:
+        k = (region(plan, r["step"]), plan.step(r["step"])["pass"])
+        if k not in keys:
+            keys.append(k)
+    return [(_ink_region_title(plan, reg, p), [r for r in rows if (region(plan, r["step"]), plan.step(r["step"])["pass"]) == (reg, p)])
+            for reg, p in keys]
+
+
+@gne_command(inkling_app, "residuals", "inkling residuals")
+def inkling_residuals_cmd(c: Common, holder: dict, spec: Path = _INK_SPEC, max_prompts: Optional[int] = _INK_MAX,
+                          name: Optional[str] = _INK_NAME):
+    """残差の定義の比べ(読むだけ)。(a) 流れの部分和 l_out と、副層が実際に読む混ぜた入力(MLP の ffn_mix、attention の attn_mix。
+    全体を見る層は Q・K・V 別、2 回目以降は繰り返しのゲートの後も)で、最後のトークンの A − B の方向を段ごとに作り、向きの近さ(cos)と
+    分かれ方(半分で作った方向で残りの半分を測った差 ÷ 標準偏差)を並べる。同じ層の回どうしの向き、3 回目の方向に沿った各回の
+    ヘッド・副層の書き込み、深さ方向の注意の重みの A 側と B 側の違い、繰り返しのメッセージの強さも出す。方向は保存するが、
+    方向で押す・射影する機能は、どの定義にするか決まるまで止めたまま。"""
+    import numpy as np
+
+    from .inkling_read import study
+    s, r = _ink_reader(c, holder)
+    plan = r.plan
+    A, B, nm = _ink_convs(spec, max_prompts)
+    d = study(r, A, B)
+    D = d.pop("directions")
+    d["path"] = _ink_save(s, name or nm, "residuals", d, {f"d_{k}": v for k, v in D.items()})
+    f = lambda x, fm="+.2f": "—" if x is None or x != x else format(x, fm)  # noqa: E731
+    med = lambda xs: float(np.median(xs)) if xs else float("nan")  # noqa: E731
+    lines = [f"残差の定義の比べ(A {d['n_a']} 問・B {d['n_b']} 問、最後のトークン)。a = 流れの部分和、ffn = MLP が読む混ぜた入力、"
+             "Q/K/V = attention が読む混ぜた入力(SWA の層は 1 つ)、ffn'・Q' = 繰り返しのゲートの後。分かれ方 = 半分で作った方向で残りの"
+             "半分を測った A − B ÷ 標準偏差"]
+    cols = [("l_out|ffn_mix", "a-ffn"), ("l_out|attn_mix_q", "a-Q"), ("ffn_mix|attn_mix_q", "ffn-Q"), ("attn_mix_q|attn_mix_k", "Q-K"),
+            ("attn_mix_q|attn_mix_v", "Q-V"), ("ffn_mix|ffn_in", "ffn-ffn'"), ("attn_mix_q|attn_in_q", "Q-Q'")]
+    lines.append("\n1. 向きの近さ(cos)と分かれ方")
+    for title, rows in _ink_groups(plan, d["steps"]):
+        lines.append(f"[{title}]")
+        for x in rows:
+            cs = "  ".join(f"{lab} {f(x['cos'][k])}" for k, lab in cols if k in x["cos"])
+            sp = " ".join(f"{lab} {f(x['sep'].get(v), '.1f')}" for v, lab in (("l_out", "a"), ("ffn_mix", "ffn"), ("attn_mix_q", "Q"))
+                          if v in x["sep"])
+            lines.append(f"  段 {x['step']:>2} 層 {x['layer']:>2}  {cs}  | 分かれ方 {sp}")
+        lines.append(f"  中央値: cos a-ffn {f(med([x['cos']['l_out|ffn_mix'] for x in rows]))}、cos ffn-Q "
+                     f"{f(med([x['cos'].get('ffn_mix|attn_mix_q') for x in rows if 'ffn_mix|attn_mix_q' in x['cos']]))}、分かれ方 a "
+                     f"{f(med([x['sep']['l_out'] for x in rows]), '.1f')} / ffn {f(med([x['sep']['ffn_mix'] for x in rows]), '.1f')}")
+    lines.append("\n2. 同じ層の回どうしの向きの近さ(1-2 / 2-3 / 1-3)")
+    for x in d["passes"]:
+        lines.append(f"  層 {x['layer']:>2}  " + "  ".join(f"{lab} {'/'.join(f(v) for v in x[k])}"
+                                                    for k, lab in (("l_out", "a"), ("ffn_mix", "ffn"), ("attn_mix_q", "Q"))))
+    lines.append("\n3. 3 回目の方向(その層の段)に沿った各回の書き込みの A − B(attention 全体・MLP 全体、ヘッドは向きが 3 回目と逆で、"
+                 "大きさが 3 回目の最大の 1 割以上のもの)。方向 a = 流れの部分和、b = MLP が読む混ぜた入力")
+    for dn in ("a", "b"):
+        n_opp = 0
+        for x in [h for h in d["heads"] if h["direction"] == dn]:
+            n_opp += len(x["opposite"])
+            pp = "  ".join(f"{q['pass']}回目 attn {q['attn']:+.2f} ffn {q['ffn']:+.2f}" for q in x["passes"])
+            op = ", ".join(f"{o['pass']}回目 H{o['head']} {o['value']:+.2f}(3回目 {o['pass3']:+.2f})" for o in x["opposite"][:6])
+            lines.append(f"  [{dn}] 層 {x['layer']:>2}  {pp}" + (f"  逆向き: {op}" + (" …" if len(x["opposite"]) > 6 else "") if op else ""))
+        lines.append(f"  [{dn}] 逆向きのヘッド(1・2 回目の延べ): {n_opp}(層 {plan.width} × ヘッド {len(d['heads'][0]['passes'][0]['heads'])} × 2 回)")
+    lines.append(f"  ヘッドごとの書き込みの和と attn_out の差(相対、最大): {f(d['head_sum_rel_max'], '.1e')}")
+    lines.append("\n4. 深さ方向の注意の重みの A 側と B 側の違い(重みの差の絶対値の和 ÷ 2。0 = 同じ、1 = まったく違う)")
+    for title, rows in _ink_groups(plan, d["mix"]):
+        lines.append(f"[{title}]")
+        for x in rows:
+            parts = [f"{side} 最後 {x[f'{side}_last']['tv']:.3f} 全体 {x[f'{side}_all']['tv']:.3f}" for side in ("attn", "ffn", "msg")
+                     if f"{side}_last" in x]
+            lines.append(f"  段 {x['step']:>2}  " + "  ".join(parts))
+        lines.append(f"  最大: ffn 最後 {max(x['ffn_last']['tv'] for x in rows):.3f}、attn 最後 "
+                     f"{max([x['attn_last']['tv'] for x in rows if 'attn_last' in x] or [0]):.3f}")
+    lines.append("\n5. 繰り返しのメッセージの強さ(2 回目以降、全トークンの平均): ‖gain ⊙ メッセージ‖ ÷ ‖混ぜた入力‖ / ‖forget ⊙ 混ぜた入力‖ ÷ ‖混ぜた入力‖")
+    for p in (2, 3):
+        rows = [x for x in d["loop"] if x["pass"] == p]
+        for step in sorted({x["step"] for x in rows}):
+            xs = [x for x in rows if x["step"] == step]
+            lines.append(f"  段 {step:>2}(層 {xs[0]['layer']}・{p} 回目)  " + "  ".join(
+                f"{x['ctrl']} {x['gain_msg_rel']:.3f} / {x['forget_rel']:.3f}" for x in xs))
+        if rows:
+            lines.append(f"  {p} 回目の平均: gain·メッセージ {np.mean([x['gain_msg_rel'] for x in rows]):.3f}、forget "
+                         f"{np.mean([x['forget_rel'] for x in rows]):.3f}")
+    lines.append(f"\n保存: {d['path']}(方向は .npz)")
+    return d, "\n".join(lines), 0
+
+
+@gne_command(inkling_app, "conv", "inkling conv")
+def inkling_conv_cmd(c: Common, holder: dict, spec: Path = _INK_SPEC, max_prompts: Optional[int] = _INK_MAX,
+                     steps: Optional[str] = typer.Option(None, "--steps", help="段(省くと全部)"),
+                     source: Optional[str] = typer.Option(None, "--from", help="方向を取る gne inkling residuals の結果の名前(省くとひな形の名前。無ければ作る)"),
+                     name: Optional[str] = _INK_NAME):
+    """attention と MLP の書き込みから方向を除いたとき、短い畳み込みの後に方向の成分がどれだけ残るか(実際の活性で)。方向は段ごとの
+    A − B で、a = 流れの部分和、b = MLP が読む混ぜた入力(gne inkling residuals の結果)。素直な射影と、今のトークンの倍率で直した
+    射影を比べる。"""
+    import numpy as np
+
+    from .inkling_read import conv_leak, study
+    s, r = _ink_reader(c, holder)
+    plan = r.plan
+    A, B, nm = _ink_convs(spec, max_prompts)
+    src = s.store.root / "inkling" / s.meta.model_id / f"{source or nm}.residuals.npz"
+    if src.exists():
+        z = np.load(src)
+        dirs = {"a": z["d_l_out"], "b": z["d_ffn_mix"]}
+    else:
+        D = study(r, A, B)["directions"]
+        dirs = {"a": D["l_out"], "b": D["ffn_mix"]}
+    d = conv_leak(r, A + B, dirs, steps=parse_layers(steps))
+    d["directions_from"] = str(src) if src.exists() else "computed"
+    d["path"] = _ink_save(s, name or nm, "conv", d)
+    f = lambda x: "—" if x is None else f"{x:.3f}"  # noqa: E731
+    lines = ["短い畳み込みの後に残る方向の成分(残る割合 = 射影の後の成分 ÷ 元の成分、二乗平均)。素直 = r を除く(今のトークンの倍率の分 + "
+             "前のトークンからの漏れ)、直した = normalize(g⊙r) を除く。副作用 = 方向のほかの部分の変化 ÷ 書き込みの大きさ。"
+             f"方向: {d['directions_from']}"]
+    for title, rows in _ink_groups(plan, d["rows"]):
+        lines.append(f"[{title}]")
+        for x in rows:
+            lines.append(f"  段 {x['step']:>2} {x['kind']:4} [{x['direction']}]  素直 {f(x['left_naive'])}(今 {f(x['left_naive_now'])} "
+                         f"前 {f(x['left_naive_past'])})  直した {f(x['left_corrected'])}  副作用 素直 {f(x['side_naive'])} "
+                         f"直した {f(x['side_corrected'])}  再計算の差 {x['recompute_rel']:.1e}")
+    for kind in ("attn", "ffn"):
+        for dn in ("a", "b"):
+            xs = [x for x in d["rows"] if x["kind"] == kind and x["direction"] == dn]
+            if xs:
+                lines.append(f"{kind} [{dn}]: 素直な射影で残る割合 中央値 {np.median([x['left_naive'] for x in xs]):.3f}(最大 "
+                             f"{np.max([x['left_naive'] for x in xs]):.3f})、直した射影 {np.median([x['left_corrected'] for x in xs]):.3f}"
+                             f"(最大 {np.max([x['left_corrected'] for x in xs]):.3f})、副作用 素直 "
+                             f"{np.median([x['side_naive'] for x in xs]):.3f} 直した {np.median([x['side_corrected'] for x in xs]):.3f}")
+    lines.append(f"保存: {d['path']}")
+    return d, "\n".join(lines), 0
+
+
+@gne_command(inkling_app, "experts", "inkling experts")
+def inkling_experts_cmd(c: Common, holder: dict, spec: Path = _INK_SPEC, max_prompts: Optional[int] = _INK_MAX,
+                        name: Optional[str] = _INK_NAME):
+    """段ごとの専門家の選ばれ方(全トークン)と、繰り返しの層で同じトークンに回どうしが選んだ 8 個の重なり。"""
+    import numpy as np
+
+    from .inkling_read import experts
+    s, r = _ink_reader(c, holder)
+    A, B, nm = _ink_convs(spec, max_prompts)
+    d = experts(r, A + B)
+    d["path"] = _ink_save(s, name or nm, "experts", d)
+    lines = [f"専門家の選ばれ方({d['n_tokens']} トークン)。5 割・9 割 = 選ばれた回数のその割合を占める専門家の数"]
+    for st in d["steps"]:
+        lines.append(f"{_ink_step(st)}  5 割 {st['n50']:>3}  9 割 {st['n90']:>3}  選ばれた {st['n_used']:>3}  "
+                     f"いちばん大きい重みの平均 {st['w_max_mean']:.2f}")
+    lines.append("同じトークンで回どうしが選んだ専門家の重なり(共通の数 ÷ 8): " + "; ".join(
+        f"層 {x['layer']} {x['passes'][0]}-{x['passes'][1]} {x['mean']:.2f}" for x in d["overlap"]))
+    lines.append(f"保存: {d['path']}")
     return d, "\n".join(lines), 0
 
 

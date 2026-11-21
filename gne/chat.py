@@ -62,6 +62,38 @@ def _with_dose(recipe: Recipe, dose: float | None, sign: float) -> Recipe:
     return recipe.like(units, ablate=ab, sampling=None)
 
 
+def effort_choices(template: str | None) -> list[str] | None:
+    """チャットテンプレートが受け付ける reasoning_effort の名前(テンプレートの effort_map の鍵。Inkling 2 は none / minimal / low /
+    medium / high / xhigh / max)。reasoning_effort を使わないテンプレートは None、使うが名前の表が無ければ []。"""
+    import re
+    if not template or "reasoning_effort" not in template:
+        return None
+    m = re.search(r"effort_map\s*=\s*\{([^}]*)\}", template)
+    return re.findall(r"[\"']([\w-]+)[\"']\s*:", m.group(1)) if m else []
+
+
+def effort_value(template: str | None, value):
+    """--reasoning-effort の値をテンプレートに渡す形にする。None・空はテンプレートの既定(渡さない)。名前の表があるテンプレートは、
+    その名前か 0〜0.99 の数(Inkling 2 のテンプレートの範囲)。"""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    choices = effort_choices(template)
+    if choices is None:
+        raise GneError("BAD_ARGS", "このモデルのチャットテンプレートは reasoning_effort を使いません")
+    v = value.strip() if isinstance(value, str) else value
+    try:
+        num = float(v)
+    except (TypeError, ValueError):
+        num = None
+    if num is not None:
+        if choices and not 0.0 <= num <= 0.99:
+            raise GneError("BAD_ARGS", f"reasoning_effort の数は 0〜0.99 です({v})")
+        return num
+    if choices and v not in choices:
+        raise GneError("BAD_ARGS", f"reasoning_effort は {' / '.join(choices)} か 0〜0.99 の数です({v!r})")
+    return v
+
+
 def make_columns(recipe: Recipe | None, *, dose: float | None = None, left: Recipe | None = None,
                  right: Recipe | None = None, center: Recipe | None = None) -> list[Column]:
     """既定は [−レシピ, 無介入, +レシピ]。--left / --right / --center で任意のレシピに差し替えられる。"""

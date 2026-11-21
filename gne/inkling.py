@@ -219,19 +219,33 @@ def answer_part(text: str) -> str:
 
 # --- まだ対応していない機能の断り ----------------------------------------------------------------------------------
 
-FIX = ("このモデルで使えるのは、読み込み・gne info・マップ・会話(gne chat、gne serve のチャット、OpenAI 互換 API)と、"
-       "レシピを当てない gne behave です(docs/inkling2.md)")
+FIX = ("このモデルで使えるのは、読み込み・gne info・マップ・会話(gne chat、gne serve のチャット、OpenAI 互換 API)、"
+       "レシピを当てない gne behave と、中を読むだけの gne inkling(read・check・mix・residuals・conv・experts)です(docs/inkling2.md)")
 
 
 # CLI で使えるコマンド(gne_command の名前)。ほかは読み込む前に止める。読み込み・情報・会話・名前の一覧と、ファイルだけを扱うもの。
 # 低い層の止め方(engine.py の捕捉・control vector・LoRA、weights.py の重みの読み出し)は、MCP・UI のジョブにも効く
 CLI_OK = frozenset({"info", "probe", "verify", "bench", "chat", "behave", "worker", "recipe-combine", "recipe-scale",
-                    "direction keys"})
+                    "direction keys", "inkling read", "inkling check", "inkling mix", "inkling residuals", "inkling conv",
+                    "inkling experts"})
+
+
+# 読むだけのコマンドのうち、決めることが残っているので止めているもの(理由を添える)
+WAITING = {
+    "stats resid": ("残差の大きさ(ρ)は、残差を流れの部分和で読むか、副層が読む混ぜた入力で読むかで変わります。どちらにするか決まるまで止めます"
+                    "(gne inkling residuals が、両方の大きさを段ごとに出します)"),
+    "stats act": ("専門家のニューロンの活性は段ごとに読めますが、保存されている 24 層の地図に 48 段の値をどう出すか(段ごとの地図か、回を選ぶか、"
+                  "回をまとめるか)が決まっていないので止めます(gne inkling read --names ffn_moe_situ,ffn_moe_argsort で段ごとに読めます)"),
+    "heads attention": ("注意の向き先は段ごとに読めますが、地図と同じく段の番号の出し方が決まるまで止めます"
+                        "(gne inkling read --names kqv_out,attn_gated でヘッドの出力は読めます)"),
+}
 
 
 def check_command(plan: InklingPlan, command: str | None) -> None:
     """CLI のコマンドが Inkling 2 で使えるか。使えなければ refuse。command が None(CLI 以外から)なら何もしない。"""
     if command is not None and command not in CLI_OK:
+        if command in WAITING:
+            raise GneError("ARCH_UNSUPPORTED", f"gne {command} は、Inkling 2 ではまだ使えません: {WAITING[command]}", FIX)
         raise refuse(plan, f"gne {command}")
 
 

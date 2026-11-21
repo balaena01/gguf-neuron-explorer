@@ -227,6 +227,10 @@ class Session:
                                "head_dim": int(self.weights.field(f"{m.arch}.attention.key_length", 0) or 0),
                                "final_logit_softcapping": self.weights.field(f"{m.arch}.final_logit_softcapping")}
             meta["internals_supported"] = False
+        from .chat import effort_choices                 # チャットテンプレートが reasoning_effort を使うなら、その名前(UI のチャットの欄)
+        eff = effort_choices(m.chat_template)
+        if eff is not None:
+            meta["reasoning_effort_choices"] = eff
         llama = None
         if load:
             try:

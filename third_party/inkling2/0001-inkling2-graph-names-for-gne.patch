@@ -1,0 +1,192 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: balaena01 <261439497+balaena01@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 12:00:00 +0900
+Subject: [PATCH] inkling2: graph names for gne (mixed inputs, depth-mixing
+ weights, loop messages and gates, gated head outputs, pre-convolution output)
+
+Names only: no operation is added or changed, and the logits are bit-identical
+with and without this patch (checked on CPU and GPU, 4 prompts, last-position
+logits and 24 greedy tokens). Applies to ggml-org/llama.cpp 29b52d3 with
+PR #32704 (inkling2_loop: re-share the loop slots after the scale pass).
+
+- mix(): optional name; the mixed result gets the name and the softmax weights
+  over the states (the stored streams in reverse order, then the current one)
+  get name_w. Used for attn_mix, ffn_mix, out_mix and loop_msg.
+- control(): optional layer index; names the gate values loop_gain_{q,k,v,ffn}
+  and loop_forget_{q,k,v,ffn}.
+- build_layer(): attn_in_{q,k,v} and ffn_in (inputs after the cross-pass gate,
+  before the norm), attn_norm / attn_norm_{q,k,v} and ffn_norm (after the norm),
+  attn_gated (head outputs after the gate, the input of W_o), attn_wo (W_o
+  output before the short convolution).
+- build_inputs(): embd_norm (the normalized token embeddings, the first stored
+  stream).
+
+---
+diff --git a/src/models/models.h b/src/models/models.h
+index 636afea..703aa2a 100644
+--- a/src/models/models.h
++++ b/src/models/models.h
+@@ -2507,7 +2507,9 @@ struct llama_model_inkling2 : public llama_model_base {
+ 
+     struct graph : public llm_graph_context {
+         graph(const llm_graph_params & params);
+-        ggml_tensor * mix(const std::vector<ggml_tensor *> & blocks, ggml_tensor * cur, ggml_tensor * query);
++        // name (optional, for gne): the mixed result gets `name`, the softmax weights over the states `name`_w
++        ggml_tensor * mix(const std::vector<ggml_tensor *> & blocks, ggml_tensor * cur, ggml_tensor * query,
++                const char * name = nullptr, int il = -1);
+         ggml_tensor * clip(ggml_tensor * cur, ggml_tensor * scale, float threshold);
+         ggml_tensor * convolve(
+                 ggml_tensor * cur,
+@@ -2517,7 +2519,7 @@ struct llama_model_inkling2 : public llama_model_base {
+                 ggml_tensor * history,
+                 llm_graph_input_rs * inp,
+                 int64_t offset);
+-        ggml_tensor * control(ggml_tensor * cur, ggml_tensor * message, const loop_layer & loop, int ctrl);
++        ggml_tensor * control(ggml_tensor * cur, ggml_tensor * message, const loop_layer & loop, int ctrl, int il = -1);
+ 
+     protected:
+         // the helpers alone, a derived graph builds its own body
+diff --git a/src/models/inkling2.cpp b/src/models/inkling2.cpp
+index 3e43ef4..54e438b 100644
+--- a/src/models/inkling2.cpp
++++ b/src/models/inkling2.cpp
+@@ -175,7 +175,8 @@ ggml_tensor * llama_model_inkling2::graph::clip(ggml_tensor * cur, ggml_tensor *
+ }
+ 
+ // attention over the depth: mix the earlier block outputs and cur with learned queries
+-ggml_tensor * llama_model_inkling2::graph::mix(const std::vector<ggml_tensor *> & blocks, ggml_tensor * cur, ggml_tensor * query) {
++ggml_tensor * llama_model_inkling2::graph::mix(const std::vector<ggml_tensor *> & blocks, ggml_tensor * cur, ggml_tensor * query,
++        const char * name, int il) {
+     ggml_tensor * states = ggml_reshape_3d(ctx0, cur, n_embd, 1, n_tokens);
+     for (ggml_tensor * block : blocks) {
+         states = ggml_concat(ctx0, ggml_reshape_3d(ctx0, block, n_embd, 1, n_tokens), states, 1);
+@@ -187,7 +188,13 @@ ggml_tensor * llama_model_inkling2::graph::mix(const std::vector<ggml_tensor *>
+     ggml_tensor * scores = ggml_mul_mat(ctx0, states, queries);
+     scores = ggml_soft_max_ext(ctx0, scores, nullptr, 1.0f/sqrtf(n_embd), 0.0f);
+ 
+-    return ggml_mul_mat(ctx0, ggml_cont(ctx0, ggml_transpose(ctx0, states)), scores);
++    ggml_tensor * mixed = ggml_mul_mat(ctx0, ggml_cont(ctx0, ggml_transpose(ctx0, states)), scores);
++    if (name) {
++        // gne: the weights over [blocks in reverse order..., cur] and the mixed result (names only)
++        cb(scores, (std::string(name) + "_w").c_str(), il);
++        cb(mixed, name, il);
++    }
++    return mixed;
+ }
+ 
+ // causal short convolution with a residual; dynamic adds input-dependent taps per head
+@@ -237,12 +244,19 @@ ggml_tensor * llama_model_inkling2::graph::convolve(
+ }
+ 
+ // mix a cross-pass message into a looped layer input: (1 - forget)*cur + gain*message, both gated on cur and message
+-ggml_tensor * llama_model_inkling2::graph::control(ggml_tensor * cur, ggml_tensor * message, const loop_layer & loop, int ctrl) {
++ggml_tensor * llama_model_inkling2::graph::control(ggml_tensor * cur, ggml_tensor * message, const loop_layer & loop, int ctrl, int il) {
+     ggml_tensor * gate = ggml_concat(ctx0, ggml_rms_norm(ctx0, cur, 1e-6f), ggml_rms_norm(ctx0, message, 1e-6f), 0);
+     gate = build_lora_mm(loop.ctrl_down[ctrl], gate);
+ 
+     ggml_tensor * gain   = ggml_tanh(ctx0, build_lora_mm(loop.ctrl_gain[ctrl],   gate));
+     ggml_tensor * forget = ggml_tanh(ctx0, build_lora_mm(loop.ctrl_forget[ctrl], gate));
++    if (il >= 0) {
++        // gne: the gate values of controller ctrl (names only)
++        static const char * gain_names[LOOP_CTRL_COUNT]   = { "loop_gain_q",   "loop_gain_k",   "loop_gain_v",   "loop_gain_ffn"   };
++        static const char * forget_names[LOOP_CTRL_COUNT] = { "loop_forget_q", "loop_forget_k", "loop_forget_v", "loop_forget_ffn" };
++        cb(gain,   gain_names[ctrl],   il);
++        cb(forget, forget_names[ctrl], il);
++    }
+ 
+     return ggml_add(ctx0, ggml_sub(ctx0, cur, ggml_mul(ctx0, forget, cur)), ggml_mul(ctx0, gain, message));
+ }
+@@ -265,6 +279,7 @@ ggml_tensor * llama_model_inkling2::graph::build_inputs() {
+     // important: do not normalize raw embeddings input (i.e. encoded image embeddings)
+     if (ubatch.token) {
+         cur = build_norm(cur, model.tok_norm, nullptr, LLM_NORM_RMS, -1);
++        cb(cur, "embd_norm", -1); // gne: the first stored stream (names only)
+     }
+ 
+     return cur;
+@@ -296,7 +311,7 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
+     // attention inputs: SWA layers mix one, full-attention layers one each for Q, K and V
+     ggml_tensor * inputs[3] = {cur, cur, cur};
+     if (layer.attn_res_query) {
+-        ggml_tensor * mixed = mix(blocks, cur, layer.attn_res_query);
++        ggml_tensor * mixed = mix(blocks, cur, layer.attn_res_query, "attn_mix", il);
+         for (int j = 0; j < 3; ++j) {
+             inputs[j] = ggml_cont(ctx0, ggml_view_2d(ctx0, mixed, n_embd, n_tokens, mixed->nb[2], (is_swa ? 0 : j)*mixed->nb[1]));
+         }
+@@ -304,8 +319,10 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
+ 
+     if (messages) {
+         // the messages make the Q, K and V inputs of a SWA layer differ
++        static const char * in_names[3] = { "attn_in_q", "attn_in_k", "attn_in_v" };
+         for (int j = 0; j < 3; ++j) {
+-            inputs[j] = control(inputs[j], message(LOOP_CTRL_Q + j), *loop, LOOP_CTRL_Q + j);
++            inputs[j] = control(inputs[j], message(LOOP_CTRL_Q + j), *loop, LOOP_CTRL_Q + j, il);
++            cb(inputs[j], in_names[j], il); // gne: the input after the cross-pass gate, before the norm (names only)
+         }
+     }
+ 
+@@ -321,6 +338,14 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
+         inputs[1] = build_norm(inputs[1], layer.attn_k_inp_norm, nullptr, LLM_NORM_RMS, il);
+         inputs[2] = build_norm(inputs[2], layer.attn_v_inp_norm, nullptr, LLM_NORM_RMS, il);
+     }
++    // gne: the normalized attention inputs (names only; one tensor when Q, K and V share it)
++    if (inputs[1] == inputs[0]) {
++        cb(inputs[0], "attn_norm", il);
++    } else {
++        cb(inputs[0], "attn_norm_q", il);
++        cb(inputs[1], "attn_norm_k", il);
++        cb(inputs[2], "attn_norm_v", il);
++    }
+ 
+     // self-attention
+     {
+@@ -372,7 +397,10 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
+                 Qcur, Kcur, Vcur, kq_b, sinks, 1.0f/sqrtf(n_embd_head), il);
+ 
+         cur = ggml_mul(ctx0, cur, ggml_sigmoid(ctx0, build_lora_mm(layer.wqkv_gate, inputs[0])));
+-        cur = convolve(build_lora_mm(layer.wo, cur), layer.attn_post_conv, nullptr, state, history, recr, 2*n_embd_k_gqa);
++        cb(cur, "attn_gated", il); // gne: the head outputs after the gate, the input of W_o (names only)
++        cur = build_lora_mm(layer.wo, cur);
++        cb(cur, "attn_wo", il);    // gne: the attention output before the short convolution (names only)
++        cur = convolve(cur, layer.attn_post_conv, nullptr, state, history, recr, 2*n_embd_k_gqa);
+         cb(cur, "attn_out", il);
+     }
+ 
+@@ -387,11 +415,13 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
+     cb(ffn_inp, "ffn_inp", il);
+ 
+     // MoE
+-    cur = ggml_reshape_2d(ctx0, mix(blocks, cur, layer.ffn_res_query), n_embd, n_tokens);
++    cur = ggml_reshape_2d(ctx0, mix(blocks, cur, layer.ffn_res_query, "ffn_mix", il), n_embd, n_tokens);
+     if (messages) {
+-        cur = control(cur, message(LOOP_CTRL_FFN), *loop, LOOP_CTRL_FFN);
++        cur = control(cur, message(LOOP_CTRL_FFN), *loop, LOOP_CTRL_FFN, il);
++        cb(cur, "ffn_in", il); // gne: the FFN input after the cross-pass gate, before the norm (names only)
+     }
+     cur = build_norm(cur, layer.ffn_norm, nullptr, LLM_NORM_RMS, il);
++    cb(cur, "ffn_norm", il);   // gne: the normalized FFN input (names only)
+ 
+     cur = build_moe_ffn(cur,
+             layer.ffn_gate_inp,
+@@ -421,7 +451,7 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
+ }
+ 
+ void llama_model_inkling2::graph::build_output(ggml_tensor * cur, const std::vector<ggml_tensor *> & blocks) {
+-    cur = ggml_reshape_2d(ctx0, mix(blocks, cur, model.output_res_query), n_embd, n_tokens);
++    cur = ggml_reshape_2d(ctx0, mix(blocks, cur, model.output_res_query, "out_mix", -1), n_embd, n_tokens);
+     cur = build_norm(cur, model.output_norm, nullptr, LLM_NORM_RMS, -1);
+ 
+     if (inp_out_ids) {
+diff --git a/src/models/inkling2-loop.cpp b/src/models/inkling2-loop.cpp
+index 0de66ba..69919ca 100644
+--- a/src/models/inkling2-loop.cpp
++++ b/src/models/inkling2-loop.cpp
+@@ -102,7 +102,7 @@ llama_model_inkling2_loop::graph::graph(const llm_graph_params & params) : llama
+                 continue;
+             }
+             const auto & loop = m.loop_layers[ip - start];
+-            cur = build_layer(il, ip, cur, blocks, mix(bank, bank_out, loop.msg_query), &loop);
++            cur = build_layer(il, ip, cur, blocks, mix(bank, bank_out, loop.msg_query, "loop_msg", il), &loop);
+         }
+     }
+ 

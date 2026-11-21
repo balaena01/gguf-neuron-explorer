@@ -1237,6 +1237,9 @@ export const EN = {
   "このモデルで gne が扱うのは、読み込み・情報・マップ・会話だけです(中を測る・書き換える機能は、理由を出して止まります)":
     "For this model gne handles loading, info, the map and chat only (features that measure or rewrite internals stop with a message)",
   "会話する": "Chat",
+  "思考の量": "reasoning effort",
+  "テンプレートの既定": "template default",
+  "チャットテンプレートに渡す思考の量(reasoning_effort)。空はテンプレートの既定。名前のほかに 0〜0.99 の数も書ける": "Reasoning effort passed to the chat template (reasoning_effort). Empty = the template's default. Besides the names, a number from 0 to 0.99 also works",
   "このモデルでは介入できないので、無介入の 1 列で話します(思考の欄は <think> … </think>)": "No interventions are available for this model, so the chat has one column without intervention (reasoning is shown between <think> and </think>)",
   "無介入のモデルの応答だけを生成します。": "Only replies of the model without intervention are generated.",
   "このモデルのグラフは control vector を読みません。gain を使ってください": "This model's graph ignores control vectors. Use gain instead",

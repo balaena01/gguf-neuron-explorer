@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import json
 import os
@@ -209,6 +210,7 @@ class Engine:
         self.n_threads = n_threads or int(os.environ.get("GNE_THREADS") or 0) or max(1, (os.cpu_count() or 2) // 2)
         self.n_gpu_layers = n_gpu_layers
         self.chat_template = self.meta_str("tokenizer.chat_template")
+        self.template_vars: dict = {}             # チャットテンプレートに渡す変数(gne chat --reasoning-effort など。既定は渡さない)
         self.arch = self.meta_str("general.architecture") or ""
         self.hc_streams = int(self.meta_str(f"{self.arch}.hyper_connection.count") or 0)   # 残差の本数(0 = 1 本)
         self.cvec_supported = self.arch not in NO_CVEC
@@ -290,9 +292,12 @@ class Engine:
         if logits_all:
             p.n_outputs_max_per_seq = 0   # 既定 1(各 seq 最終位置だけ)。0 = n_outputs_max
         if capture is not None:
-            if self.inkling is not None and not getattr(capture, "names_only", False):
-                from .inkling import refuse
-                raise refuse(self.inkling, "中間のテンソルを読む処理(残差・ヘッド・ニューロン・専門家の値の捕捉)")
+            if self.inkling is not None:
+                # 読むだけの Inkling 用の処理(inkling_read.py が inkling_ok を立てる)と名前の一覧だけを通す。名前は実行順の段に読み替える
+                if not (getattr(capture, "inkling_ok", False) or getattr(capture, "names_only", False)):
+                    from .inkling import refuse
+                    raise refuse(self.inkling, "中間のテンソルを読む処理(残差・ヘッド・ニューロン・専門家の値の捕捉)")
+                capture.inkling = self.inkling
             capture.hc_streams = self.hc_streams
             if self.loop is not None and capture.loop is None and not getattr(capture, "raw_names", False):
                 capture.loop, capture.loop_d, capture.loop_full = self.loop, self.n_embd, self.loop_full
@@ -379,7 +384,17 @@ class Engine:
         return render_template(tpl, messages, enable_thinking=enable_thinking,
                                add_generation_prompt=add_generation_prompt,
                                bos_token=self.token_text(C.llama_vocab_bos(self.vocab)),
-                               eos_token=self.token_text(C.llama_vocab_eos(self.vocab)))
+                               eos_token=self.token_text(C.llama_vocab_eos(self.vocab)), **self.template_vars)
+
+    @contextlib.contextmanager
+    def with_template_vars(self, **kw):
+        """この中だけ、チャットテンプレートに変数を渡す(None の値は渡さない。例: reasoning_effort)。抜けると元に戻す。"""
+        prev = self.template_vars
+        self.template_vars = {**prev, **{k: v for k, v in kw.items() if v is not None}}
+        try:
+            yield
+        finally:
+            self.template_vars = prev
 
     def tokenize(self, text: str, *, add_special: bool = False, parse_special: bool = True) -> list[int]:
         b = text.encode("utf-8")

@@ -38,9 +38,11 @@ const SP_KEY = "gne.chat.sampling";            // このブラウザに覚えて
 const COLS_KEY = "gne.chat.single";            // 1 列(+ の列だけ)で話すか
 
 export class ChatPanel {
-  constructor({ recipe, onStatus, onAdded, plain }) {
+  constructor({ recipe, onStatus, onAdded, plain, effortChoices }) {
     this.recipe = recipe;
     this.plain = plain || (() => false);   // 介入できないモデル(Inkling 2): 無介入の 1 列だけで話す
+    this.effortChoices = effortChoices || (() => null);   // チャットテンプレートの reasoning_effort の名前(使わないテンプレートは null)
+    this.effort = "";                      // 思考の量(空 = テンプレートの既定)
     this.onStatus = onStatus || (() => {});
     this.onAdded = onAdded || (() => {});    // レシピに足したとき(app.js がレシピのパネルを開く。どの入口でも同じ)
     this.mode = "writes";
@@ -202,6 +204,7 @@ export class ChatPanel {
           WHEN.map(([w, l]) => `<option value="${w}"${this.when === w ? " selected" : ""}>${tr(l)}</option>`).join("")}</select>${
           this.when === "after" || this.when === "ramp" ? `<input id="ch-when-x" size="8" value="${esc(this.whenArg)}" placeholder="${this.when === "after" ? tr("結論:") : "1.5-0.5"}">` : ""}</div>
       <div class="ch-tools">${this.samplingHTML()}</div>
+      ${this.effortHTML()}
       <div class="ch-tools"><span class="muted">system</span><input id="ch-system" class="ch-system" value="${esc(this.system)}" placeholder="${tr("空なら無し(音声で話すなら Respond in text.)")}">
         <label class="muted" title="${tr("右の列の応答を、ブラウザの音声で読み上げる")}"><input type="checkbox" id="ch-speak"${this.speak ? " checked" : ""}> 🔊 ${tr("読み上げ")}</label></div>
       <div class="ch-log${this.single || plain ? " single" : ""}">
@@ -213,6 +216,18 @@ export class ChatPanel {
       <div class="ch-input"><textarea id="ch-text" rows="2" placeholder="${tr("メッセージ(Ctrl+Enter で送る)")}"${this.busy ? " disabled" : ""}>${esc(this.draft)}</textarea>
         <button class="main" id="ch-send"${this.busy ? " disabled" : ""}>${tr("送る")}</button><button id="ch-mic" class="${this.mic.recording ? "rec" : ""}" title="${tr("音声で話しかける(押して話し、もう一度押すと送る。入力欄の文も一緒に送る)")}"${this.busy ? " disabled" : ""}>${this.mic.recording ? `■ ${tr("止めて送る")}` : `🎤 ${tr("話す")}`}</button><button id="ch-stop"${this.busy ? "" : " disabled"}>${tr("止める")}</button><button id="ch-reset" title="${tr("会話を消して、最初から話す(どの列も)")}"${this.busy ? " disabled" : ""}>${tr("新しい会話")}</button></div>
       <div class="ch-status muted note" id="ch-status" role="status">${esc(this.status || "")}</div>`;
+  }
+
+  // 思考の量(チャットテンプレートの reasoning_effort)。テンプレートが使わないモデルでは出さない
+  effortHTML() {
+    const ch = this.effortChoices();
+    if (ch === null || ch === undefined) return "";
+    const title = tr("チャットテンプレートに渡す思考の量(reasoning_effort)。空はテンプレートの既定。名前のほかに 0〜0.99 の数も書ける");
+    const field = ch.length
+      ? `<select id="ch-effort">${[["", tr("テンプレートの既定")], ...ch.map((x) => [x, x])].map(([v, l]) => `<option value="${esc(v)}"${v === this.effort ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>`
+        + `<input id="ch-effort-num" size="5" placeholder="0〜0.99" value="${ch.includes(this.effort) ? "" : esc(this.effort)}">`
+      : `<input id="ch-effort-num" size="8" value="${esc(this.effort)}">`;
+    return `<div class="ch-tools"><span class="muted" title="${title}">${tr("思考の量")}</span>${field}</div>`;
   }
 
   // 「この強さをレシピに反映」: いまの強さを各ユニットの強さに掛け込み、全体の強さを 1 に戻す(+ 列と同じレシピになる)。
@@ -323,6 +338,9 @@ export class ChatPanel {
     $("#ch-send").addEventListener("click", () => this.send(text.value));
     $("#ch-mic").addEventListener("click", () => this.toggleMic());
     $("#ch-system").addEventListener("change", (ev) => { this.system = ev.target.value.trim(); });
+    const ef = $("#ch-effort"), en = $("#ch-effort-num");
+    if (ef) ef.addEventListener("change", () => { this.effort = ef.value; if (en) en.value = ""; });
+    if (en) en.addEventListener("change", () => { this.effort = en.value.trim(); if (ef && this.effort) ef.value = ""; });
     $("#ch-speak").addEventListener("change", (ev) => { this.speak = ev.target.checked; if (!this.speak && window.speechSynthesis) speechSynthesis.cancel(); });
     $("#ch-stop").addEventListener("click", () => { if (this.sid) postJSON(`/api/steer/${this.sid}/stop`, {}); });
     const log = $(".ch-log");
@@ -384,6 +402,7 @@ export class ChatPanel {
       ...sp.body,
       when: this.whenSpec(),
       ...(this.system ? { system: this.system } : {}),
+      ...(this.effort !== "" && this.effortChoices() !== null ? { reasoning_effort: this.effort } : {}),
       columns: cols.map((c, ci) => ({
         label: c.label, units: c.units, ...(c.ablate ? { ablate: c.ablate } : {}),
         ...(this.target === "recipe" ? { proj_correction: this.recipe.projCorrection } : {}),   // 射影の補正(v0.9.0)

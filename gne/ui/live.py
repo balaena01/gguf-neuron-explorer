@@ -85,6 +85,8 @@ class Live:
             seed = vals.pop("seed", None)
             sampling = Sampling(**vals, seed=seed if seed is not None else int.from_bytes(uuid.uuid4().bytes[:4], "little"))
         system = body.get("system")
+        from ..chat import effort_value                  # チャットテンプレートに渡す思考の量(reasoning_effort。無ければ既定)
+        effort = effort_value(self.s.engine.chat_template, body.get("reasoning_effort"))
         from ..media import http_content                 # 音声の部品(base64)。ローカルのファイルは読ませない
         hist = [[{**m, "content": http_content(m.get("content")) if m.get("role") == "user" else m.get("content")}
                  for m in (c.get("messages") or [])] for c in cols]
@@ -107,7 +109,7 @@ class Live:
                         if stop.is_set():
                             break
                         # CHANGE-05: 専門家全体の gain・route は作業用コピーで読み直して生成する(抜けると元に戻す)
-                        with self.s.patched(self.s.patches_for(r)) as e:
+                        with self.s.patched(self.s.patches_for(r)) as e, e.with_template_vars(reasoning_effort=effort):
                             ctx = e.steer_ctx()
                             msgs = ([{"role": "system", "content": system}] if system else []) + hist[i]
                             ids = e.chat_ids(msgs)

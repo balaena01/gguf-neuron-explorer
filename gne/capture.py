@@ -73,6 +73,12 @@ class Capture:
         # 2 本の中の層の残差を読めない llama.cpp(公式の改造版に手を入れていないもの)では、Engine が (理由, 直し方) を入れる。
         # その層の l_out・attn_residual・attn_post_norm を欲しいのに無ければ、take() が理由と直し方を書いて断る
         self.loop_refuse: tuple[str, str] | None = None
+        # Inkling 2(inkling.py): Engine が段の対応(InklingPlan)を入れると、llama.cpp の番号(グラフの名前の -N)を実行順の段に
+        # 読み替える。流れが始まる段では attention の出力の名前 attn_out が ffn_inp に上書きされているので(同じテンソル)、
+        # attn_out-<段> を欲しいときは ffn_inp-<段> から埋める
+        self.inkling = None
+        self._ink_step: dict[int, int] = {}
+        self._ink_start: set[int] = set()
         self._cb = C.ggml_backend_sched_eval_callback(self._on_tensor)  # 参照を保持(GC 対策)
 
     def install(self, cparams: C.llama_context_params) -> None:
@@ -130,6 +136,8 @@ class Capture:
         return {k: (v[0] if len(v) == 1 else np.concatenate(v, axis=0)) for k, v in out.items()}
 
     def _canon(self, name: str) -> str:
+        if self.inkling is not None:
+            return self._ink_canon(name)
         if self.loop is not None:
             return self._loop_canon(name)
         return "l_out-" + name[7:] if self.hc_streams and name.startswith("l_last-") else name
@@ -149,10 +157,31 @@ class Capture:
         b = self._LOOP_NAMES.get(base)
         return f"{b}-{L}" if b else name
 
+    def _ink_canon(self, name: str) -> str:
+        """Inkling 2: グラフの名前の llama.cpp の番号を、実行順の段にする(番号の無い名前はそのまま)。"""
+        if not self._ink_step:
+            for st in self.inkling.steps():
+                self._ink_step[st["slot"]] = st["step"]
+                if st["new_stream"]:
+                    self._ink_start.add(st["step"])
+        base, sep, n = name.rpartition("-")
+        if not sep or not n.isdigit() or int(n) not in self._ink_step:
+            return name
+        return f"{base}-{self._ink_step[int(n)]}"
+
+    def _ink_attn_out(self, name: str) -> str | None:
+        """ffn_inp-<段> が流れの始まる段なら、同じテンソルの attn_out-<段> の名前(欲しいときだけ)。"""
+        base, _, n = name.rpartition("-")
+        if base == "ffn_inp" and n.isdigit() and int(n) in self._ink_start and self._wanted(f"attn_out-{n}"):
+            return f"attn_out-{n}"
+        return None
+
     def _want(self, name: str) -> bool:
         """捕捉するか。l_out_pre-L は、2 本の中の層の l_out-L を欲しいときにも取る(グラフの l_out が view なら、それで埋める)。"""
         if self._wanted(name):
             return True
+        if self.inkling is not None:
+            return self._ink_attn_out(name) is not None
         if self.loop is None:
             return False
         base, _, L = name.rpartition("-")
@@ -178,6 +207,12 @@ class Capture:
         return bool(self._want(name))
 
     def _store(self, name: str, arr: np.ndarray) -> None:
+        if self.inkling is not None:
+            alias = self._ink_attn_out(name)
+            if alias is not None and alias not in self._step:
+                self._step[alias] = arr
+            if not self._wanted(name):
+                return
         if self.loop is not None:
             arr = self._loop_shape(name, arr)
         if name in self._step:               # 同じグラフの 2 つ目の同名ノード

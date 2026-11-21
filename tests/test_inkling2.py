@@ -87,6 +87,68 @@ def test_refuse_message():
         assert ex.value.code == "ARCH_UNSUPPORTED" and f"gne {bad}" in ex.value.message
 
 
+def test_capture_translates_slots_to_steps():
+    import numpy as np
+
+    from gne.capture import Capture
+    cap = Capture(lambda n: n in ("l_out-18", "attn_out-6", "attn_out-7", "out_mix"))
+    cap.inkling = _plan()
+    assert cap._canon("l_out-24") == "l_out-18" and cap._canon("l_out-18") == "l_out-42" and cap._canon("l_out-47") == "l_out-41"
+    assert cap._canon("out_mix") == "out_mix" and cap._canon("norm") == "norm"
+    # 流れが始まる段(6)の attn_out は ffn_inp と同じテンソル: ffn_inp-6 を取って attn_out-6 の名前で返す。始まらない段(7)は取らない
+    assert cap._want("ffn_inp-6") and not cap._want("ffn_inp-7") and cap._want("attn_out-7")
+    cap._store("ffn_inp-6", np.ones((2, 3), np.float32))
+    assert "attn_out-6" in cap._step and "ffn_inp-6" not in cap._step
+
+
+def test_states_follow_the_graph():
+    from gne.inkling_read import Reader
+    r = Reader.__new__(Reader)
+    r.plan = _plan()
+    r.steps = r.plan.steps()
+    st = r.states()
+    names = lambda xs: [n for _, n in xs]  # noqa: E731
+    assert 0 not in st["attn"]                                                      # 層 0 は深さ方向の注意なしで読む
+    assert names(st["ffn"][0]) == ["embd_norm", "ffn_inp-0"]
+    assert names(st["attn"][6]) == ["embd_norm", "l_out-5"]                          # 流れが始まる段: 前の流れを取っておく前
+    assert names(st["ffn"][6]) == ["l_out-5", "embd_norm", "ffn_inp-6"]              # 取っておいた流れは新しい順
+    assert names(st["attn"][12]) == ["l_out-5", "embd_norm", "l_out-11"]
+    assert names(st["ffn"][13]) == ["l_out-11", "l_out-5", "embd_norm", "ffn_inp-13"]
+    assert names(st["attn"][18]) == ["embd_norm", "l_out-5"]                         # 2 回目は層 5 の出力からやり直す
+    assert names(st["ffn"][24]) == ["l_out-23", "l_out-5", "embd_norm", "ffn_inp-24"]
+    assert names(st["msg"][18]) == ["l_out-11", "l_out-17"] and names(st["msg"][30]) == ["l_out-23", "l_out-29"]
+    assert 6 not in st["msg"]
+    assert names(st["attn"][42]) == ["l_out-35", "l_out-5", "embd_norm", "l_out-41"]  # 繰り返しの後は 3 回目の流れを読む
+    assert names(st["out"]) == ["l_out-41", "l_out-35", "l_out-5", "embd_norm", "l_out-47"]
+
+
+def test_conv_post_matches_the_formula():
+    import numpy as np
+
+    from gne.inkling_read import _conv_post
+    rng = np.random.default_rng(0)
+    x, w = rng.standard_normal((6, 5)), rng.standard_normal((5, 4))
+    out = _conv_post(x, w)
+    for t in range(6):
+        ref = x[t] + sum(w[:, k] * (x[t - 3 + k] if t - 3 + k >= 0 else 0) for k in range(4))
+        np.testing.assert_allclose(out[t], ref / np.sqrt(5), rtol=1e-12)
+
+
+def test_reasoning_effort_values():
+    from gne.chat import effort_choices, effort_value
+    tpl = '{%- set effort_map = {"none": 0.0, "minimal": 0.1, "low": 0.2, "medium": 0.7, "high": 0.9, "xhigh": 0.99, "max": 0.99} -%}' \
+          '{{ reasoning_effort }}'
+    assert effort_choices(tpl) == ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+    assert effort_choices("{{ messages }}") is None and effort_choices("{{ reasoning_effort }}") == []
+    assert effort_value(tpl, None) is None and effort_value(tpl, " ") is None
+    assert effort_value(tpl, "low") == "low" and effort_value(tpl, "0.5") == 0.5 and effort_value(tpl, 0) == 0.0
+    for bad in ("huge", "1.5", "-0.1"):
+        with pytest.raises(GneError):
+            effort_value(tpl, bad)
+    with pytest.raises(GneError):
+        effort_value("{{ messages }}", "low")
+
+
 class _FakeEngine:
     """ReplyMarks が使う分だけ: 特別なトークン 1 つを 1 つの番号に、ほかは 1 文字 = 1 トークン。"""
     SPECIAL = {"<|content_thinking|>": 1001, "<|content_text|>": 1002, "<|message_model|>": 1003, "<|end_message|>": 1004,
@@ -192,9 +254,10 @@ def test_real_engine_guards_and_graph_order(session):
     e.allow_names = True
     names = e.list_names(ids)
     e.allow_names = False
-    assert {f"l_out-{k}" for k in range(48)} <= names
+    assert {f"l_out-{k}" for k in range(48)} <= names        # 名前は実行順の段に読み替える
+    # グラフの中の順が実行の順(llama.cpp の番号の順ではない)なら、読み替えた名前は 0〜47 の順に並ぶ
     order = [int(n.split("-")[1]) for n in e._probe.capture.seen if re.fullmatch(r"l_out-\d+", n)]
-    assert order == [s["slot"] for s in e.inkling.steps()]
+    assert order == list(range(48))
     e._probe.free()
     e._probe = None
 
@@ -223,3 +286,64 @@ def test_real_chat_and_behave(session, tmp_path):
     assert e.value.code == "ARCH_UNSUPPORTED"
     d = session.behave(["How is the weather today?"], match=r"weather", max_tokens=48, name="t")
     assert d["runs"][0]["counts"]["n"] == 1
+
+
+def _reader(session):
+    from gne.inkling_read import Reader
+    r = Reader(session)
+    if not r.patch_present():
+        pytest.skip("この llama.cpp には third_party/inkling2/0001 の名前がありません")
+    return r
+
+
+@real
+def test_real_reader_without_patch_refuses(session):
+    from gne.inkling_read import Reader
+    r = Reader(session)
+    if r.patch_present():
+        pytest.skip("0001 を当てた llama.cpp なので、断りは確かめられません")
+    with pytest.raises(GneError) as e:
+        r.require_patch()
+    assert e.value.code == "ARCH_UNSUPPORTED" and "0001" in e.value.hint
+
+
+@real
+def test_real_check_against_independent_math(session):
+    from gne.inkling_read import check
+    d = check(_reader(session), "How is the weather today?", steps=[1, 6, 11, 18, 23, 35, 42, 47], n_tok_expert=1)
+    err = d["errors"]
+    for k, v in err.items():
+        limit = 3e-2 if any(x in k for x in ("W_o", "W_down", "W_gate_up", "SiTU")) else 2e-3
+        assert v["max"] < limit, (k, v)
+    assert any("繰り返し" in k for k in err) and any("専門家" in k for k in err)
+
+
+@real
+def test_real_study_and_mix(session):
+    import numpy as np
+
+    from gne.inkling_read import experts, mix_summary, study
+    r = _reader(session)
+    A = [[{"role": "user", "content": q}] for q in ("今日の天気はどうですか？", "おすすめの本を教えてください。")]
+    B = [[{"role": "user", "content": q}] for q in ("How is the weather today?", "Can you recommend a book?")]
+    m = mix_summary(r, A + B, positions="last")
+    for st in m["steps"]:
+        for side in ("attn", "ffn", "msg"):
+            if side in st:
+                np.testing.assert_allclose(np.sum(st[side]["weights"], axis=-1), 1.0, atol=1e-4)
+    d = study(r, A, B)
+    assert len(d["steps"]) == 48 and d["head_sum_rel_max"] < 3e-2       # W_o の積は量子化した重みと活性(相対 1e-2 程度)
+    assert {x["region"] for x in d["steps"]} == {"before", "loop", "after"}
+    assert all("l_out|ffn_mix" in x["cos"] for x in d["steps"])
+    assert {x["pass"] for x in d["loop"]} == {2, 3}
+    e = experts(r, A[:1])
+    assert len(e["steps"]) == 48 and e["overlap"]
+
+
+@real
+def test_real_reasoning_effort_reaches_the_prompt(session):
+    e = session.engine
+    with e.with_template_vars(reasoning_effort="none"):
+        text = e.render_chat([{"role": "user", "content": "Hi"}])
+    assert "Thinking effort level: 0<" in text
+    assert "Thinking effort level: 0.9" in e.render_chat([{"role": "user", "content": "Hi"}])

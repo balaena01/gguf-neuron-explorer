@@ -67,7 +67,8 @@ gne の表示の「段」は、実行の順(0〜47)。llama.cpp のキャッシ�
 - `gne serve` では、地図の凡例の「会話する」で、無介入の 1 列のチャットが開く(くわしく見るの欄に、いまの層のニューロン 0 のチャットとして開く。介入の欄は出ない。応答の長さの既定は 1,024)。
 - 思考の欄は `<think>` … `</think>` で囲んで見せる。会話の履歴には回答だけを入れる(前の思考は次のプロンプトに入れない)。
 - `gne serve --openai` の `/v1/chat/completions` は、思考を `reasoning_content`、回答を `content` に分けて返す(流すときも同じ)。
-- チャットテンプレートは、`reasoning_effort`(既定 0.9)を最初の system の欄に入れる。gne はこの値を渡していないので、いつも既定の 0.9。
+- チャットテンプレートは、`reasoning_effort`(既定 0.9)を「Thinking effort level」として最初の system の欄に入れる。
+- 思考の量: `gne chat --reasoning-effort low` のように渡す。テンプレートが受け付けるのは none(0)・minimal(0.1)・low(0.2)・medium(0.7)・high(0.9)・xhigh(0.99)・max(0.99)か、0〜0.99 の数。省くとテンプレートの既定(0.9)。UI のチャットの「思考の量」、OpenAI 互換 API の `reasoning_effort` も同じ。
 - モデルの勧めるサンプリングは温度 1.0・top-p 1・top-k 0・min-p 0(`--temperature 1 --top-p 1 --top-k 0 --min-p 0 --presence-penalty 0`)。
 - 答えの前に思考を書くので、`--max-tokens` は長めに取る(公開のひな形の質問で、思考と回答を合わせて平均 440 トークン前後)。
 
@@ -77,10 +78,39 @@ gne の表示の「段」は、実行の順(0〜47)。llama.cpp のキャッシ�
 
 | 使える | 止まる(理由を書いて止める) |
 |---|---|
-| `gne info`、`gne probe --list-names`(グラフのテンソルの名前だけ)、`gne chat`(レシピなし)、`gne serve` のマップ・会話・保存済みの一覧、OpenAI 互換 API、`gne behave`(レシピなし、`--match`。思考の欄を除いた回答だけを数える)、`gne verify`(トークン化の V8 だけ。ほかは省く) | 中間のテンソルの捕捉(残差・ヘッド・ニューロン・専門家の値)、control vector、LoRA、焼き込み、重みの中身を読む処理(ニューロン・専門家・ヘッドの詳細、logit lens など)。これを使うコマンド(`gne stats`・`lens`・`sweep`・`direction`・`heads …`・`experts …`・`nw …`・`steer`・`gain`・`ablate`・`bake`・`eval` など)は全部止まる。`gne behave --judge`(読み手の判定)と `gne fieldtest` も止まる |
+| `gne info`、`gne probe --list-names`(グラフのテンソルの名前だけ。番号は段)、`gne inkling read / check / mix / residuals / conv / experts`(中を読むだけ。0001 が要る。下の「中を読む」)、`gne chat`(レシピなし。`--reasoning-effort`)、`gne serve` のマップ・会話・保存済みの一覧、OpenAI 互換 API、`gne behave`(レシピなし、`--match`。思考の欄を除いた回答だけを数える)、`gne verify`(トークン化の V8 だけ。ほかは省く) | 中間のテンソルの捕捉(残差・ヘッド・ニューロン・専門家の値)、control vector、LoRA、焼き込み、重みの中身を読む処理(ニューロン・専門家・ヘッドの詳細、logit lens など)。これを使うコマンド(`gne stats`・`lens`・`sweep`・`direction`・`heads …`・`experts …`・`nw …`・`steer`・`gain`・`ablate`・`bake`・`eval` など)は全部止まる。`gne behave --judge`(読み手の判定)と `gne fieldtest` も止まる |
 
-止まるときのエラーは `ARCH_UNSUPPORTED`。CLI では、使えるコマンド(`info`・`probe`・`verify`・`bench`・`chat`・`behave`・`worker`・`recipe-combine`・`recipe-scale`・`direction keys`)のほかは、モデルを読み込む前に止まる。MCP と画面のジョブは、中間のテンソルの捕捉・control vector・LoRA・重みの読み出しのところで止まる(生成だけを先にする処理は、生成の後で止まる)。
+止まるときのエラーは `ARCH_UNSUPPORTED`。CLI では、使えるコマンド(`info`・`probe`・`verify`・`bench`・`chat`・`behave`・`worker`・`recipe-combine`・`recipe-scale`・`direction keys`・`inkling …`)のほかは、モデルを読み込む前に止まる。MCP と画面のジョブは、中間のテンソルの捕捉・control vector・LoRA・重みの読み出しのところで止まる(生成だけを先にする処理は、生成の後で止まる)。中間のテンソルの捕捉を通すのは `gne inkling …` の読むだけの処理だけ。
 
-## グラフのテンソルの名前(次の段階のための記録)
+## 中を読む(読むだけ)
 
-`gne probe --list-names` で見える名前の番号は、llama.cpp のキャッシュの番号(上の表)。流れが始まる段(番号 0・6・12・18・24・30・36・42)では、attention の出力がそのまま新しい流れになるので、`attn_out` の名前は `ffn_inp` に上書きされて残らない。深さ方向の注意で混ぜた各副層の入力、繰り返しのメッセージとゲートの値、attention のゲートの後の値、畳み込みの前の出力には名前が無く、いくつかの正規化はどれも `norm` という同じ名前になる。中を読むには、名前を付けるパッチが要る。
+中の値を読むには、llama.cpp に `third_party/inkling2/0001-inkling2-graph-names-for-gne.patch` を当てる(名前を付けるだけで計算は変えない。当てる前と後で、公開のひな形の 4 問の最後の位置のロジットと貪欲に生成した 24 トークンが、CPU でも GPU でもビットまで一致した)。当て方は [third_party/inkling2/](../third_party/inkling2/README.md)。当てていない llama.cpp では、`gne inkling …` は理由と直し方を書いて止まる。
+
+名前の番号は、gne が実行順の段に読み替える(`l_out-18` は段 18 = 層 6 の 2 回目)。`gne probe --list-names` もこの番号で出す。流れが始まる段(0・6・12・18・24・30・36・42)では、attention の出力が新しい流れの始まりになり、グラフでは `attn_out` の名前が `ffn_inp` に上書きされている(同じテンソル)。gne は `attn_out-<段>` を頼まれたら `ffn_inp-<段>` から返す。
+
+| 名前 | 中身 |
+|---|---|
+| `l_out` | 今の流れの、その段までの和(流れの部分和) |
+| `ffn_inp` | attention を足した後の今の流れ |
+| `attn_out`・`ffn_out` | attention・MLP の書き込み(短い畳み込みの後。流れに足すもの) |
+| `attn_wo`・`ffn_moe_out` | 同じ書き込みの、短い畳み込みの前 |
+| `attn_mix`・`ffn_mix` | 副層が実際に読む入力: それまでの流れと今の状態を RMS 正規化し、深さ方向の注意の重みで足したもの。全体を見る層の `attn_mix` は Q・K・V の 3 行 |
+| `attn_mix_w`・`ffn_mix_w`・`out_mix_w` | 深さ方向の注意の重み(並びは、取っておいた流れの新しい順、最後が今の状態) |
+| `loop_msg`・`loop_msg_w` | 2 回目・3 回目: 前の回の流れから混ぜたメッセージ(Q・K・V・MLP の 4 行)とその重み |
+| `loop_gain_{q,k,v,ffn}`・`loop_forget_{q,k,v,ffn}` | 2 回目・3 回目: ゲートの値。入力 ← (1 − forget)·入力 + gain·メッセージ |
+| `attn_in_{q,k,v}`・`ffn_in` | 2 回目・3 回目: ゲートの後の入力(正規化の前) |
+| `kqv_out`・`attn_gated` | ヘッドの出力(ゲートの前・後。`attn_gated` が W_o の入力) |
+| `ffn_moe_argsort`・`ffn_moe_weights_scaled`・`ffn_moe_situ` | 専門家の選び方(大きい順の並びの先頭 8 個が選んだ専門家)・選んだ重み・専門家のニューロンの活性 |
+
+| コマンド | 中身 |
+|---|---|
+| `gne inkling read --text … --names … --steps … --out x.npz` | 段ごとの値を .npz に書く |
+| `gne inkling check` | 捕まえた値を別の計算と突き合わせる: 流れの和、混ぜ方(状態と重みから)、繰り返しのゲート、W_o の積、短い畳み込み、専門家の和(倍率 × W_down × 活性)、ゲート・アップと SiTU |
+| `gne inkling mix --spec …` | 各段の深さ方向の注意の重み(どの流れをどれだけ読むか) |
+| `gne inkling residuals --spec …` | 残差の定義(流れの部分和と、副層が読む混ぜた入力)ごとの A − B の方向の比べ、回どうしの向き、3 回目の方向に沿った各回のヘッド・副層の書き込み、深さ方向の注意の重みの A 側と B 側の違い、繰り返しのメッセージの強さ |
+| `gne inkling conv --spec …` | 書き込みから方向を除いたとき、短い畳み込みの後に残る方向の成分 |
+| `gne inkling experts --spec …` | 段ごとの専門家の選ばれ方と、同じ層の回どうしの重なり |
+
+結果は `<root>/inkling/<model_id>/` に書く。方向も保存するが、方向で押す・射影する機能(CHiPS・FiSH・キー・lens など)は、残差をどちらの定義で読むか決まるまで止めたまま。`gne stats resid`・`gne stats act`・`gne heads attention` も、それぞれ決めることが残っているので理由を書いて止まる。
+
+`gne inkling check` の結果(UD-IQ2_XXS、GPU、24 トークン、全 48 段): 流れの和・混ぜ方・ゲート・短い畳み込み・SiTU は相対誤差 3×10⁻⁸〜2×10⁻⁷(float32 の丸め)。W_o・専門家の行列の積は 5×10⁻³〜1×10⁻²(llama.cpp は量子化した重みとの積で活性も量子化する。gne の計算は重みを戻して float64 で掛ける)。
