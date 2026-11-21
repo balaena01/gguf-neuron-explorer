@@ -3294,6 +3294,7 @@ def _inkling_export_lines(d: dict, bake: bool) -> list[str]:
     g = d.get("growth") or {}
     lines = [f"{d['path']}({d['bytes'] / 2**30:.2f} GiB、元 {d['bytes_src'] / 2**30:.2f} GiB、焼き込み、型 {d['requant']})",
              *([d["plan"]] if d.get("plan") else []),
+             *([f"注意: {d['vram_note']}"] if d.get("vram_note") else []),
              f"ファイルと VRAM の増え方: {g.get('bytes', 0) / 2**20:+.0f} MiB"
              + (f"(読み込んだときの VRAM の空き {d['vram_free_mb']:.0f} MiB)" if d.get("vram_free_mb") is not None else "")]
     lines += [_inkling_bake_line(m) for m in d["modified"]]

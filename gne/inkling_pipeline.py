@@ -787,7 +787,7 @@ def bake_recipe(session, heads, dst: Path, *, requant: str = "auto", vram_free_m
     """レシピの射影の部品を GGUF に焼き込む(inkling_chips.bake)。requant は auto(既定: MLP 全体の部品がある層の専門家のテンソルと、
     編集が残らないテンソルは Q8_0、ほかは元の型・元の大きさ)・keep・q8_0・f16。書く前に一度計算して、Q8_0 にする層と
     ファイル・VRAM の増え方を決め、progress で知らせる(結果の plan にも入れる)。vram_free_mb(読み込んだときの空き)を渡すと、
-    収まらないときは止める。"""
+    収まらないときは知らせる(ファイルは書く)。"""
     from .inkling_chips import bake
     heads = [p for p in heads if p.s]
     if not heads:
@@ -809,13 +809,21 @@ def bake_recipe(session, heads, dst: Path, *, requant: str = "auto", vram_free_m
     plan = bake_plan_text(grow)
     if getattr(session, "progress", None):                    # 書く前に知らせる(CLI は進み具合の行、画面はジョブの段の文)
         session.progress(0, 1, plan)
+    vram_note = None
     if vram_free_mb is not None and grow["bytes"] / 2**20 > vram_free_mb - VRAM_MARGIN_MB:
-        raise GneError("VRAM_FULL", f"焼き込むと VRAM が {grow['bytes'] / 2**20:.0f} MiB 増えますが、空きは {vram_free_mb:.0f} MiB です"
-                                    f"(書き換える専門家の層 {grow['expert_layers']})",
-                       "部品の層を減らすか、LoRA のまま使ってください(書き換える専門家の層 1 つで Q8_0 は Q2_0 の層 +253 MiB・NVFP4 の層 +162 MiB)")
+        # ファイルを書くだけなら VRAM は要らないので、止めずに知らせる。空きは、いまのモデルと作業用の領域を載せたままの値なので、
+        # 焼き込んだ GGUF だけを読み込むときの空きより小さく出る
+        vram_note = (f"焼き込むと VRAM が {grow['bytes'] / 2**20:.0f} MiB 増えます(書き換える専門家の層 {grow['expert_layers']})。"
+                     f"いまの空きは {vram_free_mb:.0f} MiB です(いまのモデルと作業用の領域を載せたままの値)。"
+                     f"焼き込んだ GGUF を読み込むときに GPU に収まらなければ、部品の層を減らすか、型を自動(元の大きさ)にしてください"
+                     f"(書き換える専門家の層 1 つで Q8_0 は Q2_0 の層 +253 MiB・NVFP4 の層 +162 MiB)")
+        if getattr(session, "warn", None):
+            session.warn(vram_note)
     r = bake(rd, units, refs, Path(dst), requant=requant, strip_meta=strip_meta, tens=tens)
     r["growth"] = grow
     r["plan"] = plan
+    if vram_note:
+        r["vram_note"] = vram_note
     return r
 
 

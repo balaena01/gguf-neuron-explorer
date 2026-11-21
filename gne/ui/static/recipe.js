@@ -1032,6 +1032,8 @@ export class RecipePanel {
     this.lxSet(`<p class="note">${x.url ? t("{file} を書き出しました", { file: `<a href="${esc(x.url)}" download="${esc(x.file)}">${esc(x.file)}</a>` })
         : t("{file} を書き出しました", { file: `<span class="mono">${esc(x.path)}</span>` })}(${fmt(mb, mb < 10 ? 2 : 0)} MB)</p>
       ${x.url ? `<p class="muted note mono">${esc(x.path)}</p>` : ""}
+      ${x.plan ? `<p class="muted note">${esc(x.plan)}</p>` : ""}
+      ${x.vram_note ? `<p class="note">⚠ ${esc(x.vram_note)}</p>` : ""}
       ${x.into ? `<p class="muted note">${t("マージ先: {f}", { f: esc(x.into) })}</p>` : ""}
       ${x.imatrix ? `<p class="muted note">${t(x.imatrix_auto ? "imatrix: {f}(モデルの隣で見つけたもの)" : "imatrix: {f}", { f: esc(x.imatrix) })}</p>` : ""}
       ${x.strip_meta ? `<p class="note">${(x.local_path_keys || []).length
