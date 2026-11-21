@@ -228,6 +228,7 @@ class Engine:
         # テンソルの名前を調べるだけ(gne probe --list-names)は allow_names を立てたときだけ通す
         self.inkling = None
         self.allow_names = False
+        self.allow_lora_trial = False             # gne inkling chips-trial(試し)だけが立てる。ほかの処理の LoRA は止めたまま
         if self.arch:
             from .gguf_fast import FastGGUF
             from .inkling import plan_of as inkling_plan_of
@@ -615,7 +616,7 @@ class Engine:
 
     def lora(self, path: str | Path):
         """LoRA アダプタ GGUF を読み込む(同じファイルは 1 回だけ)。"""
-        if self.inkling is not None:
+        if self.inkling is not None and not self.allow_lora_trial:
             from .inkling import refuse
             raise refuse(self.inkling, "LoRA(重みの書き換え)")
         key = str(Path(path).resolve())

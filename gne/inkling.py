@@ -227,7 +227,8 @@ FIX = ("このモデルで使えるのは、読み込み・gne info・マップ�
 # 低い層の止め方(engine.py の捕捉・control vector・LoRA、weights.py の重みの読み出し)は、MCP・UI のジョブにも効く
 CLI_OK = frozenset({"info", "probe", "verify", "bench", "chat", "behave", "worker", "recipe-combine", "recipe-scale",
                     "direction keys", "inkling read", "inkling check", "inkling mix", "inkling residuals", "inkling conv",
-                    "inkling experts"})
+                    "inkling experts", "inkling chips-trial", "inkling chips-bake",
+                    "inkling chips-bake-check"})
 
 
 # 読むだけのコマンドのうち、決めることが残っているので止めているもの(理由を添える)

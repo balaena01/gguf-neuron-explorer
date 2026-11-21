@@ -149,6 +149,92 @@ def test_reasoning_effort_values():
         effort_value("{{ messages }}", "low")
 
 
+def test_chips_trial_projection_math():
+    import numpy as np
+
+    from gne.inkling_chips import layer_lora
+    rng = np.random.default_rng(3)
+    d, nh, hd = 12, 3, 4
+    Wo, cw, r = rng.standard_normal((d, nh * hd)), rng.standard_normal((d, 4)) * 0.5, rng.standard_normal(d)
+    g = (1 + cw[:, -1]) / np.sqrt(5)
+    x = rng.standard_normal(nh * hd)
+    for correct in (True, False):
+        A, B = layer_lora(Wo, cw, r, [(1, 1.0)], hd, correct=correct)
+        W1 = Wo + B @ A
+        y = W1[:, hd:2 * hd] @ x[hd:2 * hd]                     # ヘッド 1 の書き込み(畳み込みの前)
+        now = r @ (g * y)                                        # 畳み込みの後の、今のトークンの r の成分
+        if correct:
+            assert abs(now) < 1e-9 * np.linalg.norm(y)           # 直した形は今のトークンの分をちょうど消す
+        else:
+            assert abs(r @ y) < 1e-9 * np.linalg.norm(y) and abs(now) > 1e-6
+        np.testing.assert_allclose(W1[:, :hd], Wo[:, :hd])      # ほかのヘッドは変わらない
+    A2, _ = layer_lora(Wo, cw, r, [(None, 2.0)], hd)
+    A1, _ = layer_lora(Wo, cw, r, [(h, 2.0) for h in range(nh)], hd)
+    np.testing.assert_allclose(A1, A2)                           # attention 全体 = 全部のヘッド
+
+
+def test_chips_trial_tap_vectors_match_the_convolution():
+    import numpy as np
+
+    from gne.inkling_chips import _taps
+    from gne.inkling_read import _conv_post
+    rng = np.random.default_rng(5)
+    d, T = 10, 7
+    cw, r, y = rng.standard_normal((d, 4)), rng.standard_normal(d), rng.standard_normal((T, d))
+    V = _taps(cw, r)
+    # 最後のトークンの畳み込みの後の r の成分 = 最後の 4 トークンの書き込みと、タップごとの向きの内積の和
+    np.testing.assert_allclose(_conv_post(y, cw)[-1] @ r, sum(V[k] @ y[T - 4 + k] for k in range(4)), rtol=1e-12)
+
+
+def test_chips_trial_candidates_all():
+    from gne.inkling_chips import candidates_all, unit_of
+    p = _plan()
+    ra = {"rows": [{"kind": "head", "layer": 7, "head": 1, "value": 3.0}, {"kind": "attn", "layer": 12, "head": None, "value": 9.0},
+                   {"kind": "ffn", "layer": 12, "head": None, "value": 8.0}, {"kind": "head", "layer": 2, "head": 0, "value": 7.0}],
+          "neurons": [{"kind": "neuron", "layer": 9, "expert": 5, "neuron": 77, "value": 5.0},
+                      {"kind": "neuron", "layer": 20, "expert": 1, "neuron": 3, "value": -1.0}]}
+    c = candidates_all(p, ra, ("head", "attn", "ffn", "neuron"))
+    assert [(r["kind"], r["layer"]) for r in c] == [("ffn", 12), ("neuron", 9), ("head", 7)]   # 流れの始まりの層は MLP だけ残す
+    assert [(r["kind"]) for r in candidates_all(p, ra, ("head", "attn", "ffn"))] == ["ffn", "head"]
+    assert unit_of(c[1], 2.0) == [9, "neuron", [5, 77], 2.0] and unit_of(c[0], 1.0) == [12, "ffn", None, 1.0]
+
+
+def test_chips_bake_units_and_compare():
+    import numpy as np
+
+    from gne.inkling_chips import bake_compare, units_of
+    assert units_of({"units": [[8, 3, 2.0], [14, None, 1.0]]}) == [[8, "head", 3, 2.0], [14, "attn", None, 1.0]]
+    assert units_of({"units": [[9, "neuron", [5, 77], 2.0]]}) == [[9, "neuron", [5, 77], 2.0]]
+    p = _plan()
+    n = p.n_steps
+    base = np.ones((2, n))
+    lora = {"proj": (base * 0.5).tolist(), "proj_base": base.tolist(), "out": [0.5, 0.5], "out_base": [1.0, 1.0],
+            "greedy": {"tokens": [[1, 2, 3], [4, 5]], "n_tokens": 5, "seconds": 1.0}}
+    other = {"proj": (base * 0.55).tolist(), "out": [0.45, 0.5], "greedy": {"tokens": [[1, 2, 9], [4, 5]], "n_tokens": 5, "seconds": 2.0}}
+    c = bake_compare(p, lora, other)
+    assert abs(c["proj_by_region"]["pass3"]["diff_over_edit_median"] - 0.1) < 1e-9          # 0.05 ÷ 0.5
+    assert np.allclose(c["out"]["diff_over_edit"], [0.1, 0.0])
+    assert c["greedy"]["same"] == 1 and c["greedy"]["first_diff"] == [2, None] and c["greedy"]["tok_per_s"] == [5.0, 2.5]
+
+
+def test_chips_trial_candidates_and_pick():
+    from gne.inkling_chips import candidates, pick
+    p = _plan()
+    rows = [{"layer": L, "head": h, "value": v} for L, h, v in
+            ((3, 0, 5.0), (6, 1, 4.0), (7, 2, 3.0), (12, 0, 2.5), (19, 4, 2.0), (18, 1, 9.0), (8, 0, -1.0), (9, None, 6.0))]
+    c = candidates(p, rows)
+    assert [(r["layer"], r["head"]) for r in c] == [(7, 2), (19, 4)]          # 0〜5 は入れない、流れの始まりの層・負の値も外す
+    c = candidates(p, rows, skip_stream_start=False)
+    assert [(r["layer"], r["head"]) for r in c] == [(18, 1), (6, 1), (7, 2), (12, 0), (19, 4)]
+    assert [(r["layer"], r["head"]) for r in candidates(p, rows, regions=("before",))] == [(3, 0)]
+    assert [r["layer"] for r in candidates(p, rows, whole=True)] == [9]
+    rep = lambda m, e=0: {"counts": {"match": m, "empty": e, "loop": 0, "at_limit": 0, "n": 4}}  # noqa: E731
+    res = {"base": {"A": rep(4), "B": rep(0)},
+           "sets": {"x": {"A": rep(1), "B": rep(0), "kl_b": 0.1}, "y": {"A": rep(0, 4), "B": rep(0), "kl_b": 0.0},
+                    "z": {"A": rep(1), "B": rep(0), "kl_b": 0.05}, "z_naive": {"A": rep(0), "B": rep(0), "kl_b": 0.0}}}
+    assert pick(res) == ("z", "y")                               # y は壊れた応答が増えすぎ、素直な射影の組は選ばない
+
+
 class _FakeEngine:
     """ReplyMarks が使う分だけ: 特別なトークン 1 つを 1 つの番号に、ほかは 1 文字 = 1 トークン。"""
     SPECIAL = {"<|content_thinking|>": 1001, "<|content_text|>": 1002, "<|message_model|>": 1003, "<|end_message|>": 1004,
@@ -347,3 +433,62 @@ def test_real_reasoning_effort_reaches_the_prompt(session):
         text = e.render_chat([{"role": "user", "content": "Hi"}])
     assert "Thinking effort level: 0<" in text
     assert "Thinking effort level: 0.9" in e.render_chat([{"role": "user", "content": "Hi"}])
+
+
+@real
+def test_real_chips_trial_lora_and_tiny_run(session, tmp_path):
+    from gne.inkling_chips import check_lora, directions, layer_refs, load_spec, trial
+    r = _reader(session)
+    session.engine.allow_lora_trial = True
+    try:
+        sp = load_spec(Path(__file__).resolve().parent.parent / "configs" / "pipeline" / "pirate_tone.json")
+        D = directions(r, sp["build_a"][:2], sp["build_b"][:2])
+        refs = layer_refs(r.plan, D, "after")
+        assert check_lora(r, refs, 14, 3, 2.0, tmp_path / "one.lora.gguf") < 1e-3   # LoRA の変化が計算どおり
+        res = trial(session, Path(__file__).resolve().parent.parent / "configs" / "pipeline" / "pirate_tone.json", tmp_path / "t",
+                    ks=(2,), strengths=(1.0,), whole_ks=(), whole_strengths=(), n_build=2, n_val_a=1, n_val_b=1, n_kl=1,
+                    max_tokens=16, region_k=2)
+        assert "heads_k2_s1" in res["sets"] and res["sets"]["heads_k2_s1"]["keep_out"] is not None
+        assert res["best"] is None or res["best"] in res["sets"]
+    finally:
+        session.engine.allow_lora_trial = False
+    with pytest.raises(GneError):
+        session.engine.lora(tmp_path / "t" / "heads_k2_s1.lora.gguf")                  # 試しの外では LoRA は止まる
+
+
+@real
+def test_real_chips_trial_ffn_lora(session, tmp_path):
+    from gne.inkling_chips import check_ffn_lora, directions, layer_refs, load_spec
+    r = _reader(session)
+    session.engine.allow_lora_trial = True
+    try:
+        sp = load_spec(Path(__file__).resolve().parent.parent / "configs" / "pipeline" / "pirate_tone.json")
+        refs = layer_refs(r.plan, directions(r, sp["build_a"][:2], sp["build_b"][:2]), "after")
+        for units in ([[9, "neuron", [3, 10], 1.0], [9, "neuron", [40, 7], 2.0]], [[22, "ffn", None, 1.0]]):
+            ck = check_ffn_lora(r, refs, units, tmp_path / "f.lora.gguf")
+            assert ck["rel_post"] < 1e-3 and ck["rel_pre"] < 1e-3, ck            # 専門家ごとの倍率を差分に入れた式どおり
+    finally:
+        session.engine.allow_lora_trial = False
+
+
+@real
+def test_real_chips_bake_types(session):
+    """焼き込みの型: q8_0 と f16 は編集が残り、keep は Q2_0 を断る(ファイルは書かない)。"""
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    from gne.inkling_chips import bake, layer_refs
+    from gne.steer import GneError
+    plan = session.weights.inkling
+    rng = np.random.default_rng(0)
+    D = {k: rng.standard_normal((plan.n_steps, session.weights.arch.n_embd)) for k in ("ffn_mix", "ffn_in")}
+    D["out"] = rng.standard_normal(session.weights.arch.n_embd)
+    refs = layer_refs(plan, D, "after")
+    rd = SimpleNamespace(w=session.weights, plan=plan)
+    units = [[11, "head", 5, 2.0], [17, "neuron", [3, 10], 2.0], [22, "neuron", [7, 1], 2.0]]
+    for rq, tol in (("q8_0", 0.1), ("f16", 0.01)):            # 1 列だけの小さな編集は Q8_0 の刻みで数 % ずれる
+        for m in bake(rd, units, refs, None, requant=rq)["modified"]:
+            assert abs(m["edit_kept"] - 1.0) < tol, (rq, m)
+    with pytest.raises(GneError, match="Q2_0"):
+        bake(rd, units, refs, None, requant="keep")

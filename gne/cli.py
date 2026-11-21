@@ -4555,6 +4555,219 @@ def inkling_conv_cmd(c: Common, holder: dict, spec: Path = _INK_SPEC, max_prompt
     return d, "\n".join(lines), 0
 
 
+@gne_command(inkling_app, "chips-trial", "inkling chips-trial")
+def inkling_chips_trial_cmd(c: Common, holder: dict,
+                            spec: Path = typer.Option(Path(__file__).resolve().parent.parent / "configs" / "pipeline" / "pirate_tone.json",
+                                                      "--spec", exists=True, help="user_prompts・system_a/b・validate のあるひな形"),
+                            name: str = typer.Option("trial", "--name", help="結果を <root>/inkling/<model_id>/<名前>.chips/ に書く(流し直すと済んだ組は飛ばす)"),
+                            ks: str = typer.Option("4,8,16,32", "--ks", help="ヘッドの組の大きさ"),
+                            strengths: str = typer.Option("1,2,4,8", "--strengths", help="強さ s(どの部品も同じ)"),
+                            whole_ks: str = typer.Option("2,4", "--whole-ks", help="attention 全体の組の層の数"),
+                            whole_strengths: str = typer.Option("1,2,4", "--whole-strengths"),
+                            gate: str = typer.Option("after", "--gate", help="2・3 回目の MLP の入力: after(繰り返しのゲートの後)/ before"),
+                            keep_stream_start: bool = typer.Option(False, "--keep-stream-start", help="流れが始まる層(0・6・12・18)の attention も候補に入れる"),
+                            n_build: Optional[int] = typer.Option(None, "--n-build", help="方向と順位に使う質問の数(省くと全部)"),
+                            n_val_a: int = typer.Option(30, "--n-val-a", help="A 側の応答の数"),
+                            n_val_b: int = typer.Option(15, "--n-val-b", help="B 側の応答の数"),
+                            n_kl: int = typer.Option(30, "--n-kl", help="中の値と最後のトークンの KL を測る質問の数(各側)"),
+                            max_tokens: int = typer.Option(1024, "--max-tokens"),
+                            all_kinds: bool = typer.Option(False, "--all-kinds", help="ヘッドだけの組の後に、MLP 全体・専門家のニューロンも入れた組"
+                                                           "(hw = ヘッド + attention 全体 + MLP 全体、all = それにニューロン)を同じ格子で足す"),
+                            all_ks: str = typer.Option("8,16,32", "--all-ks", help="--all-kinds の組の大きさ"),
+                            answer_check: bool = typer.Option(False, "--answer-check", help="最後に、思考の後の回答の始まりでの確かめ"
+                                                              "(2 つ目の方向・射影の続き方・強い組の思考)を 1 回だけ")):
+    """[試し] Inkling 2 で、CHiPS の形の取り除き(ヘッド・attention 全体の書き込みから方向の成分を引く LoRA)が応答で効くかを、
+    決まった格子(組の大きさ × 強さ)で確かめる。ふつうの機能ではない。方向は MLP が読む混ぜた入力(層 6〜17 は 3 回目)、射影は
+    短い畳み込みの今のトークンの倍率で直した形。docs/inkling2.md の「CHiPS の試し」。"""
+    import numpy as np
+
+    from .inkling_chips import broken, candidates_all, region_of, trial, trial_all
+    if gate not in ("after", "before"):
+        raise GneError("BAD_ARGS", "--gate は after か before です")
+    s = holder["session"] = c.session()
+    fl = lambda x: tuple(float(v) for v in x.split(",") if v.strip())  # noqa: E731
+    il = lambda x: tuple(int(v) for v in x.split(",") if v.strip())  # noqa: E731
+    out = s.store.root / "inkling" / s.meta.model_id / f"{name}.chips"
+    res = trial(s, spec, out, ks=il(ks), strengths=fl(strengths), whole_ks=il(whole_ks), whole_strengths=fl(whole_strengths),
+                gate=gate, skip_stream_start=not keep_stream_start, n_build=n_build, n_val_a=n_val_a, n_val_b=n_val_b, n_kl=n_kl,
+                max_tokens=max_tokens, progress=c.progress)
+    if all_kinds:
+        res = trial_all(s, spec, out, ks=il(all_ks), strengths=fl(strengths), gate=gate, skip_stream_start=not keep_stream_start,
+                        n_build=n_build, n_val_a=n_val_a, n_val_b=n_val_b, n_kl=n_kl, max_tokens=max_tokens, progress=c.progress)
+    if answer_check:
+        from .inkling_chips import answer_check as _answer_check
+        res = _answer_check(s, spec, out, gate=gate, n_val_a=n_val_a, n_val_b=n_val_b, max_tokens=max_tokens, progress=c.progress)
+    f = lambda x, fm=".2f": "—" if x is None or x != x else format(x, fm)  # noqa: E731
+    cnt = lambda r, sd: (f"一致 {r[sd]['counts'].get('match', 0)}/{r[sd]['counts']['n']} 空 {r[sd]['counts']['empty']} "  # noqa: E731
+                         f"繰り返し {r[sd]['counts']['loop']} 切れた {r[sd]['counts']['at_limit']}")
+    lines = [f"[試し] CHiPS の形の取り除き({res['config']['spec']}、方向は MLP の入力・2/3 回目は {res['config']['gate']}、"
+             f"流れの始まりの層の attention {'を外す' if res['config']['skip_stream_start'] else 'も入れる'})"]
+    lines.append("順位(基準の段での A − B の書き込み、上位 16 個。括弧は 1・2・3 回目):")
+    pos = sorted([r for r in res["rank"] if r["head"] is not None and r["value"] > 0], key=lambda r: -r["value"])
+    for r in pos[:16]:
+        bp = " / ".join(f(r["by_pass"][k]) for k in sorted(r["by_pass"]) if k != "0")
+        lines.append(f"  層 {r['layer']:>2} H{r['head']:<2} {r['value']:+.3f}" + (f"({bp})" if bp else ""))
+    ra = res.get("rank_all")
+    if ra:
+        plan = s.weights.inkling
+        lines.append(f"全部の種類の順位: 専門家の重みの下ごしらえ {ra['expert_q']['seconds']:.0f} 秒(q {ra['expert_q']['q_mb']:.0f} MB)、"
+                     f"順位 {ra['seconds']:.0f} 秒、最大のメモリ(RSS){ra['max_rss_mb_after_rank']:.0f} MB。ニューロンの和と MLP の書き込みの差 "
+                     f"{ra['neuron_sum_vs_ffn_out_rel']['median']:.1e} / {ra['neuron_sum_vs_ffn_out_rel']['max']:.1e}")
+        allc = candidates_all(plan, ra, ("head", "attn", "ffn", "neuron"), skip_stream_start=res["config"]["skip_stream_start"])
+        for k in (8, 16, 32, 100):
+            sub = allc[:k]
+            kinds = {kk: sum(1 for r in sub if r["kind"] == kk) for kk in ("head", "attn", "ffn", "neuron")}
+            regs = {rg: sum(1 for r in sub if region_of(plan, r["layer"]) == rg) for rg in ("loop", "after")}
+            lines.append(f"  上位 {k}: {kinds}、区分 {regs}")
+        lines.append("  ニューロンの集中: " + "; ".join(f"{k} 専門家 {v['experts']}・層 {v['layers']}・上位 5 専門家の割合 {f(v['share_top5_experts'])}"
+                                                for k, v in ra["concentration"].items()))
+    for ck in res.get("ffn_lora_checks", []):
+        lines.append(f"MLP の LoRA の確かめ: 層 {ck['layer']}({ck['type']}、倍率 {'あり' if ck['has_scale'] else 'なし'}、"
+                     f"{'全体' if ck['units'][0][1] == 'ffn' else 'ニューロン'}、選ばれたトークン {ck['n_tokens_selected']}/{ck['n_tokens']})、"
+                     f"畳み込みの前 {ck['rel_pre']:.1e}・後 {ck['rel_post']:.1e}、r の成分の変化 測った {ck['r_change_measured']:+.3f} / "
+                     f"式 {ck['r_change_formula']:+.3f}、LoRA {ck['lora_bytes'] / 2**20:.2f} MB")
+    lines.append(f"無介入: A {cnt(res['base'], 'A')}、B {cnt(res['base'], 'B')}")
+    lines.append("組: 残る差 = 書き換えた後の A − B ÷ 元の A − B(最後に混ぜた出力・区分ごとの中央値)、KL = 最後のトークンの分布の差")
+    for k, r in res["sets"].items():
+        if r.get("same_as"):
+            lines.append(f"  {k:<22} {r['same_as']} と同じ部品(流し直さない)")
+            continue
+        kr = r["keep_by_region"]
+        reg = " ".join(f"{x} {f(kr.get(x))}" for x in ("before", "pass1", "pass2", "pass3", "after"))
+        rep = f"  A {cnt(r, 'A')}  B {cnt(r, 'B')}  壊れた {broken(r)}" if "A" in r else ""
+        lines.append(f"  {k:<22} 出力 {f(r['keep_out'])}  [{reg}]  KL A {f(r['kl_a'], '.3f')} B {f(r['kl_b'], '.3f')}{rep}")
+    lines.append(f"層 0〜5 と 18〜23 の比べ: 目標の縮め方 {f(res.get('region_target_reduction'))}、選んだ強さ {res.get('region_pick')}")
+    lines.append(f"いちばん良い組: {res.get('best')}、いちばん悪い組: {res.get('worst')}")
+    le = res.get("loop_effect")
+    if le:
+        for kind in ("attn", "msg"):
+            b0, b1 = np.array(le["base"][kind]), np.array(le["best"][kind])
+            lines.append(f"いちばん良い組での {kind}(A − B、段 6〜41): 1 回目 {b0[6:18].sum():+.2f}→{b1[6:18].sum():+.2f}、"
+                         f"2 回目 {b0[18:30].sum():+.2f}→{b1[18:30].sum():+.2f}、3 回目 {b0[30:42].sum():+.2f}→{b1[30:42].sum():+.2f}")
+    ac = res.get("answer_check")
+    if ac:
+        lines.append("回答の始まりでの確かめ:")
+        if "dir_build" in ac:
+            lines.append("  2 つ目の方向を作った応答: " + "、".join(f"{sd} {v['with_answer']}/{v['n']}(回答の始まり 中央値 {v['answer_pos_median']:.0f} トークン目)"
+                                                         for sd, v in ac["dir_build"].items()))
+        if "cos_by_region" in ac:
+            lines.append("  最後の質問のトークンの方向との cos(区分ごとの中央値): " + "、".join(f"{rg} {v['median']:+.2f}" for rg, v in ac["cos_by_region"].items())
+                         + f"、最後の出力 {ac['cos_out']:+.2f}")
+        tr = ac.get("trajectory")
+        if tr:
+            lines.append(f"  最後の質問のトークンの方向への射影の A − B(書き換える前の応答 A {tr['n']['A']}・B {tr['n']['B']}、位置の区切りごと):")
+            lines.append("    " + " | ".join(tr["buckets"]))
+            for rg, v in tr["gap"].items():
+                lines.append(f"    {rg}: " + " | ".join(f(v[b]) for b in tr["buckets"]))
+        for key, row in (ac.get("reruns") or {}).items():
+            for dname, d in row.items():
+                parts = [f"{m}: 出力 {f(x['keep_out'])} 3 回目 {f(x['keep_by_region'].get('pass3'))}" for m, x in d.items() if m not in ("A", "B")]
+                rep = f"  A {cnt(d, 'A')}  B {cnt(d, 'B')}" if "A" in d else ""
+                lines.append(f"  {key} を {dname} で: " + "; ".join(parts) + rep)
+    lines.append(f"保存: {out}")
+    return {k: v for k, v in res.items() if k != "rank"} | {"rank_top": pos[:32], "path": str(out)}, "\n".join(lines), 0
+
+
+def _ink_trial_units(c: Common, s, trial: Optional[Path], name: str, set_key: Optional[str], units: Optional[str]):
+    from .inkling_chips import units_of
+    d = trial or (s.store.root / "inkling" / s.meta.model_id / f"{name}.chips")
+    if not (d / "directions.npz").exists():
+        raise GneError("BAD_ARGS", f"試しの結果がありません: {d}", "--name か --trial で chips-trial の出力を指定してください")
+    if units:
+        us = json.loads(units)
+    elif set_key:
+        res = json.loads((d / "result.json").read_text(encoding="utf-8"))
+        if set_key not in res["sets"]:
+            raise GneError("BAD_ARGS", f"組 {set_key!r} がありません", "chips-trial の表の組の名前を指定してください")
+        us = units_of(res["sets"][set_key])
+    else:
+        raise GneError("BAD_ARGS", "--set か --units を指定してください")
+    return d, [[int(u[0]), str(u[1]), u[2], float(u[3])] for u in us]
+
+
+_INK_TRIAL = typer.Option(None, "--trial", help="chips-trial の出力のフォルダ(省くと --name から。焼き込んだ GGUF で確かめるときに要る)")
+_INK_SET = typer.Option(None, "--set", help="chips-trial の組の名前(例 all_k16_s2)")
+_INK_UNITS = typer.Option(None, "--units", help='部品の JSON([[層, "head"|"attn"|"ffn"|"neuron", 番号, 強さ], ...])')
+
+
+@gne_command(inkling_app, "chips-bake", "inkling chips-bake")
+def inkling_chips_bake_cmd(c: Common, holder: dict, out: Path = typer.Option(..., "--out", help="書き出す GGUF"),
+                           name: str = typer.Option("trial", "--name"), trial: Optional[Path] = _INK_TRIAL,
+                           set_key: Optional[str] = _INK_SET, units: Optional[str] = _INK_UNITS,
+                           requant: str = typer.Option("q8_0", "--requant", help="書き換えるテンソルの型: q8_0(既定)・f16・keep(元の型。Q2_0 は断る)")):
+    """[試し] chips-trial の組を GGUF に焼き込む(LoRA と同じ変化量。GPU は使わない)。層 6〜17 の重みは 3 回で共有なので、
+    焼き込みも LoRA と同じく 3 回すべてに効く。専門家ごとの倍率(ffn_down_exps.scale)はそのままにし、変化量を倍率で割って入れる。"""
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    from .inkling_chips import bake, layer_refs
+    s = holder["session"] = c.session()
+    d, us = _ink_trial_units(c, s, trial, name, set_key, units)
+    if Path(out).resolve() == Path(s.weights.path).resolve():
+        raise GneError("BAD_ARGS", "出力が元のファイルと同じです")
+    z = np.load(d / "directions.npz")
+    refs = layer_refs(s.weights.inkling, {k: z[k] for k in ("ffn_mix", "ffn_in", "out")}, "after")
+    r = bake(SimpleNamespace(w=s.weights, plan=s.weights.inkling), us, refs, Path(out), requant=requant)
+    lines = [f"[試し] 焼き込み: {r['path']}({r['bytes'] / 2**30:.2f} GiB、元 {r['bytes_src'] / 2**30:.2f} GiB)"]
+    for m in r["modified"]:
+        ex = f"、専門家 {len(m['experts'])} 個を編集" if "experts" in m else ""
+        kept = f"、残った編集 {m['edit_kept']:.3f}" if m.get("edit_kept") is not None else ""
+        lines.append(f"  {m['tensor']}: {m['type']} → {m['to']}({m['bytes_from'] / 2**20:.1f} → {m['bytes_to'] / 2**20:.1f} MiB{ex}{kept})")
+    if any((m.get("edit_kept") or 1.0) < 0.9 for m in r["modified"]):
+        lines.append("  注意: 量子化し直しで編集の 1 割以上が消えたテンソルがあります(--requant q8_0 か f16 で書き直せます)")
+    lines.append(f"記録: {r['sidecar']}")
+    return r, "\n".join(lines), 0
+
+
+@gne_command(inkling_app, "chips-bake-check", "inkling chips-bake-check")
+def inkling_chips_bake_check_cmd(c: Common, holder: dict,
+                                 mode: str = typer.Option(..., "--mode", help="lora(元のモデル + LoRA)・baked(焼き込んだ GGUF)・replies(応答だけ)"),
+                                 save: Path = typer.Option(..., "--save", help="測った値を書く JSON"),
+                                 against: Optional[Path] = typer.Option(None, "--against", help="比べる lora 側の JSON"),
+                                 name: str = typer.Option("trial", "--name"), trial: Optional[Path] = _INK_TRIAL,
+                                 set_key: Optional[str] = _INK_SET, units: Optional[str] = _INK_UNITS,
+                                 spec: Path = typer.Option(Path(__file__).resolve().parent.parent / "configs" / "pipeline" / "pirate_tone.json",
+                                                           "--spec", exists=True),
+                                 n_a: int = typer.Option(4, "--n-a"), n_b: int = typer.Option(2, "--n-b"),
+                                 reply_tokens: int = typer.Option(256, "--reply-tokens")):
+    """[試し] 焼き込みの確かめ。同じ組で、元のモデル + LoRA(--mode lora)と焼き込んだ GGUF(-m に焼き込んだもの、--mode baked)の
+    中の値(各段の MLP の入力と最後に混ぜた出力の、方向への射影)と貪欲の応答を比べる。--mode replies は中の値を読めない
+    llama.cpp(名前の patch なし)で読み込んで応答だけ。"""
+    from .inkling_chips import bake_check, bake_compare
+    if mode not in ("lora", "baked", "replies"):
+        raise GneError("BAD_ARGS", "--mode は lora・baked・replies です")
+    s = holder["session"] = c.session()
+    if mode != "lora" and not units and not set_key:          # 焼き込んだ GGUF の記録(<GGUF>.chips.json)の組
+        side = Path(str(s.weights.path) + ".chips.json")
+        if side.exists():
+            units = json.dumps(json.loads(side.read_text(encoding="utf-8"))["units"])
+    d, us = _ink_trial_units(c, s, trial, name, set_key, units)
+    r = bake_check(s, d, us, spec, mode=mode, n_a=n_a, n_b=n_b, reply_tokens=reply_tokens)
+    r["model"] = Path(s.weights.path).name
+    Path(save).write_text(json.dumps(r, ensure_ascii=False, indent=1), encoding="utf-8")
+    g = r["greedy"]
+    lines = [f"[試し] 焼き込みの確かめ({mode}、{Path(s.weights.path).name}): 応答 {len(g['tokens'])} 個、{g['n_tokens']} トークン、"
+             f"{g['n_tokens'] / max(g['seconds'], 1e-9):.1f} トークン/秒"]
+    if against:
+        lo = json.loads(Path(against).read_text(encoding="utf-8"))
+        if lo["units"] != r["units"]:
+            raise GneError("BAD_ARGS", "比べる JSON と組が違います")
+        cmp = bake_compare(s.weights.inkling, lo, r)
+        r["compare"] = cmp
+        Path(save).write_text(json.dumps(r, ensure_ascii=False, indent=1), encoding="utf-8")
+        for rg, v in (cmp.get("proj_by_region") or {}).items():
+            lines.append(f"  {rg}: 差 ÷ LoRA の動き(中央値){v['diff_over_edit_median']:.3f}、差 ÷ 元(最大){v['diff_over_base_max']:.2e}、"
+                         f"LoRA の動き ÷ 元(中央値){v['edit_over_base_median']:.3f}")
+        if "out" in cmp:
+            lines.append("  最後に混ぜた出力: 差 ÷ LoRA の動き " + ", ".join(f"{x:.3f}" for x in cmp["out"]["diff_over_edit"]))
+        gg = cmp["greedy"]
+        lines.append(f"  貪欲の応答: 同じ {gg['same']}/{gg['n']}、最初に違うトークン {gg['first_diff']}、長さ {gg['lens']}、"
+                     f"速さ LoRA {gg['tok_per_s'][0]:.1f} / こちら {gg['tok_per_s'][1]:.1f} トークン/秒")
+    lines.append(f"保存: {save}")
+    return r, "\n".join(lines), 0
+
+
 @gne_command(inkling_app, "experts", "inkling experts")
 def inkling_experts_cmd(c: Common, holder: dict, spec: Path = _INK_SPEC, max_prompts: Optional[int] = _INK_MAX,
                         name: Optional[str] = _INK_NAME):
