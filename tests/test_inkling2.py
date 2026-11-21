@@ -705,6 +705,14 @@ def test_bake_auto_rule_whole_ffn_layers():
     assert "層 9 の専門家 NVFP4 → Q8_0(+162 MiB)" in text and "層 22 の専門家 Q2_0 → Q8_0(+253 MiB)" in text
     assert "層 14" not in text and "+415 MiB" in text
     assert "元の型・元の大きさのまま" in bake_plan_text({"bytes": 0, "tensors": grow["tensors"][1:2]})
+    # keep で MLP 全体の部品を元の型(IQ4_NL)に書いて編集が丸めに消えたときは注意を出す(auto なら Q8_0 になるので出ない)
+    from gne.inkling_pipeline import kept_note
+    recs = [{"tensor": "blk.22.ffn_down_exps.weight", "to": "IQ4_NL", "edit_kept": 0.5643},
+            {"tensor": "blk.9.ffn_down_exps.weight", "to": "NVFP4", "edit_kept": 1.0014},
+            {"tensor": "blk.11.attn_output.weight", "to": "Q8_0", "edit_kept": None}]
+    note = kept_note(recs)
+    assert note and "blk.22.ffn_down_exps.weight(IQ4_NL)は 56%" in note and "blk.9" not in note
+    assert kept_note(recs[1:]) is None and kept_note([]) is None
 
 
 def test_into_same_type_rules_and_target_check():
@@ -718,7 +726,7 @@ def test_into_same_type_rules_and_target_check():
     from gne.quant import qtype_of
     from gne.steer import GneError
     assert same_type_method(qtype_of(42)) == "par" and same_type_method(SimpleNamespace(name="NVFP4")) == "par"
-    for q in (Q.Q8_0, Q.Q4_K, Q.Q5_K, Q.Q6_K, Q.Q3_K):
+    for q in (Q.Q8_0, Q.Q4_K, Q.Q5_K, Q.Q6_K, Q.Q3_K, Q.IQ4_NL):
         assert same_type_method(q) == "requant", q
     for q in (Q.IQ2_XXS, Q.IQ2_XS, Q.IQ1_S):
         assert same_type_method(q) == "imatrix", q

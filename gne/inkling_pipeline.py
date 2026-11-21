@@ -819,6 +819,8 @@ def bake_recipe(session, heads, dst: Path | None, *, requant: str = "auto", vram
                "bytes_src": Path(tw.path).stat().st_size, "bytes": Path(tw.path).stat().st_size + grow["bytes"]}
         if meta:
             out.update(into=str(tw.path), carry_over=carry_over(session, heads, tw))
+        if kept_note(recs):
+            out["kept_note"] = kept_note(recs)
         return out
     if getattr(session, "progress", None):                    # 書く前に知らせる(CLI は進み具合の行、画面はジョブの段の文)
         session.progress(0, 1, plan)
@@ -840,7 +842,21 @@ def bake_recipe(session, heads, dst: Path | None, *, requant: str = "auto", vram
     r["plan"] = plan
     if vram_note:
         r["vram_note"] = vram_note
+    if kept_note(r["modified"]):
+        r["kept_note"] = kept_note(r["modified"])
     return r
+
+
+def kept_note(recs) -> str | None:
+    """書いた型で編集の 1 割以上が丸めに消えたテンソル(edit_kept < KEYED_KEEP_MIN)の注意。auto はそうしたテンソルを Q8_0 に
+    するので、出るのは主に keep(元の型を守る)で MLP 全体の部品を IQ4_NL・Q5_K などに書いたとき。"""
+    from .gain import KEYED_KEEP_MIN
+    low = [m for m in recs or [] if m.get("edit_kept") is not None and m["edit_kept"] < KEYED_KEEP_MIN]
+    if not low:
+        return None
+    what = "、".join(f"{m['tensor']}({m['to']})は {m['edit_kept']:.0%}" for m in low[:3]) + (" など" if len(low) > 3 else "")
+    return (f"書いた型では編集の 1 割以上が丸めに消えたテンソルがあります(残った編集: {what})。"
+            "型を自動(こうしたテンソルだけ Q8_0)にするか、LoRA で配ってください")
 
 
 def target_weights(session, into):

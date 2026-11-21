@@ -1039,7 +1039,9 @@ export class RecipePanel {
       ${x.url ? `<p class="muted note mono">${esc(x.path)}</p>` : ""}
       ${x.plan ? `<p class="muted note">${esc(x.plan)}</p>` : ""}
       ${x.vram_note ? `<p class="note">⚠ ${esc(x.vram_note)}</p>` : ""}
+      ${x.kept_note ? `<p class="note">⚠ ${esc(x.kept_note)}</p>` : ""}
       ${x.into ? `<p class="muted note">${t("マージ先: {f}", { f: esc(x.into) })}</p>` : ""}
+      ${x.into && (x.carry_over || []).length ? `<p class="muted note">${carryText(x.carry_over)}</p>` : ""}
       ${x.imatrix ? `<p class="muted note">${t(x.imatrix_auto ? "imatrix: {f}(モデルの隣で見つけたもの)" : "imatrix: {f}", { f: esc(x.imatrix) })}</p>` : ""}
       ${x.strip_meta ? `<p class="note">${(x.local_path_keys || []).length
         ? `⚠ ${t("gne の記録は入れていませんが、メタデータに手元のパスらしい文字列が残っています: {k}", { k: esc(x.local_path_keys.join(", ")) })}`
@@ -1052,6 +1054,15 @@ export class RecipePanel {
       <p class="muted note">${how}</p>
       ${(x.warnings || []).length ? `<p class="muted note">${x.warnings.map(esc).join("<br>")}</p>` : ""}`);
   }
+}
+
+// マージ先(同じモデルの別の量子化)に焼き込んだときの、消す量(r̂ᵀW)の違いのまとめ(Inkling 2 の結果の carry_over)
+function carryText(co) {
+  const r = co.map((x) => x.norm_ratio), far = co.filter((x) => Math.abs(x.norm_ratio - 1) > 0.1);
+  const head = t("消す量(r̂ᵀW)のこのモデルとマージ先の大きさの比 {lo}〜{hi}(部品 {n} 個)", { lo: fmt(Math.min(...r), 2), hi: fmt(Math.max(...r), 2), n: co.length });
+  return far.length
+    ? `${head}。${t("1 から 1 割以上離れた部品(このモデルで決めた強さの効き方が変わる): {u}", { u: `<span class="mono">${esc(far.map((x) => `${x.unit} ${fmt(x.norm_ratio, 2)}`).join(", "))}</span>` })}`
+    : `${head}。${t("どの部品も 1 割以内")}`;
 }
 
 export { signed };

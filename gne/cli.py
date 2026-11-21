@@ -3305,6 +3305,7 @@ def _inkling_export_lines(d: dict, bake: bool) -> list[str]:
              *([f"焼き込む先: {d['into']}(同じモデルの別の量子化。方向と部品はこのモデル、消す量は焼き込む先の重みから)"] if d.get("into") else []),
              *([d["plan"]] if d.get("plan") else []),
              *([f"注意: {d['vram_note']}"] if d.get("vram_note") else []),
+             *([f"注意: {d['kept_note']}"] if d.get("kept_note") else []),
              f"ファイルと VRAM の増え方: {g.get('bytes', 0) / 2**20:+.0f} MiB"
              + (f"(読み込んだときの VRAM の空き {d['vram_free_mb']:.0f} MiB)" if d.get("vram_free_mb") is not None else "")]
     lines += [_inkling_bake_line(m) for m in d["modified"]]
