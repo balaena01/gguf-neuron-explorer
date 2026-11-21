@@ -894,6 +894,23 @@ export class RecipePanel {
   lxKeyedOnly() { return this.r.keyed().length > 0 && !this.r.heads().length && !this.r.projs().length; }
   // 書き換えたテンソルの型の既定: keyed を含むなら auto(テンソルごとに、元が Q8_0 なら Q8_0 のまま、それ以外は F16。
   // Q8_0 のままでは編集の 1 割以上が丸めに消えるテンソルだけ F16)、それ以外は Q8_0。auto は keyed を含むときだけ選べる
+  // Inkling 2: 焼き込みの予定(型を変える層と、ファイル・VRAM の増え方の見込み)。正確な数はジョブの段の文と結果に出る
+  inklingBakePlan(rq) {
+    const ink = this.inkling() || {}, types = ink.down_types || [];
+    const MIB = { NVFP4: 182.2, Q2_0: 91.1, Q8_0: 344.2, F16: 648.0 };
+    const to = rq === "f16" ? "F16" : "Q8_0";
+    const ffnL = [...new Set(this.r.units.filter((u) => u.mode === "proj" && u.kind === "ffn").map((u) => u.layer))].sort((a, b) => a - b);
+    const expL = [...new Set(this.r.units.filter((u) => u.mode === "proj" && (u.kind === "ffn" || u.kind === "expert_neuron")).map((u) => u.layer))].sort((a, b) => a - b);
+    const conv = rq === "keep" ? [] : rq === "auto" ? ffnL : expL;
+    if (!conv.length) return t("焼き込みの予定: 専門家のテンソルは元の型・元の大きさのまま(attention の出力も、残った編集が 9 割を切らない限り元の型)");
+    const parts = conv.map((L) => { const ty = types[L] || "?"; const g = MIB[ty] ? MIB[to] - MIB[ty] : null;
+      return `L${L} ${ty} → ${to}${g !== null ? ` (+${g.toFixed(0)} MiB)` : ""}`; });
+    const tot = conv.reduce((a, L) => a + (MIB[types[L]] ? MIB[to] - MIB[types[L]] : 0), 0);
+    return rq === "auto"
+      ? t("焼き込みの予定: {p}。ファイルと VRAM は合わせて約 +{m} MiB(MLP 全体の部品がある層の専門家のテンソル)", { p: parts.join("、"), m: tot.toFixed(0) })
+      : t("焼き込みの予定: {p}。ファイルと VRAM は合わせて約 +{m} MiB(書き換える専門家のテンソル)", { p: parts.join("、"), m: tot.toFixed(0) });
+  }
+
   lxRequant() {
     if (this.inkling()) return this.lx.requant ?? "auto";            // Inkling 2: 既定は元の型・元の大きさ(auto)
     const nk = this.r.keyed().length;
@@ -912,7 +929,7 @@ export class RecipePanel {
       <div class="rc-lx-row${bake ? "" : " off"}"><span class="muted" title="${t("空なら、いま読んでいるモデルにマージする。同じモデルの量子化していない GGUF(F16 / BF16)のパスを入れると、方向はこのモデルで作ったものを使い、そちらにマージする(GPU は使わない。少し誤差がある。LoRA 版との比較はできない)")}">${t("マージ先")}</span>
         <input id="lx-into" size="30" value="${esc(f.into)}" placeholder="${t("空ならいま読んでいるモデル")}" spellcheck="false"${dis}></div>
       <div class="rc-lx-row${bake ? "" : " off"}"><span class="muted" title="${t("書き換えたテンソルを何の型で書くか。Q8_0 は元より少し大きくなることがある、F16 はもっと大きい。下の「元の型に戻す」を使うとほぼ元の大きさ")}">${t("書き換えたテンソルの型")}</span>
-        <select id="lx-requant"${dis || (f.via_f16 ? " disabled" : "")}>${this.inkling() ? `<option value="auto"${rq === "auto" ? " selected" : ""}>${t("自動(元の型・元の大きさのまま。編集が残らないテンソルだけ Q8_0)")}</option><option value="keep"${rq === "keep" ? " selected" : ""}>${t("いつも元の型")}</option>`
+        <select id="lx-requant"${dis || (f.via_f16 ? " disabled" : "")}>${this.inkling() ? `<option value="auto"${rq === "auto" ? " selected" : ""}>${t("自動(元の型・元の大きさのまま。MLP 全体の部品がある層と、編集が残らないテンソルだけ Q8_0)")}</option><option value="keep"${rq === "keep" ? " selected" : ""}>${t("いつも元の型")}</option>`
           : nk ? `<option value="auto"${rq === "auto" ? " selected" : ""}>${t("自動(Q8_0 は元のまま、ほかは F16)")}</option>` : ""}<option value="q8_0"${rq === "q8_0" ? " selected" : ""}>Q8_0</option><option value="f16"${rq === "f16" ? " selected" : ""}>F16</option>${this.inkling() ? "" : `<option value="keep"${rq === "keep" ? " selected" : ""}>${t("元と同じ(F16・BF16 のモデル)")}</option>`}</select>
         <label title="${t("書き換えたテンソルを F16 で書いてから、llama-quantize で元の量子化の型に戻す(ファイルの大きさを元に近く保つ。低ビットの型は imatrix があると誤差が小さい)")}"><input type="checkbox" id="lx-viaf16"${f.via_f16 ? " checked" : ""}${dis}> ${t("元の量子化の型に戻す")}</label></div>
       ${bake && nk ? `<div class="rc-lx-row"><span class="muted note">${t("キーつきの書き込みを含むので、書き換えたテンソルの型の既定は「自動」: 元が Q8_0 のテンソルは Q8_0 のまま(F16 にすると計算方法が変わり、LoRA 版とかえってずれる)、それ以外は F16。Q8_0 のままでは編集の 1 割以上が丸めに消えるテンソルだけ F16(配るなら LoRA がおすすめ)")}</span></div>` : ""}
@@ -928,6 +945,7 @@ export class RecipePanel {
       <div class="rc-lx-row"><button class="main" id="lx-go">${t(bake ? "マージする" : "LoRA を書き出す")}</button>
         <span class="muted note">${nk ? t("名前は上のレシピの名前(空なら headproj)。LoRA に入るユニット {n} 個(ヘッド {h}・キーつきの書き込み {k})", { n, h: n - nk, k: nk })
           : t("名前は上のレシピの名前(空なら headproj)。ヘッドのユニット {n} 個が入る", { n })}${nAdd ? ` · ${t("add のユニット {k} 個は入らない(cvec で書き出す)", { k: nAdd })}` : ""}${bake ? ` · ${t("マージはモデルを丸ごともう 1 つ書く(同じくらいのディスク・時間)")}` : ""}</span></div>
+      ${bake && this.inkling() ? `<div class="rc-lx-row"><span class="muted note">${esc(this.inklingBakePlan(rq))}</span></div>` : ""}
       <div id="lx-result">${this.lxMsg ? this.lxMsg.html : ""}</div></div>`;
   }
 
@@ -935,7 +953,7 @@ export class RecipePanel {
     const $ = (s) => this.root.querySelector(s), f = this.lx;
     for (const el of this.root.querySelectorAll("input[name=lx-kind]")) el.addEventListener("change", () => { f.bake = el.value === "bake" && el.checked; this.render(); });
     const on = (sel, ev, fn) => { const el = $(sel); if (el) el.addEventListener(ev, fn); };
-    on("#lx-requant", "change", (ev) => { f.requant = ev.target.value; });
+    on("#lx-requant", "change", (ev) => { f.requant = ev.target.value; this.render(); });
     if (this.inkling()) {                         // Inkling 2: マージ先・元の量子化の型に戻す・LoRA 版との比べは使えないので出さない
       for (const id of ["#lx-into", "#lx-viaf16", "#lx-verify"]) {
         const el = this.root.querySelector(id);

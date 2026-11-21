@@ -291,7 +291,7 @@ export class PipelinePanel {
     this.steps = new Steps(root, {
       shared: this.$("#pp-shared"), store: "gne.chips.step", label: t("CHiPS の手順"), extra: () => [this.$("#pp-nores")],
       steps: [{ key: "input", label: t("1. 対照の文"), els: () => [this.$("#pp-input"), this.$("#pp-run")], shared: true },
-              { key: "dir", label: t("2. 方向と基準層"), els: res("section.pp-stage:nth-of-type(1)") },
+              { key: "dir", label: this.inkling() ? t("2. 方向と測る点") : t("2. 方向と基準層"), els: res("section.pp-stage:nth-of-type(1)") },
               { key: "causal", label: t("3. 効くヘッドを探す"), els: res("section.pp-stage:nth-of-type(2)") },
               { key: "alloc", label: t("4. 配り方を決める"), els: res("section.pp-stage:nth-of-type(3), section.pp-stage:nth-of-type(4), section.pp-stage:nth-of-type(5)") },
               { key: "cand", label: t("5. 強さの候補を作る"), els: res(".pp-cand") },
@@ -323,9 +323,14 @@ export class PipelinePanel {
     const rb = this.$("#pp-rank-blocked");
     rb.hidden = false;
     rb.textContent = t("Inkling 2 では「止めて選ぶ」はまだ使えません");
-    this.$("#pp-kinds").value = "all,layers";
+    const kinds = this.$("#pp-kinds");                // このモデルの部品(線形注意は無い)と既定(ヘッド・ニューロン・層全体)
+    kinds.innerHTML = [["heads", t("ヘッドだけ")], ["all", t("ヘッドと専門家のニューロン")], ["heads,layers", t("ヘッドと層全体")],
+                       ["all,layers", t("ヘッド・専門家のニューロン・層全体(既定)")]].map(([v, l]) => `<option value="${v}">${l}</option>`).join("");
+    kinds.value = "all,layers";
     this.$("#pp-mx").value = 32;
+    this.$("#pp-mx").closest("label").title = t("このモデルでは、方向づくりと射影の値を測る段(順位づけ・確かめ・配分)の両方で、側ごとにこの数の質問を使う(等間隔に間引く。既定 32)。答えの始まりなどの位置では、質問 1 つごとに返事を書かせるので、全部の質問を使うと時間がかかるため");
     this.$("#pp-ckt").value = 1024;
+    this.$("#pp-ckt").closest("label").title = t("応答での確かめで書かせる長さの上限(トークン、このモデルの既定 1024。答えの前に思考を書くので長め)");
     for (const id of ["#pp-holdout", "#pp-loopdir", "#pp-fromdir"]) { const l = this.$(id).closest("label"); if (l) l.hidden = true; }
     this.$("#pp-kinds").closest("label").insertAdjacentHTML("afterend",
       `<label class="muted" title="${t("層 0〜5(繰り返しの前)の部品も候補に入れる。既定は入れない")}"><input type="checkbox" id="pp-before"> ${t("層 0〜5 も候補に入れる")}</label>`);
@@ -856,7 +861,10 @@ export class PipelinePanel {
     if (d.inkling) {                               // Inkling 2: 層ごとの基準は決まっているので、測る点の A と B の平均を並べる
       const ink = d.inkling, sk = dir.skipped || {};
       const rows = (sc.layers || []).map((x) => `<tr><td class="l">${esc(inkPoint(x))}</td><td>${fmt(x.A, 2)}</td><td>${fmt(x.B, 2)}</td><td>${fmt(x.A - x.B, 2)}</td></tr>`).join("");
+      const nu = ink.n_questions || {};
       return `<section class="pp-stage"><h4>${t("1. 方向と測る点")}</h4>
+        ${nu.direction ? `<p class="note">${t("使った質問: 方向 A {da} / B {db}、測る段 A {ma} / B {mb}(対照集合 A {na} / B {nb} から、側ごとに最大 {mx} 問を等間隔に)", {
+          da: nu.direction.A, db: nu.direction.B, ma: nu.measure.A, mb: nu.measure.B, na: nu.total.A, nb: nu.total.B, mx: nu.max_examples ?? "—" })}</p>` : ""}
         ${noteHTML(t("A と B で同じ質問を読ませ、段ごとに MLP が読む入力の平均の差を方向にします(層 6〜17 は 3 回目の段、繰り返しのゲートの後)。部品の射影の基準はその層の最後の段の方向です。組は「最後に混ぜた出力」で A 側の値を下げるように作ります。"), "muted note")}
         <p class="note mono">positions ${esc(dir.positions || "—")} · ${t("方向を作った例")} A ${nr.A ?? "—"} / B ${nr.B ?? "—"}${
           (sk.A || sk.B) ? ` · ${t("答えの始まりが無く読めなかった会話")} A ${sk.A || 0} / B ${sk.B || 0}` : ""}</p>

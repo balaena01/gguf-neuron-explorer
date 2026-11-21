@@ -702,6 +702,9 @@ def pipeline(session, spec: dict, pipe: dict, given: dict, t0: float) -> dict:
     # 2. 段ごとの A と B の分かれ方(ほかのモデルの「基準層」の代わり。Inkling 2 は層ごとの基準が決まっているので選ばない)
     ts = time.perf_counter()
     st = prepare(session, ds, cs, points=points, positions=str(pipe["positions"]), max_examples=mx, progress=session.progress)
+    out["inkling"]["n_questions"] = {"total": {"A": len(cs.prompts("A")), "B": len(cs.prompts("B"))}, "max_examples": mx,
+                                     "direction": d.get("n_items") or {"A": None, "B": None},
+                                     "measure": {"A": st.scorer.n("A"), "B": len(st.b_idx)}}
     out["score"] = {"base_layer": None, "best_layer": None, "n": {"A": st.scorer.n("A"), "B": st.scorer.n("B")},
                     "layers": [{"layer": L, "label": point_label(plan, L), "A": float(st.base["A"][L].mean()),
                                 "B": float(st.base["B"][L].mean())} for L in st.score_layers],
@@ -781,9 +784,10 @@ def _json(x):
 
 def bake_recipe(session, heads, dst: Path, *, requant: str = "auto", vram_free_mb: float | None = None,
                 strip_meta: bool = False) -> dict:
-    """レシピの射影の部品を GGUF に焼き込む(inkling_chips.bake)。requant は auto(既定: 元の型・元の大きさで書き、編集が残らない
-    テンソルだけ Q8_0)・keep・q8_0・f16。書き換えるテンソルごとのファイル・VRAM の増え方を出し、vram_free_mb(読み込んだときの
-    空き)を渡すと、収まらないときは止める(auto・keep は書く前に一度計算して、Q8_0 になるテンソルの分を数える)。"""
+    """レシピの射影の部品を GGUF に焼き込む(inkling_chips.bake)。requant は auto(既定: MLP 全体の部品がある層の専門家のテンソルと、
+    編集が残らないテンソルは Q8_0、ほかは元の型・元の大きさ)・keep・q8_0・f16。書く前に一度計算して、Q8_0 にする層と
+    ファイル・VRAM の増え方を決め、progress で知らせる(結果の plan にも入れる)。vram_free_mb(読み込んだときの空き)を渡すと、
+    収まらないときは止める。"""
     from .inkling_chips import bake
     heads = [p for p in heads if p.s]
     if not heads:
@@ -802,13 +806,27 @@ def bake_recipe(session, heads, dst: Path, *, requant: str = "auto", vram_free_m
                 "expert_layers": sorted({int(m["tensor"].split(".")[1]) for m in pre if "ffn_down_exps" in m["tensor"] and m["to"] != m["from"]})}
     else:
         grow = estimate_growth(session, [u[:4] for u in units], requant)
+    plan = bake_plan_text(grow)
+    if getattr(session, "progress", None):                    # 書く前に知らせる(CLI は進み具合の行、画面はジョブの段の文)
+        session.progress(0, 1, plan)
     if vram_free_mb is not None and grow["bytes"] / 2**20 > vram_free_mb - VRAM_MARGIN_MB:
         raise GneError("VRAM_FULL", f"焼き込むと VRAM が {grow['bytes'] / 2**20:.0f} MiB 増えますが、空きは {vram_free_mb:.0f} MiB です"
                                     f"(書き換える専門家の層 {grow['expert_layers']})",
                        "部品の層を減らすか、LoRA のまま使ってください(書き換える専門家の層 1 つで Q8_0 は Q2_0 の層 +253 MiB・NVFP4 の層 +162 MiB)")
     r = bake(rd, units, refs, Path(dst), requant=requant, strip_meta=strip_meta, tens=tens)
     r["growth"] = grow
+    r["plan"] = plan
     return r
+
+
+def bake_plan_text(grow: dict) -> str:
+    """焼き込みの予定の文: 型を変えるテンソル(層)と、ファイル・VRAM の増え方。"""
+    conv = [x for x in grow.get("tensors") or [] if x.get("to") and x.get("to") != x.get("type")]
+    if not conv:
+        return "焼き込みの予定: どのテンソルも元の型・元の大きさのまま"
+    parts = [f"層 {x['tensor'].split('.')[1]} の{'専門家' if 'ffn_down_exps' in x['tensor'] else ' attention の出力'}"
+             f" {x['type']} → {x['to']}(+{x['to_mib'] - x['from_mib']:.0f} MiB)" for x in conv]
+    return f"焼き込みの予定: {'、'.join(parts)}。ファイルと VRAM は合わせて {grow['bytes'] / 2**20:+.0f} MiB"
 
 
 def gpu_free_mb() -> float | None:

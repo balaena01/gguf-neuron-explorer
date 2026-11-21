@@ -829,8 +829,10 @@ def bake(reader: Reader, units: list, refs: dict | None, dst: Path | None, *, re
     - keep: 元の型・元の大きさのまま。attention の出力(Q8_0・K-quant)は llama.cpp の量子化で書き戻す。専門家のテンソル
       (NVFP4・Q2_0)は量子化し直さず、元のコードと倍率を残して、編集する列のコードだけを動かす(inkling_bake.py の射影を
       意識した丸め。編集しない列・専門家はバイトのまま)
-    - auto: テンソルごとに keep を試し、編集の残り方(edit_kept)が KEYED_KEEP_MIN(0.9)より小さければ Q8_0 にする
-      (gne の keyed の焼き込みの auto と同じ決め方)。元が Q8_0 の attention の出力は Q8_0 のまま
+    - auto: MLP 全体の部品(L:ffn)を受ける専門家のテンソルは Q8_0(元の型のままだと、方向に沿わない変化が全部の列に入り、
+      いくつかの方向が重なると LoRA から大きくずれた)。ニューロンの部品だけを受ける専門家のテンソルは keep(元の型・元の大きさ)。
+      どのテンソルも、編集の残り方(edit_kept)が KEYED_KEEP_MIN(0.9)より小さければ Q8_0 にする(gne の keyed の焼き込みの
+      auto と同じ決め方)。元が Q8_0 の attention の出力は Q8_0 のまま
     専門家ごとの倍率(ffn_down_exps.scale)はそのままにし、重みの変化量は倍率で割って入れる(実行時に倍率が掛かって LoRA と同じ
     s_e·W_e − s·u uᵀ s_e·W_e になる)。層 6〜17 の重みは 3 回で共有なので、焼き込みも 3 回すべてに効く。
     書き換えたテンソルとそのやり方は GGUF の gne.patches と <dst>.chips.json に残す(strip_meta なら GGUF には入れない)。"""
@@ -870,6 +872,7 @@ def bake(reader: Reader, units: list, refs: dict | None, dst: Path | None, *, re
         return (qt, st)
     replace: dict[str, tuple] = {}
     recs = []
+    whole = whole_ffn_layers(units)
     for name, (A, B) in sorted(tens.items()):
         t = T[name]
         rec = {"tensor": name, "from": t.tensor_type.name, "bytes_from": int(t.n_bytes), "op": "rewrite"}
@@ -881,6 +884,9 @@ def bake(reader: Reader, units: list, refs: dict | None, dst: Path | None, *, re
             rec["scale_divided"] = sc is not None
             if requant in ("q8_0", "f16"):
                 replace[name] = convert_experts(t, A, B, {"q8_0": _Q.Q8_0, "f16": _Q.F16}[requant], rec)
+            elif requant == "auto" and L in whole:               # MLP 全体の部品を受けるテンソルは Q8_0(auto の決め方)
+                replace[name] = convert_experts(t, A, B, _Q.Q8_0, rec)
+                rec["why"] = "whole_layer_mlp"
             else:
                 if t.tensor_type.name not in TYPES:
                     raise GneError("UNSUPPORTED_QUANT", f"{name}: {t.tensor_type.name} は元の型のまま書けません(NVFP4・Q2_0 だけ)",
@@ -955,6 +961,11 @@ def bake(reader: Reader, units: list, refs: dict | None, dst: Path | None, *, re
     side.write_text(json.dumps({"units": units, "requant": requant, "correct": correct, "modified": recs}, ensure_ascii=False, indent=1),
                     encoding="utf-8")
     return {"path": str(dst), "bytes": dst.stat().st_size, "bytes_src": src.stat().st_size, "modified": recs, "sidecar": str(side)}
+
+
+def whole_ffn_layers(units: list) -> set[int]:
+    """MLP 全体の部品(L:ffn)がある層。焼き込みの auto では、この層の専門家のテンソルを Q8_0 で書く。"""
+    return {int(u[0]) for u in units if len(u) > 1 and u[1] == "ffn"}
 
 
 def _convert_tofile(st, enc):

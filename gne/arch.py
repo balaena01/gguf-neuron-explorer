@@ -192,4 +192,11 @@ def arch_info(weights) -> ArchInfo:
     lp = getattr(weights, "loop", None)
     return ArchInfo(arch, m.n_layer, m.n_embd, m.n_vocab, layers, side, int(get(f"{arch}.hyper_connection.count", 0) or 0),
                     lp.to_dict() if lp is not None else None, int(get(f"{arch}.mhc.streams", 0) or 0) if lp is not None else 0,
-                    ink.to_dict() if ink is not None else None)
+                    _ink_arch(weights, ink) if ink is not None else None)
+
+
+def _ink_arch(weights, ink) -> dict:
+    """画面に渡す Inkling 2 の段の表に、層ごとの専門家の down の重みの型を足す(焼き込みの増え方の見込みに使う)。"""
+    ts = getattr(weights, "_tensors", {}) or {}
+    down = [getattr(getattr(ts.get(f"blk.{L}.ffn_down_exps.weight"), "tensor_type", None), "name", None) for L in range(ink.n_stored)]
+    return {**ink.to_dict(), "down_types": down}

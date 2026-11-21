@@ -3281,6 +3281,8 @@ def _inkling_bake_line(m: dict) -> str:
     par = (f"、動かしたコード {m['codes_changed']}(列 {m['columns']})、方向に沿わない変化 ÷ 消した成分 {m['off_over_removed_median']:.2f}"
            if m.get("method") == "projection-aware rounding" else "")
     fb = f"、元の型では残った編集が {m['fallback']['edit_kept']:.2f} なので Q8_0 にした" if m.get("fallback") else ""
+    if m.get("why") == "whole_layer_mlp":
+        fb += "、MLP 全体の部品を受けるので Q8_0(auto の決め方)"
     return (f"  {m['tensor']}: {m.get('type') or m.get('from')} → {m['to']}({m['bytes_from'] / 2**20:.1f} → {m['bytes_to'] / 2**20:.1f} MiB、"
             f"{how}{ex}{kept}{par}{fb})")
 
@@ -3291,6 +3293,7 @@ def _inkling_export_lines(d: dict, bake: bool) -> list[str]:
         return [f"{d['path']}({d['bytes'] / 1e6:.2f} MB、LoRA)"]
     g = d.get("growth") or {}
     lines = [f"{d['path']}({d['bytes'] / 2**30:.2f} GiB、元 {d['bytes_src'] / 2**30:.2f} GiB、焼き込み、型 {d['requant']})",
+             *([d["plan"]] if d.get("plan") else []),
              f"ファイルと VRAM の増え方: {g.get('bytes', 0) / 2**20:+.0f} MiB"
              + (f"(読み込んだときの VRAM の空き {d['vram_free_mb']:.0f} MiB)" if d.get("vram_free_mb") is not None else "")]
     lines += [_inkling_bake_line(m) for m in d["modified"]]
@@ -3306,6 +3309,10 @@ def _inkling_pipeline_lines(d: dict) -> list[str]:
              f"Inkling 2: 方向と測る位置 {ink['positions']}。基準は {ink['reference']}。{ink['unit_note']}",
              *(["  " + ink["position_note"]] if ink.get("position_kind") == "last" else []),
              *([f"  既定(このモデル用): " + "、".join(f"{k} {v}" for k, v in d["arch_defaults"].items())] if d.get("arch_defaults") else []),
+             *([("   使った質問: 方向 A {0}・B {1}、測る段 A {2}・B {3}(対照集合 A {4}・B {5} から、側ごとに最大 {6} 問を等間隔に)"
+                 .format((ink.get("n_questions") or {}).get("direction", {}).get("A"), (ink.get("n_questions") or {}).get("direction", {}).get("B"),
+                         ink["n_questions"]["measure"]["A"], ink["n_questions"]["measure"]["B"], ink["n_questions"]["total"]["A"],
+                         ink["n_questions"]["total"]["B"], ink["n_questions"].get("max_examples")))] if ink.get("n_questions") else []),
              f"1. 方向 {d['name']}({d['direction']['positions']}、{d['direction']['seconds']:.0f} 秒"
              + (f"、答えの始まりが無く読めなかった会話 A {d['direction']['skipped']['A']}・B {d['direction']['skipped']['B']}"
                 if any((d["direction"].get("skipped") or {}).values()) else "") + ")" + _from_dir_text(d),

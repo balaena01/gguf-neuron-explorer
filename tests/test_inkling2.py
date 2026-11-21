@@ -635,8 +635,13 @@ def test_real_inkling_pipeline_recipe_and_bake(session, tmp_path):
     ds = session.direction_set(spec["name"])
     units = [chips_unit(p) for p in proj_heads(rec) if p.s]
     refs = layer_refs_of(session.weights.inkling, ds)
+    from gne.inkling_chips import whole_ffn_layers
+    whole = whole_ffn_layers(units)
     for m in bake(SimpleNamespace(w=session.weights, plan=session.weights.inkling), units, refs, None, requant="auto")["modified"]:
-        assert m["to"] == m["from"] and m["bytes_to"] == m["bytes_from"] and m["edit_kept"] > 0.9, m
+        if "ffn_down_exps" in m["tensor"] and int(m["tensor"].split(".")[1]) in whole:     # MLP 全体の部品がある層は Q8_0(auto)
+            assert m["to"] == "Q8_0" and m.get("why") == "whole_layer_mlp", m
+        else:
+            assert m["to"] == m["from"] and m["bytes_to"] == m["bytes_from"] and m["edit_kept"] > 0.9, m
 
 
 @real
@@ -677,3 +682,22 @@ def test_real_inkling_refine_stacks(session):
     assert r2["round"] == 2 and r2["base_units"] == c1["units"]                # 前の回の合わせたレシピが土台
     for c in r2["combined_rows"]:
         assert c["units"][:len(c1["units"])] == c1["units"] and max(p["round"] for p in c["parts"]) == 2
+
+
+def test_bake_auto_rule_whole_ffn_layers():
+    """焼き込みの auto: MLP 全体の部品(L:ffn)がある層の専門家のテンソルは Q8_0、ニューロンだけの層は元の型。予定の文に出る。"""
+    from gne.inkling_chips import whole_ffn_layers
+    from gne.inkling_pipeline import bake_plan_text
+    units = [[9, "ffn", None, 1.0, "d"], [9, "neuron", [3, 10], 2.0, "d2"], [14, "neuron", [25, 389], 4.0], [11, "head", 5, 2.0],
+             [17, "ffn", None, 0.5], [23, "attn", None, 1.0]]
+    assert whole_ffn_layers(units) == {9, 17}
+    assert whole_ffn_layers([[14, "neuron", [1, 2], 1.0], [11, "attn", None, 1.0]]) == set()
+    grow = {"bytes": int((162.0 + 253.1) * 2**20), "tensors": [
+        {"tensor": "blk.9.ffn_down_exps.weight", "type": "NVFP4", "to": "Q8_0", "from_mib": 182.2, "to_mib": 344.2},
+        {"tensor": "blk.14.ffn_down_exps.weight", "type": "Q2_0", "to": "Q2_0", "from_mib": 91.1, "to_mib": 91.1},
+        {"tensor": "blk.22.ffn_down_exps.weight", "type": "Q2_0", "to": "Q8_0", "from_mib": 91.1, "to_mib": 344.2},
+        {"tensor": "blk.11.attn_output.weight", "type": "Q8_0", "to": "Q8_0", "from_mib": 7.2, "to_mib": 7.2}]}
+    text = bake_plan_text(grow)
+    assert "層 9 の専門家 NVFP4 → Q8_0(+162 MiB)" in text and "層 22 の専門家 Q2_0 → Q8_0(+253 MiB)" in text
+    assert "層 14" not in text and "+415 MiB" in text
+    assert "元の型・元の大きさのまま" in bake_plan_text({"bytes": 0, "tensors": grow["tensors"][1:2]})
