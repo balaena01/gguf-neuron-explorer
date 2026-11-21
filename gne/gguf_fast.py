@@ -178,12 +178,18 @@ def _is_bytes(raw) -> bool:
     return isinstance(raw, (bytes, bytearray, memoryview))
 
 
-def rewrite_gguf(src: str | Path, dst: str | Path, replace: dict[str, tuple[GGMLQuantizationType, object]]) -> None:
+def rewrite_gguf(src: str | Path, dst: str | Path, replace: dict[str, tuple[GGMLQuantizationType, object]],
+                 extra_kv: dict[str, str] | None = None) -> None:
     """1 つの GGUF ファイル(分割の 1 つでもよい)を、指定したテンソルだけ型とバイト列を差し替えて書き直す。メタデータの
     バイト列はそのまま写す(分割の 2 番目以降は split.* だけを持つので、gguf-py の書き出しだと余計なキーが入る)。
     差し替えはバイト列か、書くときに作るもの(nbytes と tofile(f) を持つ。専門家の 3 次元テンソルをスラブごとに書く
-    gain._SlabStream。テンソル全体をメモリに持たない)。"""
+    gain._SlabStream。テンソル全体をメモリに持たない)。extra_kv(文字列の値)はメタデータの最後に足す(gne.patches など。
+    元のファイルに同じキーがあれば断る)。"""
     g = FastGGUF(src, _part=True)
+    extra_kv = dict(extra_kv or {})
+    dup = sorted(k for k in extra_kv if k in g.types)
+    if dup:
+        raise ValueError(f"{Path(src).name} にはすでに {', '.join(dup)} があります")
     buf = memoryview(g._mm)
     align = g.alignment
     plan, off = [], 0
@@ -197,7 +203,14 @@ def rewrite_gguf(src: str | Path, dst: str | Path, replace: dict[str, tuple[GGML
     if missing:
         raise ValueError(f"{Path(src).name} に無いテンソル: {sorted(missing)[:3]}")
     with open(dst, "wb") as f:
-        f.write(bytes(buf[:g.kv_end]))
+        head = bytearray(buf[:g.kv_end])
+        if extra_kv:                              # キーの数を増やし、文字列のキーと値を最後に足す
+            n_tensors, n_kv = struct.unpack_from("<QQ", head, 8)
+            struct.pack_into("<QQ", head, 8, n_tensors, n_kv + len(extra_kv))
+            for k, v in extra_kv.items():
+                kb, vb = k.encode("utf-8"), str(v).encode("utf-8")
+                head += struct.pack("<Q", len(kb)) + kb + struct.pack("<I", int(GGUFValueType.STRING)) + struct.pack("<Q", len(vb)) + vb
+        f.write(bytes(head))
         for t, q, _, toff in plan:
             name = t.name.encode("utf-8")
             f.write(struct.pack("<Q", len(name)) + name + struct.pack("<I", len(t.shape)))

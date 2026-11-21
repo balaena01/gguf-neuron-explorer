@@ -305,7 +305,7 @@ function legend() {
   const inkNote = ink ? `<div class="note st">${(ink.n_passes > 1 ? t("層 {a}〜{b} を {n} 回続けて実行します(実行順の段 {s})。", { a: ink.core_start, b: ink.core_end - 1, n: ink.n_passes, s: ink.n_steps }) : "")
     + t("残差は 1 本ではなく、層 {starts} で新しい流れが始まり、各副層はそれまでの流れを学習された重みで混ぜて読みます。attention は窓つき({w} トークン)で、層 {full} だけ全体を見ます。",
         { starts: Array.from({ length: Math.ceil(ink.n_stored / ink.block) }, (_, i) => i * ink.block).join(", "), w: ink.window, full: ink.full_layers.join(", ") })
-    + t("このモデルで gne が扱うのは、読み込み・情報・マップ・会話だけです(中を測る・書き換える機能は、理由を出して止まります)")}</div>`
+    + t("このモデルで gne が扱うのは、読み込み・情報・マップ・会話と、CHiPS の流れ(方向とヘッドを作る → レシピで会話・書き出し)です。ほかの中を測る・書き換える機能は、理由を出して止まります")}</div>`
     + (state.model ? `<div class="detail-row"><button class="small" id="inkling-chat">${t("会話する")}</button></div>` : "") : "";   // 狭い地図でも隠さない
   const lp = state.arch.loop;                       // 同じ層を 2 回実行するモデル(sensenova_loop)
   const loop = lp ? `<div class="note st">${t("層 {a}〜{b} を 2 回続けて実行します。層 {c}〜{d} はその 2 回目で、重みは同じです(書き換えは両方の回に効きます)。各回の中の残差は 2 本の流れで、読むときはその平均を使います",
@@ -993,6 +993,7 @@ async function setView(v) {
           onEval: (params, label) => sendToEval(params, label),           // 評価へ送る(評価の画面で確かめてから始める)
           onOverlay: (field) => { setView("map"); applyOverlay(field); },
           isLoop: () => !!(state.arch && state.arch.loop),               // 同じ層を 2 回実行するモデル(ループの中の部品の方向の欄)
+          inkling: () => (state.arch && state.arch.inkling) || null,     // Inkling 2(答えの前に思考を書く。位置の選択・部品の名前)
           writesBlocked: () => writesBlocked(state.arch),               // 書き込みの量での順位づけを実行しないモデル(既定は止めて選ぶ流れ)
         },
         candidates: {                                                     // 強さの候補(heads_candidates)の候補を使う
@@ -1266,7 +1267,9 @@ async function main() {
   if (state.model) {
     state.recipe = new Recipe(state.model.meta.model_id, recipeChanged);
     chat = new ChatPanel({ recipe: state.recipe, onAdded: () => recipeTouched(true),
-                           plain: () => !!(state.arch && state.arch.inkling),           // Inkling 2: 無介入の 1 列だけで話す
+                           // Inkling 2: レシピのチャット(レシピのタブの「会話する」)のときだけレシピを当て、ほかは無介入の 1 列で話す
+                           plain: () => !!(state.arch && state.arch.inkling) && !(chat && chat.target === "recipe"),
+                           reasoningFirst: () => !!(state.arch && state.arch.inkling),  // 答えの前に思考を書く(応答の長さの既定を長く)
                            effortChoices: () => (state.model && state.model.meta.reasoning_effort_choices !== undefined
                              ? state.model.meta.reasoning_effort_choices : null) });         // 思考の量(テンプレートが使うときだけ)
     state.chat = chat;                                                   // 自動テスト用
@@ -1288,6 +1291,7 @@ async function main() {
       doseSpread: () => (state.model ? state.model.dose_spread : null),
       postNorm: () => !!(state.arch && (state.arch.layers || []).some((li) => (li.post_norm_mixer && li.post_norm_mixer !== "?")
                                                                          || (li.post_norm_ffn && li.post_norm_ffn !== "?"))),
+      inkling: () => (state.arch && state.arch.inkling) || null,         // Inkling 2: 部品の名前に回(×3)を出す
     });
     headPanel = new HeadPanel($("#head-body"), {
       onRecipe: (L, h, k) => {

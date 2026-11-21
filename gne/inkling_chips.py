@@ -498,7 +498,7 @@ def expert_q(reader: Reader, refs: dict, progress=None) -> dict:
     sc = np.ones((plan.n_stored, nE), np.float32)
     for L in range(plan.n_stored):
         if progress:
-            progress(L, plan.n_stored, "chips-trial: 専門家の重み")
+            progress(L, plan.n_stored, "Inkling 2: 専門家の重み")
         V = _taps(w2.full(f"blk.{L}.ffn_post_conv.weight").astype(np.float64), refs[L][1].astype(np.float64)).astype(np.float32)
         for e in range(nE):
             q[L, e] = V @ w2.slab(f"blk.{L}.ffn_down_exps.weight", e)
@@ -821,31 +821,32 @@ def trial_all(session, spec_path, out_dir: Path, *, ks=(8, 16, 32), strengths=(1
 
 # --- 焼き込み(GGUF に書き込む) -----------------------------------------------------------------------------------------
 
-def bake(reader: Reader, units: list, refs: dict, dst: Path | None, *, requant: str = "q8_0", correct: bool = True) -> dict:
-    """試しの組 units を GGUF に焼き込む(LoRA と同じ変化量)。requant:
-    - q8_0(既定)/ f16: 書き換えるテンソルだけその型にしてファイルを書き直す(gne のほかのモデルの焼き込みと同じ。専門家の
-      テンソルは 1 つの型しか持てないので、編集しない専門家も変換し、テンソル全体が大きくなる。F16 は元の Q2_0・NVFP4 の値を
-      そのまま表せる)
-    - keep: 元と同じ型で量子化し直して同じ場所に書き戻す(大きさは変わらない。専門家のテンソルは編集した専門家のスラブだけ)。
-      NVFP4 は llama.cpp の量子化でほぼ元に戻るが、小さな編集は丸めで一部が消える(sidecar の edit_kept)。Q2_0 は断る: この
-      GGUF の Q2_0 はブロックの倍率に負の値を使っていて、llama.cpp の量子化(倍率 = 絶対値の最大)では編集しない値の半分ほどが変わる
+def bake(reader: Reader, units: list, refs: dict, dst: Path | None, *, requant: str = "q8_0", correct: bool = True,
+         strip_meta: bool = False) -> dict:
+    """部品 units を GGUF に焼き込む(LoRA と同じ変化量)。requant(書き換えるテンソルの型):
+    - q8_0 / f16: 書き換えるテンソルをその型にする(gne のほかのモデルの焼き込みと同じ。専門家のテンソルは 1 つの型しか持てない
+      ので、編集しない専門家も変換し、テンソル全体が大きくなる。F16 は元の Q2_0・NVFP4 の値をそのまま表せる)
+    - keep: 元の型・元の大きさのまま。attention の出力(Q8_0・K-quant)は llama.cpp の量子化で書き戻す。専門家のテンソル
+      (NVFP4・Q2_0)は量子化し直さず、元のコードと倍率を残して、編集する列のコードだけを動かす(inkling_bake.py の射影を
+      意識した丸め。編集しない列・専門家はバイトのまま)
+    - auto: テンソルごとに keep を試し、編集の残り方(edit_kept)が KEYED_KEEP_MIN(0.9)より小さければ Q8_0 にする
+      (gne の keyed の焼き込みの auto と同じ決め方)。元が Q8_0 の attention の出力は Q8_0 のまま
     専門家ごとの倍率(ffn_down_exps.scale)はそのままにし、重みの変化量は倍率で割って入れる(実行時に倍率が掛かって LoRA と同じ
-    s_e·W_e − s·u uᵀ s_e·W_e になる)。層 6〜17 の重みは 3 回で共有なので、焼き込みも 3 回すべてに効く。"""
-    import shutil
-
+    s_e·W_e − s·u uᵀ s_e·W_e になる)。層 6〜17 の重みは 3 回で共有なので、焼き込みも 3 回すべてに効く。
+    書き換えたテンソルとそのやり方は GGUF の gne.patches と <dst>.chips.json に残す(strip_meta なら GGUF には入れない)。"""
     from gguf import GGMLQuantizationType as _Q
 
-    from .gain import _SlabStream, edit_kept, expert_slab_edits
+    from .gain import KEYED_KEEP_MIN, _SlabStream, edit_kept, expert_slab_edits
     from .gguf_fast import rewrite_gguf
+    from .inkling_bake import TYPES, edit_slab
     from .quant import dequantize, quantize
     from .steer import GneError
-    if requant not in ("keep", "q8_0", "f16"):
-        raise GneError("BAD_ARGS", "--requant は keep・q8_0・f16 です")
+    if requant not in ("keep", "q8_0", "f16", "auto"):
+        raise GneError("BAD_ARGS", "--requant は auto・keep・q8_0・f16 です")
     w2 = Weights2(reader.w)
     T = reader.w._tensors
     src = Path(reader.w.path)
     tens = lora_tensors_all(reader, units, refs, correct=correct)
-    target = {"q8_0": _Q.Q8_0, "f16": _Q.F16}.get(requant)
 
     def enc(W, qt):
         if qt == _Q.F16:
@@ -856,67 +857,95 @@ def bake(reader: Reader, units: list, refs: dict, dst: Path | None, *, requant: 
         if qt == _Q.F16:
             return np.ascontiguousarray(data).view(np.float16).astype(np.float32).reshape(shape)
         return dequantize(np.asarray(data, dtype=np.uint8).reshape(int(np.prod(shape[:-1])), -1), qt).reshape(shape)
-    inplace: list[tuple[int, bytes]] = []
+
+    def convert_experts(t, A, B, qt, rec):
+        stats: dict = {}
+        edited, err = expert_slab_edits(t, A, B, qt, encode=enc, decode=dec, stats=stats)
+        probe = next(iter(edited.values()))
+        st = _SlabStream(t, qt, {e: v.reshape(probe.shape) for e, v in edited.items()}, probe.shape, np.uint8)
+        st.tofile = _convert_tofile(st, enc)
+        rec.update(to=qt.name, method="convert", experts=sorted(edited), edit_kept=stats.get("kept"), requant_error=err,
+                   bytes_to=int(st.nbytes))
+        return (qt, st)
     replace: dict[str, tuple] = {}
     recs = []
     for name, (A, B) in sorted(tens.items()):
         t = T[name]
-        qt = target or t.tensor_type
-        if target is None and t.tensor_type.name == "Q2_0":
-            raise GneError("UNSUPPORTED_QUANT", f"{name}: Q2_0 のまま書き戻すと、編集しない重みの半分ほどが変わります(この GGUF の "
-                           "Q2_0 は負のブロック倍率を使い、llama.cpp の量子化はそれを作りません)", "--requant q8_0 か f16 にしてください")
+        rec = {"tensor": name, "from": t.tensor_type.name, "bytes_from": int(t.n_bytes), "op": "rewrite"}
         if A.ndim == 3:                                      # ffn_down_exps: 専門家ごと(スラブごと)
             L = int(name.split(".")[1])
             sc = w2.scale(f"blk.{L}.ffn_down_exps.scale")
             if sc is not None:
                 A = A / sc.reshape(-1, 1, 1).astype(np.float32)
-            stats: dict = {}
-            edited, err = expert_slab_edits(t, A, B, qt, encode=enc, decode=dec, stats=stats)
-            n_exp = int(t.data.shape[0])
-            rec = {"tensor": name, "type": t.tensor_type.name, "to": getattr(qt, "name", str(qt)), "experts": sorted(edited),
-                   "edit_kept": stats.get("kept"), "requant_error": err, "scale_divided": sc is not None,
-                   "bytes_from": int(t.n_bytes)}
-            if target is None:
-                slab = int(t.n_bytes) // n_exp
-                for e, raw in sorted(edited.items()):
-                    if raw.nbytes != slab:
-                        raise GneError("INTERNAL", f"{name}: 専門家 {e} の大きさ {raw.nbytes} が元の {slab} と違います")
-                    inplace.append((int(t.data_offset) + e * slab, raw.tobytes()))
-                replace[name] = (qt, _SlabStream(t, qt, edited, (slab,), np.uint8))
-                rec["bytes_to"] = int(t.n_bytes)
+            rec["scale_divided"] = sc is not None
+            if requant in ("q8_0", "f16"):
+                replace[name] = convert_experts(t, A, B, {"q8_0": _Q.Q8_0, "f16": _Q.F16}[requant], rec)
             else:
-                probe = next(iter(edited.values()))
-                st = _SlabStream(t, qt, {e: v.reshape(probe.shape) for e, v in edited.items()}, probe.shape, np.uint8)
-                st.tofile = _convert_tofile(st, enc)
-                replace[name] = (qt, st)
-                rec["bytes_to"] = int(st.nbytes)
+                if t.tensor_type.name not in TYPES:
+                    raise GneError("UNSUPPORTED_QUANT", f"{name}: {t.tensor_type.name} は元の型のまま書けません(NVFP4・Q2_0 だけ)",
+                                   "--requant q8_0 か f16 にしてください")
+                n_exp, rows, cols = int(t.data.shape[0]), int(B.shape[1]), int(A.shape[2])
+                slab = int(t.n_bytes) // n_exp
+                edited, want2, dot, flips, offs, wn = {}, 0.0, 0.0, 0, [], []
+                for e in range(n_exp):
+                    if not (np.any(A[e]) and np.any(B[e])):
+                        continue
+                    u = -B[e, :, 0].astype(np.float64)                     # B = −u
+                    a = A[e, 0].astype(np.float64)
+                    cols_e = np.nonzero(a)[0]
+                    r = edit_slab(np.ascontiguousarray(t.data[e]).reshape(rows, -1), t.tensor_type.name, u,
+                                  {int(n): float(-a[n]) for n in cols_e}, rows, cols)
+                    if r["raw"].nbytes != slab:
+                        raise GneError("INTERNAL", f"{name}: 専門家 {e} の大きさ {r['raw'].nbytes} が元の {slab} と違います")
+                    edited[e] = r["raw"].reshape(-1)
+                    want2 += float(np.sum(r["want"] ** 2))
+                    dot += float(np.sum(r["want"] * r["along"]))
+                    flips += int(np.sum(r["flips"]))
+                    offs += list(r["off"] / np.maximum(np.abs(r["want"]), 1e-30))
+                    wn += list(r["off"] / np.maximum(r["w_norm"], 1e-30))
+                kept = dot / want2 if want2 > 0 else 1.0
+                rec.update(to=t.tensor_type.name, method="projection-aware rounding", experts=sorted(edited), edit_kept=kept,
+                           codes_changed=flips, columns=len(offs), off_over_removed_median=float(np.median(offs)) if offs else None,
+                           off_over_column_median=float(np.median(wn)) if wn else None, bytes_to=int(t.n_bytes))
+                if requant == "auto" and kept < KEYED_KEEP_MIN:     # 元の型では編集が残らない: Q8_0 にする
+                    fb = {"from": t.tensor_type.name, "edit_kept": kept}
+                    rec = {k: v for k, v in rec.items() if k in ("tensor", "from", "bytes_from", "op", "scale_divided")}
+                    replace[name] = convert_experts(t, A, B, _Q.Q8_0, rec)
+                    rec["fallback"] = fb
+                else:
+                    replace[name] = (t.tensor_type, _SlabStream(t, t.tensor_type, edited, (slab,), np.uint8))
         else:                                                # attn_output (out, in)
             shape = (int(B.shape[0]), int(A.shape[-1]))
             W = w2.full(name).reshape(shape).astype(np.float32)
             dW = (B.astype(np.float64) @ A.astype(np.float64)).astype(np.float32)
             W2 = W + dW
-            raw = enc(W2, qt)
-            back = dec(raw, qt, shape)
-            rec = {"tensor": name, "type": t.tensor_type.name, "to": getattr(qt, "name", str(qt)),
-                   "edit_kept": edit_kept(back, W2, dW), "requant_error": float(np.linalg.norm(back - W2) / max(np.linalg.norm(dW), 1e-12)),
-                   "bytes_from": int(t.n_bytes), "bytes_to": int(raw.nbytes)}
-            if target is None:
-                if raw.nbytes != t.n_bytes:
-                    raise GneError("INTERNAL", f"{name}: 書き戻す大きさ {raw.nbytes} が元の {t.n_bytes} と違います")
-                inplace.append((int(t.data_offset), raw.tobytes()))
+
+            def put(qt):
+                raw = enc(W2, qt)
+                back = dec(raw, qt, shape)
+                return raw, edit_kept(back, W2, dW), float(np.linalg.norm(back - W2) / max(np.linalg.norm(dW), 1e-12))
+            if requant in ("q8_0", "f16"):
+                qt = {"q8_0": _Q.Q8_0, "f16": _Q.F16}[requant]
+            else:
+                qt = t.tensor_type
+            raw, kept, err = put(qt)
+            if requant == "auto" and qt != _Q.Q8_0 and kept < KEYED_KEEP_MIN:
+                rec["fallback"] = {"from": qt.name, "edit_kept": kept}
+                qt = _Q.Q8_0
+                raw, kept, err = put(qt)
+            if qt == t.tensor_type and raw.nbytes != t.n_bytes:
+                raise GneError("INTERNAL", f"{name}: 書き戻す大きさ {raw.nbytes} が元の {t.n_bytes} と違います")
+            rec.update(to=qt.name, method="requant" if qt == t.tensor_type else "convert", edit_kept=kept, requant_error=err,
+                       bytes_to=int(raw.nbytes))
             replace[name] = (qt, raw.tobytes())
+        rec["type"] = rec["from"]
         recs.append(rec)
-    if dst is None:                                          # 書かずに、量子化し直しでの残り方と大きさだけ
+    if dst is None:                                          # 書かずに、残り方と大きさだけ
         return {"path": None, "modified": recs}
     dst.parent.mkdir(parents=True, exist_ok=True)
-    if target is None:                                       # 写して、その場に書き戻す
-        shutil.copyfile(src, dst)
-        with open(dst, "r+b") as f:
-            for off, raw in inplace:
-                f.seek(off)
-                f.write(raw)
-    else:
-        rewrite_gguf(src, dst, replace)
+    kv = None if strip_meta else {"gne.patches": json.dumps(recs, ensure_ascii=False),
+                                  "gne.inkling_proj": json.dumps({"units": units, "requant": requant, "correct": correct})}
+    rewrite_gguf(src, dst, replace, extra_kv=kv)
     side = Path(str(dst) + ".chips.json")
     side.write_text(json.dumps({"units": units, "requant": requant, "correct": correct, "modified": recs}, ensure_ascii=False, indent=1),
                     encoding="utf-8")
@@ -958,26 +987,35 @@ def greedy(reader: Reader, convs: list, lora: str | None, n: int) -> dict:
             "texts": [e.detokenize(t) for t in toks]}
 
 
-def bake_check(session, trial_dir: Path, units: list, spec_path, *, mode: str, n_a: int = 4, n_b: int = 2,
-               reply_tokens: int = 256, gate: str = "after") -> dict:
+def bake_check(session, trial_dir: Path | None, units: list, spec_path, *, mode: str, n_a: int = 4, n_b: int = 2,
+               reply_tokens: int = 256, gate: str = "after", ds=None) -> dict:
     """焼き込みの確かめの片側。mode:
     - lora: 元のモデルに LoRA を当てて、中の値(各段の MLP の入力の方向への射影と最後に混ぜた出力の射影、最後の質問のトークン)と
       貪欲の応答を測る。比べる大きさのために、LoRA なしの中の値も測る
     - baked: 焼き込んだ GGUF(このセッションのモデル)で同じものを LoRA なしで測る
-    - replies: 応答だけ(中の値を読めない llama.cpp、例えば名前の patch を当てていない本家のビルドで読み込めるかの確かめ)"""
+    - replies: 応答だけ(中の値を読めない llama.cpp、例えば名前の patch を当てていない本家のビルドで読み込めるかの確かめ)
+    ds を渡すと(gne heads pipeline の方向、inkling_pipeline の形)、その方向の段ごとの行と最後の出力の行で測り、射影もそれで作る。"""
     sp = load_spec(spec_path)
     reader = Reader(session)
     plan = reader.plan
-    z = np.load(Path(trial_dir) / "directions.npz")
-    D = {k: z[k] for k in ("ffn_mix", "ffn_in", "out")}
-    sdirs, odir = step_dirs(plan, D, gate), _unit(D["out"])
+    if ds is not None:
+        from .inkling_pipeline import OUT, layer_refs_of
+        sdirs = np.stack([ds.unit(s).astype(np.float64) for s in range(plan.n_steps)])
+        odir = ds.unit(OUT).astype(np.float64)
+        refs_ds = layer_refs_of(plan, ds)
+        D = None
+    else:
+        z = np.load(Path(trial_dir) / "directions.npz")
+        D = {k: z[k] for k in ("ffn_mix", "ffn_in", "out")}
+        sdirs, odir = step_dirs(plan, D, gate), _unit(D["out"])
     convs = sp["val_a"][:n_a] + sp["val_b"][:n_b]
     out: dict = {"mode": mode, "units": units, "n_a": n_a, "n_b": n_b, "reply_tokens": reply_tokens}
     lora = None
     if mode == "lora":
         reader.e.allow_lora_trial = True
-        refs = layer_refs(plan, D, gate)
-        lora = str(Path(trial_dir) / "bakecheck.lora.gguf")
+        refs = refs_ds if D is None else layer_refs(plan, D, gate)
+        lora = str((Path(trial_dir) if trial_dir else session.store.root / "inkling" / session.meta.model_id) / "bakecheck.lora.gguf")
+        Path(lora).parent.mkdir(parents=True, exist_ok=True)
         out["lora_bytes"] = write_lora_all(reader, units, refs, Path(lora))["bytes"]
     if mode in ("lora", "baked"):
         reader.require_patch()

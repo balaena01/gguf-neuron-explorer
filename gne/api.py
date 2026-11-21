@@ -390,6 +390,9 @@ class Session:
         elif units and not path:                               # その場で作るレシピは、いまの当て方を記録する(記録の無い扱いにしない)
             r.proj_correction = self.proj_correction_label(None)
         r.validate()
+        if self.weights.inkling is not None:                   # Inkling 2: 射影の部品だけ(inkling_pipeline.py)
+            self._check_inkling_recipe(r)
+            return r.scaled(scale) if scale != 1.0 else r
         if r.ablate is not None:
             self.direction_path(r.ablate.direction)              # 方向が無ければここで返す
         if r.model_id and r.model_id != self.meta.model_id:
@@ -684,7 +687,22 @@ class Session:
                 return self._lora_for(dataclasses.replace(recipe, loop_edits=mode))
         return self._lora_for(recipe)
 
+    def _check_inkling_recipe(self, r: Recipe) -> None:
+        """Inkling 2 のレシピ: 方向成分の射影(ヘッド・attention 全体・MLP 全体・専門家のニューロン)だけを、Inkling 2 の形の方向で。"""
+        from .headproj import proj_heads
+        from .inkling_pipeline import check_unit, require_inkling_direction
+        other = [u.label() for u in r.units if u.mode != "proj"]
+        if other or r.ablate is not None:
+            raise GneError("ARCH_UNSUPPORTED", "Inkling 2 で当てられるのは方向成分の射影のレシピ(L:Hh・L:attn・L:ffn・L:Ee:Nn の sS@方向)だけです"
+                           f"(止めた部品: {', '.join(other[:4]) or 'ablate'})", "gne heads pipeline で作ったレシピを使ってください")
+        for p in proj_heads(r):
+            check_unit(self, p)
+            require_inkling_direction(self.direction_set(p.direction))
+
     def _lora_for(self, recipe: Recipe) -> list[tuple[str, float]] | None:
+        if self.weights.inkling is not None:                   # Inkling 2: 射影の LoRA だけ(inkling_pipeline.export_lora)
+            self._check_inkling_recipe(recipe)
+            return [(str(self.proj_lora(recipe)), 1.0)] if any(u.k for u in recipe.proj_units) else None
         out = []
         lora_units = [u for u in recipe.gain_units if u.kind != "expert"]   # 専門家全体の gain はパッチ(patches_for)
         if lora_units:
@@ -777,6 +795,19 @@ class Session:
         ヘッド・s・方向の中身(作り直したら LoRA も作り直す)・direction_layer で決まる。"""
         from .headproj import ProjBuilder, export_proj_lora, proj_cache_key, proj_heads
         heads = [p for p in proj_heads(recipe) if p.s]
+        if self.weights.inkling is not None:                   # Inkling 2: 短い畳み込みの倍率で直した射影(inkling_pipeline.py)
+            import hashlib
+            from .inkling_pipeline import export_lora
+            key = hashlib.sha256(json.dumps([p.spec() for p in heads] + [
+                hashlib.sha256(Path(self.direction_set(d).path).read_bytes()).hexdigest() for d in sorted({p.direction for p in heads})]
+            ).encode()).hexdigest()[:16]
+            path = self.store.heads_dir(self.meta.model_id) / f"proj-ink-{key}.lora.gguf"
+            if not path.exists():
+                tmp = path.with_suffix(".part")
+                export_lora(self, heads, tmp, self.direction_set)
+                tmp.replace(path)
+            self.engine.allow_lora_trial = True
+            return path
         corr = self.proj_correction_for(recipe)
         for msg in self.proj_notes(heads, corr, recipe.direction_layer):   # 補正の有無ごとの知らせ(使うたびに)
             self._warn_once(msg)
@@ -1291,6 +1322,10 @@ class Session:
     def bake(self, recipe: Recipe | list[str], dst: str | Path, *, verify: bool = False,
              verify_prompt: str = "Who are you?", n_tokens: int = 32) -> dict:
         recipe = self._as_recipe(recipe)
+        if self.weights.inkling is not None:
+            raise GneError("ARCH_UNSUPPORTED", "Inkling 2 のレシピ(方向成分の射影)の焼き込みは gne headproj export --bake です"
+                           "(gne bake は control vector の add のユニットの焼き込みで、Inkling 2 では使えません)",
+                           "gne headproj export --recipe <レシピ> --bake --out <GGUF>")
         self._no_nw(recipe, bake=True)
         self._warn_when(recipe, "bake")
         if not recipe.add_units:
@@ -2591,6 +2626,11 @@ class Session:
         spec = dict(spec)
         spec.pop("about", None)                    # テンプレート(configs/pipeline/)の説明。対照集合には入れない
         spec_pipe = spec.pop("pipeline", None) or {}
+        ink_before = None
+        if self.weights.inkling is not None:       # Inkling 2: 層 0〜5 も候補に入れる設定(このモデルだけ)
+            spec_pipe = dict(spec_pipe)
+            ink_before = over.pop("include_before", None)
+            ink_before = spec_pipe.pop("include_before", None) if ink_before is None else ink_before
         given = {**{k: v for k, v in spec_pipe.items() if v is not None}, **{k: v for k, v in over.items() if v is not None}}
         pipe = {**self.PIPELINE_DEFAULTS, **self.PIPELINE_WRITES, **spec_pipe,
                 **{k: v for k, v in over.items() if v is not None}}
@@ -2602,6 +2642,11 @@ class Session:
             raise GneError("BAD_ARGS", f"rank は causal(層 → ヘッドを止めて測る、今までの既定)か writes(全部の部品を書き込みの量で"
                                        f"順位づけ)です({pipe['rank']!r})")
         rank_given = "rank" in given
+        if self.weights.inkling is not None:       # Inkling 2: 段ごとの MLP の入力で流す(inkling_pipeline.py)
+            from .inkling_pipeline import pipeline as _ink_pipeline
+            if ink_before:
+                given["include_before"] = True
+            return _ink_pipeline(self, spec, pipe, given, t0)
         rank_note = self._rank_fallback(pipe, rank_given)
         writes = pipe["rank"] == "writes"
         if writes:
@@ -2958,6 +3003,10 @@ class Session:
             row = {}
             for side in "AB":
                 outs = _generate(self, [(m, max_tokens) for m in conv[side]], *combine(ivs[side], vecs, lora), "all", lambda k: None)
+                if self.weights.inkling is not None:           # Inkling 2: 思考の欄を除いた答えだけを数える(思考の途中で切れたら空)
+                    from .inkling import ReplyMarks, answer_part
+                    mk = ReplyMarks(self.engine)
+                    outs = [{**o, "text": answer_part(mk.render(self.engine, o["token_ids"]))} for o in outs]
                 fin = [o for o in outs if o["finish"] in ("eog", "stop", "eos")]
                 row[side] = {"n": len(outs), "finished": len(fin),
                              "match_finished": sum(bool(rx.search(o["text"] or "")) for o in fin) if rx else None,
@@ -3824,6 +3873,11 @@ round_01.scores.txt に「番号 P C」を 1 行ずつ書く(例: 17 3 4)。全�
         verify なら焼き込み版と LoRA 版を V26 の 4 項目で比べる(keyed だけなら keyed の方向で測る)。
         name は LoRA の名前の欄(general.name。省くと「<元のモデルの名前> gain <レシピの名前>」、strip_meta では "adapter")。"""
         recipe = self._as_recipe(recipe)
+        if self.weights.inkling is not None:             # Inkling 2: 射影の LoRA か焼き込み(inkling_pipeline.py)
+            if via_f16 or into is not None or imatrix or llama_quantize:
+                raise GneError("ARCH_UNSUPPORTED", "Inkling 2 の焼き込みは、いま読んでいるモデルへのマージだけです(マージ先の指定・llama-quantize で"
+                               "元の型に戻す処理はまだ使えません)", "書き換えたテンソルの型は q8_0(既定)・f16・keep から選びます")
+            return self._inkling_export(recipe, Path(out), bake=bake, requant=requant, verify=verify, strip_meta=strip_meta)
         self._no_nw(recipe, bake=bake)                   # nw は焼き込めない(LoRA には入る)
         if recipe.proj_units:                            # 出力のあとに正規化がある層の射影: 補正の有無ごとの知らせ(v0.9.0)
             from .headproj import proj_heads
@@ -3865,6 +3919,36 @@ round_01.scores.txt に「番号 P C」を 1 行ずつ書く(例: 17 3 4)。全�
             if not bake:
                 raise GneError("BAD_ARGS", "--verify は --bake と一緒に使います(焼き込み版と LoRA 版を比べる)")
             d["verify"] = self.check_proj_bake(recipe, Path(d["path"]), contrast=contrast)
+        return d
+
+    def _inkling_export(self, recipe: Recipe, out: Path, *, bake: bool, requant: str | None, verify: bool,
+                        strip_meta: bool = False) -> dict:
+        """Inkling 2 のレシピの書き出し: LoRA(既定)か焼き込み(書き換えるテンソルを Q8_0。f16・keep も)。"""
+        from .headproj import proj_heads
+        from .inkling_pipeline import bake_recipe, export_lora
+        self._check_inkling_recipe(recipe)
+        heads = [p for p in proj_heads(recipe) if p.s]
+        if verify:
+            raise GneError("ARCH_UNSUPPORTED", "Inkling 2 では、焼き込みと LoRA の比べ(--verify)を同じ処理の中ではできません"
+                           "(2 つのモデルが同時に VRAM に入らないため)",
+                           "gne inkling chips-bake-check --mode lora と、焼き込んだ GGUF での --mode baked の 2 回で比べます(docs/inkling2.md)")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        if not bake:
+            if requant not in (None, "q8_0", "auto"):
+                raise GneError("BAD_ARGS", "--requant は焼き込み(--bake)のときだけです")
+            r = export_lora(self, heads, out, self.direction_set, strip_meta=strip_meta)
+            return {"kind": "lora", "path": str(out), "bytes": r.get("bytes", out.stat().st_size), "recipe": recipe.to_dict()}
+        rq = "auto" if requant is None else requant
+        if rq not in ("auto", "q8_0", "f16", "keep"):
+            raise GneError("BAD_ARGS", f"Inkling 2 の焼き込みの --requant は auto(既定。元の型・元の大きさで書き、編集が残らない"
+                                       f"テンソルだけ Q8_0)/ keep / q8_0 / f16 です({rq!r})")
+        from .inkling_pipeline import gpu_free_mb
+        free = None
+        if self._engine_kw["n_gpu_layers"] != 0:          # いまのモデルを GPU に載せた状態での空き(焼き込むと増える分がここに入るか)
+            self.engine                                  # noqa: B018(読み込んでから測る)
+            free = gpu_free_mb()
+        d = bake_recipe(self, heads, out, requant=rq, vram_free_mb=free, strip_meta=strip_meta)
+        d.update(kind="bake", requant=rq, recipe=recipe.to_dict(), vram_free_mb=free)
         return d
 
     # --- 鍵つきの書き込み(CHANGE-07)--------------------------------------------------------------------

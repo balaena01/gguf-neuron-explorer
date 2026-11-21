@@ -1408,7 +1408,7 @@ def chat(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Option
     sp = _sampling(base, greedy, temperature, top_k, top_p, min_p, presence_penalty, sample_seed)
     load = lambda p: s.recipe(path=p) if p else None  # noqa: E731
     if s.weights.inkling is not None and base is None and not (left or right or center):
-        # Inkling 2(docs/inkling2.md): レシピを当てられないので、無介入の 1 列だけで話す
+        # Inkling 2(docs/inkling2.md): レシピを指定しないときは、無介入の 1 列だけで話す
         from .chat import Column
         cols = [Column("0(無介入)", None)]
     else:
@@ -3008,6 +3008,8 @@ def headproj_export(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, u
     d = s.headproj_export(r, out, bake=bake, requant=requant, via_f16=via_f16, imatrix=str(imatrix) if imatrix else None,
                           llama_quantize=llama_quantize, verify=verify, contrast=contrast, strip_meta=strip_meta, into=into,
                           lora_f16=lora_f16, name=name)
+    if s.weights.inkling is not None:                 # Inkling 2: テンソルごとの書き方と、ファイル・VRAM の増え方
+        return d, "\n".join(_inkling_export_lines(d, bake)), 0
     lines = [f"{d['path']}({d['bytes'] / 1e6:.2f} MB、{'焼き込み' if bake else 'LoRA'}"
              + (f"、名前の欄 {d['general_name']!r}" if d.get("general_name") else "")
              + ("、gne の記録なし" if d.get("strip_meta") else "") + ")"]
@@ -3117,7 +3119,10 @@ def heads_pipeline(c: Common, holder: dict,
                    target: Optional[str] = typer.Option(None, "--target", help="効きにくい例の射影の値の目標: 数、B(B 側の平均まで消す)、mid(既定、A と B の真ん中)"),
                    n_heads: Optional[str] = typer.Option(None, "--n-heads", help="--rank causal: 比べる組のヘッド数(既定 6,5,4)。--rank writes は --n-units"),
                    max_examples: Optional[int] = typer.Option(None, "--max-examples", help="止めて測る段階で使う質問の数(既定 64、等間隔に間引く)"),
-                   positions: Optional[str] = typer.Option(None, "--positions", help="方向を作る位置: last(既定)/ response など"),
+                   positions: Optional[str] = typer.Option(None, "--positions", help="方向を作る位置: last(既定)/ response など。"
+                                                           "Inkling 2 は last / answer(思考の後の、答えの始まり)/ response(答えのトークン全部)/ "
+                                                           "reasoning / after:<正規表現> / all / assistant(答えの前に必ず思考を書くモデルなので、"
+                                                           "答えの書き方を狙うなら answer か response も試す)"),
                    top_layers: Optional[int] = typer.Option(None, "--top-layers", help="--rank causal: ヘッドを 1 個ずつ測る層の数(既定 4)"),
                    hard: Optional[int] = typer.Option(None, "--hard", help="--rank causal: 効率を測る、射影の値が残りやすい質問の数(既定 16)"),
                    include_score_layers: bool = typer.Option(False, "--include-score-layers", help="射影の値を測る層とそれより後のヘッドも候補にする(既定は外す。測る量を直接動かすだけで、振る舞いは変わりにくい)"),
@@ -3138,6 +3143,7 @@ def heads_pipeline(c: Common, holder: dict,
                    loop_direction: Optional[str] = typer.Option(None, "--loop-direction", help="--rank writes、重みを 2 回使うモデル: ループの中の部品を、1 回目の段(first)か 2 回目の段(second)の方向で測って射影する"),
                    strength: Optional[str] = typer.Option(None, "--strength", help="--rank writes: s=1 の組が目標に届かないときの強さの決め方。per_unit(既定、部品ごとに、射影の値が残りやすい質問での効率に応じて上げる)/ uniform(全部を同じ倍率、v0.8.2 まで)"),
                    from_direction: Optional[str] = typer.Option(None, "--from-direction", help="作り済みの方向ベクトルを使う(方向づくりを飛ばす。heads geometry で保存した向きなど。一括の名前の方向として写す)"),
+                   include_before: bool = typer.Option(False, "--include-before", help="Inkling 2 だけ: 層 0〜5(繰り返しの前)の部品も候補に入れる(既定は入れない)"),
                    yes: bool = _YES):
     """対照集合から、方向づくり → 基準層 → 候補づくり → 強さの配分 を 1 回で回す。候補づくりと配分は 2 通り:
     --rank writes(既定): 全部の部品(注意ヘッド・線形注意のヘッド、--unit-kinds all で MLP のニューロンも)を方向への書き込みの量で
@@ -3153,8 +3159,14 @@ def heads_pipeline(c: Common, holder: dict,
             "n_units": _ints(n_units), "check_replies": check_replies, "check_tokens": check_tokens,
             "holdout": True if holdout else None, "loop_direction": loop_direction, "strength": strength,
             "from_direction": from_direction}
+    if include_before:
+        if s.weights.inkling is None:
+            raise GneError("BAD_ARGS", "--include-before は Inkling 2 だけの設定です")
+        over["include_before"] = True
     _gate(s, "head_pipeline", {"spec": str(spec), **{k: v for k, v in over.items() if v is not None}}, yes, None)
     d = s.heads_pipeline(spec, **over)
+    if d.get("inkling"):
+        return d, "\n".join(_inkling_pipeline_lines(d)), 0
     pn = d.get("postnorm")
     pn_line = ([f"注意: 組のヘッド・層全体の射影のうち、層 {', '.join(map(str, (pn['layers'] + pn['unsure_layers'])[:8]))} は"
                 + pn["note"]] if pn else [])
@@ -3259,6 +3271,95 @@ def _same_total(k: str, n_units: dict) -> bool:
 def _verify_corr_line(sp: dict) -> str:
     return "、".join(f"{'全体' if k == 'all' else KIND_JA.get(k, k)} {_f(v['score_vs_gap_drop'], '+.2f')}"
                      f"(A 側だけ {_f(v['score_vs_a_drop'], '+.2f')}、{v['n']} 個)" for k, v in sp.items())
+
+
+def _inkling_bake_line(m: dict) -> str:
+    ex = f"、専門家 {len(m['experts'])} 個を編集" if "experts" in m else ""
+    kept = f"、残った編集 {m['edit_kept']:.3f}" if m.get("edit_kept") is not None else ""
+    how = {"projection-aware rounding": "元の型のまま、編集する列のコードだけ動かした", "requant": "元の型で量子化し直した",
+           "convert": "型を変えた"}.get(m.get("method"), m.get("method") or "")
+    par = (f"、動かしたコード {m['codes_changed']}(列 {m['columns']})、方向に沿わない変化 ÷ 消した成分 {m['off_over_removed_median']:.2f}"
+           if m.get("method") == "projection-aware rounding" else "")
+    fb = f"、元の型では残った編集が {m['fallback']['edit_kept']:.2f} なので Q8_0 にした" if m.get("fallback") else ""
+    return (f"  {m['tensor']}: {m.get('type') or m.get('from')} → {m['to']}({m['bytes_from'] / 2**20:.1f} → {m['bytes_to'] / 2**20:.1f} MiB、"
+            f"{how}{ex}{kept}{par}{fb})")
+
+
+def _inkling_export_lines(d: dict, bake: bool) -> list[str]:
+    """gne headproj export の表示(Inkling 2)。"""
+    if not bake:
+        return [f"{d['path']}({d['bytes'] / 1e6:.2f} MB、LoRA)"]
+    g = d.get("growth") or {}
+    lines = [f"{d['path']}({d['bytes'] / 2**30:.2f} GiB、元 {d['bytes_src'] / 2**30:.2f} GiB、焼き込み、型 {d['requant']})",
+             f"ファイルと VRAM の増え方: {g.get('bytes', 0) / 2**20:+.0f} MiB"
+             + (f"(読み込んだときの VRAM の空き {d['vram_free_mb']:.0f} MiB)" if d.get("vram_free_mb") is not None else "")]
+    lines += [_inkling_bake_line(m) for m in d["modified"]]
+    lines.append(f"記録: GGUF の gne.patches と {d['sidecar']}。層 6〜17 の重みは 3 回の繰り返しで共有なので、焼き込みも 3 回すべてに効きます")
+    return lines
+
+
+def _inkling_pipeline_lines(d: dict) -> list[str]:
+    """heads pipeline の表示(Inkling 2)。ほかのモデルの rank writes の表示と同じ並びで、段の名前と区分を出す。"""
+    ink, wr, ve, al = d["inkling"], d["writes"], d["verify"], d["allocate"]
+    lab = {str(p["key"]): p["label"] for p in ink["points"]}
+    lines = [f"{d['path']}({d['n_prompts']} 問、{d['seconds']:.0f} 秒)",
+             f"Inkling 2: 方向と測る位置 {ink['positions']}。基準は {ink['reference']}。{ink['unit_note']}",
+             *(["  " + ink["position_note"]] if ink.get("position_kind") == "last" else []),
+             *([f"  既定(このモデル用): " + "、".join(f"{k} {v}" for k, v in d["arch_defaults"].items())] if d.get("arch_defaults") else []),
+             f"1. 方向 {d['name']}({d['direction']['positions']}、{d['direction']['seconds']:.0f} 秒"
+             + (f"、答えの始まりが無く読めなかった会話 A {d['direction']['skipped']['A']}・B {d['direction']['skipped']['B']}"
+                if any((d["direction"].get("skipped") or {}).values()) else "") + ")" + _from_dir_text(d),
+             "2. 測る点(A 側 / B 側の平均): " + " | ".join(f"{x['label']} {x['A']:+.2f} / {x['B']:+.2f}" for x in d["score"]["layers"]),
+             f"3. 書き込みの順位づけ: 組を作る目標は{wr['select_label']}、A {wr['n']['A']} 問・B {wr['n']['B']} 問、A−B の差 {wr['gap']:.2f}、部品 "
+             + "・".join(f"{KIND_JA.get(k, k)} {n}" for k, n in wr["n_units"].items() if n) + f"({wr['seconds']:.0f} 秒)",
+             "   候補から外した層: " + "、".join(x for x in (
+                 f"流れが始まる層の attention {wr['excluded']['stream_start']}" if wr["excluded"].get("stream_start") else "",
+                 f"層 {wr['excluded']['before'][0]}〜{wr['excluded']['before'][-1]}(--include-before で入れる)" if wr["excluded"].get("before") else "") if x),
+             "   上位: " + " ".join(f"{r['label']}({r['score']:+.2f})" for r in wr["top"][:8]),
+             f"4. 上位 {ve['n']} 個を 1 個ずつ s=1 で射影して確かめた(" + "・".join(f"{KIND_JA[k]} {n}" for k, n in ve["kinds"].items() if n)
+             + f"、{ve['seconds']:.0f} 秒)。点数と測った A−B の差の縮みの順位相関: " + _verify_corr_line(ve["spearman"]),
+             f"5. s=1 から組を作る(目標 {d['target']:.2f} = {d['target_from']}、候補 {al['pool']} 個。A 側の平均は無介入で {al['base_a_mean']:.2f}):"]
+    for r in ([dict(al["s1"], s1=True)] if al.get("s1") else []) + al["table"]:
+        if r.get("skipped"):
+            lines.append(f"   上限 {r['n_heads']} 個: {r['skipped']}")
+            continue
+        kk = "・".join(f"{KIND_JA[k]} {n}" for k, n in r["kinds"].items() if n)
+        strg = (f"強さ {r['s_max']:.2f}" if r.get("alpha") is not None or abs(r["s_max"] - r.get("s_min", r["s_max"])) < 1e-9 else
+                f"強さ 最大 {r['s_max']:.2f}・中央値 {r['s_median']:.2f}・最小 {r['s_min']:.2f}")
+        head = f"   s=1(上げる前): {r['n_used']} 個({kk})" if r.get("s1") else \
+            f"   上限 {r['n_heads']} 個: {r['n_used']} 個({kk})、{strg}({WRITES_STOP.get(r['stop'], r['stop'])})"
+        lines.append(head + f"、A 平均 {r['a_mean']:.2f}、B Δ {r['b_side_delta']:+.2f}、B 直交 {r['b_drift_orth']:.4f}、"
+                     f"残る {r['remain']}/{al['n_a']}" + ("" if r.get("effect") is None else f"、効き {r['effect']:.2f}")
+                     + ("  ← 推す" if r.get("recommended") else "") + _mr_mark(r) + ("" if r["reached"] else "(目標に届かない)"))
+        lines.append("      " + " ".join(r["units"]))
+        bl = r.get("by_layer") or {}
+        if bl:
+            lines.append("      測る点の A / B: " + " | ".join(f"{lab.get(k, k)} {v['A']:+.2f} / {v['B']:+.2f}" for k, v in bl.items()))
+    if d.get("no_recommend"):
+        lines.append(f"   推す組なし: 道具の基準では 1 つに決められなかった({d['no_recommend']['reason']})。" + _mr_line(d.get("most_reduced")))
+    lines.append("   " + REC_GUIDE)
+    for nt in al.get("notes") or []:
+        lines.append("   注意: " + nt["text"])
+    ck = d.get("check")
+    if ck:
+        def cell(x):
+            return f"{x['match_finished']}/{x['finished']}" if x.get("match_finished") is not None else f"{x['finished']}/{x['n']} 書き終え"
+        for key, lab_ in (("none", "無介入"), ("recipe", "推す組" if ck.get("recommended") else f"上限 {ck.get('n_heads')} 個の組(推す組なし)")):
+            x = ck["rows"][key]
+            lines.append(f"6. 応答での確かめ {lab_}(思考を除いた答えで数える): A {cell(x['A'])}・B {cell(x['B'])}(空 A {x['A']['empty']}/B {x['B']['empty']}、"
+                         f"繰り返し A {x['A']['loop']}/B {x['B']['loop']}、上限で切れた A {x['A']['at_limit']}/B {x['B']['at_limit']})")
+        if ck.get("match_warning"):
+            lines.append("   注意: " + ck["match_warning"])
+        for side, x in (ck.get("break_warning") or {}).items():
+            lines.append(f"   注意: 組を当てると {side} 側の応答が壊れています(繰り返し {x['loop']}・空 {x['empty']} / {x['n']} 問、無介入では "
+                         f"{x['loop_none']}・{x['empty_none']})。強さを下げるか、別の組・別の部品の種類を試してください")
+        if ck.get("note"):
+            lines.append("   注意: " + ck["note"] + (f"。{ink['position_note']}" if ink.get("position_kind") == "last" else ""))
+    if d.get("recommended"):
+        r_ = d["recommended"]["recipe"]
+        lines.append(f"レシピ: {r_}。試す: gne chat --recipe {r_}(強さは gne recipe-scale で変える)、gne behave --recipe {r_}、"
+                     f"焼き込む: gne headproj export --recipe {r_} --bake --out <GGUF>")
+    return lines
 
 
 def _pipeline_writes_lines(d: dict) -> list[str]:
@@ -4694,7 +4795,8 @@ _INK_UNITS = typer.Option(None, "--units", help='部品の JSON([[層, "head"|"a
 def inkling_chips_bake_cmd(c: Common, holder: dict, out: Path = typer.Option(..., "--out", help="書き出す GGUF"),
                            name: str = typer.Option("trial", "--name"), trial: Optional[Path] = _INK_TRIAL,
                            set_key: Optional[str] = _INK_SET, units: Optional[str] = _INK_UNITS,
-                           requant: str = typer.Option("q8_0", "--requant", help="書き換えるテンソルの型: q8_0(既定)・f16・keep(元の型。Q2_0 は断る)")):
+                           requant: str = typer.Option("auto", "--requant", help="書き換えるテンソルの型: auto(既定。元の型・元の大きさで書き、"
+                                                       "編集の 1 割以上が残らないテンソルだけ Q8_0)・keep(いつも元の型)・q8_0・f16")):
     """[試し] chips-trial の組を GGUF に焼き込む(LoRA と同じ変化量。GPU は使わない)。層 6〜17 の重みは 3 回で共有なので、
     焼き込みも LoRA と同じく 3 回すべてに効く。専門家ごとの倍率(ffn_down_exps.scale)はそのままにし、変化量を倍率で割って入れる。"""
     from types import SimpleNamespace
@@ -4711,9 +4813,7 @@ def inkling_chips_bake_cmd(c: Common, holder: dict, out: Path = typer.Option(...
     r = bake(SimpleNamespace(w=s.weights, plan=s.weights.inkling), us, refs, Path(out), requant=requant)
     lines = [f"[試し] 焼き込み: {r['path']}({r['bytes'] / 2**30:.2f} GiB、元 {r['bytes_src'] / 2**30:.2f} GiB)"]
     for m in r["modified"]:
-        ex = f"、専門家 {len(m['experts'])} 個を編集" if "experts" in m else ""
-        kept = f"、残った編集 {m['edit_kept']:.3f}" if m.get("edit_kept") is not None else ""
-        lines.append(f"  {m['tensor']}: {m['type']} → {m['to']}({m['bytes_from'] / 2**20:.1f} → {m['bytes_to'] / 2**20:.1f} MiB{ex}{kept})")
+        lines.append(_inkling_bake_line(m))
     if any((m.get("edit_kept") or 1.0) < 0.9 for m in r["modified"]):
         lines.append("  注意: 量子化し直しで編集の 1 割以上が消えたテンソルがあります(--requant q8_0 か f16 で書き直せます)")
     lines.append(f"記録: {r['sidecar']}")
@@ -4730,7 +4830,9 @@ def inkling_chips_bake_check_cmd(c: Common, holder: dict,
                                  spec: Path = typer.Option(Path(__file__).resolve().parent.parent / "configs" / "pipeline" / "pirate_tone.json",
                                                            "--spec", exists=True),
                                  n_a: int = typer.Option(4, "--n-a"), n_b: int = typer.Option(2, "--n-b"),
-                                 reply_tokens: int = typer.Option(256, "--reply-tokens")):
+                                 reply_tokens: int = typer.Option(256, "--reply-tokens"),
+                                 recipe: Optional[Path] = typer.Option(None, "--recipe", help="gne heads pipeline のレシピ(--mode lora。方向はレシピの方向)"),
+                                 direction: Optional[Path] = typer.Option(None, "--direction", help="方向の .npz(gne heads pipeline の方向。焼き込んだ GGUF で測るとき)")):
     """[試し] 焼き込みの確かめ。同じ組で、元のモデル + LoRA(--mode lora)と焼き込んだ GGUF(-m に焼き込んだもの、--mode baked)の
     中の値(各段の MLP の入力と最後に混ぜた出力の、方向への射影)と貪欲の応答を比べる。--mode replies は中の値を読めない
     llama.cpp(名前の patch なし)で読み込んで応答だけ。"""
@@ -4738,12 +4840,29 @@ def inkling_chips_bake_check_cmd(c: Common, holder: dict,
     if mode not in ("lora", "baked", "replies"):
         raise GneError("BAD_ARGS", "--mode は lora・baked・replies です")
     s = holder["session"] = c.session()
+    ds = None
+    if recipe is not None:                                     # gne heads pipeline のレシピ: 方向はレシピの方向
+        from .headproj import proj_heads
+        from .inkling_pipeline import chips_unit
+        rr = s.recipe(path=recipe)
+        hs = [p for p in proj_heads(rr) if p.s]
+        names = sorted({p.direction for p in hs})
+        if len(names) != 1:
+            raise GneError("BAD_RECIPE", "確かめられるのは 1 つの方向の射影のレシピです")
+        ds = s.direction_set(names[0])
+        units = json.dumps([chips_unit(p) for p in hs])
+    elif direction is not None:
+        from .direction import DirectionSet
+        ds = DirectionSet.load(direction)
     if mode != "lora" and not units and not set_key:          # 焼き込んだ GGUF の記録(<GGUF>.chips.json)の組
         side = Path(str(s.weights.path) + ".chips.json")
         if side.exists():
             units = json.dumps(json.loads(side.read_text(encoding="utf-8"))["units"])
-    d, us = _ink_trial_units(c, s, trial, name, set_key, units)
-    r = bake_check(s, d, us, spec, mode=mode, n_a=n_a, n_b=n_b, reply_tokens=reply_tokens)
+    if ds is not None:
+        d, us = None, [[int(u[0]), str(u[1]), u[2], float(u[3])] for u in json.loads(units)]
+    else:
+        d, us = _ink_trial_units(c, s, trial, name, set_key, units)
+    r = bake_check(s, d, us, spec, mode=mode, n_a=n_a, n_b=n_b, reply_tokens=reply_tokens, ds=ds)
     r["model"] = Path(s.weights.path).name
     Path(save).write_text(json.dumps(r, ensure_ascii=False, indent=1), encoding="utf-8")
     g = r["greedy"]

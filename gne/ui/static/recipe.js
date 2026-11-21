@@ -20,8 +20,10 @@ const fmt = (x, d = 2) => (x === null || x === undefined || !Number.isFinite(+x)
 const signed = (x, d = 2) => `${x >= 0 ? "+" : "−"}${fmt(Math.abs(x), d)}`;
 const isDir = (u) => u.kind === "direction";
 // 方向成分の射影(ヘッド CHANGE-06、ニューロン v0.8.0、層の書き込み全体 attn・ffn v0.8.1)
-const isProj = (u) => (u.kind === "head" || (u.kind || "neuron") === "neuron" || u.kind === "attn" || u.kind === "ffn") && u.mode === "proj";
-const isProjN = (u) => isProj(u) && (u.kind || "neuron") === "neuron";   // ニューロンの方向成分の射影(ffn_down の列)
+const isProj = (u) => (u.kind === "head" || (u.kind || "neuron") === "neuron" || u.kind === "attn" || u.kind === "ffn"
+  || u.kind === "expert_neuron") && u.mode === "proj";
+const isProjE = (u) => isProj(u) && u.kind === "expert_neuron";   // 専門家のニューロンの射影(Inkling 2 だけ、L:Ee:Nn:sS@NAME)
+const isProjN = (u) => isProj(u) && ((u.kind || "neuron") === "neuron" || u.kind === "expert_neuron");   // ニューロンの方向成分の射影(ffn_down の列)
 const isProjW = (u) => isProj(u) && (u.kind === "attn" || u.kind === "ffn");   // 層の書き込み全体の射影(attn_output・ssm_out / ffn_down の全体)
 const isHead = (u) => u.kind === "head" && !isProj(u);          // ヘッドの gain
 const isNeuron = (u) => (u.kind || "neuron") === "neuron" && u.mode !== "nw" && u.mode !== "proj";
@@ -57,7 +59,7 @@ export function parseNw(spec) {
 const nwRowOf = (u) => ({ layer: +u.layer, neuron: +u.neuron, mode: "nw", alpha: +(u.alpha ?? u.k), direction: u.direction || null,
                           key: u.key || null, key2: u.key2 || null, pair: u.pair ?? null, s: u.s ?? null, cap: u.cap || null,
                           kscale: u.kscale ? String(u.kscale).toLowerCase() : null, remove: u.remove || null, take: u.take || null });
-export const isMoe = (u) => !isKeyed(u) && (u.kind === "expert_neuron" || u.kind === "expert" || u.kind === "shared");
+export const isMoe = (u) => !isKeyed(u) && u.mode !== "proj" && (u.kind === "expert_neuron" || u.kind === "expert" || u.kind === "shared");
 const isGain = (u) => isHead(u) || u.mode === "gain";             // 倍率 k(1 が無介入)の行
 const isRoute = (u) => u.mode === "route";
 const isPush = (u) => isMoe(u) && (u.kind === "expert_neuron" || u.kind === "shared") && !isGain(u);   // MoE の add = 書き込み方向の押し
@@ -108,9 +110,13 @@ const aLabel = (a) => `a${a >= 0 ? "+" : "−"}${fmt(Math.abs(a), 2)}`;
 // 射影のユニットの文字列(ヘッド L:Hh:sS@NAME、ニューロン L:Nn:sS@NAME、層全体 L:attn:sS@NAME・L:ffn:sS@NAME)→ ユニット。読めなければ null
 const PROJ_RE = /^(\d+):([HhNn])(\d+):s([+-]?[\d.]+(?:e[+-]?\d+)?)(?:@([\w.\-]+))?$/i;
 const PROJW_RE = /^(\d+):(attn|ffn):s([+-]?[\d.]+(?:e[+-]?\d+)?)(?:@([\w.\-]+))?$/i;
+const PROJE_RE = /^(\d+):E(\d+):N(\d+):s([+-]?[\d.]+(?:e[+-]?\d+)?)(?:@([\w.\-]+))?$/i;   // 専門家のニューロン(Inkling 2)
 // 射影のユニット → 文字列(s に倍率 scale を掛ける)
-export const projSpec = (u, scale = 1) => `${u.layer}:${isProjW(u) ? u.kind : isProjN(u) ? `N${u.neuron}` : `H${u.head}`}:s${+scaleUnit(u, scale).s.toFixed(4)}${u.direction ? `@${u.direction}` : ""}`;
+const projWho = (u) => (isProjW(u) ? u.kind : isProjE(u) ? `E${u.expert}:N${u.neuron}` : isProjN(u) ? `N${u.neuron}` : `H${u.head}`);
+export const projSpec = (u, scale = 1) => `${u.layer}:${projWho(u)}:s${+scaleUnit(u, scale).s.toFixed(4)}${u.direction ? `@${u.direction}` : ""}`;
 export function parseProj(spec, defaultDirection = null) {
+  const e = String(spec).trim().match(PROJE_RE);
+  if (e) return { layer: +e[1], kind: "expert_neuron", mode: "proj", expert: +e[2], neuron: +e[3], s: +e[4], direction: e[5] || defaultDirection };
   const w = String(spec).trim().match(PROJW_RE);
   if (w) return { layer: +w[1], kind: w[2].toLowerCase(), mode: "proj", s: +w[3], direction: w[4] || defaultDirection };
   const m = String(spec).trim().match(PROJ_RE);
@@ -354,7 +360,8 @@ export class Recipe {
     const ok = units.filter((u) => (((u.kind || "neuron") === "neuron" || u.kind === "direction") && (u.mode || "add") === "add")
       || (u.kind === "head" && u.mode === "gain" && u.head !== null && u.head !== undefined && Number.isFinite(+u.k))
       || (u.kind === "head" && u.mode === "proj" && u.head !== null && u.head !== undefined && Number.isFinite(+(u.s ?? u.k)) && !!u.direction)
-      || (isProjN(u) && u.neuron !== null && u.neuron !== undefined && Number.isFinite(+(u.s ?? u.k)) && !!u.direction)
+      || (isProjN(u) && u.neuron !== null && u.neuron !== undefined && Number.isFinite(+(u.s ?? u.k)) && !!u.direction
+          && (!isProjE(u) || (u.expert !== null && u.expert !== undefined)))
       || (isProjW(u) && Number.isFinite(+(u.s ?? u.k)) && !!u.direction)
       || moeOk(u) || keyedOk(u) || nwOk(u));
     this.skipped = units.length - ok.length;
@@ -364,6 +371,7 @@ export class Recipe {
                                                alpha: +(u.alpha ?? u.k), direction: (u.direction_default && dd) ? null : u.direction || null,
                                                key: (u.key_default && dk) ? null : u.key || null }
       : isDir(u) ? { layer: u.layer, kind: "direction", direction: u.direction, dose: u.dose }
+      : isProjE(u) ? { layer: u.layer, kind: "expert_neuron", mode: "proj", expert: +u.expert, neuron: u.neuron, s: +(u.s ?? u.k), direction: u.direction }
       : isProjN(u) ? { layer: u.layer, kind: "neuron", mode: "proj", neuron: u.neuron, s: +(u.s ?? u.k), direction: u.direction }
       : isProjW(u) ? { layer: u.layer, kind: u.kind, mode: "proj", s: +(u.s ?? u.k), direction: u.direction }
       : isProj(u) ? { layer: u.layer, kind: "head", mode: "proj", head: u.head, s: +(u.s ?? u.k), direction: u.direction }
@@ -394,8 +402,14 @@ export const samplingLabel = (sp) => (sp ? `${t("温度")} ${+sp.temperature} ·
 
 export class RecipePanel {
   constructor(root, recipe, { onOpen, onOpenHead, onOpenExpert, onChat, unitWords, directions, projDirections, headKind, nFF, onRunJob, keys, nLayer,
-                               onAdded, onReplaced, doseSpread, postNorm }) {
+                               onAdded, onReplaced, doseSpread, postNorm, inkling }) {
     this.root = root;
+    this.inkling = () => (inkling ? inkling() : null);   // Inkling 2 の段の表(/api/model の inkling)。部品の名前に回を出す
+    // 繰り返しの層の部品の印と説明(重みは 3 回で共有なので、書き換えは 3 回すべてに効く)
+    this.inklingMark = (L) => { const k = this.inkling(); return k && L >= k.core_start && L < k.core_end ? ` ×${k.n_passes}` : ""; };
+    this.inklingTip = (L) => { const k = this.inkling(); return k && L >= k.core_start && L < k.core_end
+      ? t("層 {a}〜{b} の重みは {n} 回の繰り返しで共有なので、この部品の書き換えは {n} 回すべてに効きます", { a: k.core_start, b: k.core_end - 1, n: k.n_passes })
+      : t("繰り返しの外の層(1 回だけ実行)"); };
     this.postNorm = postNorm || (() => false);      // 出力のあとに正規化がある層があるモデルか(射影の補正の欄を出す、v0.9.0)
     this.doseSpread = doseSpread || (() => null);   // 残差の大きさの偏り(/api/model の dose_spread、v0.9.0)
     this.r = recipe;
@@ -611,7 +625,8 @@ export class RecipePanel {
       ? `<span class="badge rank1" title="${t("L{L} の射影のヘッドはどれも同じ方向なので、LoRA は階数 1 に畳める", { L: u.layer })}">rank 1</span>`
       : `<span class="badge rankk" title="${t("L{L} の射影のヘッドの方向が {n} 種類あるので、LoRA の階数は {n}(同じ方向なら 1 に畳める)", { L: u.layer, n: rank })}">rank ${rank}</span>`;
     return `
-      <tr data-i="${i}" class="rc-proj"><td class="id"><a href="#" data-open="${i}" title="${t("くわしく見るで開く")}">L${u.layer} ${isProjW(u) ? u.kind : isProjN(u) ? `N${u.neuron}` : `H${u.head}`}</a>
+      <tr data-i="${i}" class="rc-proj"><td class="id">${this.inkling() ? `<span title="${esc(this.inklingTip(u.layer))}">L${u.layer} ${projWho(u).replace(":", " ")}${this.inklingMark(u.layer)}</span>`
+        : `<a href="#" data-open="${i}" title="${t("くわしく見るで開く")}">L${u.layer} ${isProjW(u) ? u.kind : isProjN(u) ? `N${u.neuron}` : `H${u.head}`}</a>`}
         <span class="sg mono minus">${sLabel(u.s)}</span> <span class="mono">@</span><select class="rc-pdir" data-pdir="${i}" title="${t("射影する方向(gne direction の方向セット)")}">${opts}</select>
         ${rk}<button class="small quiet rm" data-rm="${i}" title="${t("外す")}">×</button>
         <div class="sl"><span class="muted">${PROJ.min}</span><input type="range" class="dose" min="${PROJ.min}" max="${PROJ.max}" step="${PROJ.step}" value="${u.s}" data-i="${i}" style="background:${projBG(u.s)}"><span class="muted">${PROJ.max}</span>

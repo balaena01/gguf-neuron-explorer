@@ -79,9 +79,9 @@ def test_refuse_message():
     assert e.code == "ARCH_UNSUPPORTED" and "control vector" in e.message and "層 6〜17 を 3 回" in e.message
     assert "docs/inkling2.md" in e.hint
     from gne.inkling import check_command
-    for ok in ("info", "chat", "behave", "probe", None):
+    for ok in ("info", "chat", "behave", "probe", "heads pipeline", "headproj export", None):   # CHiPS の流れは通す
         check_command(_plan(), ok)
-    for bad in ("heads pipeline", "direction", "steer", "nw pipeline", "stats resid"):
+    for bad in ("heads refine", "direction", "steer", "nw pipeline", "stats resid"):
         with pytest.raises(GneError) as ex:
             check_command(_plan(), bad)
         assert ex.value.code == "ARCH_UNSUPPORTED" and f"gne {bad}" in ex.value.message
@@ -197,6 +197,86 @@ def test_chips_trial_candidates_all():
     assert [(r["kind"], r["layer"]) for r in c] == [("ffn", 12), ("neuron", 9), ("head", 7)]   # 流れの始まりの層は MLP だけ残す
     assert [(r["kind"]) for r in candidates_all(p, ra, ("head", "attn", "ffn"))] == ["ffn", "head"]
     assert unit_of(c[1], 2.0) == [9, "neuron", [5, 77], 2.0] and unit_of(c[0], 1.0) == [12, "ffn", None, 1.0]
+
+
+def test_expert_neuron_projection_units():
+    """専門家のニューロンの射影(L:Ee:Nn:sS@方向、Inkling 2 だけ)の書き方・レシピ・強さの倍率。"""
+    import dataclasses
+
+    from gne.headproj import heads_to_units, proj_heads
+    from gne.steer import Recipe, parse_unit
+    from gne.unitwrites import unit_of
+    u = parse_unit("14:E25:N389:s2.5@dirx")
+    assert (u.kind, u.mode, u.expert, u.neuron, u.k) == ("expert_neuron", "proj", 25, 389, 2.5)
+    r = Recipe([u, parse_unit("11:H5:s1@dirx"), parse_unit("9:ffn:s1@dirx")], "m", name="t")
+    r.validate()
+    hs = proj_heads(r)
+    assert [h.spec() for h in hs] == ["14:E25:N389:s2.5@dirx", "11:H5:s1@dirx", "9:ffn:s1@dirx"]
+    assert hs[0].key != dataclasses.replace(hs[0], expert=26).key              # 専門家が違えば別の部品
+    assert [x.label() for x in heads_to_units(hs, "dirx")][0] == "L14 E25 N389 s2.5"
+    assert r.scaled(2.0).units[0].k == 5.0
+    assert unit_of({"layer": 14, "index": 389, "kind": "neuron", "expert": 25}, 1.0, "d").spec() == "14:E25:N389:s1@d"
+    assert unit_of({"layer": 14, "index": 389, "kind": "neuron"}, 1.0, "d").spec() == "14:N389:s1@d"   # ほかのモデルは今までどおり
+
+
+def test_inkling_positions_and_rows():
+    from gne.inkling_pipeline import parse_positions, rows_for
+    from gne.steer import GneError
+    assert parse_positions(None) == ("last", None) and parse_positions("after:[.!?]") == ("after", "[.!?]")
+    with pytest.raises(GneError):
+        parse_positions("response:3")
+
+    class E:
+        def is_eog(self, t):
+            return t == 99
+
+        def token_bytes(self, t):
+            return {50: b"Hi", 51: b".", 52: b" Ok"}.get(t, b"x")
+    ids, TEXT = [1, 2, 3], 7
+    reply = [5, 6, 6, TEXT, 50, 51, 52, 99]                 # 思考 3 トークン、答えの始まりの区切り、答え 3 トークン、EOG
+    assert rows_for(E(), "last", None, ids, 1, None, TEXT) == (ids, [2])
+    full, pos = rows_for(E(), "answer", None, ids, 1, reply, TEXT)
+    assert full == ids + reply[:4] and pos == [6]            # 区切りの位置(その出力が答えの最初のトークンを決める)
+    full, pos = rows_for(E(), "response", None, ids, 1, reply, TEXT)
+    assert full == ids + reply[:7] and pos == [6, 7, 8]      # 答えのトークンを決める位置
+    assert rows_for(E(), "reasoning", None, ids, 1, reply, TEXT)[1] == [2, 3, 4, 5]
+    full, pos = rows_for(E(), "after", r"\.", ids, 1, reply, TEXT)
+    assert pos == [8]                                        # "." のトークン(列の番号 8)の位置
+    assert rows_for(E(), "answer", None, ids, 1, [5, 6, 99], TEXT) is None     # 思考の途中で終わった
+
+
+@pytest.mark.parametrize("typ", ["Q2_0", "NVFP4"])
+def test_same_size_bake_rounding(typ):
+    """元の型・元の大きさの焼き込み(射影を意識した丸め): 編集する列だけコードが動き、uᵀw が目標に近づき、倍率はそのまま。"""
+    import numpy as np
+
+    from gne.inkling_bake import decode, edit_slab, encode
+    rng = np.random.default_rng(1)
+    rows, cols = 128, 128
+    nb = cols // 64
+    if typ == "Q2_0":
+        d = rng.choice([-1.0, 1.0], (rows, nb)) * rng.uniform(0.5, 2.0, (rows, nb))
+        raw = np.zeros((rows, nb, 18), np.uint8)
+        raw[:, :, :2] = d.astype(np.float16).view(np.uint8).reshape(rows, nb, 2)
+        raw[:, :, 2:] = rng.integers(0, 256, (rows, nb, 16), dtype=np.uint8)
+    else:
+        raw = np.zeros((rows, nb, 36), np.uint8)
+        raw[:, :, :4] = rng.integers(40, 60, (rows, nb, 4), dtype=np.uint8)
+        raw[:, :, 4:] = rng.integers(0, 256, (rows, nb, 32), dtype=np.uint8)
+    raw = raw.reshape(rows, -1)
+    q, sc, W = decode(raw, typ, rows, cols)
+    assert np.array_equal(encode(raw, typ, rows, cols, q), raw)               # 戻せる
+    u = rng.standard_normal(rows)
+    u /= np.linalg.norm(u)
+    cols_e = [3, 70]
+    c = u @ W[:, cols_e]
+    r = edit_slab(raw, typ, u, {n: float(-x) for n, x in zip(cols_e, c)}, rows, cols)
+    q2, sc2, W2 = decode(r["raw"], typ, rows, cols)
+    other = [n for n in range(cols) if n not in cols_e]
+    assert np.array_equal(q2[:, other], q[:, other]) and np.array_equal(sc2, sc)   # ほかの列・倍率はそのまま
+    hd = 2 if typ == "Q2_0" else 4
+    assert np.array_equal(r["raw"].reshape(rows, nb, -1)[:, :, :hd], raw.reshape(rows, nb, -1)[:, :, :hd])
+    assert np.all(np.abs(u @ W2[:, cols_e]) < 0.25 * np.abs(c)), (u @ W2[:, cols_e], c)   # 方向の成分はほぼ消えた
 
 
 def test_chips_bake_units_and_compare():
@@ -473,13 +553,12 @@ def test_real_chips_trial_ffn_lora(session, tmp_path):
 
 @real
 def test_real_chips_bake_types(session):
-    """焼き込みの型: q8_0 と f16 は編集が残り、keep は Q2_0 を断る(ファイルは書かない)。"""
+    """焼き込みの型: q8_0・f16・keep のどれでも編集が残る(ファイルは書かない)。"""
     from types import SimpleNamespace
 
     import numpy as np
 
     from gne.inkling_chips import bake, layer_refs
-    from gne.steer import GneError
     plan = session.weights.inkling
     rng = np.random.default_rng(0)
     D = {k: rng.standard_normal((plan.n_steps, session.weights.arch.n_embd)) for k in ("ffn_mix", "ffn_in")}
@@ -490,5 +569,32 @@ def test_real_chips_bake_types(session):
     for rq, tol in (("q8_0", 0.1), ("f16", 0.01)):            # 1 列だけの小さな編集は Q8_0 の刻みで数 % ずれる
         for m in bake(rd, units, refs, None, requant=rq)["modified"]:
             assert abs(m["edit_kept"] - 1.0) < tol, (rq, m)
-    with pytest.raises(GneError, match="Q2_0"):
-        bake(rd, units, refs, None, requant="keep")
+    for m in bake(rd, units, refs, None, requant="keep")["modified"]:       # 元の型・元の大きさ(専門家は列のコードだけ動かす)
+        assert m["to"] == m["from"] and m["bytes_to"] == m["bytes_from"] and m["edit_kept"] > 0.9, m
+
+
+@real
+def test_real_inkling_pipeline_recipe_and_bake(session, tmp_path):
+    """gne heads pipeline(Inkling 2)を小さく流し、レシピが LoRA で当たり、強さの倍率が式どおりに効き、焼き込み(元の型・
+    元の大きさ)の確かめが通る(ファイルは書かない)。"""
+    import json as _json
+    from types import SimpleNamespace
+
+    from gne.headproj import proj_heads
+    from gne.inkling_chips import bake
+    from gne.inkling_pipeline import OUT, chips_unit, layer_refs_of
+    if not _reader(session).patch_present():
+        pytest.skip("名前の patch を当てた llama.cpp だけ")
+    spec = _json.loads((Path(__file__).resolve().parent.parent / "configs" / "pipeline" / "pirate_tone.json").read_text(encoding="utf-8"))
+    spec["user_prompts"] = spec["user_prompts"][:6]
+    spec.pop("validate", None)
+    d = session.heads_pipeline(spec, max_examples=4, verify_top=3, verify_sample=0, n_units=[2], check_replies=0)
+    assert d["inkling"] and d["writes"]["select_layer"] == OUT and d["allocate"]["table"]
+    row = next(r for r in d["allocate"]["table"] if not r.get("skipped"))
+    rec = session.recipe(path=row["recipe"])
+    assert session.lora_for(rec)                                               # LoRA で当たる
+    ds = session.direction_set(spec["name"])
+    units = [chips_unit(p) for p in proj_heads(rec) if p.s]
+    refs = layer_refs_of(session.weights.inkling, ds)
+    for m in bake(SimpleNamespace(w=session.weights, plan=session.weights.inkling), units, refs, None, requant="auto")["modified"]:
+        assert m["to"] == m["from"] and m["bytes_to"] == m["bytes_from"] and m["edit_kept"] > 0.9, m

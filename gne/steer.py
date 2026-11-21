@@ -342,6 +342,7 @@ class Recipe:
                                              f"{u.layer}:{u.kind}:s1@NAME)")
             if u.mode == "proj":                                          # CHANGE-06(ニューロンは v0.8.0、層全体は v0.8.1)
                 if not ((u.kind == "head" and u.head is not None) or (u.kind == "neuron" and u.neuron is not None)
+                        or (u.kind == "expert_neuron" and u.neuron is not None and u.expert is not None)   # Inkling 2 だけ
                         or (u.kind in ("attn", "ffn") and u.head is None and u.neuron is None)) or u.k is None:
                     raise GneError("BAD_RECIPE", f"{u}: proj はヘッド(head)・ニューロン(neuron)か、層の書き込み全体(attn・ffn)で、"
                                                  "s が要ります(例 {layer: 33, kind: head, head: 16, mode: proj, direction: NAME, s: 6}、"
@@ -467,6 +468,8 @@ _UNIT_RE = re.compile(r"^(\d+):(?:(\d+)|random:(\d+)|dir:([\w.\-@]+)|[Hh](\d+)):
 _PROJ_RE = re.compile(r"^(\d+):[Hh](\d+):s([+-]?[\d.]+(?:e[+-]?\d+)?)(?:@([\w.\-]+))?$", re.I)
 _PROJN_RE = re.compile(r"^(\d+):N(\d+):s([+-]?[\d.]+(?:e[+-]?\d+)?)(?:@([\w.\-]+))?$", re.I)   # ニューロンの射影(v0.8.0)
 # 層の書き込み全体の射影(v0.8.1): attn = その層の注意の出力全体(attn_output、線形注意の層は ssm_out)、ffn = MLP の出力全体(ffn_down)
+# 専門家のニューロンの射影(Inkling 2 だけ。ffn_down_exps の専門家 e の列から方向成分を引く)
+_PROJE_RE = re.compile(r"^(\d+):E(\d+):N(\d+):s([+-]?[\d.]+(?:e[+-]?\d+)?)(?:@([\w.\-]+))?$", re.I)
 _PROJW_RE = re.compile(r"^(\d+):(attn|ffn):s([+-]?[\d.]+(?:e[+-]?\d+)?)(?:@([\w.\-]+))?$", re.I)
 
 
@@ -541,6 +544,10 @@ def parse_unit(spec: str) -> Unit:
     if mpn:
         L, n, sv, dname = mpn.groups()
         return Unit(int(L), int(n), 0.0, "neuron", mode="proj", k=float(sv), direction=dname)
+    mpe = _PROJE_RE.match(spec.strip())
+    if mpe:
+        L, e, n, sv, dname = mpe.groups()
+        return Unit(int(L), int(n), 0.0, "expert_neuron", mode="proj", k=float(sv), direction=dname, expert=int(e))
     mpw = _PROJW_RE.match(spec.strip())
     if mpw:
         L, where, sv, dname = mpw.groups()

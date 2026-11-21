@@ -78,9 +78,9 @@ gne の表示の「段」は、実行の順(0〜47)。llama.cpp のキャッシ�
 
 | 使える | 止まる(理由を書いて止める) |
 |---|---|
-| `gne info`、`gne probe --list-names`(グラフのテンソルの名前だけ。番号は段)、`gne inkling read / check / mix / residuals / conv / experts`(中を読むだけ。0001 が要る。下の「中を読む」)、`gne chat`(レシピなし。`--reasoning-effort`)、`gne serve` のマップ・会話・保存済みの一覧、OpenAI 互換 API、`gne behave`(レシピなし、`--match`。思考の欄を除いた回答だけを数える)、`gne verify`(トークン化の V8 だけ。ほかは省く) | 中間のテンソルの捕捉(残差・ヘッド・ニューロン・専門家の値)、control vector、LoRA、焼き込み、重みの中身を読む処理(ニューロン・専門家・ヘッドの詳細、logit lens など)。これを使うコマンド(`gne stats`・`lens`・`sweep`・`direction`・`heads …`・`experts …`・`nw …`・`steer`・`gain`・`ablate`・`bake`・`eval` など)は全部止まる。`gne behave --judge`(読み手の判定)と `gne fieldtest` も止まる |
+| `gne info`、`gne probe --list-names`(グラフのテンソルの名前だけ。番号は段)、`gne inkling read / check / mix / residuals / conv / experts`(中を読むだけ。0001 が要る。下の「中を読む」)、`gne chat`(`--reasoning-effort`。CHiPS のレシピも当てられる)、`gne serve` のマップ・会話・保存済みの一覧・CHiPS の画面、OpenAI 互換 API、`gne behave`(`--match`。思考の欄を除いた回答だけを数える。CHiPS のレシピも当てられる)、CHiPS の流れ(`gne heads pipeline` → レシピ → `gne headproj export`。下の「CHiPS の流れ」)、`gne recipe-scale`、`gne verify`(トークン化の V8 だけ。ほかは省く) | CHiPS の流れのほかの、中間のテンソルの捕捉(残差・ヘッド・ニューロン・専門家の値)、control vector、CHiPS の射影のほかの LoRA(gain・keyed・nw など)、重みの中身を読む処理(ニューロン・専門家・ヘッドの詳細、logit lens など)。これを使うコマンド(`gne stats`・`lens`・`sweep`・`direction`・`heads refine` などの `heads …`・`experts …`・`nw …`・`steer`・`gain`・`ablate`・`bake`・`eval` など)は止まる。`gne behave --judge`(読み手の判定)と `gne fieldtest` も止まる |
 
-止まるときのエラーは `ARCH_UNSUPPORTED`。CLI では、使えるコマンド(`info`・`probe`・`verify`・`bench`・`chat`・`behave`・`worker`・`recipe-combine`・`recipe-scale`・`direction keys`・`inkling …`)のほかは、モデルを読み込む前に止まる。MCP と画面のジョブは、中間のテンソルの捕捉・control vector・LoRA・重みの読み出しのところで止まる(生成だけを先にする処理は、生成の後で止まる)。中間のテンソルの捕捉を通すのは `gne inkling …` の読むだけの処理だけ。
+止まるときのエラーは `ARCH_UNSUPPORTED`。CLI では、使えるコマンド(`info`・`probe`・`verify`・`bench`・`chat`・`behave`・`worker`・`recipe-combine`・`recipe-scale`・`direction keys`・`heads pipeline`・`headproj export`・`inkling …`)のほかは、モデルを読み込む前に止まる。画面と MCP のジョブは、CHiPS の流れ(`head_pipeline`・`headproj_export`)と `behave` のほかは、始める前に止まる。中間のテンソルの捕捉を通すのは `gne inkling …` の読むだけの処理だけ。
 
 ## 中を読む(読むだけ)
 
@@ -115,6 +115,46 @@ gne の表示の「段」は、実行の順(0〜47)。llama.cpp のキャッシ�
 
 `gne inkling check` の結果(UD-IQ2_XXS、GPU、24 トークン、全 48 段): 流れの和・混ぜ方・ゲート・短い畳み込み・SiTU は相対誤差 3×10⁻⁸〜2×10⁻⁷(float32 の丸め)。W_o・専門家の行列の積は 5×10⁻³〜1×10⁻²(llama.cpp は量子化した重みとの積で活性も量子化する。gne の計算は重みを戻して float64 で掛ける)。
 
+## CHiPS の流れ(`gne heads pipeline`)
+
+ほかのモデルと同じ流れ(方向 → 全部の部品の書き込みの順位づけ → 上位を 1 個ずつ s=1 で確かめる → s=1 から組を作る → 応答での確かめ → レシピ)を、このモデルの形に合わせて流す。ひな形の JSON はほかのモデルと同じ形(`user_prompts` か `prompts_a` / `prompts_b`、`system_a` / `system_b`、複数ターンの会話、`validate`)。名前の patch(third_party/inkling2/0001)を当てた llama.cpp が要る。
+
+- 方向: MLP が読む混ぜた入力の、A 側の平均 − B 側の平均を段ごとに(48 行。層 6〜17 の 2・3 回目は繰り返しのゲートの後)。最後に混ぜた出力の A − B も持つ(番号 48)。部品の射影の基準は、その層の最後の回(層 6〜17 は 3 回目)の段の方向
+- 部品: ヘッド・attention 全体・MLP 全体・専門家のニューロン(`--unit-kinds` の既定はこのモデルだけ `all,layers`)。流れが始まる層(0・6・12・18)の attention は候補に入れない。層 0〜5 は既定で入れない(`--include-before` で入れる)。層 6〜17 の重みは 3 回の繰り返しで共有なので、その層の部品は 3 回すべてに効く(画面では部品の名前に ×3)
+- 射影: 短い畳み込みの今のトークンの倍率で直した向き normalize(g ⊙ r) を引く。専門家のニューロンは `ffn_down_exps` の専門家ごとの列で、専門家ごとの倍率を差分に入れる
+- 測る点: 各区分の最後の段(5・17・29・41・47)と最後に混ぜた出力。組は最後に混ぜた出力で A 側の値を目標(既定は A と B の平均の真ん中)まで下げるように作る
+- 応答での確かめは思考の欄を除いた答えで数える(長さの既定はこのモデルだけ 1024 トークン)
+- レシピの書き方はほかのモデルと同じ(`L:Hh:sS@方向`・`L:attn:sS@方向`・`L:ffn:sS@方向`)に、専門家のニューロン `L:Ee:Nn:sS@方向` を足す(Inkling 2 だけ。ほかのモデルでは止まる)。`gne chat --recipe`・`gne behave --recipe`・`gne recipe-scale`・画面のレシピの欄(強さの倍率・会話)で試す
+
+### 方向を作る位置(`--positions`)
+
+このモデルは答えの前に必ず思考を書く。質問の最後のトークンで作った方向は、思考と答えを書く位置では A と B の差が小さくなることがある(公開の海賊のひな形では、思考と答えの中で 1 割ほど)。答えの口調や書き方を狙うときは、答えの位置で作った方向も試す。
+
+| positions | 読む位置 |
+|---|---|
+| `last`(既定) | 質問の最後のトークン |
+| `answer` | 思考の後の、答えの始まり(区切り `<|content_text|>` の位置。その出力が答えの最初のトークンを決める) |
+| `response` | 答えのトークン全部(答えのトークンを決める位置、96 トークンまで) |
+| `reasoning` | 思考のトークン全部 |
+| `after:<正規表現>` | 答えの文字の中の一致の直後 |
+| `all` / `assistant` | 質問のトークン(ほかのモデルと同じ) |
+
+`answer`・`response`・`reasoning`・`after` は、書き換える前のモデルに返事(greedy、1120 トークンまで)を書かせ、その上で方向を作り、組を測る(返事は `<root>/inkling/<model_id>/replies/` に覚えて使い回す)。長さの上限までに答えが始まらなかった会話は読まない(数を出す)。
+
+### 書き出し(`gne headproj export`)
+
+`gne headproj export --recipe <レシピ>` で LoRA、`--bake` で GGUF に焼き込む(画面ではレシピの欄の「LoRA・マージ」)。焼き込みの `--requant`:
+
+- `auto`(既定): 書き換えるテンソルを元の型・元の大きさのまま書く。attention の出力(Q8_0・K-quant)は llama.cpp の量子化で書き戻す(Q8_0 は大きさが変わらない)。専門家の `ffn_down_exps`(NVFP4・Q2_0)は量子化し直さず、元のコードとブロックの倍率をそのまま残し、編集する列(ニューロン)のコードだけを、方向の成分が目標になるようにいちばん少なく 1 段ずつ動かす(|u_i| の大きい行から。行列の 1 行に沿って量子化のブロックが並ぶので、1 つの列のコードを動かしても、ほかの列の値は変わらない)。編集の残り方が 0.9 より小さいテンソルだけ Q8_0 にする(gne の keyed の焼き込みの auto と同じ決め方)
+- `keep`: いつも元の型(上のやり方)。`q8_0` / `f16`: 書き換えるテンソルをその型にする(専門家のテンソルは全部の専門家が変換され、層ごとに Q2_0 の層で +253 MiB・NVFP4 の層で +162 MiB(Q8_0)、+557 / +466 MiB(F16))
+- 書く前に VRAM の増え方を計算し、いまの空きに入らなければ止める。書き換えたテンソルとやり方は GGUF の `gne.patches` と `<GGUF>.chips.json` に残す。焼き込んだ GGUF は、名前の patch のない llama.cpp でも読み込める
+- 元の型のまま書くときの残る誤差(公開のひな形の方向・専門家の層 3 つの組での測定): 方向の成分は目標どおり(残り 1% 未満)だが、動かしたコードの方向に沿わない変化が、消した成分の 1.4〜2 倍残る。層の書き込み(畳み込みの前)に対しては、MLP 全体の部品で 3〜4%、ニューロン 1 つでは 0.2%。Q8_0 にしたときは、書き換えたテンソル全体に重みの 0.5% ほどの丸めが入り、計算の経路も変わる
+- `--verify`(焼き込みと LoRA の比べ)は同じ処理の中ではできない(2 つのモデルが同時に VRAM に入らない)。`gne inkling chips-bake-check --mode lora --recipe <レシピ> --save a.json` と、焼き込んだ GGUF での `--mode baked --direction <方向の .npz> --save b.json --against a.json` の 2 回で比べる
+
+### まだ使えないもの
+
+`--rank causal`、`heads refine`(残りから追加)、評価(`gne eval`)、強さの候補(`heads candidates`)、`--holdout`、側をレシピで作る対照集合(`recipe_a` / `recipe_b`)、`--verify-mode ablate`、`--candidate-layers`・`--select-layer`(組は最後に混ぜた出力で作る)は、理由を出して止まる。
+
 ### CHiPS の試し(`gne inkling chips-trial`、試しだけ)
 
 ふつうの機能ではない。CHiPS の形の取り除きが、このモデルで応答の水準で効くかを、決まった格子で確かめるための入口。ほかの方向を使う機能は止めたまま。
@@ -132,8 +172,8 @@ gne の表示の「段」は、実行の順(0〜47)。llama.cpp のキャッシ�
 
 `gne inkling chips-bake --name <試しの名前> --set <組> --out <GGUF>` は、試しの組を LoRA と同じ変化量で GGUF に書き込む(GPU は使わない)。gne のほかのモデルの焼き込みと同じく、書き換えるテンソルだけ型を変えてファイルを書き直し、ほかのテンソルはバイトのまま写す。
 
-- 型(`--requant`): `q8_0`(既定)か `f16`。1 つのテンソルは 1 つの型しか持てないので、ニューロン 1 つの編集でも、その層の `ffn_down_exps`(128 専門家 × 2304 × 1152)全体の型が変わり、編集しない専門家も変換される(専門家の一部だけ高い精度にすることはできない)。大きさは 1 層で Q2_0 91 MiB・NVFP4 182 MiB に対して Q8_0 344 MiB・F16 648 MiB。F16 は元の Q2_0・NVFP4 の値をそのまま表せる。Q8_0 は編集しない専門家にも重みの 0.5% ほどの丸めが入る。
-- 元の型のまま(`keep`): NVFP4 と attention の出力(Q8_0・Q5_K)は llama.cpp の量子化で書き戻せるが、NVFP4 では小さな編集の一部が丸めで消える。Q2_0 は断る。この GGUF の Q2_0 はブロックの倍率に負の値を使っていて、llama.cpp の量子化(倍率 = ブロックの絶対値の最大)で書き戻すと、編集しない値の半分ほどが変わる。IQ2_XXS・IQ1_S などは imatrix が要るので書き戻せない(この試しで書き換えるテンソルには無い)。
+- 型(`--requant`): `auto`(既定)・`keep`・`q8_0`・`f16`。決め方と残る誤差は上の「CHiPS の流れ」の「書き出し」と同じ(`auto`・`keep` は元の型・元の大きさのまま、専門家のテンソルは編集する列のコードだけを動かす。`q8_0`・`f16` は書き換えるテンソル全体の型を変える)。
+- llama.cpp の量子化で元の型に書き戻す方法は、専門家のテンソルには使わない: NVFP4 では小さな編集の 3〜5 割が丸めで消え、Q2_0 はこの GGUF のブロックの倍率に負の値があるので、llama.cpp の量子化(倍率 = ブロックの絶対値の最大)では編集しない値の半分ほどが変わる。IQ2_XXS・IQ1_S などは imatrix が要る(この試しで書き換えるテンソルには無い)。
 - 専門家ごとの倍率(`ffn_down_exps.scale`)はそのままにし、重みの変化量を倍率で割って入れる(実行時に倍率が掛かり、LoRA と同じ値になる)。
 - 書き換えたテンソルと型は `<GGUF>.chips.json` に残す。
 - 確かめの結果(UD-IQ2_XXS、専門家の層 3 つと attention の層 3 つを書き換えた組): 焼き込みと LoRA の中の値の差は、編集なしで型だけを変えたときに出る差と同じ大きさ(LoRA が動かした量に対して繰り返しの中で 4〜9%、繰り返しの後で 18〜28%。行列の積の計算の経路が変わるため)。貪欲の応答は数十トークン目から分かれる(型だけを変えたときも同じ)。名前の patch のない本家のビルドでも読み込めて、patch のあるビルドと同じトークンを出す。VRAM は書き換えた専門家のテンソルの増えた分だけ増える(この 3 層で Q8_0 +0.67 GB、F16 +1.3 GB)。生成の速さは元と同じ(LoRA を当てたままだと 4 割ほどに落ちる)。

@@ -43,8 +43,11 @@ class ProjHead:
     s: float
     direction: str
     kind: str = "head"           # head / neuron / attn(層の注意の出力全体)/ ffn(層の MLP の出力全体)。attn・ffn の head は -1
+    expert: int | None = None    # 専門家のニューロン(kind neuron、Inkling 2 だけ)の専門家の番号。ほかは None
 
     def spec(self) -> str:
+        if self.kind == "neuron" and self.expert is not None:
+            return f"{self.layer}:E{self.expert}:N{self.head}:s{self.s:.4g}@{self.direction}"
         if self.kind == "neuron":
             return f"{self.layer}:N{self.head}:s{self.s:.4g}@{self.direction}"
         if self.kind in WHOLE:
@@ -53,8 +56,8 @@ class ProjHead:
 
     @property
     def key(self) -> tuple[int, int, str]:
-        """(層, 番号, 種類)。ヘッドとニューロンで番号が重なっても別のユニット。"""
-        return (self.layer, self.head, self.kind)
+        """(層, 番号, 種類)。ヘッドとニューロンで番号が重なっても別のユニット(専門家のニューロンは種類に専門家を入れる)。"""
+        return (self.layer, self.head, self.kind if self.expert is None else f"neuron@E{self.expert}")
 
 
 WHOLE = ("attn", "ffn")                          # 層の書き込み全体の射影(v0.8.1)
@@ -70,6 +73,8 @@ def proj_heads(recipe: Recipe) -> list[ProjHead]:
             raise GneError("BAD_RECIPE", f"{u.label()}: 方向がありません(ユニットの direction かレシピの default_direction)")
         if u.kind == "neuron":
             out.append(ProjHead(int(u.layer), int(u.neuron), float(u.k), str(d), "neuron"))
+        elif u.kind == "expert_neuron":
+            out.append(ProjHead(int(u.layer), int(u.neuron), float(u.k), str(d), "neuron", int(u.expert)))
         elif u.kind in WHOLE:
             out.append(ProjHead(int(u.layer), -1, float(u.k), str(d), u.kind))
         else:
@@ -80,6 +85,8 @@ def proj_heads(recipe: Recipe) -> list[ProjHead]:
 def heads_to_units(heads: list[ProjHead], default_direction: str | None = None) -> list[Unit]:
     def one(p):
         d = None if p.direction == default_direction else p.direction
+        if p.kind == "neuron" and p.expert is not None:
+            return Unit(p.layer, p.head, 0.0, "expert_neuron", mode="proj", k=float(p.s), direction=d, expert=int(p.expert))
         if p.kind == "neuron":
             return Unit(p.layer, p.head, 0.0, "neuron", mode="proj", k=float(p.s), direction=d)
         if p.kind in WHOLE:
@@ -101,6 +108,8 @@ def parse_proj_specs(specs: list[str], default_direction: str | None = None) -> 
             raise GneError("BAD_UNIT", f"{sp!r}: 方向がありません(@NAME か --direction)")
         if u.kind == "neuron":
             out.append(ProjHead(u.layer, int(u.neuron), float(u.k), d, "neuron"))
+        elif u.kind == "expert_neuron":
+            out.append(ProjHead(u.layer, int(u.neuron), float(u.k), d, "neuron", int(u.expert)))
         elif u.kind in WHOLE:
             out.append(ProjHead(u.layer, -1, float(u.k), d, u.kind))
         else:

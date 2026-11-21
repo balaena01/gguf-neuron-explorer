@@ -38,7 +38,8 @@ const SP_KEY = "gne.chat.sampling";            // このブラウザに覚えて
 const COLS_KEY = "gne.chat.single";            // 1 列(+ の列だけ)で話すか
 
 export class ChatPanel {
-  constructor({ recipe, onStatus, onAdded, plain, effortChoices }) {
+  constructor({ recipe, onStatus, onAdded, plain, effortChoices, reasoningFirst }) {
+    this.reasoningFirst = reasoningFirst || (() => false);   // 答えの前に思考を書くモデル(Inkling 2): 応答の長さの既定を長くする
     this.recipe = recipe;
     this.plain = plain || (() => false);   // 介入できないモデル(Inkling 2): 無介入の 1 列だけで話す
     this.effortChoices = effortChoices || (() => null);   // チャットテンプレートの reasoning_effort の名前(使わないテンプレートは null)
@@ -171,9 +172,12 @@ export class ChatPanel {
     if (this.plain()) {                                    // Inkling 2: 反応を見る(中間のテンソルを読む)は使えない
       this.mode = "writes";
       if (!this.plainInit) { this.plainInit = true; if (this.maxTokens === 128) this.maxTokens = 1024; }   // 答えの前に思考を書くので長めに
+    } else if (this.reasoningFirst()) {                    // Inkling 2 のレシピのチャット: 反応を見るは使えない。答えの前に思考を書くので長めに
+      this.mode = "writes";
+      if (!this.plainInit) { this.plainInit = true; if (this.maxTokens === 128) this.maxTokens = 1024; }
     }
     this.el.innerHTML = `
-      ${this.plain() ? `<p class="muted note">${esc(tr("このモデルでは介入できないので、無介入の 1 列で話します(思考の欄は <think> … </think>)"))}</p>` : `
+      ${this.plain() ? `<p class="muted note">${esc(tr("レシピを当てずに 1 列で話します(思考の欄は <think> … </think>)。レシピを当てて話すときは、レシピのタブの「会話する」から"))}</p>` : `
       <div class="ch-tools">${seg("mode", [["writes", tl("押して話す", "steer & chat")], ["reads", tl("反応を見る", "read a text")]], this.mode)}
         ${this.mode === "writes" ? seg("target", [["neuron", tr("このニューロン")], ["recipe", tr("レシピ({n})", { n: nR }), !nR]], this.target) : ""}</div>`}
       ${this.mode === "writes" ? this.writesHTML() : this.readsHTML()}

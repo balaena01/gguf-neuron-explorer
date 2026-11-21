@@ -24,6 +24,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import time
 from pathlib import Path
@@ -539,7 +540,8 @@ def _dense_ok(w, L: int) -> bool:
 # --- 2. 確かめ(1 個ずつ流し直す)---------------------------------------------------------------------------
 
 def unit_of(row: dict, s: float, direction: str) -> ProjHead:
-    return ProjHead(int(row["layer"]), int(row["index"]), float(s), direction, UNIT_KIND.get(row["kind"], "head"))
+    return ProjHead(int(row["layer"]), int(row["index"]), float(s), direction, UNIT_KIND.get(row["kind"], "head"),
+                    None if row.get("expert") is None else int(row["expert"]))      # 専門家のニューロン(Inkling 2)
 
 
 def ablate_unit_tensors(st, row: dict) -> dict:
@@ -711,7 +713,7 @@ def allocate_units(session, st, verified: list[dict], *, target: float, n_units=
 
     def finish(units: list[ProjHead], alpha: float | None, label: str, strengths: list[float] | None = None) -> dict:
         sv = strengths if strengths is not None else [alpha] * len(units)
-        heads = [ProjHead(u.layer, u.head, float(x), u.direction, u.kind) for u, x in zip(units, sv, strict=True)]
+        heads = [dataclasses.replace(u, s=float(x)) for u, x in zip(units, sv, strict=True)]
         with st.tmp.use(st.builder.tensors(heads)) as lora:
             got = st.scorer.run(lora, sides="AB", which={"A": a_all})
             gb = st.scorer.run(lora, sides="B", which={"B": st.b_idx}, keep=True)
@@ -727,7 +729,8 @@ def allocate_units(session, st, verified: list[dict], *, target: float, n_units=
         def kind_of(p):
             return {"neuron": "neuron", "attn": "layer_attn", "ffn": "layer_mlp"}.get(p.kind) or kind_of_layer(session, p.layer)
         return {"n_used": len(heads),
-                "heads": [{"layer": p.layer, "head": p.head, "kind": kind_of(p), "s": p.s} for p in heads],
+                "heads": [{"layer": p.layer, "head": p.head, "kind": kind_of(p), "s": p.s,
+                           **({"expert": p.expert} if p.expert is not None else {})} for p in heads],
                 "kinds": {k: sum(1 for p in heads if kind_of(p) == k) for k in ALL_KINDS},
                 "units": [p.spec() for p in heads], "s_max": max(ss), "s_median": float(np.median(ss)), "s_min": min(ss),
                 "alpha": alpha,
@@ -761,14 +764,13 @@ def allocate_units(session, st, verified: list[dict], *, target: float, n_units=
                     p1 = run(units)
                 probes = []
                 sv, stop, rtrace = _tune(lambda x, a_idx, units=units: run(
-                    [ProjHead(u.layer, u.head, xi, u.direction, u.kind) for u, xi in zip(units, x, strict=True)], None, a_idx),
+                    [dataclasses.replace(u, s=xi) for u, xi in zip(units, x, strict=True)], None, a_idx),
                     [1.0] * len(units), p1, target, s_max, sc, hard=int(hard), probes=probes)
                 for pb in probes:                    # 選んだ質問の文(画面でたためる一覧)
                     pb["questions"] = [_q_text(st.scorer.prompts_side["A"][i]) for i in pb["hard"]]
                 alpha = None
             else:
-                alpha, stop, rtrace = _raise(lambda a, units=units: run([ProjHead(u.layer, u.head, a, u.direction, u.kind)
-                                                                         for u in units], a),
+                alpha, stop, rtrace = _raise(lambda a, units=units: run([dataclasses.replace(u, s=a) for u in units], a),
                                              p1, target, s_max, sc)
                 rtrace = [{k: v for k, v in p.items() if k != "a_vals"} for p in rtrace]
             n_iter = len(rtrace) - 1
