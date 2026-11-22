@@ -70,6 +70,7 @@ gne の表示の「段」は、実行の順(0〜47)。llama.cpp のキャッシ�
 - `gne chat` は、思考を `<think>` … `</think>` で囲んで出す(既定)。`--hide-reasoning` で思考は出さず、「(思考中… N トークン)」と回答だけを出す。`--json` の返事には `answer`(回答だけ)と `reasoning_tokens` も入る。会話の履歴には回答だけを入れる(前の思考は次のプロンプトに入れない)。
 - `gne behave`・`gne eval` の一致・空の数・採点は回答だけで数える(思考は数えない。behave の `tokens` は思考を含む返事全体の長さで、思考の長さは `reasoning_tokens` に別に出す)。
 - `gne serve --openai` の `/v1/chat/completions` は、思考を `reasoning_content`、回答を `content` に分けて返す(流すときも、`delta` の `reasoning_content` と `content` に分かれる)。
+- llama.cpp(このモデルに対応したビルド)で動かすとき: `llama-server` は既定(jinja が有効)で思考を `reasoning_content`、回答を `content` に分ける(流すときも)。`--reasoning-format none` にすると、思考は `<|content_thinking|>…<|end_message|>` の印ごと `content` に入る。`--no-jinja` ではチャットの要求が「this custom template is not supported」で失敗する。`llama-cli` は思考を `[Start thinking]` と `[End thinking]` の間に出し、その後に回答を出す。焼き込んだ GGUF は、gne の記録を入れても入れなくても(`--strip-meta`)チャットテンプレートを元のまま写すので、同じように動く
 - チャットテンプレートは、`reasoning_effort`(既定 0.9)を「Thinking effort level」として最初の system の欄に入れる。
 - 思考の量: `gne chat --reasoning-effort low` のように渡す。テンプレートが受け付けるのは none(0)・minimal(0.1)・low(0.2)・medium(0.7)・high(0.9)・xhigh(0.99)・max(0.99)か、0〜0.99 の数。省くとテンプレートの既定(0.9)。UI のチャットの「思考の量」、OpenAI 互換 API の `reasoning_effort` も同じ。
 - モデルの勧めるサンプリングは温度 1.0・top-p 1・top-k 0・min-p 0(`--temperature 1 --top-p 1 --top-k 0 --min-p 0 --presence-penalty 0`)。
