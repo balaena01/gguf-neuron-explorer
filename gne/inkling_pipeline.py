@@ -822,6 +822,9 @@ def bake_recipe(session, heads, dst: Path | None, *, requant: str = "auto", vram
         if kept_note(recs):
             out["kept_note"] = kept_note(recs)
         return out
+    sp = out_space(dst, Path(tw.path).stat().st_size + grow["bytes"])
+    plan = f"{plan}。{space_text(sp)}"
+    check_space(sp, dst)                                        # 書き込み先のファイルシステムに入らなければ書く前に止める
     if getattr(session, "progress", None):                    # 書く前に知らせる(CLI は進み具合の行、画面はジョブの段の文)
         session.progress(0, 1, plan)
     vram_note = None
@@ -940,6 +943,40 @@ def taps_identical(source, target) -> dict:
     diff = [n for n in names if not np.array_equal(a.full(n), b.full(n))]
     types = sorted({target._tensors[n].tensor_type.name for n in names})
     return {"n": len(names), "different": diff, "target_types": types}
+
+
+SPACE_MARGIN = 256 * 2**20           # 書き込み先の空きに残すゆとり(メタデータ・横の記録の分)
+
+
+def _wsl() -> bool:
+    try:
+        return "microsoft" in Path("/proc/version").read_text(encoding="utf-8", errors="replace").lower()
+    except OSError:
+        return False
+
+
+def out_space(dst, nbytes: int) -> dict:
+    """焼き込んだ GGUF の書き込み先: 書くファイルの大きさ、空き(同じ名前の古いファイルは書くときに切り詰めるので、その分も
+    空きに数える)、WSL の Linux 側のディスクか(/mnt/ の外)。"""
+    import shutil
+    d = Path(dst).resolve()
+    parent = d.parent
+    while not parent.exists() and parent != parent.parent:
+        parent = parent.parent
+    free = shutil.disk_usage(parent).free + (d.stat().st_size if d.is_file() else 0)
+    return {"bytes": int(nbytes), "free": int(free), "dir": str(d.parent), "wsl_linux": _wsl() and not str(d).startswith("/mnt/")}
+
+
+def space_text(sp: dict) -> str:
+    return (f"書くファイル {sp['bytes'] / 2**30:.2f} GiB(書き込み先の空き {sp['free'] / 2**30:.1f} GiB"
+            + ("、WSL の Linux 側のディスク" if sp.get("wsl_linux") else "") + ")")
+
+
+def check_space(sp: dict, dst) -> None:
+    """書き込み先のファイルシステムの空きが、書くファイルとゆとりより小さければ止める。"""
+    if sp["free"] < sp["bytes"] + SPACE_MARGIN:
+        raise GneError("NO_SPACE", f"書き込み先 {sp['dir']} の空き {sp['free'] / 2**30:.1f} GiB では、焼き込んだ GGUF"
+                                   f"({sp['bytes'] / 2**30:.2f} GiB)を書けません", "空きを作るか、--out で空きのあるディスクに書いてください")
 
 
 def plan_entry(m: dict) -> dict:

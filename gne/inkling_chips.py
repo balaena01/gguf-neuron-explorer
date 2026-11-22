@@ -942,6 +942,8 @@ def bake(reader: Reader, units: list, refs: dict | None, dst: Path | None, *, re
         recs.append(rec)
     if dst is None:                                          # 書かずに、残り方と大きさだけ(_replace は prepared で書くとき用)
         return {"path": None, "modified": recs, "_replace": replace}
+    from .inkling_pipeline import check_space, out_space
+    check_space(out_space(dst, src.stat().st_size + sum(m["bytes_to"] - m["bytes_from"] for m in recs)), dst)
     dst.parent.mkdir(parents=True, exist_ok=True)
     kv = None if strip_meta else {"gne.patches": json.dumps(recs, ensure_ascii=False),
                                   "gne.inkling_proj": json.dumps({"units": units, "requant": requant, "correct": correct,

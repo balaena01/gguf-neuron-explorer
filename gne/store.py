@@ -114,6 +114,28 @@ class Store:
     def fieldtest_dir(self) -> Path:
         return self._dir("fieldtest")
 
+    def direction_elsewhere(self, name: str, model_id: str, *, model_name: str | None, arch: str | None) -> list[dict]:
+        """方向 name が、このモデルの置き場所(model_id)には無く、同じモデル(models/*.json の general.name と arch が同じ)の
+        別のファイルの置き場所にあるとき、そのモデル(model_id・作ったときのパス)。gne は方向をモデルのファイルごとに保存するので、
+        別の量子化を -m にすると見つからない。フォルダは作らない。"""
+        out = []
+        md = self.root / "models"
+        if not name or not md.is_dir() or "/" in str(name):
+            return out
+        for f in sorted(md.glob("*.json")):
+            try:
+                d = json.loads(f.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            mid = str(d.get("model_id") or f.stem)
+            if mid == model_id or d.get("arch") != arch or d.get("name") != model_name:
+                continue
+            for q in (self.root / "directions" / mid / f"{name}.npz", self.root / "reverse" / mid / f"{name}.directions.npz"):
+                if q.exists():
+                    out.append({"model_id": mid, "path": str(d.get("path") or ""), "file": str(q)})
+                    break
+        return sorted(out, key=lambda o: not (o["path"] and Path(o["path"]).exists()))   # いまもあるモデルのファイルを先に
+
     def save_meta(self, meta) -> Path:
         p = self._dir("models") / f"{meta.model_id}.json"
         d = asdict(meta)

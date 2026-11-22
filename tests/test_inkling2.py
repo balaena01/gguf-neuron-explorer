@@ -853,6 +853,71 @@ def test_real_bake_into_other_quant_dry_run(tmp_path, target):
         s.close()
 
 
+def test_missing_direction_points_to_the_model_it_was_made_on(tmp_path):
+    """-m に別の量子化を渡して方向が見つからないとき: 同じモデル(general.name・arch が同じ)の別のファイルの置き場所にあれば、
+    そのファイルを -m に、焼き込む先を --into にと言う(Inkling 2 はそのままの形)。どこにも無ければいつもの文。"""
+    import json as _json
+    from types import SimpleNamespace
+
+    from gne.api import Session
+    from gne.steer import GneError
+    from gne.store import Store
+    st = Store(tmp_path / "root")
+    md = st.root / "models"
+    md.mkdir(parents=True)
+    for mid, path, name, arch in (("ink-src", "models/Ink-IQ2_XXS.gguf", "Ink", ARCH), ("ink-q2", "models/Ink-Q2_K_XL.gguf", "Ink", ARCH),
+                                  ("other", "models/Other.gguf", "Other", ARCH)):
+        (md / f"{mid}.json").write_text(_json.dumps({"model_id": mid, "path": path, "name": name, "arch": arch}))
+    (st.root / "directions" / "ink-src").mkdir(parents=True)
+    (st.root / "directions" / "ink-src" / "tone.npz").write_bytes(b"x")
+    (st.root / "directions" / "other").mkdir(parents=True)
+    (st.root / "directions" / "other" / "tone2.npz").write_bytes(b"x")
+    assert [o["model_id"] for o in st.direction_elsewhere("tone", "ink-q2", model_name="Ink", arch=ARCH)] == ["ink-src"]
+    assert st.direction_elsewhere("tone2", "ink-q2", model_name="Ink", arch=ARCH) == []          # 別のモデルの方向は数えない
+    me = SimpleNamespace(store=st, meta=SimpleNamespace(model_id="ink-q2", path=Path("models/Ink-Q2_K_XL.gguf"), name="Ink", arch=ARCH))
+    with pytest.raises(GneError) as e:
+        Session.direction_path(me, "tone")
+    assert e.value.code == "FILE_NOT_FOUND" and "models/Ink-IQ2_XXS.gguf" in e.value.message
+    assert ("gne -m models/Ink-IQ2_XXS.gguf headproj export --recipe <レシピ> --bake --into models/Ink-Q2_K_XL.gguf --out <GGUF>"
+            in e.value.hint)
+    with pytest.raises(GneError) as e:
+        Session.direction_path(me, "nothing")
+    assert e.value.message == "方向 nothing がありません" and "gne direction" in e.value.hint
+    me.meta.arch = "llama"                                                                        # ほかのモデル: -m の直し方を言う
+    (md / "ink-src.json").write_text(_json.dumps({"model_id": "ink-src", "path": "models/Ink-IQ2_XXS.gguf", "name": "Ink", "arch": "llama"}))
+    with pytest.raises(GneError) as e:
+        Session.direction_path(me, "tone")
+    assert "gne -m models/Ink-IQ2_XXS.gguf" in e.value.hint and "--into models/Ink-Q2_K_XL.gguf" in e.value.hint
+
+
+def test_bake_checks_free_space_at_the_output(tmp_path, monkeypatch):
+    """焼き込みを書く前に、書き込み先のファイルシステムの空きを確かめる(同じ名前の古いファイルは切り詰めるので空きに数える)。
+    予定の文に書くファイルの大きさと空き、WSL の Linux 側のディスクならそのことを出す。足りなければ書く前に止める。"""
+    import shutil
+    from collections import namedtuple
+
+    import gne.inkling_pipeline as ip
+    from gne.steer import GneError
+    du = namedtuple("du", "total used free")
+    monkeypatch.setattr(shutil, "disk_usage", lambda p: du(100 * 2**30, 90 * 2**30, 10 * 2**30))
+    monkeypatch.setattr(ip, "_wsl", lambda: True)
+    dst = tmp_path / "sub" / "out.gguf"                              # まだ無いフォルダ: ある親で測る
+    sp = ip.out_space(dst, 8 * 2**30)
+    assert sp["free"] == 10 * 2**30 and sp["wsl_linux"] == (not str(dst.resolve()).startswith("/mnt/"))
+    ip.check_space(sp, dst)
+    text = ip.space_text(sp)
+    assert "書くファイル 8.00 GiB(書き込み先の空き 10.0 GiB" in text and ("WSL の Linux 側のディスク" in text) == sp["wsl_linux"]
+    with pytest.raises(GneError) as e:
+        ip.check_space(ip.out_space(dst, 10 * 2**30), dst)          # ゆとり(256 MiB)を残せない
+    assert e.value.code == "NO_SPACE"
+    dst.parent.mkdir()
+    with open(dst, "wb") as f:                                       # 同じ名前の古いファイル(書くときに切り詰める)
+        f.truncate(2 * 2**30)
+    ip.check_space(ip.out_space(dst, 10 * 2**30), dst)
+    monkeypatch.setattr(ip, "_wsl", lambda: False)
+    assert "WSL" not in ip.space_text(ip.out_space(dst, 1))
+
+
 def test_rewrite_gguf_copies_untouched_and_adds_keys(tmp_path):
     """GGUF の書き直し: 差し替えないテンソルはバイトまで同じ(ファイルから少しずつ読んで写す)、足したメタデータが読める。"""
     import numpy as np
