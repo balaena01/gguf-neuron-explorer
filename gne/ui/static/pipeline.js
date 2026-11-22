@@ -694,12 +694,12 @@ export class PipelinePanel {
     const table = (d.allocate && d.allocate.table) || [];
     const crow = (key) => combinedRow(d, key);
     const ink = d.inkling || (d.refine && d.refine.inkling);
-    if (ink) {                                     // Inkling 2: 評価・強さの候補はまだ使えない(レシピに読み込んで、会話・behave・書き出しで試す)
+    if (ink) {                                     // Inkling 2: 評価は思考の後の回答で測る(ランダムな向きの比べる用はまだ無い)
       for (const b of out.querySelectorAll("[data-eval], #pp-rf-eval")) {
-        b.disabled = true;
-        b.title = t("Inkling 2 ではまだ使えません。レシピに読み込んで、会話・振る舞い(behave)・書き出しで試してください");
+        b.title = t("このレシピを評価の画面へ送る(強さ 0 と 1。Inkling 2 は思考の後の回答で測り、問題を少なめにする。ランダムな向きの比べる用はまだ無い。始める前に変えられる)");
       }
     }
+    const evp = (recipe) => ({ recipe, doses: [0, 1], random_controls: ink ? 0 : 8 });   // 評価の画面へ送る設定
     for (const b of out.querySelectorAll("[data-load]")) {
       b.addEventListener("click", () => {
         if (d.refine) {                                                  // 残りから追加の結果: どの行も土台と合わせたレシピだけ
@@ -727,21 +727,21 @@ export class PipelinePanel {
         if (r) this.onChatProj(`${d.name}-n${r.n_heads}`, r.units, d.name);
       });
     }
-    if (rf && re) re.addEventListener("click", () => this.onEval({ recipe: rf.recipe, doses: [0, 1], random_controls: 8 }, combinedName(d, rf)));
+    if (rf && re) re.addEventListener("click", () => this.onEval(evp(rf.recipe), combinedName(d, rf)));
     for (const b of out.querySelectorAll("[data-eval]")) {
       b.addEventListener("click", () => {
         if (d.refine) {                                                  // 残りから追加の結果: どの行も土台と合わせたレシピだけ
           const c = crow(b.dataset.eval);
-          if (c && c.recipe) this.onEval({ recipe: c.recipe, doses: [0, 1], random_controls: 8 }, combinedName(d, c));
+          if (c && c.recipe) this.onEval(evp(c.recipe), combinedName(d, c));
           return;
         }
         if (b.dataset.eval === "s1") {                                   // 倍率を上げる前の組
           const s1 = (d.allocate || {}).s1;
-          if (s1 && s1.recipe) this.onEval({ recipe: s1.recipe, doses: [0, 1], random_controls: 8 }, `${d.name}-s1`);
+          if (s1 && s1.recipe) this.onEval(evp(s1.recipe), `${d.name}-s1`);
           return;
         }
         const r = table.find((x) => String(x.n_heads) === b.dataset.eval);
-        if (r && r.recipe) this.onEval({ recipe: r.recipe, doses: [0, 1], random_controls: 8 }, `${d.name}-n${r.n_heads}`);
+        if (r && r.recipe) this.onEval(evp(r.recipe), `${d.name}-n${r.n_heads}`);
       });
     }
   }

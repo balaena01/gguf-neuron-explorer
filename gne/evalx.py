@@ -79,6 +79,155 @@ def load_suite(path: str | Path | None = None) -> Suite:
     return Suite(d.get("name") or p.stem, p, mt, th, d.get("exact", []), d.get("format", []), d.get("mix", []), persona, ppl, zh)
 
 
+# --- Inkling 2: 思考の後の回答で測る ----------------------------------------------------------------------------
+# Inkling 2 はいつも回答の前に思考(reasoning)を書く。返事を読む指標は、思考の後の回答(<|content_text|> の後)だけを読む。
+# 思考と回答は 1 本で生成し、長さの上限は「思考の上限 + その問題の回答の長さ」。回答はその問題の長さで切って採点する。
+# 無介入とレシピの腕は、それぞれ自分の思考を書く(同じ問題に同じ条件で答えさせたときの差を見る)。
+
+INK_REASONING = 512                                     # 思考の上限(トークン、既定)
+INK_ITEMS = {"exact": 8, "format": 4, "mix": 4, "persona": 4}   # Inkling 2 の既定の問題の数(等間隔に間引く)
+INK_DOSES = (0.0, 1.0)                                  # Inkling 2 の既定の倍率
+INK_TOK_PER_S = 20.0                                    # 見込みの速さ(GPU、LoRA あり、1 本ずつの実測)
+INK_REASONING_EXPECT = 260                              # 見込みの思考の長さ(公開のひな形の返事の中央値 222 から)
+
+
+def is_inkling(session) -> bool:
+    return getattr(getattr(session, "weights", None), "inkling", None) is not None
+
+
+def parse_items(spec) -> dict | None:
+    """問題の数の指定("8,4,4,4" = exact・format・mix・persona、"all" = 全部、None = 既定)→ {種類: 数}(None は全部)。"""
+    if spec is None or (isinstance(spec, str) and not spec.strip()):
+        return dict(INK_ITEMS)
+    if isinstance(spec, dict):
+        return {k: int(v) for k, v in spec.items()}
+    if str(spec).strip().lower() == "all":
+        return None
+    xs = [int(x) for x in str(spec).replace(" ", "").split(",") if x]
+    if len(xs) != 4 or min(xs) < 0:
+        raise GneError("BAD_ARGS", f"問題の数は exact,format,mix,persona の 4 つの数か all です({spec!r})")
+    return dict(zip(("exact", "format", "mix", "persona"), xs, strict=True))
+
+
+def thin_suite(st: Suite, counts: dict | None) -> Suite:
+    """タスク集を種類ごとに等間隔に間引く(counts が None なら全部)。ppl の参照テキストはそのまま。"""
+    if counts is None:
+        return st
+
+    def thin(xs, n):
+        if n >= len(xs):
+            return list(xs)
+        if n <= 0:
+            return []
+        return [xs[int(i)] for i in sorted({int(x) for x in np.linspace(0, len(xs) - 1, n).round()})]
+    import dataclasses
+    return dataclasses.replace(st, exact=thin(st.exact, counts.get("exact", len(st.exact))),
+                               format=thin(st.format, counts.get("format", len(st.format))),
+                               mix=thin(st.mix, counts.get("mix", len(st.mix))),
+                               persona=thin(st.persona, counts.get("persona", len(st.persona))))
+
+
+def ink_answer(engine, o: dict, mt: int, text_id: int | None) -> dict:
+    """Inkling 2 の返事(思考 + 回答の生成)→ 回答の部分だけの出力(text・token_ids は回答の最初の mt トークン、finish は
+    回答が終わったら eog、長さで切れたら length)と、壊れ方の印(answer: 回答が始まったか、loop、cut_answer: 回答の長さに
+    届く前に全体の上限で切れた)、思考の長さ。full_ids は思考を含む返事全体(回答の読み込みの確かめに使う)。"""
+    from .behave import loop_like
+    ids = [int(t) for t in o["token_ids"]]
+    body = [t for t in ids if not engine.is_eog(t)]
+    if text_id is not None and text_id in ids:
+        k = ids.index(text_id)
+        ans = []
+        ended = False
+        for t in ids[k + 1:]:
+            if engine.is_eog(t):
+                ended = True
+                break
+            ans.append(t)
+        ended = ended or o["finish"] in ("eog", "stop", "eos")
+        cut = ans[:mt]
+        finish = "eog" if ended and len(ans) <= mt else "length"
+        return {"text": engine.detokenize(cut), "token_ids": cut, "finish": finish, "answer": True, "reasoning_tokens": k,
+                "loop": loop_like(body), "cut_answer": (not ended) and len(ans) < mt, "full_ids": ids, "answer_at": k + 1}
+    return {"text": "", "token_ids": [], "finish": "length", "answer": False, "reasoning_tokens": len(body),
+            "loop": loop_like(body), "cut_answer": False, "full_ids": ids, "answer_at": None}
+
+
+def broken_counts(outs: list[dict]) -> dict:
+    """壊れた返事の数(Inkling 2): 回答が空(思考の途中で切れたものを含む)・思考の途中で切れた・ループ・回答が上限で切れた、
+    思考の長さの中央値。"""
+    n = len(outs)
+    rt = [o.get("reasoning_tokens", 0) for o in outs]
+    return {"n": n, "empty": sum(not (o.get("text") or "").strip() for o in outs),
+            "no_answer": sum(not o.get("answer", True) for o in outs), "loop": sum(bool(o.get("loop")) for o in outs),
+            "cut_answer": sum(bool(o.get("cut_answer")) for o in outs),
+            "reasoning_median": float(np.median(rt)) if rt else 0.0}
+
+
+def gen_answers(session, items, vecs, lora, when: str, tick, *, reasoning: int = INK_REASONING, sampling=None,
+                lora_when: str = "all", cache: Path | None = None) -> list[dict]:
+    """_generate と同じ items([(プロンプトか会話, 回答の長さ)])。Inkling 2 では思考の上限を足して生成し、回答の部分だけに
+    する(ink_answer)。cache(無介入の腕の返事の置き場所)を渡すと、あればそれを読み、無ければ生成して書く。ほかのモデルは
+    _generate そのまま。"""
+    if not is_inkling(session):
+        return _generate(session, items, vecs, lora, when, tick, sampling=sampling, lora_when=lora_when)
+    e = session.engine
+    from .inkling import ReplyMarks
+    text_id = ReplyMarks(e).text
+    raw = None
+    if cache is not None and cache.exists():
+        try:
+            got = json.loads(cache.read_text(encoding="utf-8"))
+            if len(got) == len(items):
+                raw = got
+                tick(len(items))
+        except (OSError, ValueError):
+            raw = None
+    if raw is None:
+        raw = [{"token_ids": [int(t) for t in o["token_ids"]], "finish": o["finish"]}
+               for o in _generate(session, [(pr, mt + int(reasoning)) for pr, mt in items], vecs, lora, when, tick,
+                                  sampling=sampling, lora_when=lora_when)]
+        if cache is not None:
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            cache.write_text(json.dumps(raw), encoding="utf-8")
+    return [ink_answer(e, o, mt, text_id) for o, (_, mt) in zip(raw, items, strict=True)]
+
+
+def base_cache(session, items, reasoning: int, when: str) -> Path:
+    """無介入の腕の返事の置き場所(Inkling 2)。問題・回答の長さ・思考の上限・when・テンプレートの変数で決まる。"""
+    import hashlib
+    key = json.dumps({"items": [[pr, mt] for pr, mt in items], "reasoning": int(reasoning), "when": when,
+                      "template_vars": getattr(session.engine, "template_vars", None) or {}}, sort_keys=True, ensure_ascii=False, default=str)
+    sha = hashlib.sha256(key.encode()).hexdigest()[:16]
+    return session.store.root / "inkling" / session.meta.model_id / "eval" / f"{sha}.json"
+
+
+def reply_logprob(session, prompts: list, base_outs: list[dict], lora, tick) -> list[tuple[float, float] | None]:
+    """返事の段階の読み込み(Inkling 2): 無介入の腕が書いた返事(思考と、採点した回答)を teacher-forced で読ませたときの平均
+    対数確率(lora を当てて)。問題ごとに (返事全体, 回答の部分)。回答が始まらなかった返事は思考だけで (思考, nan)。
+    回答は前の思考でほぼ決まる(無介入の思考の後の回答のトークンは確率がほぼ 1)ので、レシピの効きは思考の部分に出る。
+    最初のトークンの KL の代わり。"""
+    e = session.engine
+    ctx = e.steer_ctx()
+    out: list[tuple[float, float] | None] = []
+    e.set_lora(ctx, lora)
+    try:
+        for pr, o in zip(prompts, base_outs, strict=True):
+            body = list(o["full_ids"][:o["answer_at"]]) + list(o["token_ids"]) if o.get("answer") else \
+                [t for t in o["full_ids"] if not e.is_eog(t)]
+            if not body:
+                out.append(None)
+                tick(1)
+                continue
+            pids = e.tokenize_prompt(e.render_chat(_msgs(pr)))
+            lp = e.token_logprobs(ctx, pids + body, chunk=512)[len(pids) - 1:]
+            n_ans = len(o["token_ids"]) if o.get("answer") else 0
+            out.append((float(lp.mean()), float(lp[-n_ans:].mean()) if n_ans else float("nan")))
+            tick(1)
+    finally:
+        e.set_lora(ctx, None)
+    return out
+
+
 # --- 採点 ---------------------------------------------------------------------------------------------
 
 def _norm(s: str) -> str:
@@ -305,14 +454,31 @@ class Reactivity:
         return cls(d.get("name") or p.stem, p, pairs, match)
 
 
+def _ink_refuse(recipe: Recipe, *, when, lora_when, random_controls, head_controls) -> None:
+    """Inkling 2 の評価でまだ使えないもの(理由を添えて止める)。"""
+    why = []
+    if int(random_controls or 0) > 0 or int(head_controls or 0) > 0:
+        why.append("ランダムな対照(--random-controls・--head-controls。Inkling の部品から同じ数のランダムな部品を作る方法がまだ無い)")
+    from .when import parse_when
+    if str(parse_when(when or recipe.when)) != "all":
+        why.append("場面を限る生成(--when)")
+    if lora_when not in (None, "", "all"):
+        why.append("LoRA を当てる位置(--lora-when。思考と回答のどちらに当てるかが決まっていない)")
+    if recipe.keyed_units:
+        why.append("keyed のユニット")
+    if why:
+        raise GneError("ARCH_UNSUPPORTED", "Inkling 2 の評価では、まだ使えないものがあります: " + "、".join(why),
+                       "外して流してください(docs/inkling2.md の「評価」)")
+
+
 def reactivity_score(session, rc: Reactivity, recipe: Recipe | None, when: str, max_tokens: int,
-                     tick: Callable[[int], None], judge: Judge | None = None) -> dict:
+                     tick: Callable[[int], None], judge: Judge | None = None, reasoning: int = INK_REASONING) -> dict:
     """トリガーあり/なしの各プロンプト(system なし)に返事をさせ、判定の一致率(と judge)の差 = 反応性。"""
     rx = re.compile(rc.match, re.IGNORECASE)
     vecs = session.vectors(recipe)[0] if recipe is not None and recipe.add_units else None
     lora = session.lora_for(recipe) if recipe is not None else None
     items = [(p, max_tokens) for pair in rc.pairs for p in pair]
-    outs = _generate(session, items, vecs, lora, when, tick)
+    outs = gen_answers(session, items, vecs, lora, when, tick, reasoning=reasoning)     # Inkling 2: 思考の後の回答で数える
     hit = [bool(rx.search(o["text"])) for o in outs]
     w, wo = float(np.mean(hit[0::2])), float(np.mean(hit[1::2]))
     d = {"with": w, "without": wo, "reactivity": w - wo, "n_pairs": len(rc.pairs),
@@ -354,7 +520,8 @@ class DirMetrics:
     射影の値は基準層と最も後ろの層で測り、行に平らに出す値(drift_*・dir_drop_a)は最も後ろの層のもの。"""
 
     def __init__(self, session, name: str, *, contrast: str | Path | None = None, layers: list[int] | None = None,
-                 behavior: bool = True, max_tokens: int = 64, max_examples: int | None = 64):
+                 behavior: bool = True, max_tokens: int = 64, max_examples: int | None = 64,
+                 behavior_examples: int | None = None, reasoning: int = INK_REASONING):
         from .direction import Scorer, base_layer_of, load_contrast, score_layers_default
         from .direction import score as score_fn
         self.session = session
@@ -363,21 +530,35 @@ class DirMetrics:
         if not src or not Path(src).exists():
             raise GneError("BAD_ARGS", f"方向 {name} を作った対照集合 {src} が見つかりません")
         self.cs, self.val = load_contrast(src)
-        if base_layer_of(ds) is None:
-            score_fn(session, ds, self.cs)
-            ds = session.direction_set(name)
-        b = base_layer_of(ds)
-        self.layers = sorted(set(layers)) if layers else sorted({b, max(score_layers_default(session, ds, b))})
-        self.top = max(self.layers)
-        self.name, self.ds = name, ds
+        self.ink = is_inkling(session)
+        self.reasoning = int(reasoning)
         # 質問が多い対照集合(何百問)では、1 回の測定で全部を読むと大きいモデルで何十分もかかるので、等間隔に間引く
         from .direction import thin
         self.max_examples = max_examples
-        self.sc = Scorer(session, ds, self.cs, layers=self.layers, max_examples=max_examples)
+        if self.ink:
+            # Inkling 2: 1 本の残差が無いので、CHiPS の流れと同じく、方向の位置の MLP の入力(層 6〜17 の最後の回の最後の段)と
+            # 最後に混ぜた出力を読む(InkScorer)。返事の位置(answer など)は無介入の返事を使い回す
+            from .inkling_pipeline import OUT, InkScorer
+            plan = session.weights.inkling
+            self.layers = sorted(set(layers)) if layers else [plan.core_start + plan.n_passes * plan.width - 1, OUT]
+            self.sc = InkScorer(session, ds, self.cs, layers=self.layers, positions=str(ds.meta.get("positions") or "last"),
+                                max_examples=max_examples)
+            beh_n = (min(8, max_examples or 8) if behavior_examples is None else behavior_examples)   # 返事を書かせる(思考つき)ので少なめ
+        else:
+            if base_layer_of(ds) is None:
+                score_fn(session, ds, self.cs)
+                ds = session.direction_set(name)
+            b = base_layer_of(ds)
+            self.layers = sorted(set(layers)) if layers else sorted({b, max(score_layers_default(session, ds, b))})
+            self.sc = Scorer(session, ds, self.cs, layers=self.layers, max_examples=max_examples)
+            beh_n = max_examples if behavior_examples is None else behavior_examples
+        self.top = max(self.layers)
+        self.name, self.ds = name, ds
+        self.beh_examples = beh_n
         self.behavior = behavior and bool(self.val.match)
         self.max_tokens = max_tokens
         self.n_score = self.sc.n("A") + self.sc.n("B")
-        self.n_beh = len(thin(list(self.val.prompts), max_examples)) if self.behavior else 0
+        self.n_beh = len(thin(list(self.val.prompts), beh_n)) if self.behavior else 0
         self.cost = self.n_score + self.n_beh             # 1 回の測定で読む・作る会話の数(進み具合に数える)
         self.tick: Callable[[int, str], None] = lambda n, label="": None
         self.base = None
@@ -390,7 +571,7 @@ class DirMetrics:
         if self.behavior:
             from .direction import behavior as beh
             self.base_rate = beh(self.session, self.cs, self.val, None, max_tokens=self.max_tokens,
-                                 max_examples=self.max_examples, with_kl=False)["rate"]
+                                 max_examples=self.beh_examples, with_kl=False, reasoning=self.reasoning)["rate"]
             self.tick(self.n_beh, "方向の指標(無介入)")
 
     def measure(self, r: Recipe | None, label: str = "方向の指標") -> dict:
@@ -418,8 +599,8 @@ class DirMetrics:
             from .direction import behavior as beh
             rate = self.base_rate
             if r is not None:
-                rate = beh(self.session, self.cs, self.val, r, max_tokens=self.max_tokens, max_examples=self.max_examples,
-                           with_kl=False)["rate"]
+                rate = beh(self.session, self.cs, self.val, r, max_tokens=self.max_tokens, max_examples=self.beh_examples,
+                           with_kl=False, reasoning=self.reasoning)["rate"]
                 self.tick(self.n_beh, label)
             out["rate"], out["rate_drop"] = rate, None if rate is None or self.base_rate is None else self.base_rate - rate
         return out
@@ -462,7 +643,8 @@ def evaluate(session, recipe: Recipe, *, doses=(0, 0.25, 0.5, 0.75, 1.0), suite:
              control_pool: str = "before", direction_metrics: bool = True, baseline: dict | None = None,
              dir_max_examples: int | None = 64, keyed_contrast: str | Path | None = None, keyed_metrics: bool = True,
              keyed_examples: int | None = 8, keyed_match: bool = True, keyed_pseudo: int = 8,
-             keyed_subset: str | None = None, progress: Callable[[int, int, str], None] | None = None, lora_when: str = "all") -> dict:
+             keyed_subset: str | None = None, progress: Callable[[int, int, str], None] | None = None, lora_when: str = "all",
+             items: str | dict | None = None, reasoning: int | None = None) -> dict:
     """dose(レシピ全体の倍率)ごとに全タスクを流し、指標の表を返す。0 が無ければ足す(ベースライン、最初に測る)。
     倍率 0 も同じ when の経路で生成する(バッチの組み方で数値が変わるので、比べる行どうしで経路をそろえる)。
     負の倍率(反対向き)も測れる。表は倍率の小さい順。
@@ -480,12 +662,23 @@ def evaluate(session, recipe: Recipe, *, doses=(0, 0.25, 0.5, 0.75, 1.0), suite:
     結果の keyed に方式の比較(keyed・同じ α の add・書き込みたい位置をそろえた add / gain / proj)と比較用の鍵の eval の
     選択性(keyed_pseudo 本)を出す。
     keyed_examples は会話の組ごとに読む数、keyed_match=False で大きさ合わせ(bisection 相当の探索)を省く、
-    keyed_metrics=False で測らない。対照集合が分からなければ結果の keyed に skipped(理由)だけを書く。"""
+    keyed_metrics=False で測らない。対照集合が分からなければ結果の keyed に skipped(理由)だけを書く。
+    Inkling 2(いつも回答の前に思考を書く)では、返事を読む指標を思考の後の回答で測る(gen_answers。思考の上限 reasoning、既定
+    INK_REASONING)。問題は items(exact,format,mix,persona の数、既定 INK_ITEMS、"all" で全部)に間引き、無介入の腕の返事は
+    覚えて使い回す。行に壊れた返事の数(broken)と、能力の問題の回答の読み込み(answer_logprob: 無介入の思考の後に同じ回答を
+    読ませたときの平均対数確率)を足す。ランダムな対照・場面を限る生成・LoRA を当てる位置は、このモデルではまだ止める。"""
     from .controls import head_control_recipes
     from .controls import null_pct as ctrl_null_pct
     from .controls import summarize as summarize_ctrl
     from .when import parse_when
     st = load_suite(suite)
+    ink = is_inkling(session)
+    rsn = int(reasoning if reasoning is not None else INK_REASONING)
+    if ink:
+        _ink_refuse(recipe, when=when, lora_when=lora_when, random_controls=random_controls, head_controls=head_controls)
+        st = thin_suite(st, parse_items(items))
+        if rsn < 16:
+            raise GneError("BAD_ARGS", f"思考の上限は 16 トークン以上にしてください({rsn})")
     doses = sorted({float(d) for d in doses} | {0.0})
     order = [0.0] + [d for d in doses if d != 0]
     w = str(parse_when(when or recipe.when))
@@ -499,7 +692,7 @@ def evaluate(session, recipe: Recipe, *, doses=(0, 0.25, 0.5, 0.75, 1.0), suite:
     dname = direction_of(recipe) if direction_metrics else None
     if dname is not None:
         try:
-            dm = DirMetrics(session, dname, max_examples=dir_max_examples)
+            dm = DirMetrics(session, dname, max_examples=dir_max_examples, reasoning=rsn)
         except GneError as e:
             session.warn(f"方向 {dname} の射影の値と直交成分のずれは測りません: {e.message}")
     km, kblock = None, None
@@ -531,6 +724,19 @@ def evaluate(session, recipe: Recipe, *, doses=(0, 0.25, 0.5, 0.75, 1.0), suite:
         total += dm.cost * (1 + n_nonzero + n_ctrl * n_nonzero)
     if km is not None:                              # keyed: 無介入 1 回 + 倍率ごと + 対照ごと + 方式の比較と比較用の鍵
         total += km.n_full * (1 + n_nonzero + n_ctrl * n_nonzero) + km.block_cost()
+    if ink:                                         # 無介入の返事の読み込み: 倍率ごとに問題の数
+        total += len(doses) * len(items)
+    base_cache_path = base_cache(session, [(t["prompt"], mt) for _, t, mt in items], rsn, w) if ink else None
+    base_cached = bool(base_cache_path is not None and base_cache_path.exists())
+    expected = None
+    if ink:                                         # 見込みの時間(GPU、1 本ずつの速さで。CPU ではもっと長い)
+        toks = sum(min(rsn, INK_REASONING_EXPECT) + mt for _, _, mt in items)
+        n_arms = len(doses) - (1 if base_cached else 0)
+        expected = {"tokens": int(toks * n_arms), "seconds": round(toks * n_arms / INK_TOK_PER_S),
+                    "base_cached": base_cached, "arms": n_arms}
+        if progress:
+            progress(0, total, f"見込み: 思考と回答 約 {expected['tokens']} トークン、GPU で約 {expected['seconds'] / 60:.0f} 分"
+                               + ("(無介入の返事は前の結果を使う)" if base_cached else ""))
 
     def tick(n: int, d: float = 0.0):
         nonlocal done
@@ -555,11 +761,17 @@ def evaluate(session, recipe: Recipe, *, doses=(0, 0.25, 0.5, 0.75, 1.0), suite:
             kblock = {"skipped": e.message, **({"hint": e.hint} if e.hint else {})}
             km = None
 
+    base_outs: list[dict] = []
+
     def measure(r: Recipe | None, d: float):
         vecs = session.vectors(r)[0] if r is not None else None
         lora = session.lora_for(r) if r is not None else None
-        outs = _generate(session, [(t["prompt"], mt) for _, t, mt in items], vecs, lora, w, lambda n, d=d: tick(n, d),
-                         lora_when=lora_when if r is not None else "all")
+        if ink:
+            outs = gen_answers(session, [(t["prompt"], mt) for _, t, mt in items], vecs, lora, w, lambda n, d=d: tick(n, d),
+                               reasoning=rsn, cache=base_cache_path if r is None else None)
+        else:
+            outs = _generate(session, [(t["prompt"], mt) for _, t, mt in items], vecs, lora, w, lambda n, d=d: tick(n, d),
+                             lora_when=lora_when if r is not None else "all")
         ppl = _ppl(session, st.ppl, vecs, lora, lambda n, d=d: tick(n, d)) if st.ppl else {}
         by = {"exact": [], "format": [], "mix": [], "persona": []}
         for (cat, t, _), o in zip(items, outs, strict=True):
@@ -574,6 +786,17 @@ def evaluate(session, recipe: Recipe, *, doses=(0, 0.25, 0.5, 0.75, 1.0), suite:
                "mix_other": float(np.mean([b for _, b in mixes])) if mixes else 0.0,
                "failed": {"exact": [t["id"] for (t, _), ok in zip(by["exact"], ex, strict=True) if not ok],
                           "format": [t["id"] for (t, _), ok in zip(by["format"], fm, strict=True) if not ok]}}
+        if ink:                                      # Inkling 2: 壊れた返事の数と、無介入の返事の読み込み
+            row["broken"] = broken_counts(outs)
+            if r is None:
+                base_outs[:] = outs
+            lps = reply_logprob(session, [t["prompt"] for _, t, _ in items], base_outs, lora, lambda n, d=d: tick(n, d)) \
+                if len(base_outs) == len(items) else []
+            whole = [x[0] for x in lps if x is not None]
+            ans = [x[1] for x in lps if x is not None and x[1] == x[1]]
+            row["reply_logprob"] = float(np.mean(whole)) if whole else None
+            row["answer_logprob"] = float(np.mean(ans)) if ans else None
+            row["reply_logprob_n"] = len(whole)
         return row, by, ex, fm
 
     for d in order:
@@ -582,11 +805,12 @@ def evaluate(session, recipe: Recipe, *, doses=(0, 0.25, 0.5, 0.75, 1.0), suite:
         with session.patched(ps) if ps is not None else contextlib.nullcontext():
             if d == 0 and baseline is not None:
                 row, by, ex, fm = (json.loads(json.dumps(baseline["row"])), baseline["by"], baseline["ex"], baseline["fm"])
-                tick(len(items) + len(st.ppl), d)
+                base_outs[:] = baseline.get("outs") or []
+                tick(len(items) + len(st.ppl) + (len(items) if ink else 0), d)
             else:
                 row, by, ex, fm = measure(r, d)
             if d == 0:
-                base_meas = {"row": json.loads(json.dumps(row)), "by": by, "ex": ex, "fm": fm}
+                base_meas = {"row": json.loads(json.dumps(row)), "by": by, "ex": ex, "fm": fm, "outs": list(base_outs)}
             if dm is not None:
                 row["direction"] = dm.measure(r, f"方向の指標 倍率 {d:g}")
                 for k in ("dir_drop_a", "drift_par_a", "drift_orth_a", "drift_par_b", "drift_orth_b", "rate", "rate_drop"):
@@ -604,7 +828,7 @@ def evaluate(session, recipe: Recipe, *, doses=(0, 0.25, 0.5, 0.75, 1.0), suite:
                 row["judge"] = float(np.mean(vals)) if vals else None
                 row["judge_scores"] = scores
             if rc is not None:
-                rx = reactivity_score(session, rc, r, w, reactivity_tokens, lambda n, d=d: tick(n, d), judge)
+                rx = reactivity_score(session, rc, r, w, reactivity_tokens, lambda n, d=d: tick(n, d), judge, reasoning=rsn)
                 if n_hctrl and d != 0:
                     cr_ = [reactivity_score(session, rc, c, w, reactivity_tokens, lambda n, d=d: tick(n, d))["reactivity"]
                            for c in head_control_recipes(session, r, n_hctrl)]
@@ -629,7 +853,9 @@ def evaluate(session, recipe: Recipe, *, doses=(0, 0.25, 0.5, 0.75, 1.0), suite:
                              **({"keyed_selectivity": ckm["selectivity"], "keyed_b_norm": ckm["b_norm"]} if ckm else {})})
             row["ctrl"] = {"n": len(crow), "rows": crow}
         rows.append(row)
-        samples[f"{d:g}"] = {"persona": [{"id": t["id"], "text": o["text"][:400]} for t, o in by["persona"]],
+        samples[f"{d:g}"] = {"persona": [{"id": t["id"], "text": o["text"][:400],
+                                          **({"reasoning_tokens": o.get("reasoning_tokens"), "answer": o.get("answer")} if ink else {})}
+                                         for t, o in by["persona"]],
                              "mix": [{"id": t["id"], "text": o["text"][:200]} for t, o in by["mix"][:3]],
                              "failed": [{"id": t["id"], "text": o["text"][:200]} for (t, o), ok in
                                         zip(by["exact"] + by["format"], ex + fm, strict=True) if not ok][:6]}
@@ -652,6 +878,10 @@ def evaluate(session, recipe: Recipe, *, doses=(0, 0.25, 0.5, 0.75, 1.0), suite:
         row["ok"] = {"capability": drop <= th["capability_drop_pt"], "ppl": worse <= th["ppl_worse_pct"],
                      "mix": mix_up <= th["mix_increase"] + 1e-9}
         row["shippable"] = all(row["ok"].values())
+        if ink:
+            for k in ("reply_logprob", "answer_logprob"):
+                if row.get(k) is not None and base.get(k) is not None:
+                    row[k + "_drop"] = base[k] - row[k]
         c = row.get("ctrl")
         if c:                                        # 対照の分布(能力の低下・ppl の悪化は無介入との差に直す)
             cr = c["rows"]
@@ -700,7 +930,17 @@ def evaluate(session, recipe: Recipe, *, doses=(0, 0.25, 0.5, 0.75, 1.0), suite:
         notes += [f"keyed: {n}" for n in kblock.get("notes", [])]
         if "skipped" in kblock:
             notes.append(f"keyed: eval の選択性は測っていません({kblock['skipped']})")
+    ink_block = None
+    if ink:
+        ink_block = {"answer_level": True, "reasoning_tokens": rsn, "items": {k: len(getattr(st, k)) for k in ("exact", "format", "mix", "persona")},
+                     "measures_answer": ["exact", "format", "mix", "persona", "judge", "reactivity", "rate"],
+                     "measures_text": ["ppl"],
+                     "reply_logprob": "無介入の返事(思考と回答)を teacher-forced で読ませたときの平均対数確率(回答の部分は answer_logprob)",
+                     "direction_metrics": "MLP の入力(段ごと)と最後に混ぜた出力で読む" if dm is not None else None,
+                     "not_measured": ["次のトークンの KL(思考の始まりを読むので意味が無い)", "ランダムな対照", "場面を限る生成"],
+                     "expected": expected}
     return {"recipe": recipe.to_dict(), "when": w, "random_controls": n_ctrl,
+            **({"inkling": ink_block} if ink_block is not None else {}),
             **({"keyed": kblock} if kblock is not None else {}),
             **({"control_pool": control_pool} if recipe.proj_units and n_ctrl else {}),
             **({"direction_metrics": {"direction": dm.name, "layers": dm.layers, "contrast": dm.cs.name,

@@ -209,6 +209,17 @@ class ReplyMarks:
         return "".join(out)
 
 
+def reasoning_tokens(marks: ReplyMarks, token_ids) -> int | None:
+    """返事のトークンのうち思考の部分の数(思考の始まりから回答の始まりの区切りまで。回答が始まらなければ最後まで)。
+    思考の区切りが無い返事は None。"""
+    ids = [int(t) for t in token_ids]
+    if marks.think is None or marks.think not in ids:
+        return None
+    a = ids.index(marks.think) + 1
+    rest = ids[a:]
+    return rest.index(marks.text) if marks.text is not None and marks.text in rest else len(rest)
+
+
 def answer_part(text: str) -> str:
     """表示の文字列から回答だけ(思考の欄を除く)。会話の履歴に入れる。"""
     if text.startswith(THINK_OPEN):
@@ -220,13 +231,14 @@ def answer_part(text: str) -> str:
 # --- まだ対応していない機能の断り ----------------------------------------------------------------------------------
 
 FIX = ("このモデルで使えるのは、読み込み・gne info・マップ・会話(gne chat、gne serve のチャット、OpenAI 互換 API)、gne behave、"
+       "評価(gne eval。返事は思考の後の回答で測る)、"
        "CHiPS の流れ(gne heads pipeline・heads refine → レシピの会話・gne behave --recipe・gne headproj export、名前の patch を当てた llama.cpp で)と、"
        "中を読むだけの gne inkling(read・check・mix・residuals・conv・experts)です(docs/inkling2.md)")
 
 
 # CLI で使えるコマンド(gne_command の名前)。ほかは読み込む前に止める。読み込み・情報・会話・名前の一覧と、ファイルだけを扱うもの。
 # 低い層の止め方(engine.py の捕捉・control vector・LoRA、weights.py の重みの読み出し)は、MCP・UI のジョブにも効く
-CLI_OK = frozenset({"info", "probe", "verify", "bench", "chat", "behave", "worker", "recipe-combine", "recipe-scale",
+CLI_OK = frozenset({"info", "probe", "verify", "bench", "chat", "behave", "eval", "worker", "recipe-combine", "recipe-scale",
                     "direction keys", "inkling read", "inkling check", "inkling mix", "inkling residuals", "inkling conv",
                     "inkling experts", "inkling chips-trial", "inkling chips-bake",
                     "inkling chips-bake-check", "heads pipeline", "heads refine", "headproj export", "bake"})

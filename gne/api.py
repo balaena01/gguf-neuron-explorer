@@ -2038,14 +2038,16 @@ class Session:
 
     # --- eval(§6.14)---------------------------------------------------------------------------
 
-    def eval(self, recipe: Recipe | list[str], *, doses=(0, 0.25, 0.5, 0.75, 1.0), suite: str | Path | None = None,
+    def eval(self, recipe: Recipe | list[str], *, doses=None, suite: str | Path | None = None,
              when: str | None = None, lora_when: str = "all", judge_model: str | Path | None = None, judge_target: str | None = None,
              name: str | None = None, random_controls: int = 0, reactivity: str | Path | None = None,
              head_controls: int = 0, control_pool: str = "before", direction_metrics: bool = True,
              dir_max_examples: int | None = 64, keyed_contrast: str | Path | None = None, keyed_metrics: bool = True,
              keyed_examples: int | None = 8, keyed_match: bool = True, keyed_pseudo: int = 8,
-             keyed_subset: str | None = None) -> dict:
+             keyed_subset: str | None = None, items: str | None = None, reasoning_tokens: int | None = None) -> dict:
         """レシピの倍率ごとの副作用(能力・ppl・言語混入)と性格の変化量を測り、<root>/evals/<model_id>/<name>.json に保存する。
+        doses を省くと 0,0.25,0.5,0.75,1(Inkling 2 は 0,1)。Inkling 2 では、返事を読む指標を思考の後の回答で測り(思考の上限
+        reasoning_tokens、既定 512)、問題を items(exact,format,mix,persona の数、既定 8,4,4,4、all で全部)に間引く(evalx)。
         random_controls > 0 なら各倍率で同じ大きさのランダムな対照レシピも測る(行の ctrl・ctrl_novelty_p95 など)。
         reactivity(対照集合の YAML)で反応性(トリガーあり/なしの差)も測り、head_controls 本のランダムなヘッドと比べる。
         方向を使うレシピ(proj など)では方向の指標(射影の値の下がり方・ずれ・判定の一致率)も測る。direction_metrics=False で
@@ -2055,12 +2057,23 @@ class Session:
         どちらも無ければ結果の keyed は skipped)、keyed_examples は会話の組ごとに読む数(None か 0 で全部)、keyed_pseudo は
         比較用の鍵の本数、keyed_subset は読む例(even / odd / all、省くと鍵の作成と反対側)、keyed_match=False で方式の比較の
         大きさ合わせを省く、keyed_metrics=False で測らない。"""
-        from .evalx import Judge, evaluate
+        from .evalx import INK_DOSES, Judge, evaluate
         recipe = self._as_recipe(recipe)
         if not recipe.units and recipe.ablate is None:
             raise GneError("BAD_RECIPE", "ユニットがありません")
         if (judge_model is None) != (judge_target is None):
             raise GneError("BAD_ARGS", "--judge-model と --judge-target は両方指定してください")
+        ink = self.weights.inkling is not None
+        if doses is None:
+            doses = INK_DOSES if ink else (0, 0.25, 0.5, 0.75, 1.0)
+        if not ink and (items is not None or reasoning_tokens is not None):
+            self.warn("問題の数(items)と思考の上限(reasoning_tokens)は Inkling 2 だけで使います")
+        if judge_model is not None:                      # 採点するモデルが思考を書くモデルなら、短い返事で数字を読めない
+            from .gguf_fast import FastGGUF
+            from .inkling import ARCHS
+            if FastGGUF(judge_model).get("general.architecture") in ARCHS:
+                raise GneError("BAD_ARGS", "採点するモデル(--judge-model)が Inkling 2 です。返事の前に思考を書くので、短い返事で"
+                                           "数字を読む採点には使えません", "思考を書かないモデルを指定してください")
         keyed_subset = keyed_subset or None
         if keyed_subset is not None and keyed_subset not in ("even", "odd", "all"):
             raise GneError("BAD_ARGS", f"keyed_subset は even / odd / all です({keyed_subset!r})")
@@ -2082,7 +2095,7 @@ class Session:
                          dir_max_examples=dir_max_examples, keyed_contrast=keyed_contrast,
                          keyed_metrics=bool(keyed_metrics), keyed_examples=keyed_examples or None,
                          keyed_match=bool(keyed_match), keyed_pseudo=keyed_pseudo, keyed_subset=keyed_subset,
-                         progress=self.progress)
+                         progress=self.progress, **({"items": items, "reasoning": reasoning_tokens} if ink else {}))
             d.pop("_baseline", None)
         finally:
             if judge is not None:
@@ -2113,6 +2126,9 @@ class Session:
         能力・ppl・混入は eval、消したい振る舞いの残り具合は方向の対照集合の判定(validate.match)で測る。"""
         from .direction import behavior, load_contrast, top_writer_neurons
         from .steer import AblateSpec, Unit
+        if self.weights.inkling is not None:
+            raise GneError("ARCH_UNSUPPORTED", "Inkling 2 では消去の比較(--compare-ablation)はまだ使えません(ニューロンの gain と"
+                                               "方向の消去をこのモデルにはまだ当てられません)", "ふつうの gne eval で測ってください")
         t0 = time.perf_counter()
         ds = self.direction_set(direction)
         _, meta = self.ablation_vector(direction, from_layer=from_layer)
@@ -2166,6 +2182,9 @@ class Session:
         from .evalx import evaluate
         from .headproj import proj_heads
         from .steer import AblateSpec, Unit
+        if self.weights.inkling is not None:
+            raise GneError("ARCH_UNSUPPORTED", "Inkling 2 では方式の比較(--compare-methods)はまだ使えません(比べる方式の gain・"
+                                               "方向の消去をこのモデルにはまだ当てられません)", "ふつうの gne eval で測ってください")
         t0 = time.perf_counter()
         recipe = self._as_recipe(recipe)
         heads = proj_heads(recipe)

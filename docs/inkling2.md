@@ -65,8 +65,11 @@ gne の表示の「段」は、実行の順(0〜47)。llama.cpp のキャッシ�
 
 - `gne chat -p …`(レシピなし)は、無介入の 1 列で話す(ほかのモデルの `gne chat` は −/0/+ の 3 列で、レシピが要る)。
 - `gne serve` では、地図の凡例の「会話する」で、無介入の 1 列のチャットが開く(くわしく見るの欄に、いまの層のニューロン 0 のチャットとして開く。介入の欄は出ない。応答の長さの既定は 1,024)。
-- 思考の欄は `<think>` … `</think>` で囲んで見せる。会話の履歴には回答だけを入れる(前の思考は次のプロンプトに入れない)。
-- `gne serve --openai` の `/v1/chat/completions` は、思考を `reasoning_content`、回答を `content` に分けて返す(流すときも同じ)。
+- このモデルはいつも答えの前に思考(reasoning)を書く(`<|content_thinking|>` … の後に `<|content_text|>` 回答。`reasoning_effort` は system の 1 行を変えるだけで、none でも思考は書く)。
+- 画面のチャット(3 列・1 列・レシピの「会話する」)は、思考を返事ごとに折りたたんで出す(見出しに思考のトークン数。押すと開く)。見えるのは回答。道具の欄の「思考を表示」で全部の返事の思考を開く(既定は閉じる。このブラウザに覚える)。読み上げは回答だけ。
+- `gne chat` は、思考を `<think>` … `</think>` で囲んで出す(既定)。`--hide-reasoning` で思考は出さず、「(思考中… N トークン)」と回答だけを出す。`--json` の返事には `answer`(回答だけ)と `reasoning_tokens` も入る。会話の履歴には回答だけを入れる(前の思考は次のプロンプトに入れない)。
+- `gne behave`・`gne eval` の一致・空の数・採点は回答だけで数える(思考は数えない。behave の `tokens` は思考を含む返事全体の長さで、思考の長さは `reasoning_tokens` に別に出す)。
+- `gne serve --openai` の `/v1/chat/completions` は、思考を `reasoning_content`、回答を `content` に分けて返す(流すときも、`delta` の `reasoning_content` と `content` に分かれる)。
 - チャットテンプレートは、`reasoning_effort`(既定 0.9)を「Thinking effort level」として最初の system の欄に入れる。
 - 思考の量: `gne chat --reasoning-effort low` のように渡す。テンプレートが受け付けるのは none(0)・minimal(0.1)・low(0.2)・medium(0.7)・high(0.9)・xhigh(0.99)・max(0.99)か、0〜0.99 の数。省くとテンプレートの既定(0.9)。UI のチャットの「思考の量」、OpenAI 互換 API の `reasoning_effort` も同じ。
 - モデルの勧めるサンプリングは温度 1.0・top-p 1・top-k 0・min-p 0(`--temperature 1 --top-p 1 --top-k 0 --min-p 0 --presence-penalty 0`)。
@@ -78,7 +81,7 @@ gne の表示の「段」は、実行の順(0〜47)。llama.cpp のキャッシ�
 
 | 使える | 止まる(理由を書いて止める) |
 |---|---|
-| `gne info`、`gne probe --list-names`(グラフのテンソルの名前だけ。番号は段)、`gne inkling read / check / mix / residuals / conv / experts`(中を読むだけ。0001 が要る。下の「中を読む」)、`gne chat`(`--reasoning-effort`。CHiPS のレシピも当てられる)、`gne serve` のマップ・会話・保存済みの一覧・CHiPS の画面、OpenAI 互換 API、`gne behave`(`--match`。思考の欄を除いた回答だけを数える。CHiPS のレシピも当てられる)、CHiPS の流れ(`gne heads pipeline`・`gne heads refine` → レシピ → `gne headproj export`。下の「CHiPS の流れ」)、`gne recipe-scale`、`gne verify`(トークン化の V8 だけ。ほかは省く) | CHiPS の流れのほかの、中間のテンソルの捕捉(残差・ヘッド・ニューロン・専門家の値)、control vector、CHiPS の射影のほかの LoRA(gain・keyed・nw など)、重みの中身を読む処理(ニューロン・専門家・ヘッドの詳細、logit lens など)。これを使うコマンド(`gne stats`・`lens`・`sweep`・`direction`・`heads candidates` などの `heads …`・`experts …`・`nw …`・`steer`・`gain`・`ablate`・`bake`・`eval` など)は止まる。`gne behave --judge`(読み手の判定)と `gne fieldtest` も止まる |
+| `gne info`、`gne probe --list-names`(グラフのテンソルの名前だけ。番号は段)、`gne inkling read / check / mix / residuals / conv / experts`(中を読むだけ。0001 が要る。下の「中を読む」)、`gne chat`(`--reasoning-effort`。CHiPS のレシピも当てられる)、`gne serve` のマップ・会話・保存済みの一覧・CHiPS の画面、OpenAI 互換 API、`gne behave`(`--match`。思考の欄を除いた回答だけを数える。CHiPS のレシピも当てられる)、CHiPS の流れ(`gne heads pipeline`・`gne heads refine` → レシピ → `gne headproj export`。下の「CHiPS の流れ」)、`gne recipe-scale`、`gne eval`(返事は思考の後の回答で測る。下の「評価」)、`gne verify`(トークン化の V8 だけ。ほかは省く) | CHiPS の流れのほかの、中間のテンソルの捕捉(残差・ヘッド・ニューロン・専門家の値)、control vector、CHiPS の射影のほかの LoRA(gain・keyed・nw など)、重みの中身を読む処理(ニューロン・専門家・ヘッドの詳細、logit lens など)。これを使うコマンド(`gne stats`・`lens`・`sweep`・`direction`・`heads candidates` などの `heads …`・`experts …`・`nw …`・`steer`・`gain`・`ablate`・`bake` など)は止まる。`gne behave --judge`(読み手の判定)と `gne fieldtest` も止まる |
 
 止まるときのエラーは `ARCH_UNSUPPORTED`。CLI では、使えるコマンド(`info`・`probe`・`verify`・`bench`・`chat`・`behave`・`worker`・`recipe-combine`・`recipe-scale`・`direction keys`・`heads pipeline`・`heads refine`・`headproj export`・`inkling …`)のほかは、モデルを読み込む前に止まる。画面と MCP のジョブは、CHiPS の流れ(`head_pipeline`・`heads_refine`・`headproj_export`)と `behave` のほかは、始める前に止まる。中間のテンソルの捕捉を通すのは `gne inkling …` の読むだけの処理だけ。
 
@@ -173,9 +176,22 @@ gne の表示の「段」は、実行の順(0〜47)。llama.cpp のキャッシ�
 - 部品の種類・層 0〜5 の設定・位置は元の一括のまま。足す組の部品の数の上限は `--new-heads`(既定 3,2,1)
 - このモデルは応答を読んで決めるので、画面の結果の行と「代表の合わせたレシピ」に「3 列チャット」を置いた(土台 + 足した組でレシピを置き換えて、3 列チャットを開く)。CLI は `gne chat --recipe <名前>_rK.combined.yaml`
 
+### 評価(`gne eval`、画面の「評価」と CHiPS の結果の「評価へ送る」)
+
+ほかのモデルの評価は最初に生成したトークンから読むが、このモデルでは最初のトークンが思考の始まりなので、返事を読む指標はすべて思考の後の回答(`<|content_text|>` の後)で測る。
+
+- 能力(exact・format)・言語の混入・新語(persona)・judge・反応性・判定の一致率は、回答で測る。思考と回答を 1 本で生成し、長さの上限は「思考の上限(`--reasoning-tokens`、既定 512)+ その問題の回答の長さ」。回答はその問題の長さ(exact 32・format 96 など)で切って採点する。無介入とレシピの腕は、それぞれ自分の思考を書く(同じ問題に同じ条件で答えさせたときの差を見る)
+- 壊れた返事の数を倍率ごとに出す: 回答が空・思考の途中で上限に達した(回答が始まらない)・ループ・回答の途中で全体の上限に達した、と思考の長さの中央値
+- 返事の読み込み(返事lp低下): 無介入の腕が書いた返事(思考と回答)を、レシピを当てて teacher-forced で読ませたときの平均対数確率の下がり方。最初のトークンの KL の代わり(最初のトークンは思考の始まりなので、KL はほぼ 0 のまま返事が壊れることがあった)。回答だけを読むと、前の思考で答えがほぼ決まっていて確率がほぼ 1 になる(公開の問題で確かめた)ので、思考を含めて読む
+- ppl は参照テキストをチャットの形にせずそのまま読む(思考は関係ない)
+- 方向の指標(A 側の射影の下がり方・方向に沿わない向きのずれ)は、1 本の残差の代わりに、層 6〜17 の最後の段の MLP の入力と最後に混ぜた出力(点 48)で、方向の位置を読む(CHiPS の流れと同じ読み方)。判定の一致率の返事は 8 問まで(`--dir-max-examples` の方が小さければその数)
+- 既定はこのモデルだけ軽くする: 問題は exact 8・format 4・mix 4・persona 4(`--items 8,4,4,4`、`all` で全部。等間隔に間引く)、倍率は 0 と 1。無介入の腕の返事は `<root>/inkling/<model_id>/eval/` に覚えて、同じ問題・同じ上限なら使い回す。始める前に見込み(思考と回答のトークン数と、GPU で 1 本ずつの速さの時間)を出す。既定のタスク集のまま全部(52 問 × 倍率 5)だと GPU で 30〜65 分
+- まだ使えないもの(理由を出して止める): ランダムな対照(`--random-controls`・`--head-controls`。部品から同じ数のランダムな部品を作る方法がまだ無い)、`--compare-methods`・`--compare-ablation`(比べる方式をまだ当てられない)、`--when`・`--lora-when`(思考と回答のどちらに当てるかが決まっていない)。採点するモデル(`--judge-model`)に Inkling 2 は使えない(短い返事で数字を読めない)。`--alloc` は各組を 1 本の腕として測る
+- 結果には `inkling`(回答で測ったこと・思考の上限・問題の数・見込み)が入り、CLI と画面の表に、壊れた返事と返事lp低下の列が足される
+
 ### まだ使えないもの
 
-`--rank causal`、評価(`gne eval`)、強さの候補(`heads candidates`)、`--holdout`、側をレシピで作る対照集合(`recipe_a` / `recipe_b`)、`--verify-mode ablate`、`--candidate-layers`・`--select-layer`(組は最後に混ぜた出力で作る)は、理由を出して止まる。
+`--rank causal`、`--holdout`、側をレシピで作る対照集合(`recipe_a` / `recipe_b`)、`--verify-mode ablate`、`--candidate-layers`・`--select-layer`(組は最後に混ぜた出力で作る)は、理由を出して止まる。
 
 ### CHiPS の試し(`gne inkling chips-trial`、試しだけ)
 

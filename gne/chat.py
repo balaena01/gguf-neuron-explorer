@@ -113,9 +113,11 @@ def make_columns(recipe: Recipe | None, *, dose: float | None = None, left: Reci
 def chat_turn(session, state: ChatState, user: str, *, max_tokens: int = 256,
               on_text: Callable[[int, str], None] | None = None,
               on_column: Callable[[int, Column], None] | None = None,
-              when_override: str | None = None, sampling=None, lora_when: str = "all") -> list[dict]:
+              when_override: str | None = None, sampling=None, lora_when: str = "all", hide_reasoning: bool = False) -> list[dict]:
     """ユーザーの発話を全列に足し、列ごとに返答を生成して履歴に足す。on_text(列, 文字列の断片)で逐次表示できる。
-    sampling(engine.Sampling)を渡すと、どの列も同じ seed で引く(列の違いは介入の違いだけ)。"""
+    sampling(engine.Sampling)を渡すと、どの列も同じ seed で引く(列の違いは介入の違いだけ)。
+    答えの前に思考を書くモデル(Inkling 2)では、思考を <think> … </think> で囲んで出す。hide_reasoning なら思考は出さず、
+    「(思考中… N トークン)」と回答だけを出す(返事の text も回答だけ)。返事には answer(回答だけ)と reasoning_tokens も入れる。"""
     from .when import generate_when
     e = session.engine
     ctx = e.steer_ctx()
@@ -136,9 +138,19 @@ def chat_turn(session, state: ChatState, user: str, *, max_tokens: int = 256,
             from .inkling import ReplyMarks
             marks = ReplyMarks(e)
         cb = None
+        think_n = [0]
         if on_text is not None:
             def cb(_si, tok, _i=i, _dec=dec):
                 mark = marks.piece(tok) if marks is not None else None
+                if hide_reasoning and marks is not None:
+                    if mark is not None:                       # 思考の始まり・終わり: 中身の代わりに長さだけ
+                        _dec.decode(b"", final=True)
+                        on_text(_i, "(思考中…" if marks.open else f" {think_n[0]} トークン)\n\n")
+                        return
+                    if marks.open:
+                        think_n[0] += 1
+                        _dec.decode(e.token_bytes(tok))
+                        return
                 piece = _dec.decode(b"", final=True) + mark if mark is not None else _dec.decode(e.token_bytes(tok))
                 if piece:
                     on_text(_i, piece)
@@ -146,14 +158,21 @@ def chat_turn(session, state: ChatState, user: str, *, max_tokens: int = 256,
         r, _ = generate_when(e, ctx, state.messages(i), vecs, when, max_tokens=max_tokens, on_token=cb,
                              lora=session.lora_for(col.recipe), sampling=sampling, lora_when=lora_when)
         if on_text is not None:
+            if hide_reasoning and marks is not None and marks.open:     # 回答の前で終わった
+                dec.decode(b"", final=True)
+                on_text(i, f" {think_n[0]} トークン、回答の前に上限で切れました)")
             tail = dec.decode(b"", final=True)
             if tail:
                 on_text(i, tail)
-        text, content = r.text, r.text
+        text, content, rt = r.text, r.text, None
         if marks is not None:
-            from .inkling import answer_part
+            from .inkling import answer_part, reasoning_tokens
+            rt = reasoning_tokens(marks, r.token_ids)
             text = marks.render(e, r.token_ids)
             content = answer_part(text)                # 履歴には回答だけ(思考の欄は入れない)
+            if hide_reasoning:
+                text = content
         state.histories[i].append({"role": "assistant", "content": content})
-        replies.append({"column": col.label, "text": text, "finish": r.finish, "n_gen": r.n_gen})
+        replies.append({"column": col.label, "text": text, "finish": r.finish, "n_gen": r.n_gen,
+                        **({"answer": content, "reasoning_tokens": rt} if marks is not None else {})})
     return replies

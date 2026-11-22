@@ -75,16 +75,21 @@ def behave(session, prompts: list, *, lora=None, vectors=None, match: str | None
         outs = _generate(session, [(q, max_tokens) for q in prompts], vectors, lora, "all", lambda k, st=stage: tick(k, st),
                          sampling=sp, thinking=thinking)
         if ink:
-            from .inkling import ReplyMarks, answer_part
+            from .inkling import ReplyMarks, answer_part, reasoning_tokens
             marks = ReplyMarks(session.engine)
             for o in outs:
                 o["shown"] = marks.render(session.engine, o["token_ids"])
+                o["reasoning_tokens"] = reasoning_tokens(marks, o["token_ids"])
         replies = [{"i": i, "text": answer_part(o["shown"]) if ink else answer_of(o["text"], thinking),
                     "full": o["shown"] if ink else o["text"] if thinking else None,
-                    "finish": o["finish"], "n_tokens": len(o["token_ids"]), "loop": loop_like(o["token_ids"])} for i, o in enumerate(outs)]
+                    "finish": o["finish"], "n_tokens": len(o["token_ids"]), "loop": loop_like(o["token_ids"]),
+                    **({"reasoning_tokens": o["reasoning_tokens"]} if ink else {})} for i, o in enumerate(outs)]
         counts = {"n": len(replies), "empty": sum(not r["text"].strip() for r in replies), "loop": sum(r["loop"] for r in replies),
                   "at_limit": sum(r["finish"] not in ("eog", "stop", "eos") for r in replies),
                   "tokens": round(sum(r["n_tokens"] for r in replies) / max(len(replies), 1), 1)}
+        if ink:                                     # 一致・空は回答だけで数える。tokens は思考を含む返事全体の長さ、思考の長さは別に出す
+            rts = [r["reasoning_tokens"] or 0 for r in replies]
+            counts["reasoning_tokens"] = round(sum(rts) / max(len(rts), 1), 1)
         if rx:
             counts["match"] = sum(bool(rx.search(r["text"])) for r in replies)
         if judge:

@@ -397,6 +397,9 @@ a:visited { color: var(--link-visited); }
 .ch-cell.plus { border-top: 2px solid var(--plus-line); }
 .ch-cell .txt { white-space: pre-wrap; word-break: break-word; line-height: 1.45; }
 .ch-cell .caret { color: var(--accent); animation: blink 1s steps(2) infinite; }
+.ch-cell details.ch-think { margin: 0 0 var(--sp-2); }
+.ch-cell details.ch-think > summary { cursor: pointer; font-size: var(--fs-s); }
+.ch-cell .txt.think { color: var(--muted); font-size: var(--fs-s); border-left: 2px solid var(--line-soft); padding-left: var(--sp-2); margin-top: var(--sp-1); }
 @keyframes blink { 50% { opacity: 0; } }
 .ch-input { display: flex; gap: var(--sp-3); margin-top: var(--sp-4); align-items: flex-start; }
 .ch-input textarea { flex: 1 1 auto; min-width: 0; padding: var(--sp-2) var(--sp-3); }

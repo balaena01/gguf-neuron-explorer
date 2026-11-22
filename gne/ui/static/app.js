@@ -1055,7 +1055,8 @@ async function setView(v) {
   if (v === "eval") {
     if (!state.model) { xv.innerHTML = `<p class="muted view-empty">${t("合成の構造には eval がありません")}</p>`; return; }
     if (!evalView) {
-      evalView = new EvalView(xv, { recipe: state.recipe, onRun: (p) => jobsBar.start("eval", p).catch((e) => { state.note = `${t("エラー")}: ${e.message}`; updateStatus(); return null; }), onRunJob: (kind, params) => jobsBar.start(kind, params),          // 組・方式のレシピを読み込む
+      evalView = new EvalView(xv, { recipe: state.recipe, inkling: () => !!(state.arch && state.arch.inkling),   // Inkling 2: 思考の後の回答で測る
+                                    onRun: (p) => jobsBar.start("eval", p).catch((e) => { state.note = `${t("エラー")}: ${e.message}`; updateStatus(); return null; }), onRunJob: (kind, params) => jobsBar.start(kind, params),          // 組・方式のレシピを読み込む
                                     onLoadProj: (name, specs) => replaceRecipe(name, () => state.recipe.loadProj(name, specs)),
                                     onLoadRecipe: async (rd, { scale = 1 } = {}) => {
                                       const us = (rd.units || []).map((u) => (u.mode === "proj" && !u.direction ? { ...u, direction: rd.default_direction } : u));

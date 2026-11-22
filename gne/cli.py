@@ -895,8 +895,13 @@ def _doses(text: str) -> list[float]:
 @gne_command(app, "eval")
 def eval_cmd(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Optional[list[str]] = _UNIT,
              dose_unit: Optional[str] = _DOSE_UNIT,
-             doses: str = typer.Option("0,0.25,0.5,0.75,1", "--doses", help="レシピ全体に掛ける倍率(0 = 無介入は必ず入る)"),
+             doses: Optional[str] = typer.Option(None, "--doses", help="レシピ全体に掛ける倍率(0 = 無介入は必ず入る。既定 0,0.25,0.5,0.75,1、"
+                                                                     "Inkling 2 は 0,1)"),
              suite: Optional[Path] = typer.Option(None, "--suite", help="タスク集 YAML(既定 configs/eval/default.yaml)"),
+             items: Optional[str] = typer.Option(None, "--items", help="Inkling 2: 問題の数 exact,format,mix,persona(既定 8,4,4,4。all で全部。"
+                                                                    "等間隔に間引く)"),
+             reasoning_tokens: Optional[int] = typer.Option(None, "--reasoning-tokens",
+                                                            help="Inkling 2: 思考の上限(トークン、既定 512)。思考と回答を合わせて、上限 + 回答の長さまで書かせる"),
              when: Optional[str] = _WHEN, lora_when: str = _LORA_WHEN,
              judge_model: Optional[Path] = typer.Option(None, "--judge-model", help="性格の採点に使う別の GGUF(任意)"),
              judge_target: Optional[str] = typer.Option(None, "--judge-target", help="採点させる目標の性格(例 'a yandere anime girl')"),
@@ -977,15 +982,18 @@ def eval_cmd(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Op
                          f"{_f(r_['rate'], '6.2f')}" + ("  配布可" if r_["shippable"] else ""))
         lines.append("同じ A 側の射影の値の水準で比べた副作用(A射影 = A 側の射影の値)。報告には判定の一致率(外から見える指標)を主にする")
         return d, "\n".join(lines), 0
-    _gate(s, "eval", {"doses": _doses(doses), "suite": suite, "when": when, "random_controls": random_controls,
+    dz = _doses(doses) if doses else None
+    _gate(s, "eval", {"doses": dz, "suite": suite, "when": when, "random_controls": random_controls, "items": items,
+                      "reasoning_tokens": reasoning_tokens,
                       "recipe": r, "keyed_metrics": keyed, "keyed_contrast": keyed_contrast,      # keyed の選択性の分も見積もる
                       "keyed_examples": keyed_examples or None, "keyed_pseudo": keyed_pseudo, "keyed_match": keyed_match,
                       "keyed_subset": keyed_subset}, yes, None)
-    d = s.eval(r, doses=_doses(doses), suite=suite, when=when, lora_when=lora_when, judge_model=judge_model, judge_target=judge_target,
+    d = s.eval(r, doses=dz, suite=suite, when=when, lora_when=lora_when, judge_model=judge_model, judge_target=judge_target,
                name=name, random_controls=random_controls, reactivity=reactivity, head_controls=head_controls,
                control_pool=control_pool, direction_metrics=direction_metrics, dir_max_examples=dir_max_examples or None,
                keyed_contrast=keyed_contrast, keyed_metrics=keyed, keyed_examples=keyed_examples or None,
-               keyed_match=keyed_match, keyed_pseudo=keyed_pseudo, keyed_subset=keyed_subset)
+               keyed_match=keyed_match, keyed_pseudo=keyed_pseudo, keyed_subset=keyed_subset,
+               **({"items": items, "reasoning_tokens": reasoning_tokens} if items is not None or reasoning_tokens is not None else {}))
     th = d["suite"]["thresholds"]
     nc = d.get("random_controls") or 0
     head = f"{'倍率':>5} {'能力':>6} {'低下pt':>6} {'ppl':>8} {'悪化%':>7} {'混入':>6} {'新語':>5} {'d4':>5} {'打切':>4}"
@@ -1000,6 +1008,9 @@ def eval_cmd(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Op
     if dmx:                                              # CHANGE-06 F.1: 方向への射影の値と直交成分のずれ
         head += f" │ {'下がり':>7} {'A直交':>7} {'B直交':>7}" + (f" {'一致率':>6}" if dmx.get("behavior") else "") \
             + (f" {'null':>5}" if nc else "")
+    inkd = d.get("inkling")
+    if inkd:                                             # Inkling 2: 壊れた返事(空・思考の途中で切れた・ループ・回答が切れた)と回答の読み込み
+        head += f" │ {'空':>3} {'思考切':>5} {'ループ':>5} {'回答切':>5} {'思考':>5} {'返事lp低下':>9}"
     kd = d.get("keyed")                                  # CHANGE-07 E: 結果の keyed(方式の比較・比較用の鍵、または skipped)
     ksel = any((row.get("keyed") or {}).get("selectivity") is not None for row in d["rows"])
     knull = ksel and any((row.get("keyed") or {}).get("null_pct") is not None for row in d["rows"])
@@ -1033,6 +1044,10 @@ def eval_cmd(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Op
             if nc:
                 npct = row.get("rate_null_pct") if row.get("rate_null_pct") is not None else row.get("dir_null_pct")
                 line += f" {_f(None if npct is None else npct * 100, '4.0f')}%"
+        if inkd:
+            bk = row.get("broken") or {}
+            line += (f" │ {bk.get('empty', 0):>3} {bk.get('no_answer', 0):>5} {bk.get('loop', 0):>5} {bk.get('cut_answer', 0):>5} "
+                     f"{bk.get('reasoning_median', 0):>5.0f} {_f(row.get('reply_logprob_drop'), '+9.4f')}")
         if ksel:
             kr = row.get("keyed") or {}
             line += f" │ {_f(kr.get('selectivity'), '+.3g'):>7}"
@@ -1057,6 +1072,19 @@ def eval_cmd(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Op
     if dmx:
         text += (f"\n方向 {dmx['direction']}(L{dmx['layers'][-1]}): 下がり = A 側の射影の値の下がり方、A直交・B直交 = 残差の差の直交成分 ÷ 残差"
                  + ("、一致率 = A 側の判定(validate.match)" if dmx.get("behavior") else ""))
+        if inkd:
+            text += "(Inkling 2: 残差の代わりに、層 6〜17 の最後の段の MLP の入力と最後に混ぜた出力で読んだ値。点 48 = 最後に混ぜた出力)"
+    if inkd:
+        it = inkd["items"]
+        text += (f"\nInkling 2: 返事を読む指標(能力・混入・新語・judge・反応性・一致率)は、思考の後の回答で測りました(思考の上限 "
+                 f"{inkd['reasoning_tokens']} トークン、問題 exact {it['exact']}・format {it['format']}・mix {it['mix']}・persona {it['persona']}。"
+                 "各倍率が自分の思考を書く)。ppl は参照テキストをそのまま読んだ値。空 = 回答が空、思考切 = 思考の途中で上限、"
+                 "ループ = 繰り返し、回答切 = 回答が上限で切れた、思考 = 思考の長さの中央値、返事lp低下 = 無介入の返事(思考と回答)を"
+                 "読ませたときの平均対数確率の下がり方(大きいほど返事が変わりやすい。回答は前の思考でほぼ決まるので、効きは思考に出る)。"
+                 "次のトークンの KL は測っていません")
+        ex = inkd.get("expected") or {}
+        if ex:
+            text += f"(見込みは約 {ex['seconds'] / 60:.0f} 分" + ("、無介入の返事は前の結果を使った" if ex.get("base_cached") else "") + ")"
     if kd and "skipped" in kd:
         text += f"\nkeyed の eval の選択性は測っていません: {kd['skipped']}" + (f"\nヒント: {kd['hint']}" if kd.get("hint") else "")
     elif kd:
@@ -1394,7 +1422,10 @@ def chat(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Option
          sample_seed: Optional[int] = _SSEED, greedy: bool = _GREEDY, lora_when: str = _LORA_WHEN,
          reasoning_effort: Optional[str] = typer.Option(None, "--reasoning-effort",
                                                         help="チャットテンプレートに渡す思考の量(reasoning_effort。Inkling 2 は none / minimal / "
-                                                             "low / medium / high / xhigh / max か 0〜0.99。省くとテンプレートの既定)")):
+                                                             "low / medium / high / xhigh / max か 0〜0.99。省くとテンプレートの既定)"),
+         hide_reasoning: bool = typer.Option(False, "--hide-reasoning",
+                                             help="答えの前に思考を書くモデル(Inkling 2)で、思考は出さずに長さと回答だけを出す"
+                                                  "(既定は思考を <think> … </think> で囲んで出す)")):
     """−/0/+ の 3 列比較チャット(ユーザーの発話は共有、返答は列ごと)。サンプリングなら 3 列とも同じ seed で引く。"""
     from .chat import ChatState, chat_turn, effort_value, make_columns
     s = holder["session"] = c.session()
@@ -1430,7 +1461,8 @@ def chat(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Option
             turns.append({"user": user, "replies": chat_turn(s, state, user, max_tokens=max_tokens,
                                                              on_text=on_text if live else None,
                                                              on_column=on_column if live else None,
-                                                             when_override=when, sampling=sp, lora_when=lora_when)})
+                                                             when_override=when, sampling=sp, lora_when=lora_when,
+                                                             hide_reasoning=hide_reasoning)})
         d = {"columns": [{"label": col.label, "recipe": col.recipe.to_dict() if col.recipe else None} for col in cols],
              "system": system, "turns": turns, "sampling": None if sp is None else sp.to_dict()}
         if live:
@@ -1440,7 +1472,8 @@ def chat(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Option
         for t in d["turns"]:
             lines.append(f"> {t['user']}")
             for col, rep in zip(d["columns"], t["replies"], strict=True):
-                lines.append(f"── {col['label']} ──({rep['finish']}, {rep['n_gen']} tok)\n{rep['text']}")
+                rtx = f"、思考 {rep['reasoning_tokens']} tok" if hide_reasoning and rep.get("reasoning_tokens") is not None else ""
+                lines.append(f"── {col['label']} ──({rep['finish']}, {rep['n_gen']} tok{rtx})\n{rep['text']}")
         return d, "\n".join(lines), 0
     if c.json:
         raise GneError("BAD_ARGS", "--json では --prompt で発話を渡してください(対話モードは使えません)")
@@ -1462,10 +1495,11 @@ def chat(c: Common, holder: dict, recipe: Optional[Path] = _RECIPE, unit: Option
             continue
         replies = chat_turn(s, state, user, max_tokens=max_tokens, on_text=on_text if stream else None,
                             on_column=on_column if stream else None, when_override=when, sampling=sp,
-                             lora_when=lora_when)
+                            lora_when=lora_when, hide_reasoning=hide_reasoning)
         if not stream:
             for col, rep in zip(cols, replies, strict=True):
-                print(f"── {col.label} ──\n{rep['text']}")
+                rtx = f"(思考 {rep['reasoning_tokens']} トークン)\n" if hide_reasoning and rep.get("reasoning_tokens") is not None else ""
+                print(f"── {col.label} ──\n{rtx}{rep['text']}")
         else:
             print()
         turns.append({"user": user, "replies": replies})

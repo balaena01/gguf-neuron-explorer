@@ -36,6 +36,16 @@ const SP_FIELDS = [["temperature", "温度", 0.05], ["top_k", "top-k", 1], ["top
                    ["presence_penalty", "presence", 0.1]];
 const SP_KEY = "gne.chat.sampling";            // このブラウザに覚えておく(使えなければ覚えない)
 const COLS_KEY = "gne.chat.single";            // 1 列(+ の列だけ)で話すか
+const THINK_KEY = "gne.chat.showThinking";      // 思考の欄を開いて出すか(既定は閉じる)
+const THINK_OPEN = "<think>\n", THINK_CLOSE = "\n</think>";
+
+// 答えの前に思考を書くモデル(Inkling 2)の返事: サーバは思考を <think> … </think> で囲んで送る → {think, answer, open(まだ思考の途中)}
+export function splitThink(text) {
+  if (!text || !text.startsWith(THINK_OPEN)) return null;
+  const i = text.indexOf(THINK_CLOSE, THINK_OPEN.length);
+  if (i < 0) return { think: text.slice(THINK_OPEN.length), answer: "", open: true };
+  return { think: text.slice(THINK_OPEN.length, i), answer: text.slice(i + THINK_CLOSE.length).replace(/^\n+/, ""), open: false };
+}
 
 export class ChatPanel {
   constructor({ recipe, onStatus, onAdded, plain, effortChoices, reasoningFirst }) {
@@ -75,6 +85,8 @@ export class ChatPanel {
     this.speak = false;                // 右の列の返事をブラウザの音声で読み上げる
     this.single = false;               // 1 列: レシピ(またはこのニューロンの +)を当てた返事だけを生成する
     try { this.single = localStorage.getItem(COLS_KEY) === "1"; } catch { /* 覚えていなくても使える */ }
+    this.showThinking = false;         // 思考の欄を全部開いて出す(既定は閉じる。返事ごとに開ける)
+    try { this.showThinking = localStorage.getItem(THINK_KEY) === "1"; } catch { /* 覚えていなくても使える */ }
   }
 
   // 列の数を切り替える。履歴は列ごとなので、会話があれば確かめてから消す
@@ -157,6 +169,13 @@ export class ChatPanel {
 
   mount(el) {
     this.el = el;
+    // 返事ごとの思考の欄の開け閉め(描き直しても保つ)。toggle は泡立たないので捕捉で受ける
+    el.addEventListener("toggle", (ev) => {
+      const d = ev.target;
+      if (!d.matches || !d.matches("details.ch-think")) return;
+      const c = d.closest(".ch-cell"), turn = c && this.turns[+c.dataset.t];
+      if (turn) { turn.thinkOpen = turn.thinkOpen || {}; turn.thinkOpen[+c.dataset.c] = d.open; }
+    }, true);
     this.render();
   }
 
@@ -177,7 +196,7 @@ export class ChatPanel {
       if (!this.plainInit) { this.plainInit = true; if (this.maxTokens === 128) this.maxTokens = 1024; }
     }
     this.el.innerHTML = `
-      ${this.plain() ? `<p class="muted note">${esc(tr("レシピを当てずに 1 列で話します(思考の欄は <think> … </think>)。レシピを当てて話すときは、レシピのタブの「会話する」から"))}</p>` : `
+      ${this.plain() ? `<p class="muted note">${esc(tr("レシピを当てずに 1 列で話します(思考は返事ごとに折りたたんで出します。「思考を表示」で全部開く)。レシピを当てて話すときは、レシピのタブの「会話する」から"))}</p>` : `
       <div class="ch-tools">${seg("mode", [["writes", tl("押して話す", "steer & chat")], ["reads", tl("反応を見る", "read a text")]], this.mode)}
         ${this.mode === "writes" ? seg("target", [["neuron", tr("このニューロン")], ["recipe", tr("レシピ({n})", { n: nR }), !nR]], this.target) : ""}</div>`}
       ${this.mode === "writes" ? this.writesHTML() : this.readsHTML()}
@@ -203,7 +222,8 @@ export class ChatPanel {
       [["3", tr("3 列")], ["1", tr("1 列")]].map(([v, l]) => `<button data-cols="${v}"${(this.single ? "1" : "3") === v ? ' class="on"' : ""}${this.busy ? " disabled" : ""}>${l}</button>`).join("")}</span>`;
     const plain = this.plain();
     return `
-      <div class="ch-tools">${plain ? "" : colSeg + amount}<span class="muted">${tr("応答の長さ")}</span><input id="ch-max" type="number" min="1" max="2048" value="${this.maxTokens}">
+      <div class="ch-tools">${plain ? "" : colSeg + amount}<span class="muted">${tr("応答の長さ")}</span><input id="ch-max" type="number" min="1" max="2048" value="${this.maxTokens}">${
+        plain || this.reasoningFirst() ? `<label class="muted" title="${tr("答えの前に書く思考の欄を、全部の返事で開いて出す(既定は閉じる。返事ごとにも開ける)")}"><input type="checkbox" id="ch-think"${this.showThinking ? " checked" : ""}> ${tr("思考を表示")}</label>` : ""}
         <span class="muted"${plain ? ' hidden' : ""} title="${tr("足す位置: all = 全位置 / gen = 生成中だけ(プロンプトの理解を壊さない)/ assistant = assistant の発話だけ / skip-replies = 過去の応答以外(過去の応答は素のまま読む)/ after = 出力にその文字列が出てから / ramp = 倍率を a から b へ変える")}">${tr("足す位置")}</span><select id="ch-when"${plain ? " hidden" : ""}>${
           WHEN.map(([w, l]) => `<option value="${w}"${this.when === w ? " selected" : ""}>${tr(l)}</option>`).join("")}</select>${
           this.when === "after" || this.when === "ramp" ? `<input id="ch-when-x" size="8" value="${esc(this.whenArg)}" placeholder="${this.when === "after" ? tr("結論:") : "1.5-0.5"}">` : ""}</div>
@@ -277,7 +297,16 @@ export class ChatPanel {
     const f = t.finish[ci];
     const badge = f === "length" ? `<span class="badge" title="${tr("max_tokens で打ち切り")}">${tr("打ち切り")}</span>` : f === "stopped" ? `<span class="badge">${tr("止めた")}</span>` : "";
     const cur = this.busy && t === this.turns[this.turns.length - 1] && this.activeCol === ci ? `<span class="caret">▍</span>` : "";
-    return `${badge}<div class="txt">${esc(t.replies[ci])}${cur}</div>`;
+    const sp = this.reasoningFirst() ? splitThink(t.replies[ci]) : null;     // 思考の欄を分けるのは Inkling 2 だけ(ほかのモデルはそのまま)
+    if (!sp) return `${badge}<div class="txt">${esc(t.replies[ci])}${cur}</div>`;
+    // 思考の欄は折りたたむ(返事ごとに開ける。「思考を表示」で全部開く)。見えるのは回答
+    const n = (t.thinkTokens || {})[ci] || 0;
+    const open = (t.thinkOpen || {})[ci] !== undefined ? t.thinkOpen[ci] : this.showThinking;
+    const label = sp.open ? tr("思考中…({n} トークン)", { n }) : tr("思考({n} トークン)", { n });
+    const cut = f === "length" && !sp.answer.trim() ? ` <span class="badge" title="${tr("回答の前に上限で切れた")}">${tr("回答なし")}</span>` : "";
+    return `${badge}<details class="ch-think"${open ? " open" : ""}><summary class="muted">${label}${cut}</summary>`
+      + `<div class="txt think">${esc(sp.think)}${sp.open ? cur : ""}</div></details>`
+      + `<div class="txt">${esc(sp.answer)}${sp.open ? "" : cur}</div>`;
   }
 
   whenSpec() {
@@ -306,6 +335,13 @@ export class ChatPanel {
       });
     }
     $("#ch-max").addEventListener("change", (ev) => { this.maxTokens = Math.max(1, Math.min(2048, +ev.target.value || 128)); });
+    const th = $("#ch-think");
+    if (th) th.addEventListener("change", (ev) => {                 // 思考を表示: 全部の返事の思考の欄を開く・閉じる
+      this.showThinking = ev.target.checked;
+      for (const t of this.turns) t.thinkOpen = {};
+      try { localStorage.setItem(THINK_KEY, this.showThinking ? "1" : "0"); } catch { /* 覚えなくても使える */ }
+      this.render();
+    });
     $("#ch-sp").addEventListener("change", (ev) => {
       const v = this.spValues();
       this.spPreset = ev.target.value;
@@ -375,6 +411,8 @@ export class ChatPanel {
   }
 
   speakReply(text) {
+    const sp = this.reasoningFirst() ? splitThink(text) : null;   // 思考の欄は読み上げない
+    if (sp) text = sp.answer;
     if (!this.speak || !text || !window.speechSynthesis) return;
     const u = new SpeechSynthesisUtterance(text);
     u.lang = /[\u3040-\u30ff\u4e00-\u9fff]/.test(text) ? "ja-JP" : "en-US";
@@ -424,9 +462,15 @@ export class ChatPanel {
           this.waited = ev.waited_s;
           this.setStatus(tr("生成中(GPU を待った時間 {s} 秒)", { s: fmt(ev.waited_s, 1) }));
         } else if (ev.type === "column") { const old = this.activeCol; this.activeCol = ev.col; if (old !== null) paint(old); paint(ev.col); }
-        else if (ev.type === "text") { turn.replies[ev.col] += ev.text; paint(ev.col); }
+        else if (ev.type === "text") {
+          turn.replies[ev.col] += ev.text;
+          const st = this.reasoningFirst() ? splitThink(turn.replies[ev.col]) : null;
+          if (st && st.open) { turn.thinkTokens = turn.thinkTokens || {}; turn.thinkTokens[ev.col] = (turn.thinkTokens[ev.col] || 0) + 1; }   // 生成中は断片の数(ほぼトークン数)
+          paint(ev.col);
+        }
         else if (ev.type === "end") {
           if (ev.text !== null) turn.replies[ev.col] = ev.text;
+          if (ev.reasoning_tokens !== undefined && ev.reasoning_tokens !== null) { turn.thinkTokens = turn.thinkTokens || {}; turn.thinkTokens[ev.col] = ev.reasoning_tokens; }
           turn.finish[ev.col] = ev.finish;
           paint(ev.col);
         } else if (ev.type === "warn") { this.lastWarn = ev.warnings; this.setStatus(ev.warnings.join(" / ")); }

@@ -135,8 +135,12 @@ class Live:
                                 out, winfo = generate_when(e, ctx, msgs, vecs, w, max_tokens=max_tokens, on_token=cb,
                                                            lora=self.s.lora_for(r), sampling=sampling)
                                 text = marks.render(e, out.token_ids) if marks is not None else out.text
+                                rt = None
+                                if marks is not None:                  # 思考の長さ(画面の思考の欄の見出し)
+                                    from ..inkling import reasoning_tokens
+                                    rt = reasoning_tokens(marks, out.token_ids)
                                 q.put({"type": "end", "col": i, "text": text, "finish": out.finish, "n_gen": out.n_gen,
-                                       "when": winfo})
+                                       "when": winfo, **({"reasoning_tokens": rt} if rt is not None else {})})
                             except _Stopped:
                                 q.put({"type": "end", "col": i, "text": None, "finish": "stopped", "n_gen": None})
                                 break

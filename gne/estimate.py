@@ -164,15 +164,20 @@ def estimate(session, kind: str, params: dict) -> dict:
             sec += (n_l + 1 + n_ctrl * (1 if p.get("mode", "ablate") == "ablate" else ctrl_layers)) * per
             detail = {**detail, "layers": n_l, "seconds_per_measure": round(per, 2), "controls": n_ctrl}
     elif kind == "eval":
-        from .evalx import load_suite
+        from .evalx import INK_REASONING, INK_REASONING_EXPECT, load_suite, parse_items, thin_suite
         st = load_suite(p.get("suite"))
-        doses = p.get("doses") or [0, 0.25, 0.5, 0.75, 1]
+        ink = getattr(session.weights, "inkling", None) is not None
+        extra = 0                                                  # Inkling 2: 回答の前の思考(見込みの長さ)
+        if ink:
+            st = thin_suite(st, parse_items(p.get("items")))
+            extra = min(int(p.get("reasoning_tokens") or INK_REASONING), INK_REASONING_EXPECT)
+        doses = p.get("doses") or ([0, 1] if ink else [0, 0.25, 0.5, 0.75, 1])
         n_d = len(set(map(float, doses)) | {0.0})
         when = p.get("when") or "all"
         per = 0.0
         for cat, items in (("exact", st.exact), ("format", st.format), ("mix", st.mix), ("persona", st.persona)):
             if items:
-                per += sp.gen(len(items), st.max_tokens[cat], 8 if when == "all" else 1)
+                per += sp.gen(len(items), st.max_tokens[cat] + extra, 8 if when == "all" else 1)
         per += len(st.ppl) * 4 * sp.setprefill / 1000
         n_ctrl = int(p.get("random_controls", 0))
         kd = _keyed_eval(session, sp, p, n_d - 1, n_ctrl)          # CHANGE-07: keyed のレシピの eval の選択性(prefill だけ)

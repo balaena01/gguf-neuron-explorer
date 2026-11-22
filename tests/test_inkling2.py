@@ -79,9 +79,9 @@ def test_refuse_message():
     assert e.code == "ARCH_UNSUPPORTED" and "control vector" in e.message and "層 6〜17 を 3 回" in e.message
     assert "docs/inkling2.md" in e.hint
     from gne.inkling import check_command
-    for ok in ("info", "chat", "behave", "probe", "heads pipeline", "heads refine", "headproj export", None):   # CHiPS の流れは通す
+    for ok in ("info", "chat", "behave", "eval", "probe", "heads pipeline", "heads refine", "headproj export", None):   # CHiPS の流れと評価は通す
         check_command(_plan(), ok)
-    for bad in ("eval", "direction", "steer", "nw pipeline", "stats resid"):
+    for bad in ("direction", "steer", "nw pipeline", "stats resid"):
         with pytest.raises(GneError) as ex:
             check_command(_plan(), bad)
         assert ex.value.code == "ARCH_UNSUPPORTED" and f"gne {bad}" in ex.value.message
@@ -916,6 +916,55 @@ def test_bake_checks_free_space_at_the_output(tmp_path, monkeypatch):
     ip.check_space(ip.out_space(dst, 10 * 2**30), dst)
     monkeypatch.setattr(ip, "_wsl", lambda: False)
     assert "WSL" not in ip.space_text(ip.out_space(dst, 1))
+
+
+def test_eval_reads_the_answer_after_the_reasoning():
+    """評価(Inkling 2): 返事を思考の後の回答に切る(回答の長さで切る・思考の途中で切れたら空・壊れ方の印)、壊れた返事の数、
+    問題の間引き、まだ使えないものの断り。"""
+    from types import SimpleNamespace
+
+    from gne.evalx import Suite, _ink_refuse, broken_counts, ink_answer, parse_items, thin_suite
+    from gne.steer import GneError, Recipe, parse_unit
+    E = SimpleNamespace(is_eog=lambda t: t == 0, detokenize=lambda ids: " ".join(f"w{t}" for t in ids))
+    T = 99                                                            # <|content_text|> の代わり
+    o = {"token_ids": [5, 6, 7, T, 11, 12, 13, 0], "finish": "eog"}
+    a = ink_answer(E, o, 32, T)
+    assert a["text"] == "w11 w12 w13" and a["token_ids"] == [11, 12, 13] and a["finish"] == "eog"
+    assert a["answer"] and a["reasoning_tokens"] == 3 and not a["cut_answer"] and a["answer_at"] == 4
+    a2 = ink_answer(E, o, 2, T)                                       # 回答の長さで切る(採点は最初の 2 トークン)
+    assert a2["token_ids"] == [11, 12] and a2["finish"] == "length" and not a2["cut_answer"]
+    a3 = ink_answer(E, {"token_ids": [5] * 40, "finish": "length"}, 32, T)   # 思考の途中で上限(回答が始まらない)
+    assert a3["text"] == "" and not a3["answer"] and a3["loop"] and a3["reasoning_tokens"] == 40
+    a4 = ink_answer(E, {"token_ids": [5, 6, T, 11], "finish": "length"}, 32, T)   # 回答の途中で全体の上限
+    assert a4["cut_answer"] and a4["finish"] == "length"
+    b = broken_counts([a, a3, a4])
+    assert b == {"n": 3, "empty": 1, "no_answer": 1, "loop": 1, "cut_answer": 1, "reasoning_median": 3.0}
+    assert parse_items(None) == {"exact": 8, "format": 4, "mix": 4, "persona": 4} and parse_items("all") is None
+    assert parse_items("2,1,0,1") == {"exact": 2, "format": 1, "mix": 0, "persona": 1}
+    with pytest.raises(GneError):
+        parse_items("1,2")
+    st = Suite("s", Path("x"), {}, {}, [{"id": i} for i in range(24)], [{"id": i} for i in range(12)], [{"id": i} for i in range(8)],
+               [{"id": i} for i in range(8)], [{"id": "p"}])
+    t = thin_suite(st, parse_items("8,4,0,4"))
+    assert [x["id"] for x in t.exact] == [0, 3, 7, 10, 13, 16, 20, 23] and len(t.format) == 4 and t.mix == [] and len(t.persona) == 4
+    assert t.ppl == st.ppl and thin_suite(st, None) is st
+    r = Recipe([parse_unit("11:H5:s2@d")], "m")
+    _ink_refuse(r, when=None, lora_when="all", random_controls=0, head_controls=0)
+    for kw in ({"random_controls": 2}, {"lora_when": "reply"}, {"when": "gen"}):
+        with pytest.raises(GneError) as e:
+            _ink_refuse(r, **{"when": None, "lora_when": "all", "random_controls": 0, "head_controls": 0, **kw})
+        assert e.value.code == "ARCH_UNSUPPORTED"
+
+
+def test_reasoning_token_count():
+    """思考の長さ(画面の思考の欄の見出し・gne chat --hide-reasoning・behave の reasoning_tokens): 思考の始まりから回答の区切りまで。"""
+    from types import SimpleNamespace
+
+    from gne.inkling import reasoning_tokens
+    mk = SimpleNamespace(think=7, text=9)
+    assert reasoning_tokens(mk, [7, 1, 2, 3, 9, 4, 5]) == 3
+    assert reasoning_tokens(mk, [7, 1, 2, 3, 4]) == 4                  # 回答が始まらない
+    assert reasoning_tokens(mk, [1, 2, 3]) is None                    # 思考の区切りが無い
 
 
 def test_rewrite_gguf_copies_untouched_and_adds_keys(tmp_path):

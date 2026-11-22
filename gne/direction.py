@@ -441,11 +441,14 @@ def thin(v: list, n: int | None) -> list:
 
 
 def behavior(session, cs: ContrastSet, val: Validate, recipe, *, max_tokens: int = 64,
-             base_lp: np.ndarray | None = None, max_examples: int | None = None, with_kl: bool = True) -> dict:
+             base_lp: np.ndarray | None = None, max_examples: int | None = None, with_kl: bool = True,
+             reasoning: int | None = None) -> dict:
     """消したい振る舞いがどれだけ出るか: A 側(system_a 付き)の検証プロンプトの出力で判定の一致率、
     B 側(system_b 付き)の次トークン分布の KL(base‖recipe)。recipe が None なら無介入。
-    max_examples で質問を等間隔に間引く。with_kl=False なら KL を測らない(B 側を読まない)。"""
-    from .evalx import _generate
+    max_examples で質問を等間隔に間引く。with_kl=False なら KL を測らない(B 側を読まない)。
+    Inkling 2 では思考の後の回答で判定する(evalx.gen_answers、思考の上限 reasoning)。最初のトークンの KL は思考の始まりを
+    読むだけなので測らない。"""
+    from .evalx import INK_REASONING, _generate, gen_answers, is_inkling
     rx = re.compile(val.match, re.IGNORECASE) if val.match else None
     from .reverse import combine, side_interventions
     vecs = session.vectors(recipe)[0] if recipe is not None else None
@@ -453,7 +456,12 @@ def behavior(session, cs: ContrastSet, val: Validate, recipe, *, max_tokens: int
     ivs = side_interventions(session, cs) if cs.has_recipes else {"A": (None, None), "B": (None, None)}
     gen = cs.convs("A", thin(list(val.prompts), max_examples))
     kl_convs = thin(cs.convs("B"), max_examples)
-    outs = _generate(session, [(c, max_tokens) for c in gen], *combine(ivs["A"], vecs, lora), "all", lambda n: None)
+    if is_inkling(session):
+        outs = gen_answers(session, [(c, max_tokens) for c in gen], *combine(ivs["A"], vecs, lora), "all", lambda n: None,
+                           reasoning=INK_REASONING if reasoning is None else reasoning)
+        with_kl = False
+    else:
+        outs = _generate(session, [(c, max_tokens) for c in gen], *combine(ivs["A"], vecs, lora), "all", lambda n: None)
     lp = last_logprobs(session, kl_convs, *combine(ivs["B"], vecs, lora)) if with_kl else None
     return {"rate": float(np.mean([bool(rx.search(o["text"])) for o in outs])) if rx else None,
             "kl_b": kl(base_lp, lp) if base_lp is not None and lp is not None else 0.0, "lp": lp,
