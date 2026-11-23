@@ -168,8 +168,13 @@ def gen_answers(session, items, vecs, lora, when: str, tick, *, reasoning: int =
     """_generate と同じ items([(プロンプトか会話, 回答の長さ)])。Inkling 2 では思考の上限を足して生成し、回答の部分だけに
     する(ink_answer)。cache(無介入の腕の返事の置き場所)を渡すと、あればそれを読み、無ければ生成して書く。ほかのモデルは
     _generate そのまま。"""
-    if not is_inkling(session):
-        return _generate(session, items, vecs, lora, when, tick, sampling=sampling, lora_when=lora_when)
+    if not is_inkling(session):                      # ほかのモデル: 前と同じ呼び方(既定の引数は渡さない)
+        kw = {}
+        if sampling is not None:
+            kw["sampling"] = sampling
+        if lora_when != "all":
+            kw["lora_when"] = lora_when
+        return _generate(session, items, vecs, lora, when, tick, **kw)
     e = session.engine
     from .inkling import ReplyMarks
     text_id = ReplyMarks(e).text

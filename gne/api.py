@@ -598,7 +598,8 @@ class Session:
                   self.store.reverse_dir(self.meta.model_id) / f"{name}.directions.npz"):
             if q.exists():
                 return q
-        others = self.store.direction_elsewhere(str(name), self.meta.model_id, model_name=self.meta.name, arch=self.meta.arch)
+        others = self.store.direction_elsewhere(str(name), self.meta.model_id, model_name=getattr(self.meta, "name", None),
+                                                arch=getattr(self.meta, "arch", None))
         if others:                                   # 同じモデルの別のファイル(別の量子化など)で作った方向
             o, here = others[0], str(self.meta.path)
             from .inkling import ARCHS
@@ -2063,7 +2064,7 @@ class Session:
             raise GneError("BAD_RECIPE", "ユニットがありません")
         if (judge_model is None) != (judge_target is None):
             raise GneError("BAD_ARGS", "--judge-model と --judge-target は両方指定してください")
-        ink = self.weights.inkling is not None
+        ink = getattr(getattr(self, "weights", None), "inkling", None) is not None
         if doses is None:
             doses = INK_DOSES if ink else (0, 0.25, 0.5, 0.75, 1.0)
         if not ink and (items is not None or reasoning_tokens is not None):
