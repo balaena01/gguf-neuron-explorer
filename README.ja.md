@@ -62,7 +62,7 @@ llama-cpp-python 経由で llama.cpp の上で動くので、手元の量子化�
 - Metal では試していません。
 - MoE モデル: granite-3.1-1b-a400m と LFM2-8B-A1B。[MoE(専門家を選ぶモデル)](#moe専門家を選ぶモデル)を見てください。
 - SenseNova-Loop-9B(arch `sensenova_loop`、層 4〜27 を 2 回実行する)。公式の llama.cpp はまだ読めないので、2 つの改造版の llama.cpp のどちらかと、llama-cpp-python 0.3.36 の直しを入れた専用の環境が要ります。改造版ごとに読める GGUF が違います。モデルの開発元の改造版(OpenSenseNova/llama.cpp。llama.cpp 1.0 が元)は公式の GGUF(sensenova/SenseNova-Loop-9B-GGUF。BF16 を含む)を読み、GuideboardLabs 版(llama.cpp 0.8 が元)は guideboardlabs/SenseNova-Loop-9B-GGUF を読みます。生成は GuideboardLabs 版のほうが約 5 倍速く動きます。どちらを選ぶかは [docs/sensenova_loop.md](docs/sensenova_loop.md)、パッチは [third_party/sensenova-loop/](third_party/sensenova-loop/README.md) を見てください。
-- Inkling-2-Mini(arch `inkling2_loop`、層 6〜17 を 3 回実行する MoE)。いまは読み込み・情報・マップ・会話だけで、中を測る・書き換える機能は理由を書いて止まります。公式の llama.cpp に未取り込みの修正(PR #32704)を当てたビルドと、llama-cpp-python 0.3.36 の直しを入れた専用の環境が要ります。[docs/inkling2.md](docs/inkling2.md) を見てください。
+- Inkling-2-Mini(arch `inkling2_loop`、層 6〜17 を 3 回実行し、答えの前に思考を書く MoE)。中を読む処理(`gne inkling …`)、CHiPS の流れ(方向・ヘッド / attention 全体 / MLP 全体 / 専門家のニューロンの順位づけ・組・レシピ)と残りから追加、LoRA の書き出し、元の大きさのままの焼き込み(同じモデルの別の量子化への焼き込みも)、思考の後の回答で測る評価、思考を折りたたむ会話を使えます。FiSH・キー・lens などほかの方向を使う機能は理由を書いて止まります。PR #32704 を取り込んだコミット(`690b87d8`、2026-11-21)以降の llama.cpp と、中を読むための名前の patch([third_party/inkling2/](third_party/inkling2/README.md))、llama-cpp-python 0.3.36 の直しを入れた専用の環境が要ります。確かめたのはおもに UD-IQ2_XXS と公開のひな形です。[docs/inkling2.md](docs/inkling2.md) を見てください。
 - 初めて使うモデルでは、まず `gne verify` で確かめてください。
 
 ## インストール
@@ -634,7 +634,7 @@ python -m pytest -q
 - [FiSH: ほとんど働いていないニューロンを書き換えて、決まった場面でだけ口調を変える](https://balaena01.github.io/fish-steering/#ja): FiSH の記事。実測とデータつき
 - [docs/qwen4exp.md](docs/qwen4exp.md): Qwen3.8-Flash-Next(`qwen4exp`)。分割ファイルの GGUF、4 本の残差ストリーム、control vector なしで使えるもの
 - [docs/sensenova_loop.md](docs/sensenova_loop.md): SenseNova-Loop-9B(`sensenova_loop`)。環境の作り方、2 回実行する層の番号、書き換えを両方の回か片方の回に当てる方法、回ごとの CHiPS
-- [docs/inkling2.md](docs/inkling2.md): Inkling-2-Mini(`inkling2_loop`)。環境の作り方、構造(3 回の繰り返し・複数の残差の流れ)、段の番号、会話の思考の欄、使える機能と止まる機能
+- [docs/inkling2.md](docs/inkling2.md): Inkling-2-Mini(`inkling2_loop`)。環境の作り方、構造(3 回の繰り返し・複数の残差の流れ)、段の番号、会話の思考の欄、中を読む処理、CHiPS の流れ、書き出しと焼き込み(元の大きさ・`--into`)、評価、止まる機能
 - [docs/head-component-steering.md](docs/head-component-steering.md): CHiPS。因果で選んだ数個の attention ヘッドの、方向に沿った成分だけを変える手法(`mode: proj`、`gne direction score`、`gne heads causal`、`gne heads allocate`、`gne eval --compare-methods`)と、全層の射影消去との関係
 - [docs/keyed-write.md](docs/keyed-write.md): キーつきの書き込み。残差に書き込む重み行列の入力に、対照集合から作ったキーが反応するときだけ効くランク 1 の書き込み(`mode: keyed`、`gne direction key`、`gne direction key-check`)と、語尾の例、CHiPS との使い分け、効く場所の探し方(`gne direction key-causal`)
 - [docs/persona_workflow.md](docs/persona_workflow.md): 性格をニューロンで作る手順（`examples/persona_neurons/` のスクリプトと、ヤンデレでたどった道）と、お手本の会話から attention ヘッドとニューロンを導く手順
