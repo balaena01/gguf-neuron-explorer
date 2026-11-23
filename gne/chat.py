@@ -72,13 +72,16 @@ def effort_choices(template: str | None) -> list[str] | None:
     return re.findall(r"[\"']([\w-]+)[\"']\s*:", m.group(1)) if m else []
 
 
-def effort_value(template: str | None, value):
+def effort_value(template: str | None, value, *, strict: bool = True):
     """--reasoning-effort の値をテンプレートに渡す形にする。None・空はテンプレートの既定(渡さない)。名前の表があるテンプレートは、
-    その名前か 0〜0.99 の数(Inkling 2 のテンプレートの範囲)。"""
+    その名前か 0〜0.99 の数(Inkling 2 のテンプレートの範囲)。reasoning_effort を使わないテンプレートは、strict なら止め、
+    strict でなければ(OpenAI 互換 API: クライアントが自分で付けて送ることがある)何もしない。"""
     if value is None or (isinstance(value, str) and not value.strip()):
         return None
     choices = effort_choices(template)
     if choices is None:
+        if not strict:
+            return None
         raise GneError("BAD_ARGS", "このモデルのチャットテンプレートは reasoning_effort を使いません")
     v = value.strip() if isinstance(value, str) else value
     try:

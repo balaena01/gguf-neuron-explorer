@@ -147,6 +147,7 @@ def test_reasoning_effort_values():
             effort_value(tpl, bad)
     with pytest.raises(GneError):
         effort_value("{{ messages }}", "low")
+    assert effort_value("{{ messages }}", "low", strict=False) is None       # OpenAI 互換 API: 使わないテンプレートでは無視する
 
 
 def test_chips_trial_projection_math():
@@ -890,6 +891,7 @@ def test_missing_direction_points_to_the_model_it_was_made_on(tmp_path):
     (st.root / "directions" / "other" / "tone2.npz").write_bytes(b"x")
     assert [o["model_id"] for o in st.direction_elsewhere("tone", "ink-q2", model_name="Ink", arch=ARCH)] == ["ink-src"]
     assert st.direction_elsewhere("tone2", "ink-q2", model_name="Ink", arch=ARCH) == []          # 別のモデルの方向は数えない
+    assert st.direction_elsewhere("tone", "ink-q2", model_name=None, arch=ARCH) == []            # 名前の無いモデルは同じと決めない
     me = SimpleNamespace(store=st, meta=SimpleNamespace(model_id="ink-q2", path=Path("models/Ink-Q2_K_XL.gguf"), name="Ink", arch=ARCH))
     with pytest.raises(GneError) as e:
         Session.direction_path(me, "tone")
@@ -903,7 +905,7 @@ def test_missing_direction_points_to_the_model_it_was_made_on(tmp_path):
     (md / "ink-src.json").write_text(_json.dumps({"model_id": "ink-src", "path": "models/Ink-IQ2_XXS.gguf", "name": "Ink", "arch": "llama"}))
     with pytest.raises(GneError) as e:
         Session.direction_path(me, "tone")
-    assert "gne -m models/Ink-IQ2_XXS.gguf" in e.value.hint and "--into models/Ink-Q2_K_XL.gguf" in e.value.hint
+    assert "gne -m models/Ink-IQ2_XXS.gguf" in e.value.hint and "--into" not in e.value.hint     # --into はほかのモデルでは F16 / BF16 向け
 
 
 def test_bake_checks_free_space_at_the_output(tmp_path, monkeypatch):

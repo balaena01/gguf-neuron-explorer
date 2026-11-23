@@ -126,7 +126,7 @@ def register(app: FastAPI, session, live) -> None:
                 raise GneError("BAD_ARGS", "max_tokens は 1〜4096 です")
             sampling = sampling_from(body, recipe)
             from ..chat import effort_value              # reasoning_effort(OpenAI と同じ名前)。テンプレートが使うときだけ
-            effort = effort_value(session.engine.chat_template, body.get("reasoning_effort"))
+            effort = effort_value(session.engine.chat_template, body.get("reasoning_effort"), strict=False)   # 使わないモデルでは無視
         except GneError as e:
             return _err(e)
         cid, created = f"chatcmpl-{uuid.uuid4().hex[:12]}", int(time.time())

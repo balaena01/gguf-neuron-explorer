@@ -120,7 +120,7 @@ class Store:
         別の量子化を -m にすると見つからない。フォルダは作らない。"""
         out = []
         md = self.root / "models"
-        if not name or not md.is_dir() or "/" in str(name):
+        if not name or not model_name or not md.is_dir() or "/" in str(name):   # 名前の無いモデルは同じモデルと決められない
             return out
         for f in sorted(md.glob("*.json")):
             try:

@@ -603,12 +603,12 @@ class Session:
             o, here = others[0], str(self.meta.path)
             from .inkling import ARCHS
             how = (f"gne -m {o['path']} headproj export --recipe <レシピ> --bake --into {here} --out <GGUF>"
-                   if self.meta.arch in ARCHS else f"gne -m {o['path']} …(同じコマンド)。別の量子化に焼き込むなら "
-                                                  f"gne -m {o['path']} headproj export --recipe <レシピ> --bake --into {here} --out <GGUF>")
+                   if self.meta.arch in ARCHS else f"gne -m {o['path']} …(同じコマンド)")
             raise GneError("FILE_NOT_FOUND",
                            f"方向 {name} は、このモデルのファイル({Path(here).name})の置き場所にはありません。同じモデルの別のファイル "
                            f"{o['path']} で作った方向です(gne は方向をモデルのファイルごとに保存します)",
-                           f"-m にはレシピ(方向)を作ったモデルを指定し、別の量子化に焼き込むならそのファイルを --into に: {how}")
+                           (f"-m にはレシピ(方向)を作ったモデルを指定し、別の量子化に焼き込むならそのファイルを --into に: {how}"
+                            if self.meta.arch in ARCHS else f"-m にはレシピ(方向)を作ったモデルを指定してください: {how}"))
         raise GneError("FILE_NOT_FOUND", f"方向 {name} がありません", "gne direction --contrast <対照集合> で作ってください")
 
     def direction_set(self, name: str):
