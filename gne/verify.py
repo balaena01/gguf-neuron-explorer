@@ -88,14 +88,18 @@ class Verifier:
     def v1_shapes(self) -> VResult:
         m = self.w.meta
         bad = []
-        if m.n_expert:                                  # 全層 MoE: ne = [n_ff, n_embd, n_expert]、1 専門家ぶんだけ dequantize
+        if m.n_expert:                                  # 全層 MoE: ne = [n_ff(専門家幅), n_embd, n_expert]、1 専門家ぶんだけ dequantize
+            # shared expert を持つ二幅 MoE(gemma4 等)は feed_forward_length が shared expert 幅で、
+            # ルート専門家の幅は expert_feed_forward_length(ffn_down_exps の ne[0])
+            exp_ff = self.w.field(f"{m.arch}.expert_feed_forward_length")
+            w_ff = lambda L: int(exp_ff) if isinstance(exp_ff, int) else m.n_ff_at(L)
             for L in range(m.n_layer):
                 name = f"blk.{L}.ffn_down_exps.weight"
                 ne = [int(x) for x in self.w.tensor(name).shape] if self.w.has_tensor(name) else None
-                if ne != [m.n_ff_at(L), m.n_embd, m.n_expert]:
+                if ne != [w_ff(L), m.n_embd, m.n_expert]:
                     bad.append(f"{name} ne={ne}")
             mat = self.w.expert_down(self.L, 0)
-            if mat.shape != (m.n_embd, m.n_ff_at(self.L)) or not np.isfinite(mat).all():
+            if mat.shape != (m.n_embd, w_ff(self.L)) or not np.isfinite(mat).all():
                 bad.append(f"L{self.L} 専門家 0 の dequant {mat.shape}")
             return VResult("V1", "形状と dequantize", "fail" if bad else "pass",
                            f"全 {m.n_layer} 層の ne=[n_ff, n_embd, n_expert]、L{self.L} 専門家 0 を dequantize"
