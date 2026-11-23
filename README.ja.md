@@ -576,6 +576,8 @@ r = client.chat.completions.create(
 
 コマンドでは `gne steer --audio speech.wav --system "Respond in text." --recipe ...` で同じことができます。
 
+要求の `reasoning_effort` は、チャットテンプレートが使うとき(Inkling 2 や、gpt-oss のようにそれを読むテンプレート。コマンドでは `gne chat --reasoning-effort`)はテンプレートに渡し、使わないときは無視します。Inkling 2 では、返事の思考を `reasoning_content`、回答を `content` に分けて返します(流すときも。[docs/inkling2.md](docs/inkling2.md))。
+
 `units` の代わりに `"recipe"` で `~/.gne/recipes` に保存したレシピの名前を渡せます。`"scale"` はその dose に掛ける倍率です。生成は既定で greedy です。次のどれかに当てはまると、llama.cpp と同じ順番でサンプリングします。
 
 - `temperature` を 0 より大きくする
