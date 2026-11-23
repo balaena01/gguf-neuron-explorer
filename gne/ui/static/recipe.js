@@ -1046,6 +1046,7 @@ export class RecipePanel {
       });
       this.lxSet(`<p class="note">${t("書いていません(計算だけ)。書けば {g} GiB(元 {s} GiB)", { g: fmt((x.bytes || 0) / 2 ** 30, 2), s: fmt((x.bytes_src || 0) / 2 ** 30, 2) })}</p>
         ${x.growth ? `<p class="muted note">${esc(inkPlanText(x.growth, x.off_max))}</p>` : x.plan ? `<p class="muted note">${esc(x.plan)}</p>` : ""}
+        ${x.growth && inkLoopNote(x.growth) ? `<p class="note">${esc(inkLoopNote(x.growth))}</p>` : ""}
         ${x.kept_note ? `<p class="note">⚠ ${esc(x.off_max !== undefined ? inkKeptNote(x.modified, x.off_max) : x.kept_note)}</p>` : ""}
         ${x.into ? `<p class="muted note">${t("マージ先: {f}", { f: esc(x.into) })}</p>` : ""}
         ${x.into && (x.carry_over || []).length ? `<p class="muted note">${carryText(x.carry_over)}</p>` : ""}
@@ -1062,6 +1063,7 @@ export class RecipePanel {
         : t("{file} を書き出しました", { file: `<span class="mono">${esc(x.path)}</span>` })}(${fmt(mb, mb < 10 ? 2 : 0)} MB)</p>
       ${x.url ? `<p class="muted note mono">${esc(x.path)}</p>` : ""}
       ${x.growth ? `<p class="muted note">${esc(inkPlanText(x.growth, x.off_max))}</p>` : x.plan ? `<p class="muted note">${esc(x.plan)}</p>` : ""}
+      ${x.growth && inkLoopNote(x.growth) ? `<p class="note">${esc(inkLoopNote(x.growth))}</p>` : ""}
       ${x.vram_note ? `<p class="note">⚠ ${esc(x.growth && x.vram_free_mb !== undefined && x.vram_free_mb !== null ? inkVramNote(x.growth, x.vram_free_mb) : x.vram_note)}</p>` : ""}
       ${x.kept_note ? `<p class="note">⚠ ${esc(x.off_max !== undefined ? inkKeptNote(x.modified, x.off_max) : x.kept_note)}</p>` : ""}
       ${x.into ? `<p class="muted note">${t("マージ先: {f}", { f: esc(x.into) })}</p>` : ""}
@@ -1105,6 +1107,13 @@ function inkPlanText(g, offMax) {
   }).join(t("、")) });
   const mib = (g.bytes || 0) / 2 ** 20;
   return t("焼き込みの予定: {p}。ファイルと VRAM は合わせて {m} MiB", { p: [stayTxt, convTxt].filter(Boolean).join(t("。")), m: (mib >= 0 ? "+" : "") + fmt(mib, 0) });
+}
+
+function inkLoopNote(g) {
+  const xs = ((g && g.tensors) || []).filter((x) => x.whole_layer && x.loop_layer && x.to === x.type);
+  if (!xs.length) return "";
+  return t("層 {l} の MLP 全体の部品は繰り返しの層にあり、元の大きさのまま書いたときの小さな方向に沿わない変化が {n} 回すべての段に効くので、焼き込んだファイルは、ほかの層より実行時の LoRA との違いが大きくなることがある(公開のひな形 1 つ・UD-IQ2_XXS で測った値: 方向 2 つで 3 回目の段に LoRA 自身の変化の 0.30 ほど、Q8_0 では 0.15。方向 1 つでは Q8_0 とほぼ同じ)。避けるには型を Q8_0 にする(書き換える専門家の層 1 つにつき NVFP4 +162 MiB・Q2_0 +253 MiB)",
+    { l: xs.map((x) => x.tensor.split(".")[1]).join(t("・")), n: (g.loop && g.loop.passes) || 3 });
 }
 
 function inkKeptNote(recs, offMax) {

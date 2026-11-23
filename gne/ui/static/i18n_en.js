@@ -1271,6 +1271,8 @@ export const EN = {
   "自動(元の型・元の大きさで書いて測り、編集が残らないテンソルと、方向に沿わない変化が大きい MLP 全体の層だけ Q8_0)": "auto (write in the original types and size and measure; Q8_0 only for tensors where the edit would not survive and for whole-MLP layers with a large off-direction change)",
   "書かずに計算だけする: 型を変えるテンソルとその理由、元の大きさのまま書くテンソル、ファイルの増え方": "Compute without writing: which tensors change type and why, which stay at the original size, and how much the file grows",
   "予定を計算する(書かない)": "compute the plan (no write)",
+  "層 {l} の MLP 全体の部品は繰り返しの層にあり、元の大きさのまま書いたときの小さな方向に沿わない変化が {n} 回すべての段に効くので、焼き込んだファイルは、ほかの層より実行時の LoRA との違いが大きくなることがある(公開のひな形 1 つ・UD-IQ2_XXS で測った値: 方向 2 つで 3 回目の段に LoRA 自身の変化の 0.30 ほど、Q8_0 では 0.15。方向 1 つでは Q8_0 とほぼ同じ)。避けるには型を Q8_0 にする(書き換える専門家の層 1 つにつき NVFP4 +162 MiB・Q2_0 +253 MiB)": "The whole-MLP parts of L{l} sit in looped layers: the small off-direction change of writing them at the original size acts in all {n} passes, so the baked file can differ more from the runtime LoRA there than elsewhere (measured on one public template with UD-IQ2_XXS: with two directions about 0.30 of the LoRA's own change at pass 3, against 0.15 for Q8_0; with one direction about the same as Q8_0). To avoid it, write with the type Q8_0 (+162 MiB per rewritten NVFP4 expert layer, +253 MiB per Q2_0 layer)",
+  "・": ", ",
   "{w}(+{m} MiB{why})": "{w} (+{m} MiB{why})",
   "方向に沿わない変化 ÷ 消した成分 {v} が上限 {m} を超える": "off-direction change ÷ removed component {v} is above the limit {m}",
   "imatrix の要る型": "a type that needs an imatrix",

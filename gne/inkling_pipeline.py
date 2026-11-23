@@ -812,6 +812,7 @@ def bake_recipe(session, heads, dst: Path | None, *, requant: str = "auto", vram
     else:
         pre = prep = None
         grow = estimate_growth(SimpleNamespace(weights=tw), [u[:4] for u in units], requant)
+    _mark_loop(grow, session.weights.inkling)
     plan = bake_plan_text(grow)
     if dry_run:                                                 # 書かずに: 書き換えるテンソル・大きさ・残り方
         recs = pre if pre is not None else bake(rd, units, refs, None, requant=requant, tens=tens)["modified"]
@@ -1004,6 +1005,27 @@ def _plan_why(x: dict) -> str:
     return ""
 
 
+def _mark_loop(grow: dict, plan) -> None:
+    """予定の行に、繰り返しの層(層 6〜17、3 回実行)のテンソルかの印と、繰り返しの回数を入れる(予定の注意の文に使う)。"""
+    lo, hi = plan.core_start, plan.core_end
+    grow["loop"] = {"first": lo, "last": hi - 1, "passes": plan.n_passes}
+    for x in grow.get("tensors") or []:
+        x["loop_layer"] = lo <= int(x["tensor"].split(".")[1]) < hi
+
+
+def loop_note(grow: dict) -> str | None:
+    """繰り返しの層の MLP 全体の部品を元の大きさのまま書くときの注意(止めない。数は公開のひな形 1 つ・UD-IQ2_XXS で測った値)。"""
+    xs = [x for x in grow.get("tensors") or [] if x.get("whole_layer") and x.get("loop_layer") and x.get("to") == x.get("type")]
+    if not xs:
+        return None
+    n = (grow.get("loop") or {}).get("passes", 3)
+    ls = "・".join(x["tensor"].split(".")[1] for x in xs)
+    return (f"層 {ls} の MLP 全体の部品は繰り返しの層にあり、元の大きさのまま書いたときの小さな方向に沿わない変化が {n} 回すべての段に効くので、"
+            "焼き込んだファイルは、ほかの層より実行時の LoRA との違いが大きくなることがある(公開のひな形 1 つ・UD-IQ2_XXS で測った値: 方向 2 つで "
+            "3 回目の段に LoRA 自身の変化の 0.30 ほど、Q8_0 では 0.15。方向 1 つでは Q8_0 とほぼ同じ)。避けるには --requant q8_0(画面は Q8_0)で"
+            "書く(書き換える専門家の層 1 つにつき NVFP4 +162 MiB・Q2_0 +253 MiB)")
+
+
 def bake_plan_text(grow: dict) -> str:
     """焼き込みの予定の文: 型を変えるテンソル(層)とその理由、MLP 全体の部品を受けて元の大きさのまま書く専門家のテンソル
     (方向に沿わない変化 ÷ 消した成分)、ファイル・VRAM の増え方。"""
@@ -1019,9 +1041,10 @@ def bake_plan_text(grow: dict) -> str:
         parts.append("型を変える: " + "、".join(
             f"層 {x['tensor'].split('.')[1]} の{'専門家' if 'ffn_down_exps' in x['tensor'] else ' attention の出力'} {x['type']} → {x['to']}"
             f"(+{x['to_mib'] - x['from_mib']:.0f} MiB" + (f"、{_plan_why(x)}" if _plan_why(x) else "") + ")" for x in conv))
+    ln = loop_note(grow)
     if not conv:
-        return "焼き込みの予定: どのテンソルも元の型・元の大きさのまま" + (f"({parts[0]})" if parts else "")
-    return f"焼き込みの予定: {'。'.join(parts)}。ファイルと VRAM は合わせて {grow['bytes'] / 2**20:+.0f} MiB"
+        return "焼き込みの予定: どのテンソルも元の型・元の大きさのまま" + (f"({parts[0]})" if parts else "") + (f"。{ln}" if ln else "")
+    return f"焼き込みの予定: {'。'.join(parts)}。ファイルと VRAM は合わせて {grow['bytes'] / 2**20:+.0f} MiB" + (f"。{ln}" if ln else "")
 
 
 def gpu_free_mb() -> float | None:

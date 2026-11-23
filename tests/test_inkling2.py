@@ -768,6 +768,22 @@ def test_bake_auto_rule_whole_ffn_layers():
     assert "層 9 の専門家 NVFP4 → Q8_0(+162 MiB)" in text and "層 22 の専門家 Q2_0 → Q8_0(+253 MiB)" in text
     assert "層 14" not in text and "+415 MiB" in text
     assert "元の型・元の大きさのまま" in bake_plan_text({"bytes": 0, "tensors": grow["tensors"][1:2]})
+    # 繰り返しの層(6〜17)の MLP 全体の部品を元の大きさのまま書くときだけ、3 回の段に効く注意と Q8_0 での避け方を足す(止めない)
+    from types import SimpleNamespace
+    from gne.inkling_pipeline import _mark_loop, loop_note
+    plan = SimpleNamespace(core_start=6, core_end=18, n_passes=3)
+    g = {"bytes": 0, "tensors": [plan_entry({"tensor": "blk.17.ffn_down_exps.weight", "from": "NVFP4", "to": "NVFP4",
+                                                       "bytes_from": 1, "bytes_to": 1, "whole_layer": True, "off_over_removed": 1.01}),
+                                 plan_entry({"tensor": "blk.22.ffn_down_exps.weight", "from": "Q2_0", "to": "Q2_0", "bytes_from": 1,
+                                             "bytes_to": 1, "whole_layer": True, "off_over_removed": 1.93})]}
+    _mark_loop(g, plan)
+    assert [x["loop_layer"] for x in g["tensors"]] == [True, False] and g["loop"]["passes"] == 3
+    note = loop_note(g)
+    assert note and "層 17 の MLP 全体" in note and "層 22" not in note and "3 回すべての段" in note and "--requant q8_0" in note
+    assert note in bake_plan_text(g)
+    g2 = {"bytes": 0, "tensors": [dict(g["tensors"][0], to="Q8_0")]}
+    _mark_loop(g2, plan)
+    assert loop_note(g2) is None                                 # Q8_0 にしたなら注意は出さない
     # keep で MLP 全体の部品を元の型(IQ4_NL)に書いて編集が丸めに消えたときは注意を出す(auto なら Q8_0 になるので出ない)
     from gne.inkling_pipeline import kept_note
     recs = [{"tensor": "blk.22.ffn_down_exps.weight", "to": "IQ4_NL", "edit_kept": 0.5643},
