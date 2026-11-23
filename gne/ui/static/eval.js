@@ -52,6 +52,14 @@ function series(d) {
   return s;
 }
 
+// 方向成分の射影の部品の名前: ヘッドは H、Inkling 2 の attention 全体・MLP 全体は attn・ffn、専門家のニューロンは E N
+function projWho(u) {
+  if (u.head !== null && u.head !== undefined) return `H${u.head}`;
+  if (u.kind === "expert_neuron") return `E${u.expert} N${u.neuron}`;
+  if (u.kind === "neuron") return `N${u.neuron}`;
+  return u.kind || "?";
+}
+
 export class EvalView {
   constructor(root, { recipe, onRun, onLoadProj, onLoadRecipe, onRunJob, inkling }) {
     this.root = root;
@@ -253,7 +261,7 @@ export class EvalView {
       : u.kind === "expert_neuron" ? `E${u.expert} N${u.neuron}` : u.kind === "shared" ? `S N${u.neuron}` : u.kind === "expert" ? `E${u.expert}` : `N${u.neuron}`);
     const pm = (x) => `${x >= 0 ? "+" : "−"}${fmt(Math.abs(x), 2)}`;
     const units = d.recipe.units.map((u) => (u.mode === "query" ? `L${u.layer} H${u.head} query ${u.direction}→${String(u.seek || "").split("/").pop().replace(/\.ya?ml$/, "")} ×${fmt(u.k, 2)}`
-      : u.mode === "proj" ? `L${u.layer} H${u.head} s${+(+u.k).toFixed(3)} @${u.direction || d.recipe.default_direction || "?"}`
+      : u.mode === "proj" ? `L${u.layer} ${projWho(u)} s${+(+u.k).toFixed(3)} @${u.direction || d.recipe.default_direction || "?"}`
       : u.mode === "keyed" ? `L${u.layer} ${u.kind === "shared" ? "S" : u.kind === "expert" ? `E${u.expert}` : u.kind} keyed a${+(+u.k).toFixed(3)} @${
         u.direction || d.recipe.default_direction || "?"} #${u.key || d.recipe.default_key || "?"}`                    // CHANGE-07
       : u.mode === "gain" ? `L${u.layer} ${who(u)} ×${fmt(u.k, 2)}`

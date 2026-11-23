@@ -1092,6 +1092,10 @@ async function setView(v) {
   }
   if (v === "layers") {
     if (!state.model) { lv.innerHTML = `<p class="muted view-empty">${t("合成の構造には layers ビューのデータがありません")}</p>`; return; }
+    if (state.arch && state.arch.inkling) {             // Inkling 2: 残差が 1 本でないので層ごとの逆引きはない(サーバーも断る)
+      lv.innerHTML = `<p class="muted view-empty">${t("Inkling 2 では layers ビュー(層ごとの逆引きの cos)はありません。残差が 1 本の流れではないためです(docs/inkling2.md)")}</p>`;
+      return;
+    }
     if (!layersView) layersView = new LayersView(lv, { onPick: (L) => { setView("map"); state.map.frontView(L); } });
     state.note = t("layers ビューを読み込み中(初回は逆引きの cos を全層で計算)");
     updateStatus();

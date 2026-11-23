@@ -1045,8 +1045,8 @@ export class RecipePanel {
         return `${m.tensor} ${m.from}→${m.to}${why ? ` (${why})` : ""}`;
       });
       this.lxSet(`<p class="note">${t("書いていません(計算だけ)。書けば {g} GiB(元 {s} GiB)", { g: fmt((x.bytes || 0) / 2 ** 30, 2), s: fmt((x.bytes_src || 0) / 2 ** 30, 2) })}</p>
-        ${x.plan ? `<p class="muted note">${esc(x.plan)}</p>` : ""}
-        ${x.kept_note ? `<p class="note">⚠ ${esc(x.kept_note)}</p>` : ""}
+        ${x.growth ? `<p class="muted note">${esc(inkPlanText(x.growth, x.off_max))}</p>` : x.plan ? `<p class="muted note">${esc(x.plan)}</p>` : ""}
+        ${x.kept_note ? `<p class="note">⚠ ${esc(x.off_max !== undefined ? inkKeptNote(x.modified, x.off_max) : x.kept_note)}</p>` : ""}
         ${x.into ? `<p class="muted note">${t("マージ先: {f}", { f: esc(x.into) })}</p>` : ""}
         ${x.into && (x.carry_over || []).length ? `<p class="muted note">${carryText(x.carry_over)}</p>` : ""}
         ${rows.length ? `<p class="muted note mono">${esc(rows.join("\n")).replace(/\n/g, "<br>")}</p>` : ""}`);
@@ -1061,9 +1061,9 @@ export class RecipePanel {
     this.lxSet(`<p class="note">${x.url ? t("{file} を書き出しました", { file: `<a href="${esc(x.url)}" download="${esc(x.file)}">${esc(x.file)}</a>` })
         : t("{file} を書き出しました", { file: `<span class="mono">${esc(x.path)}</span>` })}(${fmt(mb, mb < 10 ? 2 : 0)} MB)</p>
       ${x.url ? `<p class="muted note mono">${esc(x.path)}</p>` : ""}
-      ${x.plan ? `<p class="muted note">${esc(x.plan)}</p>` : ""}
-      ${x.vram_note ? `<p class="note">⚠ ${esc(x.vram_note)}</p>` : ""}
-      ${x.kept_note ? `<p class="note">⚠ ${esc(x.kept_note)}</p>` : ""}
+      ${x.growth ? `<p class="muted note">${esc(inkPlanText(x.growth, x.off_max))}</p>` : x.plan ? `<p class="muted note">${esc(x.plan)}</p>` : ""}
+      ${x.vram_note ? `<p class="note">⚠ ${esc(x.growth && x.vram_free_mb !== undefined && x.vram_free_mb !== null ? inkVramNote(x.growth, x.vram_free_mb) : x.vram_note)}</p>` : ""}
+      ${x.kept_note ? `<p class="note">⚠ ${esc(x.off_max !== undefined ? inkKeptNote(x.modified, x.off_max) : x.kept_note)}</p>` : ""}
       ${x.into ? `<p class="muted note">${t("マージ先: {f}", { f: esc(x.into) })}</p>` : ""}
       ${x.into && (x.carry_over || []).length ? `<p class="muted note">${carryText(x.carry_over)}</p>` : ""}
       ${x.imatrix ? `<p class="muted note">${t(x.imatrix_auto ? "imatrix: {f}(モデルの隣で見つけたもの)" : "imatrix: {f}", { f: esc(x.imatrix) })}</p>` : ""}
@@ -1081,12 +1081,53 @@ export class RecipePanel {
 }
 
 // マージ先(同じモデルの別の量子化)に焼き込んだときの、消す量(r̂ᵀW)の違いのまとめ(Inkling 2 の結果の carry_over)
+// Inkling 2 の焼き込みの予定と注意を、結果の数(growth・modified)からこの画面の言葉で組み立てる(サーバーの文は日本語だけ)
+function inkPlanWhy(x, offMax) {
+  if (x.why === "off_direction") return t("方向に沿わない変化 ÷ 消した成分 {v} が上限 {m} を超える", { v: fmt(x.off_over_removed, 2), m: offMax });
+  if (x.why === "edit_kept") return t("元の型では残る編集 {v}", { v: fmt(x.edit_kept, 2) });
+  if (x.why === "imatrix") return t("imatrix の要る型");
+  return "";
+}
+
+function inkPlanText(g, offMax) {
+  const ts = (g && g.tensors) || [];
+  const layer = (x) => x.tensor.split(".")[1];
+  const conv = ts.filter((x) => x.to && x.to !== x.type);
+  const stay = ts.filter((x) => x.whole_layer && x.to === x.type && x.off_over_removed !== undefined && x.off_over_removed !== null);
+  const stayTxt = stay.length ? t("元の大きさのまま: {s}", { s: stay.map((x) => t("層 {l} の専門家 {ty}(MLP 全体の部品。方向に沿わない変化 ÷ 消した成分 {v}、上限 {m})",
+    { l: layer(x), ty: x.type, v: fmt(x.off_over_removed, 2), m: offMax })).join(t("、")) }) : "";
+  if (!conv.length) return stayTxt ? t("焼き込みの予定: どのテンソルも元の型・元の大きさのまま({s})", { s: stayTxt }) : t("焼き込みの予定: どのテンソルも元の型・元の大きさのまま");
+  const convTxt = t("型を変える: {s}", { s: conv.map((x) => {
+    const why = inkPlanWhy(x, offMax);
+    const what = x.tensor.includes("ffn_down_exps") ? t("層 {l} の専門家 {a} → {b}", { l: layer(x), a: x.type, b: x.to })
+      : t("層 {l} の attention の出力 {a} → {b}", { l: layer(x), a: x.type, b: x.to });
+    return t("{w}(+{m} MiB{why})", { w: what, m: fmt(x.to_mib - x.from_mib, 0), why: why ? t("、") + why : "" });
+  }).join(t("、")) });
+  const mib = (g.bytes || 0) / 2 ** 20;
+  return t("焼き込みの予定: {p}。ファイルと VRAM は合わせて {m} MiB", { p: [stayTxt, convTxt].filter(Boolean).join(t("。")), m: (mib >= 0 ? "+" : "") + fmt(mib, 0) });
+}
+
+function inkKeptNote(recs, offMax) {
+  const low = (recs || []).filter((m) => m.edit_kept !== undefined && m.edit_kept !== null && m.edit_kept < 0.9);
+  const off = (recs || []).filter((m) => m.whole_layer && (m.off_over_removed || 0) > offMax && !low.includes(m));
+  const out = [];
+  const list = (xs, f) => xs.slice(0, 3).map(f).join(t("、")) + (xs.length > 3 ? t(" など") : "");
+  if (low.length) out.push(t("書いた型では編集の 1 割以上が丸めに消えたテンソルがあります(残った編集: {w})", { w: list(low, (m) => t("{n}({ty})は {v}", { n: m.tensor, ty: m.to, v: `${Math.round(m.edit_kept * 100)}%` })) }));
+  if (off.length) out.push(t("元の型のままでは、方向に沿わない変化 ÷ 消した成分が上限 {m} を超えたテンソルがあります({w})", { m: offMax, w: list(off, (m) => t("{n}({ty})は {v}", { n: m.tensor, ty: m.to, v: fmt(m.off_over_removed, 2) })) }));
+  return out.length ? out.join(t("。")) + t("。型を自動(こうしたテンソルだけ Q8_0)にするか、LoRA で配ってください") : "";
+}
+
+function inkVramNote(g, free) {
+  return t("焼き込むと VRAM が {g} MiB 増えます(書き換える専門家の層 {l})。いまの空きは {f} MiB です(いまのモデルと作業用の領域を載せたままの値)。焼き込んだ GGUF を読み込むときに GPU に収まらなければ、部品の層を減らすか、型を自動(元の大きさ)にしてください(書き換える専門家の層 1 つで Q8_0 は Q2_0 の層 +253 MiB・NVFP4 の層 +162 MiB)",
+    { g: fmt((g.bytes || 0) / 2 ** 20, 0), l: `[${(g.expert_layers || []).join(", ")}]`, f: fmt(free, 0) });
+}
+
 function carryText(co) {
   const r = co.map((x) => x.norm_ratio), far = co.filter((x) => Math.abs(x.norm_ratio - 1) > 0.1);
   const head = t("消す量(r̂ᵀW)のこのモデルとマージ先の大きさの比 {lo}〜{hi}(部品 {n} 個)", { lo: fmt(Math.min(...r), 2), hi: fmt(Math.max(...r), 2), n: co.length });
   return far.length
-    ? `${head}。${t("1 から 1 割以上離れた部品(このモデルで決めた強さの効き方が変わる): {u}", { u: `<span class="mono">${esc(far.map((x) => `${x.unit} ${fmt(x.norm_ratio, 2)}`).join(", "))}</span>` })}`
-    : `${head}。${t("どの部品も 1 割以内")}`;
+    ? `${head}${t("。")}${t("1 から 1 割以上離れた部品(このモデルで決めた強さの効き方が変わる): {u}", { u: `<span class="mono">${esc(far.map((x) => `${x.unit} ${fmt(x.norm_ratio, 2)}`).join(", "))}</span>` })}`
+    : `${head}${t("。")}${t("どの部品も 1 割以内")}`;
 }
 
 export { signed };

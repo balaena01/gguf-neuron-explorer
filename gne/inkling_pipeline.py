@@ -815,7 +815,7 @@ def bake_recipe(session, heads, dst: Path | None, *, requant: str = "auto", vram
     plan = bake_plan_text(grow)
     if dry_run:                                                 # 書かずに: 書き換えるテンソル・大きさ・残り方
         recs = pre if pre is not None else bake(rd, units, refs, None, requant=requant, tens=tens)["modified"]
-        out = {"path": None, "dry_run": True, "modified": recs, "growth": grow, "plan": plan, "requant": requant,
+        out = {"path": None, "dry_run": True, "modified": recs, "growth": grow, "plan": plan, "requant": requant, "off_max": _off_max(),
                "bytes_src": Path(tw.path).stat().st_size, "bytes": Path(tw.path).stat().st_size + grow["bytes"]}
         if meta:
             out.update(into=str(tw.path), carry_over=carry_over(session, heads, tw))
@@ -843,11 +843,17 @@ def bake_recipe(session, heads, dst: Path | None, *, requant: str = "auto", vram
         r["into"] = Path(tw.path).name if strip_meta else str(tw.path)
         r["carry_over"] = carry_over(session, heads, tw)
     r["plan"] = plan
+    r["off_max"] = _off_max()
     if vram_note:
         r["vram_note"] = vram_note
     if kept_note(r["modified"]):
         r["kept_note"] = kept_note(r["modified"])
     return r
+
+
+def _off_max() -> float:
+    from .inkling_bake import OFF_MAX
+    return OFF_MAX
 
 
 def kept_note(recs) -> str | None:
@@ -1061,7 +1067,8 @@ def estimate_growth(session, units: list, requant: str) -> dict:
             q = qtype_of({"q8_0": 8, "f16": 1}[requant])
             bs, ts = block_sizes(q)
             to = n_el * ts // bs
-        per.append({"tensor": nm, "type": t.tensor_type.name, "from_mib": t.n_bytes / 2**20, "to_mib": to / 2**20})
+        to_type = t.tensor_type.name if requant == "keep" else {"q8_0": "Q8_0", "f16": "F16"}[requant]
+        per.append({"tensor": nm, "type": t.tensor_type.name, "to": to_type, "from_mib": t.n_bytes / 2**20, "to_mib": to / 2**20})
         tot += to - int(t.n_bytes)
     return {"bytes": tot, "tensors": per,
             "expert_layers": sorted({int(x["tensor"].split(".")[1]) for x in per if "ffn_down_exps" in x["tensor"]})}
