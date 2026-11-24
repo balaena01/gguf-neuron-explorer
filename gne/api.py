@@ -1817,6 +1817,75 @@ class Session:
         r.save(path)
         return {"name": name, "path": str(path), "recipe": r.to_dict(), **({"note": note} if note else {})}
 
+    def unit_check(self, spec: str, *, default_direction: str | None = None, default_key: str | None = None) -> dict:
+        """レシピの欄の「ユニットを足す」(v0.10.1): 書き方を読み、このモデルで当てられるかを確かめる(モデルは流さない)。
+        当てられれば {"ok": True, "unit": レシピの行(/api/recipes と同じ形。省いた方向・鍵は既定で埋めて *_default を付ける),
+        "label", "spec"}。当てられなければ {"ok": False, "code", "params", "message", "hint"}(code は画面が訳す: grammar /
+        no_direction / no_key / layer_range / head_range / no_heads / neuron_range / expert_range / not_moe / no_such_direction /
+        model。model は Session.recipe の文をそのまま)。"""
+        from .steer import parse_unit
+        spec = str(spec or "").strip()
+
+        def bad(code, e=None, **params):
+            return {"ok": False, "code": code, "params": params, "spec": spec,
+                    "message": e.message if e is not None else "", "hint": e.hint if e is not None else None}
+        try:
+            u = parse_unit(spec)
+        except GneError as e:
+            return bad("grammar", e)
+        if u.mode in ("proj", "keyed", "nw") and not (u.direction or default_direction):
+            return bad("no_direction")
+        if u.mode in ("keyed", "nw") and not (u.key or default_key):
+            return bad("no_key")
+        ink = self.weights.inkling
+        n_layers = ink.n_stored if ink is not None else self.weights.n_main
+        if ink is not None and u.mode != "proj":
+            return bad("inkling_proj_only")
+        if not 0 <= u.layer < n_layers:
+            return bad("layer_range", layer=u.layer, max=n_layers - 1)
+        if ink is None and u.kind == "neuron" and u.neuron is not None and self.weights.is_moe(u.layer):
+            return bad("moe_neuron", layer=u.layer)
+        li = self.weights.arch.layers[0 if ink is not None else u.layer]
+        if u.kind == "head" and u.head is not None:
+            nh = int(getattr(li, "n_head", 0) or 0)
+            if nh == 0:
+                return bad("no_heads", layer=u.layer)
+            if not 0 <= u.head < nh:
+                return bad("head_range", layer=u.layer, head=u.head, max=nh - 1)
+        if u.kind in ("expert_neuron", "expert"):
+            if ink is None and not self.weights.is_moe(u.layer):
+                return bad("not_moe", layer=u.layer)
+            ne, nf = int(getattr(li, "n_expert", 0) or 0), int(getattr(li, "n_ff", 0) or 0)
+            if ne and not 0 <= (u.expert or 0) < ne:
+                return bad("expert_range", layer=u.layer, expert=u.expert, max=ne - 1)
+            if u.kind == "expert_neuron" and nf and not 0 <= (u.neuron or 0) < nf:
+                return bad("neuron_range", layer=u.layer, neuron=u.neuron, max=nf - 1)
+        elif u.kind == "neuron" and u.neuron is not None and ink is None and not self.weights.is_moe(u.layer):
+            nf = self.meta.n_ff_at(u.layer)
+            if not 0 <= u.neuron < nf:
+                return bad("neuron_range", layer=u.layer, neuron=u.neuron, max=nf - 1)
+        dname = u.direction or (default_direction if u.mode in ("proj", "keyed", "nw") else None)
+        if u.kind == "direction" and u.direction:
+            dname = u.direction
+        if dname:
+            try:
+                self.direction_set(dname)
+            except GneError as e:
+                return bad("no_such_direction", e, name=dname)
+        try:
+            r = self.recipe(units=[spec], default_direction=default_direction, default_key=default_key)
+        except GneError as e:
+            return bad("model", e)
+        row = r.to_dict()["units"][0]
+        if row.get("mode") == "proj" and not row.get("direction"):
+            row["direction"] = default_direction
+        if row.get("mode") in ("keyed", "nw"):
+            if not row.get("direction") and default_direction:
+                row["direction"], row["direction_default"] = default_direction, True
+            if not row.get("key") and default_key:
+                row["key"], row["key_default"] = default_key, True
+        return {"ok": True, "unit": row, "label": r.units[0].label(), "spec": spec}
+
     def recipe_path(self, name_or_path: str | Path) -> Path:
         p = Path(name_or_path)
         if p.suffix in (".yaml", ".yml") and p.exists():

@@ -7,6 +7,7 @@
 // 組の比較の下の「候補を作る」で heads_candidates のジョブを投げる(組 × 全体の倍率の返事を作り、名前を伏せて採点する。
 // 結果は同じビューの「強さの候補」に出る)。
 import { getJSON } from "./api.js";
+import { parseProj } from "./recipe.js";
 import { LANG, t } from "./i18n.js";
 import { esc } from "./panels.js";
 import { Steps } from "./steps.js";
@@ -165,6 +166,34 @@ const mrNext = (mr, refine) => {
 };
 const partName = (q) => (q.kind === "neuron" ? `L${q.layer} ${q.expert !== undefined && q.expert !== null ? `E${q.expert} ` : ""}N${q.head}${inkMark(q.layer)}` : q.kind === "layer_attn" ? `L${q.layer} attn` : q.kind === "layer_mlp" ? `L${q.layer} ffn` : `L${q.layer} H${q.head}`);
 
+// --- 候補を 1 個ずつレシピに足す(v0.10.1) ---------------------------------------------------------------------
+// 候補の行(書き込みの順位・確かめ・因果の表: { layer, index | head, kind, expert })→ 射影のユニット(レシピの行の形)
+const candUnit = (r, s, dir) => {
+  const L = +r.layer, i = +(r.index ?? r.head);
+  if (r.kind === "layer_attn") return { layer: L, kind: "attn", mode: "proj", s, direction: dir };
+  if (r.kind === "layer_mlp") return { layer: L, kind: "ffn", mode: "proj", s, direction: dir };
+  if (r.kind === "neuron") return r.expert !== undefined && r.expert !== null
+    ? { layer: L, kind: "expert_neuron", mode: "proj", expert: +r.expert, neuron: i, s, direction: dir }
+    : { layer: L, kind: "neuron", mode: "proj", neuron: i, s, direction: dir };
+  return { layer: L, kind: "head", mode: "proj", head: i, s, direction: dir };
+};
+// 部品の鍵(組の部品の表と候補の行を合わせる。層全体は番号を見ない)
+const candKey = (x) => { const k = x.kind === "linear" ? "attn" : x.kind || "attn";
+  return `${x.layer}|${k}|${k === "layer_attn" || k === "layer_mlp" ? "" : x.index ?? x.head}|${x.expert ?? ""}`; };
+// 足すときの強さ: 組の表のどれかに入っていれば、それを含むいちばん小さい組の s(部品ごとの強さ)、無ければ 1
+function startS(d, r) {
+  const a = d.allocate || {}, k = candKey(r);
+  const rows = [...(a.table || []).filter((x) => !x.skipped), ...(a.s1 ? [a.s1] : [])];
+  let best = null;
+  for (const row of rows) {
+    const h = (row.heads || []).find((x) => candKey(x) === k);
+    const n = row.n_used ?? (row.heads || []).length;
+    if (h && Number.isFinite(+h.s) && (!best || n < best.n)) best = { s: +h.s, n, s1: row === a.s1 };
+  }
+  return best;
+}
+const ADD_NOTE = () => t("足した部品の候補の表の数は、その部品だけを当てて測った値です。ほかの部品と合わせると効き方が変わるので、返事を確かめて強さを調整してください");
+
 // 層ごとの cohen_d の小さな棒グラフ(SVG)。基準層は白、cohen_d 最大の層は緑。棒にマウスを当てると値
 function dChart(layers, base, best) {
   if (!layers || !layers.length) return "";
@@ -182,7 +211,13 @@ function dChart(layers, base, best) {
 
 export class PipelinePanel {
   constructor(root, { onRun, onShowDirection, onOpenHead, onOpenNeuron, onLoadProj, onEval, onOverlay, onOpenCandidates, isLoop, writesBlocked,
-                      inkling, onChatProj } = {}) {
+                      inkling, onChatProj, recipeHas, onAddUnit, onRemoveUnit, onAddUnits } = {}) {
+    // 候補を 1 個ずつレシピに足す(v0.10.1): (行) → { in: 同じ方向の行があるか, other: 別の方向の行の方向 }、足す・外す・組の足りない部品を足す
+    this.recipeHas = recipeHas || (() => ({ in: null, other: [] }));
+    this.onAddUnit = onAddUnit || (() => "added");
+    this.onRemoveUnit = onRemoveUnit || (() => {});
+    this.onAddUnits = onAddUnits || (() => ({ added: 0, had: 0 }));
+    this.adds = [];                              // 描いた表の「レシピに足す」の行(ボタンの data-add の番号 → { q, why })
     this.onChatProj = onChatProj || ((name, specs, dir) => this.onLoadProj(name, specs, dir));   // (名前, 部品, 方向) → レシピを置き換えて 3 列チャット
     this.isLoop = isLoop || (() => false);       // 同じ層を 2 回実行するモデル(ループの中の部品の方向の欄を出す)
     this.inkling = inkling || (() => null);      // Inkling 2 の段の表(答えの前に思考を書くモデル。位置の選択と、使えない欄を変える)
@@ -642,6 +677,7 @@ export class PipelinePanel {
 
   _render() {
     const d = this.data, out = this.$("#pp-result");
+    this.adds = [];
     if (!d) { out.innerHTML = ""; return; }
     const sides = d.sides || {};
     const side = (x) => (x ? [x.recipe ? (Array.isArray(x.recipe) ? t("レシピ(ユニット {n} 個: {u})", { n: x.recipe.length, u: x.recipe.slice(0, 3).join(", ") })
@@ -663,6 +699,7 @@ export class PipelinePanel {
       <div class="pp-actions"><button class="small" id="pp-showdir" title="${t("上の「方向を見る」で、この方向の層ごとの射影の値と分布を見る")}">${t("方向を見る")}</button>
         ${d.writes ? "" : `<button class="small" id="pp-map" title="${t("地図の板の上辺のヘッドを、止めたときの下がり方で色付けする")}">${t("地図: 効き")}</button>`}
         ${d.spec ? `<button class="small" id="pp-respec" title="${t("この実行に使った JSON を入力欄に戻す(設定を変えて流し直すため)")}">${t("入力欄に戻す")}</button>` : ""}</div>
+      <p class="note pp-add-msg" id="pp-add-msg" role="status" aria-live="polite"></p>
       </div>${this.stage1(d)}${d.writes ? this.writesStage(d) : `${this.stage2(d)}${this.stage3(d)}${this.stage4(d)}`}
       ${this.candForm(d) || `<div class="pp-cand"><p class="muted note">${t("この実行には、候補を作れる組がありません(4. の組がどれも作れていない)。")}</p></div>`}</div>`;
     const $ = (s) => out.querySelector(s);
@@ -689,6 +726,7 @@ export class PipelinePanel {
       a.addEventListener("click", (ev) => { ev.preventDefault(); const [L, n] = a.dataset.neuron.split(":").map(Number); this.onOpenNeuron({ layer: L, n }); });
     }
     this.wireCand(out, d);
+    this.wireAdds(out, d);
     const more = $("#pp-eta-more");
     if (more) more.addEventListener("click", () => { for (const tr of out.querySelectorAll("table.pp-eta tr.pp-more")) tr.classList.remove("hidden"); more.remove(); });
     const table = (d.allocate && d.allocate.table) || [];
@@ -744,6 +782,114 @@ export class PipelinePanel {
         if (r && r.recipe) this.onEval(evp(r.recipe), `${d.name}-n${r.n_heads}`);
       });
     }
+  }
+
+  // --- 候補を 1 個ずつレシピに足す(v0.10.1) -----------------------------------------------------------------------------
+  // 候補の行の「レシピに足す」(射影のユニット、方向はこの実行の方向)。入っていれば「レシピにある」になり、押すと外す
+  addBtn(d, r) {
+    const st = startS(d, r), s = st ? st.s : 1;
+    const q = candUnit(r, +(+s).toFixed(4), d.name);
+    const why = st ? (st.s1 ? t("強さ s{s}: 倍率を上げる前の組(s=1)での値", { s: fmt(s, 2) })
+      : t("強さ s{s}: この部品を含むいちばん小さい組({n} 個)での、この部品の強さ", { s: fmt(s, 2), n: st.n }))
+      : t("強さ s1: どの組にも入っていないので 1(方向の成分をちょうど消す強さ。確かめの段もこの強さで 1 個ずつ測っています)");
+    const i = this.adds.push({ q, why }) - 1;
+    return `<button class="small pp-add" data-add="${i}">${t("レシピに足す")}</button>`;
+  }
+  // 組の行の「足りない部品を足す」
+  setBtn(key, off) {
+    return `<button class="small" data-addset="${key}" title="${esc(t("この組の部品のうち、いまのレシピに無いもの(同じ部品・同じ方向)だけを足します。レシピにある部品の強さは変えません。") + ADD_NOTE())}"${off ? " disabled" : ""}>${t("足りない部品を足す")}</button>`;
+  }
+  // 部品の短い名前(知らせの文に使う)
+  unitLabel(q) {
+    const who = q.kind === "attn" ? "attn" : q.kind === "ffn" ? "ffn" : q.kind === "expert_neuron" ? `E${q.expert} N${q.neuron}` : q.kind === "neuron" ? `N${q.neuron}` : `H${q.head}`;
+    return `L${q.layer} ${who}${inkMark(q.layer)}`;
+  }
+  // ボタンの文字・印を、いまのレシピに合わせる(レシピが変わるたびに app.js から)
+  paintAdd(b) {
+    const x = this.adds[+b.dataset.add];
+    if (!x) return;
+    const h = this.recipeHas(x.q) || { in: null, other: [] };
+    b.classList.toggle("on", !!h.in);
+    if (h.in) {
+      b.textContent = `✓ ${t("レシピにある")}`;
+      b.title = t("いまのレシピに入っています(強さ s{s}、方向 {d})。押すとレシピから外します", { s: fmt(h.in.s, 2), d: x.q.direction });
+      return;
+    }
+    const other = (h.other || []).length;
+    b.textContent = other ? t("足す(別の方向あり)") : t("レシピに足す");
+    b.title = `${x.why} ${t("方向 {d} の射影のユニットとして、いまのレシピに足します。", { d: x.q.direction })}${
+      other ? ` ${t("同じ部品が別の方向({o})でレシピにあります。足すと、この方向の行が別に入ります(LoRA は方向ごと)。", { o: h.other.join(", ") })}` : ""} ${ADD_NOTE()}`;
+  }
+  refreshMarks() { for (const b of this.root.querySelectorAll("#pp-result [data-add]")) this.paintAdd(b); }
+  addMsg(html) { const el = this.$("#pp-add-msg"); if (el) el.innerHTML = html; }
+  wireAddButtons(el) {
+    for (const b of el.querySelectorAll("[data-add]")) {
+      if (b.dataset.wired) continue;
+      b.dataset.wired = "1";
+      this.paintAdd(b);
+      b.addEventListener("click", () => {
+        const x = this.adds[+b.dataset.add];
+        if (!x) return;
+        const h = this.recipeHas(x.q) || {};
+        if (h.in) {
+          this.onRemoveUnit(x.q);
+          this.addMsg(esc(t("{u}(方向 {d})をレシピから外しました", { u: this.unitLabel(x.q), d: x.q.direction })));
+        } else {
+          const r = this.onAddUnit(x.q);
+          this.addMsg(r === "exists" ? esc(t("{u} はもうレシピにあります", { u: this.unitLabel(x.q) }))
+            : `${esc(t("{u} を強さ s{s}・方向 {d} でレシピに足しました。", { u: this.unitLabel(x.q), s: fmt(x.q.s, 2), d: x.q.direction }))} <span class="muted">${esc(ADD_NOTE())}</span>`);
+        }
+        this.refreshMarks();
+      });
+    }
+  }
+  // 組の行(上限の数か s1)の部品の文字列(残りから追加の結果は土台と合わせたもの)
+  setUnits(d, key) {
+    if (d.refine) { const c = combinedRow(d, key); return c ? c.units : []; }
+    const a = d.allocate || {};
+    if (String(key) === "s1") return (a.s1 || {}).units || [];
+    const r = (a.table || []).find((x) => String(x.n_heads) === String(key));
+    return r ? r.units || [] : [];
+  }
+  wireAdds(out, d) {
+    this.wireAddButtons(out);
+    for (const b of out.querySelectorAll("[data-addset]")) {
+      b.addEventListener("click", () => {
+        const specs = this.setUnits(d, b.dataset.addset), us = specs.map((x) => parseProj(x, d.name));
+        const ok = us.filter(Boolean), bad = us.length - ok.length;
+        const r = this.onAddUnits(ok) || { added: 0, had: 0 };
+        this.addMsg(`${esc(t("この組の {n} 個のうち {a} 個を足しました({h} 個はもうレシピにありました)。", { n: specs.length, a: r.added, h: r.had }))}${
+          bad ? ` <span class="ng">${esc(t("読めない部品 {k} 個は足していません", { k: bad }))}</span>` : ""}${r.added ? ` <span class="muted">${esc(ADD_NOTE())}</span>` : ""}`);
+        this.refreshMarks();
+      });
+    }
+    const rk = out.querySelector("details.pp-rankall");
+    if (rk) rk.addEventListener("toggle", () => { if (rk.open && !rk.dataset.loaded) this.loadRanking(rk, d); });
+  }
+  // 「部品の順位を見る」: 保存した順位(.writes.json)の上位を読み、行から足せる表にする
+  async loadRanking(el, d) {
+    el.dataset.loaded = "1";
+    const body = el.querySelector(".pp-rank-body");
+    let x;
+    try { x = await getJSON(`/api/pipelines/${encodeURIComponent(d.name)}/writes`); } catch (e) {
+      body.innerHTML = `<p class="note ng">${esc(e.message)}</p>`; delete el.dataset.loaded; return;
+    }
+    if (this.data !== d) return;                                       // 読む間に別の結果を開いた
+    const rows = x.rows || [];
+    if (!rows.length) { body.innerHTML = `<p class="muted note">${t("この結果には部品の順位が保存されていません")}</p>`; return; }
+    const tr = rows.map((r) => `<tr class="${r.verified && r.verified.excluded ? "rnd" : ""}"><td>${r.rank}</td><td class="l">${unitChip(r)}</td><td>${t(KIND_LABEL[r.kind] || r.kind)}</td>
+      <td>${sgn(r.score, 3)}</td><td>${r.verified ? sgn(r.verified.gap_drop, 3) : `<span class="muted">${t("未確認")}</span>`}</td><td>${this.addBtn(d, r)}</td></tr>`).join("");
+    body.innerHTML = `<p class="muted note">${t("上位 {n} 行(全部で {m} 個)。「測った縮み」は 4. で 1 個ずつ確かめた部品だけ。", { n: rows.length, m: x.n_rows_total ?? rows.length })}${ADD_NOTE()}</p>
+      <div class="evx-scroll"><table class="evx mono pp-rank"><thead><tr><th>#</th><th class="l">${t("部品")}</th><th>${t("種類")}</th><th title="${t("選ぶ層で s=1 の射影で直接に縮まる A−B の差")}">${t("点数")}</th>
+      <th title="${t("流し直して測った A−B の差の縮み")}">${t("測った縮み")}</th><th></th></tr></thead><tbody>${tr}</tbody></table></div>`;
+    for (const a of body.querySelectorAll("[data-head]")) {
+      a.addEventListener("click", (ev) => { ev.preventDefault(); const [L, h] = a.dataset.head.split(":").map(Number); this.onOpenHead({ layer: L, head: h, tab: "causal" }); });
+    }
+    for (const a of body.querySelectorAll("[data-neuron]")) {
+      if (!this.onOpenNeuron || this.isLoop()) { const sp = document.createElement("span"); sp.className = "mono"; sp.innerHTML = a.innerHTML; a.replaceWith(sp); continue; }
+      a.addEventListener("click", (ev) => { ev.preventDefault(); const [L, n] = a.dataset.neuron.split(":").map(Number); this.onOpenNeuron({ layer: L, n }); });
+    }
+    this.wireAddButtons(body);
   }
 
   // 「候補を作る」: 組 × 全体の倍率で返事を作り、名前を伏せて採点する(heads_candidates のジョブ)
@@ -889,7 +1035,7 @@ export class PipelinePanel {
     const vwhy = (r) => (r.excluded ? `<span class="pp-ex">${t("外した: B 側の直交成分のずれが {d} を超える(ふつうの入力の残差まで大きく動かす)", { d: fmt(a.drift_max ?? 0.5, 2) })}</span>`
       : r.effect !== undefined && r.effect !== null && r.effect <= 0 ? `<span class="muted">${t("組に使わない: A 側の下がり − B 側の動きの大きさが 0 以下")}</span>` : "");
     const vrows = (v.top || []).map((r, i) => `<tr class="${r.excluded ? "rnd" : ""}"><td>${i + 1}</td><td class="l">${unitChip(r)}</td><td>${t(KIND_LABEL[r.kind] || r.kind)}</td>
-      <td>${sgn(r.score, 3)}</td><td>${sgn(r.gap_drop, 3)}</td><td>${sgn(r.causal, 3)}</td><td>${sgn(r.b_side_delta, 3)}</td><td>${fmt(r.drift_orth_b, 3)}</td><td class="l">${vwhy(r)}</td></tr>`).join("");
+      <td>${sgn(r.score, 3)}</td><td>${sgn(r.gap_drop, 3)}</td><td>${sgn(r.causal, 3)}</td><td>${sgn(r.b_side_delta, 3)}</td><td>${fmt(r.drift_orth_b, 3)}</td><td class="l">${vwhy(r)}</td><td>${this.addBtn(d, r)}</td></tr>`).join("");
     const stop = { target: t("全部 1"), raised: t("上げて届いた"), s_max: t("上限で止めた"), drift: t("B 側の直交成分のずれで止めた"),
       b_move: t("B 側が A 側へ動くので止めた"), no_gain: t("上げても良くならないので止めた"), iters: t("回数の上限で止めた") };
     const STRENGTH = { per_unit: t("部品ごと"), uniform: t("全部を同じ倍率") };
@@ -942,7 +1088,8 @@ export class PipelinePanel {
       return `<td class="l"><button class="small" data-load="${key}" title="${ttl(t("土台(元の組とそれまでの回の追加)と、この行の足した組を合わせたレシピで、今のレシピを置き換える(足した組は単独では使わない)"), t("この組(proj のユニット)で今のレシピを置き換える"))}"${off}>${R ? t("合わせてレシピを置き換える") : t("レシピを置き換える")}</button>
           ${INK ? `<button class="small" data-chat="${key}" title="${R ? t("土台とこの行の足した組を合わせたレシピに置き換えて、3 列チャットを開く") : t("この組のレシピに置き換えて、3 列チャットを開く")}"${off}>${t("3 列チャット")}</button>` : ""}
           <button class="small" data-eval="${key}" title="${ttl(t("土台と、この行の足した組を合わせたレシピを評価の画面へ送る(強さ 0 と 1、ランダムな向きの比べる用 8 本が入る。始める前に変えられる)"), t("この組のレシピを評価の画面へ送る(強さ 0 と 1、ランダムな向きの比べる用 8 本が入る。始める前に変えられる)"))}"${r.recipe && !off ? "" : " disabled"}>${R ? t("合わせて評価へ送る") : t("評価へ送る")}</button>
-          ${refine ? `<button class="small" data-refine="${key}" title="${R ? t("この行の合わせたレシピ(土台 + この組)を当てても元の目標まで下がらない質問だけで、もう一度足す部品を探す(重ねる)。結果は新しい一括の結果(名前 _r1 …)として出る") : t("この組を当てても目標まで下がらない質問(残り)だけで、組を当てたまま方向を作り直し、足す部品を探す。結果は新しい一括の結果(名前 _r1 …)として出る")}"${(R ? c && c.remain_after > 0 : r.remain > 0) ? "" : " disabled"}>${t("残りから追加")}</button>` : ""}</td>`;
+          ${refine ? `<button class="small" data-refine="${key}" title="${R ? t("この行の合わせたレシピ(土台 + この組)を当てても元の目標まで下がらない質問だけで、もう一度足す部品を探す(重ねる)。結果は新しい一括の結果(名前 _r1 …)として出る") : t("この組を当てても目標まで下がらない質問(残り)だけで、組を当てたまま方向を作り直し、足す部品を探す。結果は新しい一括の結果(名前 _r1 …)として出る")}"${(R ? c && c.remain_after > 0 : r.remain > 0) ? "" : " disabled"}>${t("残りから追加")}</button>` : ""}
+          ${this.setBtn(key, R && !c)}</td>`;
     };
     const cells = (r) => `<td>${r.remain ?? "—"}${nA ? ` / ${nA}` : ""}</td><td title="${t("A 側の射影の値の最大 {v}", { v: fmt(r.a_max, 2) })}">${fmt(r.a_mean, 2)}</td>
         <td>${sgn(r.b_side_delta, 2)}</td><td>${fmt(r.b_drift_orth, 3)}</td><td>${r.effect === undefined ? "—" : fmt(r.effect, 2)}</td><td class="${r.reached ? "ok" : "ng"}">${r.reached ? "✓" : "×"}</td>`;
@@ -1013,12 +1160,14 @@ export class PipelinePanel {
       <p class="note mono">${t("選ぶ層")} L${w.select_layer ?? "—"} · A ${(w.n || {}).A ?? "—"} / B ${(w.n || {}).B ?? "—"} · ${t("A−B の差")} ${fmt(w.gap, 2)} · ${kinds(w.n_units)}</p>
       ${(w.zero_layers || []).length ? `<p class="note pp-warn pp-zero">${t("方向の長さが 0 の層 {l} を外しました。A 側と B 側の残差がまったく同じ層です(短い畳み込みの層は数トークン前までしか見ないので、両側で違う system プロンプトがまだ届いていません)。この層では方向に沿った書き込みが決まりません。", { l: esc(w.zero_layers.slice(0, 8).join(", ")) })}</p>` : ""}
       ${share ? `<p class="note">${t("直接の書き込みの和 ÷ 差")}: ${share}</p>` : ""}
-      ${(w.layer_scores || []).length ? `<p class="note" title="${t("その層の注意の出力全体・MLP の出力全体を s=1 で射影したときに、選ぶ層で直接に縮む A−B の差の割合(層全体の部品の選び方の目安)")}">${t("層ごとの直接の書き込み ÷ 差(上位 6 層)")}: ${w.layer_scores.slice(0, 6).map((x) => `L${x.layer} ${t("注意全体")} ${sgn(100 * x.attn_share, 0)}% · MLP ${sgn(100 * x.mlp_share, 0)}%`).join(" | ")}</p>` : ""}</section>
+      ${(w.layer_scores || []).length ? `<p class="note" title="${t("その層の注意の出力全体・MLP の出力全体を s=1 で射影したときに、選ぶ層で直接に縮む A−B の差の割合(層全体の部品の選び方の目安)")}">${t("層ごとの直接の書き込み ÷ 差(上位 6 層)")}: ${w.layer_scores.slice(0, 6).map((x) => `L${x.layer} ${t("注意全体")} ${sgn(100 * x.attn_share, 0)}% · MLP ${sgn(100 * x.mlp_share, 0)}%`).join(" | ")}</p>` : ""}
+      <details class="pp-rankall" data-rank="${esc(d.name)}"><summary class="muted note">${t("部品の順位を見る(書き込みの量の上位。行からレシピに足せる)")}</summary><div class="pp-rank-body"><p class="muted note">${t("読み込み中…")}</p></div></details></section>
       <section class="pp-stage"><h4>${t("4. 上位を 1 個ずつ確かめる")}</h4>
       ${noteHTML(t("点数の上位を 1 個ずつ s=1 で射影して(または止めて)流し直し、因果スクリーニングと同じ物差しで測ります。測った「A−B の差の縮み」と点数の順位相関を出します。"), "muted note")}
       <p class="note mono">${kinds(v.kinds)}${corr ? ` · ${t("順位相関")} ${corr}` : ""}</p>
       <div class="evx-scroll"><table class="evx mono pp-top"><thead><tr><th>#</th><th class="l">${t("部品")}</th><th>${t("種類")}</th><th title="${t("選ぶ層で s=1 の射影で直接に縮まる A−B の差")}">${t("点数")}</th>
-        <th title="${t("流し直して測った A−B の差の縮み")}">${t("測った縮み")}</th><th title="${t("A 側の射影の値の下がり方")}">${t("A の下がり")}</th><th title="${t("B 側の射影の値の変化")}">B Δ</th><th title="${t("B 側の直交成分のずれ")}">B ⊥</th><th></th></tr></thead><tbody>${vrows}</tbody></table></div></section>
+        <th title="${t("流し直して測った A−B の差の縮み")}">${t("測った縮み")}</th><th title="${t("A 側の射影の値の下がり方")}">${t("A の下がり")}</th><th title="${t("B 側の射影の値の変化")}">B Δ</th><th title="${t("B 側の直交成分のずれ")}">B ⊥</th><th></th><th></th></tr></thead><tbody>${vrows}</tbody></table></div>
+      <p class="muted note">${t("行の「レシピに足す」で、その部品を射影のユニット(方向 {d})としていまのレシピに足します。", { d: esc(d.name) })}${ADD_NOTE()}</p></section>
       <section class="pp-stage"><h4>${t("5. s=1 から組を作る")}</h4>
       ${noteHTML(t("確かめた部品を、A 側の下がり − B 側の動きの大きい順に、s=1 で 1 個ずつ組に足します(A 側の平均が下がり、組の効きが増え、上限の中のときだけ)。目標に届けば強さは全部 1。届かなければ強さを上げます。部品ごと(既定)では、部品ごとに s を 1.5 倍にしてみて、射影の値が残りやすい質問での組の効きの増え方(効率)を測り、効率に比例して上げ幅を配ることを繰り返します(効く部品は高く、B 側を押す部品は低く。どの部品も 1 より下げず、組から外さない)。s が 1 を超えると成分を反転させるので、B 側(ふつうの入力)が A 側へ動くことがあります。目標に届けば届く最小の上げ幅、届かなければ上限の中で組の効きがいちばん大きい点を使います。効き = A 側の下がり − B 側の動きの大きさ。上限 = B 側の直交成分のずれ {d}、B 側が A 側へ動く量は A と B の差の {m}%。", { d: fmt(a.drift_max ?? 0.5, 2), m: fmt(100 * (a.b_move_max ?? 0.1), 0) }), "muted note")}
       <p class="note">${t("届かないときの強さの決め方")}: <b>${esc(STRENGTH[a.strength || "uniform"] || a.strength || "")}</b>${a.strength ? "" : ` <span class="muted">${t("(v0.8.2 までの結果は全部を同じ倍率)")}</span>`}</p>
@@ -1057,7 +1206,7 @@ export class PipelinePanel {
     const layerRows = lr.map((r) => `<tr class="${r.excluded ? "rnd" : measured.has(r.layer) ? "on" : ""}"><td>L${r.layer}</td>${dropCells(r)}<td>${fmt(r.causal_max, 2)}</td>
       <td>${fmt(r.drift_orth_b, 3)}</td><td class="l">${r.excluded ? why(r) : measured.has(r.layer) ? t("ヘッドを測った") : ""}</td></tr>`).join("");
     const heads = (c.top || []).map((r, i) => `<tr class="${r.excluded ? "rnd" : ""}"><td>${i + 1}</td><td class="l">${headChip(r.layer, r.head)}</td><td>${fmt(r.causal_max, 2)}</td>${dropCells(r)}
-      <td>${fmt(r.contrib, 2)}</td><td>${fmt(r.ratio, 2)}</td><td>${sgn(r.b_side_delta, 2)}</td><td>${fmt(r.drift_orth_b, 3)}</td><td class="l">${why(r)}</td></tr>`).join("");
+      <td>${fmt(r.contrib, 2)}</td><td>${fmt(r.ratio, 2)}</td><td>${sgn(r.b_side_delta, 2)}</td><td>${fmt(r.drift_orth_b, 3)}</td><td class="l">${why(r)}</td><td>${this.addBtn(d, { layer: r.layer, head: r.head, kind: "attn" })}</td></tr>`).join("");
     const slh = SL.map((L) => `<th title="${t("止めたときの、L{L} での A 側の射影の値の下がり方", { L })}">L${L}${L === P ? "*" : ""}</th>`).join("");
     return `<section class="pp-stage"><h4>${t("2. 因果スクリーニング")}</h4>
       ${noteHTML(t("層ごとにその層のヘッドを全部止め、後ろの層(射影の値を測る層)で A 側の射影の値がどれだけ下がるかを測って、よく下がる層を選びます(top_layers = {k})。止めると中立の入力(B 側)の残差まで大きく動く層とヘッドは、効いているのではなくモデルを壊しているだけなので外します。選んだ層のヘッドを 1 個ずつ止めて、同じように下がり方(因果の効き目)を測ります。", { k: k ?? "—" }), "muted note")}
@@ -1066,7 +1215,8 @@ export class PipelinePanel {
       <h4 class="pp-sub">${t("止めたときの下がり方が大きいヘッド(上位 {n})", { n: (c.top || []).length })}</h4>
       <div class="evx-scroll"><table class="evx mono pp-top"><thead><tr><th>#</th><th class="l">${t("ヘッド")}</th><th title="${t("止めたときの下がり方の、射影の値を測る層での最大")}">causal_max</th>${slh}
         <th title="${t("無介入でこのヘッドが、射影の値を測る主の層の方向に直接書く量")}">contrib</th><th title="${t("causal ÷ 直接の寄与。1 より大きい = 後段のユニットを通る間接の経路")}">ratio</th>
-        <th title="${t("B 側の射影の値の変化")}">B Δ</th><th title="${t("B 側の直交成分のずれ")}">B ⊥</th><th></th></tr></thead><tbody>${heads}</tbody></table></div>
+        <th title="${t("B 側の射影の値の変化")}">B Δ</th><th title="${t("B 側の直交成分のずれ")}">B ⊥</th><th></th><th></th></tr></thead><tbody>${heads}</tbody></table></div>
+      <p class="muted note">${t("行の「レシピに足す」で、そのヘッドを射影のユニット(方向 {d})としていまのレシピに足します。", { d: esc(d.name) })}${ADD_NOTE()}</p>
       ${lr.length ? `<details><summary class="muted note">${t("層ごとのスクリーニング({n} 層、層のヘッドを全部止めたとき)", { n: lr.length })}</summary>
         <div class="evx-scroll"><table class="evx mono pp-layers"><thead><tr><th>${t("層")}</th>${slh}<th>causal_max</th><th title="${t("B 側の直交成分のずれ")}">B ⊥</th><th></th></tr></thead><tbody>${layerRows}</tbody></table></div></details>` : ""}
       <p class="muted note">${t("* = 射影の値を測る主の層。下がり方 = 止める前 − 後の A 側の射影の値(正 = A 側の向きに押していた)。")}</p></section>`;
@@ -1099,7 +1249,7 @@ export class PipelinePanel {
       const rk = abRank(r), moved = rk !== null && Math.abs(rk - (i + 1)) >= 2;
       return `<tr class="${r.excluded ? "rnd" : ""}${i >= ETA_SHOWN ? " pp-more hidden" : ""}"><td>${i + 1}</td><td class="l">${headChip(r.layer, r.head)}</td><td>${fmt(r.eta, 3)}</td>
         <td>${fmt(ab.get(`${r.layer}:${r.head}`), 2)}</td><td class="${moved ? "pp-moved" : ""}">${rk ?? "—"}</td><td>${sgn(r.b_side_delta, 2)}</td><td>${fmt(r.drift_orth_b, 3)}</td>
-        <td>${r.in_base ? "✓" : ""}</td><td class="l">${r.excluded ? `<span class="pp-ex">${t("外した: 中立の残差が大きく動く")}</span>` : ""}</td></tr>`;
+        <td>${r.in_base ? "✓" : ""}</td><td class="l">${r.excluded ? `<span class="pp-ex">${t("外した: 中立の残差が大きく動く")}</span>` : ""}</td><td>${this.addBtn(d, { layer: r.layer, head: r.head, kind: "attn" })}</td></tr>`;
     }).join("");
     const nA = a.n_a;
     const R = d.refine;                                                  // 残りから追加の結果: 行は「土台 + この組」で使う
@@ -1117,7 +1267,8 @@ export class PipelinePanel {
         <td class="l">${c ? `<div class="note">${t("元の組と合わせると(元の方向・元の目標で): 残り {a} → {b} 問 · A 平均 {ma} → {mb} · B Δ {bd} · B ⊥ {c}", { a: c.remain_before, b: c.remain_after, ma: fmt(c.a_mean_before, 2), mb: fmt(c.a_mean_after, 2), bd: sgn(c.b_delta, 2), c: fmt(c.b_drift_orth, 3) })}</div>` : R ? `<div class="note ng">${t("この行には土台と合わせたレシピがありません")}</div>` : ""}
           <button class="small" data-load="${r.n_heads}" title="${R ? t("土台(元の組とそれまでの回の追加)とこの組を合わせたユニットで今のレシピを置き換える(この組は土台を当てた状態で探したので、単独では使わない)") : t("この組(proj のユニット)で今のレシピを置き換える")}"${off}>${R ? t("元の組と合わせてレシピを置き換える") : t("レシピを置き換える")}</button>
           <button class="small" data-eval="${r.n_heads}" title="${R ? t("土台とこの組を合わせたレシピを評価の画面へ送る(強さ 0 と 1、ランダムな向きの比べる用 8 本が入る。始める前に変えられる)") : t("この組のレシピを評価の画面へ送る(強さ 0 と 1、ランダムな向きの比べる用 8 本が入る。始める前に変えられる)")}"${r.recipe && !off ? "" : " disabled"}>${R ? t("合わせて評価へ送る") : t("評価へ送る")}</button>
-          <button class="small" data-refine="${r.n_heads}" title="${R ? t("この行の合わせたレシピ(土台 + この組)を当てても元の目標まで下がらない質問だけで、もう一度足すヘッドを探す(重ねる)。結果は新しい一括の結果(名前 _r1 …)として出る") : t("この組を当てても目標まで下がらない質問(残り)だけで、組を当てたまま方向を作り直し、因果 → 配分で足すヘッドを探す。結果は新しい一括の結果(名前 _r1 …)として出る")}"${(R ? c && c.remain_after > 0 : r.remain > 0) ? "" : " disabled"}>${t("残りから追加")}</button></td></tr>`;
+          <button class="small" data-refine="${r.n_heads}" title="${R ? t("この行の合わせたレシピ(土台 + この組)を当てても元の目標まで下がらない質問だけで、もう一度足すヘッドを探す(重ねる)。結果は新しい一括の結果(名前 _r1 …)として出る") : t("この組を当てても目標まで下がらない質問(残り)だけで、組を当てたまま方向を作り直し、因果 → 配分で足すヘッドを探す。結果は新しい一括の結果(名前 _r1 …)として出る")}"${(R ? c && c.remain_after > 0 : r.remain > 0) ? "" : " disabled"}>${t("残りから追加")}</button>
+          ${this.setBtn(r.n_heads, R && !c)}</td></tr>`;
     }).join("");
     const hp = hard.prompts || [], hs = hard.scores || [];
     return `<section class="pp-stage"><h4>${t("4. 効率での配り直し")}</h4>
@@ -1127,7 +1278,7 @@ export class PipelinePanel {
       <h4 class="pp-sub">${t("効率 η(大きい順)")}</h4>
       <div class="evx-scroll"><table class="evx mono pp-eta"><thead><tr><th>#</th><th class="l">${t("ヘッド")}</th><th title="${t("s を Δs 上げたときの、射影の値が残りやすい質問での下がり方 ÷ Δs")}">η</th>
         <th title="${t("丸ごと止めたときの下がり方(L{L})", { L: S ?? "—" })}">${t("止めた効き目")}</th><th title="${t("丸ごと止めたときの効き目での順位。黄 = 効率の順位と 2 つ以上ずれている")}">${t("効き目の順位")}</th>
-        <th title="${t("B 側の射影の値の変化")}">B Δ</th><th title="${t("B 側の直交成分のずれ")}">B ⊥</th><th title="${t("最初の組に入っていたヘッド")}">${t("最初の組")}</th><th></th></tr></thead><tbody>${eta}</tbody></table></div>
+        <th title="${t("B 側の射影の値の変化")}">B Δ</th><th title="${t("B 側の直交成分のずれ")}">B ⊥</th><th title="${t("最初の組に入っていたヘッド")}">${t("最初の組")}</th><th></th><th></th></tr></thead><tbody>${eta}</tbody></table></div>
       ${etaRows.length > ETA_SHOWN ? `<button class="small" id="pp-eta-more">${t("残り {n} 行も見る", { n: etaRows.length - ETA_SHOWN })}</button>` : ""}
       <h4 class="pp-sub">${t("ヘッドの数ごとの組の比較")}</h4>
       <div class="evx-scroll"><table class="evx mono pp-cmp"><thead><tr><th>${t("ヘッド数")}</th><th class="l">${t("ヘッドと強さ")}</th><th>s max</th>

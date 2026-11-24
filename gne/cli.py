@@ -2956,6 +2956,41 @@ def recipe_combine(recipes: list[Path] = typer.Argument(..., exists=True, help="
           + (f"、鍵 {', '.join(keys)}" if keys else "") + ")")
 
 
+@app.command("recipe-add")
+def recipe_add(recipe: Path = typer.Option(..., "--recipe", exists=True, help="ユニットを足すレシピ(YAML)"),
+               unit: list[str] = typer.Option(..., "--unit", help="足すユニット(--unit を重ねて複数)。例 14:H19:s4@NAME、9:attn:s1@NAME、"
+                                                                 "12:N345:s2@NAME、17:E25:N389:s4@NAME(Inkling 2)。@NAME を省くとレシピの既定の方向"),
+               out: Optional[Path] = typer.Option(None, "--out", "-o", help="書き出すレシピ(既定は --recipe のファイルを書き換える)"),
+               replace: bool = typer.Option(False, "--replace", help="同じユニット(同じ部品・同じ方向)がもうあれば、その行の強さを置き換える"
+                                                                     "(既定は止める)"),
+               name: Optional[str] = typer.Option(None, "--name", help="レシピの名前(既定は元の名前のまま)")):
+    """レシピにユニットを 1 つずつ足す(CHiPS の候補の表から、組に入らなかった部品を手で足すときなど)。UI のレシピの欄の
+    「ユニットを足す」と CHiPS の結果の「レシピに足す」と同じ。書き方は --unit と同じ。同じ部品でも方向が違えば別のユニット(LoRA は
+    方向ごとの行)。モデルは読まないので、書き方・重複・方向の有無だけを確かめる(層・番号の範囲などは当てるときに確かめる)。"""
+    from .steer import ADD_NOTE, GneError, Recipe, add_units, parse_unit
+    try:
+        r = Recipe.load(recipe)
+        us = [parse_unit(x) for x in unit]
+        r2, done = add_units(r, us, replace=replace)
+    except GneError as e:
+        raise typer.BadParameter(e.message + (f"({e.hint})" if e.hint else ""), param_hint="--unit") from e
+    dst = out or recipe
+    r2 = r2.like(r2.units, name=name or (out.stem if out else r.name))
+    try:
+        r2.save(dst)
+    except GneError as e:
+        raise typer.BadParameter(e.message, param_hint="--out") from e
+    for x in done:
+        print(f"  {'足した' if x['action'] == 'added' else '強さを置き換えた'}: {x['label']}"
+              + (f"(前は {x['was']})" if x["action"] == "replaced" else ""))
+    dirs = sorted({u.direction or r2.default_direction for u in r2.units if u.mode in ("proj", "keyed") and (u.direction or r2.default_direction)})
+    print(f"{dst}({len(r2.units)} ユニット" + (f"、方向 {', '.join(dirs)}" if dirs else "") + ")")
+    print(ADD_NOTE + "(gne chat --recipe で試し、gne recipe-scale で全体の強さを掛け込めます)")
+    if r.proj_correction is None and (r.proj_units or r.ablate):                    # v0.9.0: 記録の無い古いレシピ(recipe-scale と同じ)
+        print("元のレシピには射影の補正の記録が無いので、補正つき(proj_correction: postnorm)として書きました。出力のあとに正規化がある"
+              "モデルでは前の版と効き方が違います。前と同じ効き方にするには、書き出したレシピの proj_correction を none にしてください")
+
+
 @app.command("recipe-scale")
 def recipe_scale(recipe: Path = typer.Argument(..., exists=True, help="倍率を掛けるレシピ"),
                  scale: float = typer.Option(..., "--scale", help="レシピ全体に掛ける倍率(チャットの強さ・評価の倍率と同じ意味。0 は不可)"),

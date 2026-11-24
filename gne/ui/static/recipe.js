@@ -11,7 +11,7 @@
 // 省いたまま既定を添える。cvec には入らない(LoRA・焼き込みは headproj_export のジョブ、焼き込みの既定は F16)。
 // 編集中のレシピはこのブラウザの localStorage に下書きとして置く(使えなければ置かない)。
 import { getJSON, postJSON } from "./api.js";
-import { t } from "./i18n.js";
+import { LANG, t } from "./i18n.js";
 import { targetKind } from "./keys.js";
 import { esc } from "./panels.js";
 import { wireTabs, noteHTML, askConfirm, layersInput, useContrastList } from "./ui.js";
@@ -161,6 +161,49 @@ export function unitSpec(u, s = 1) {
   return `${u.layer}:${who}:${d >= 0 ? "+" : ""}${+d.toFixed(4)}`;
 }
 
+// /api/recipes・/api/recipe-unit の行(Recipe.to_dict の形)を、この欄で扱えるか(扱えない種類は外して数える)
+function rowOk(u) {
+  const nwOk = (x) => isNw(x) && x.neuron !== null && x.neuron !== undefined && Number.isFinite(+(x.alpha ?? x.k)) && (x.alpha ?? x.k) !== null;
+  const keyedOk = (x) => isKeyed(x) && KEYED_KINDS.includes(x.kind) && Number.isFinite(+(x.alpha ?? x.k)) && (x.alpha ?? x.k) !== null
+    && (x.kind !== "expert" || (x.expert !== null && x.expert !== undefined));
+  const moeOk = (x) => isMoe(x) && (x.kind === "shared" || (x.expert !== null && x.expert !== undefined))
+    && ({ expert_neuron: ["add", "gain"], shared: ["add", "gain"], expert: ["gain", "route"] }[x.kind].includes(x.mode || "add"))
+    && (x.mode === "gain" ? Number.isFinite(+x.k) && x.k !== null : true);
+  return (((u.kind || "neuron") === "neuron" || u.kind === "direction") && (u.mode || "add") === "add")
+    || (u.kind === "head" && u.mode === "gain" && u.head !== null && u.head !== undefined && Number.isFinite(+u.k))
+    || (u.kind === "head" && u.mode === "proj" && u.head !== null && u.head !== undefined && Number.isFinite(+(u.s ?? u.k)) && !!u.direction)
+    || (isProjN(u) && u.neuron !== null && u.neuron !== undefined && Number.isFinite(+(u.s ?? u.k)) && !!u.direction
+        && (!isProjE(u) || (u.expert !== null && u.expert !== undefined)))
+    || (isProjW(u) && Number.isFinite(+(u.s ?? u.k)) && !!u.direction)
+    || moeOk(u) || keyedOk(u) || nwOk(u);
+}
+// その行 → この欄の行。dd・dk はレシピの既定の方向・鍵(既定で埋めた keyed の行は省いた形に戻す)
+function rowOf(u, dd = null, dk = null) {
+  return isNw(u) ? nwRowOf(u)
+    : isKeyed(u) ? { layer: u.layer, kind: u.kind, ...(u.kind === "expert" ? { expert: +u.expert } : {}), mode: "keyed",
+                     alpha: +(u.alpha ?? u.k), direction: (u.direction_default && dd) ? null : u.direction || null,
+                     key: (u.key_default && dk) ? null : u.key || null }
+    : isDir(u) ? { layer: u.layer, kind: "direction", direction: u.direction, dose: u.dose }
+    : isProjE(u) ? { layer: u.layer, kind: "expert_neuron", mode: "proj", expert: +u.expert, neuron: u.neuron, s: +(u.s ?? u.k), direction: u.direction }
+    : isProjN(u) ? { layer: u.layer, kind: "neuron", mode: "proj", neuron: u.neuron, s: +(u.s ?? u.k), direction: u.direction }
+    : isProjW(u) ? { layer: u.layer, kind: u.kind, mode: "proj", s: +(u.s ?? u.k), direction: u.direction }
+    : isProj(u) ? { layer: u.layer, kind: "head", mode: "proj", head: u.head, s: +(u.s ?? u.k), direction: u.direction }
+    : isHead(u) ? { layer: u.layer, kind: "head", head: u.head, k: +u.k }
+    : isMoe(u) ? { layer: u.layer, kind: u.kind, ...(u.kind !== "shared" ? { expert: +u.expert } : {}), ...(u.kind !== "expert" ? { neuron: u.neuron } : {}),
+                   mode: u.mode || "add", ...(u.mode === "gain" ? { k: +u.k } : { dose: +(u.dose ?? u.delta) }) }
+    : { layer: u.layer, neuron: u.neuron, dose: u.dose };
+}
+// 同じユニットかを決める鍵(gne/steer.py の unit_identity と同じ考え、v0.10.1): 層・種類・mode・番号と、方向・鍵(省いたものは
+// レシピの既定)。強さは含めない。同じ部品でも方向が違えば別のユニット
+export function unitId(u, dd = null, dk = null) {
+  const kind = isDir(u) ? "direction" : (u.kind || "neuron"), mode = isProj(u) ? "proj" : isKeyed(u) ? "keyed" : isNw(u) ? "nw" : (u.mode || (isHead(u) ? "gain" : "add"));
+  const dir = isDir(u) ? u.direction : (mode === "proj" || mode === "keyed" || mode === "nw") ? (u.direction || dd || "") : "";
+  const key = (mode === "keyed" || mode === "nw") ? (u.key || dk || "") : "";
+  return [u.layer, kind, mode, u.head ?? "", u.neuron ?? "", u.expert ?? "", u.pair ?? "", dir, key, u.key2 ?? ""].join("|");
+}
+// 方向を除いた部品の鍵(同じ部品が別の方向で入っているかを見る)
+export const partId = (u) => unitId({ ...u, direction: "", key: null }, "", "");
+
 export class Recipe {
   constructor(modelId, onChange) {
     this.key = `gne.recipe.${modelId}`;
@@ -299,6 +342,34 @@ export class Recipe {
   removeProj(L, h, dir = undefined) { const u = this.hasProj(L, h, dir); if (u) this.remove(this.units.indexOf(u)); }
   setProjDir(i, dir) { if (isProj(this.units[i])) { this.units[i].direction = dir; this._save(); } }
   setDirectionLayer(v) { this.directionLayer = v === "base" ? "base" : "own"; this._save(); }
+  // 同じユニット(unitId)の行(v0.10.1)。無ければ undefined
+  findUnit(q) { const k = unitId(q, this.defaultDirection, this.defaultKey); return this.units.find((u) => unitId(u, this.defaultDirection, this.defaultKey) === k); }
+  // 同じ部品(方向を問わない)の行
+  partRows(q) { const k = partId(q); return this.units.filter((u) => partId(u) === k); }
+  // 行を足す(v0.10.1。CHiPS の候補・組・レシピの欄の「ユニットを足す」)。同じユニットがあれば replace なら強さを置き換え、
+  // そうでなければ足さない。戻り値 "added" / "replaced" / "exists"
+  addUnit(q, { replace = false } = {}) {
+    const row = rowOf(q, this.defaultDirection, this.defaultKey), u = this.findUnit(row);
+    if (u && !replace) return "exists";
+    if (u) this.units[this.units.indexOf(u)] = row; else this.units.push(row);
+    this._sort();
+    this._save();
+    return u ? "replaced" : "added";
+  }
+  // 行をまとめて足す(組の「足りない部品を足す」)。すでにある行(同じユニット)は強さを変えない。足した数とあった数
+  addUnits(qs) {
+    let added = 0, had = 0;
+    for (const q of qs) {
+      const row = rowOf(q, this.defaultDirection, this.defaultKey);
+      if (this.findUnit(row)) { had += 1; continue; }
+      this.units.push(row);
+      added += 1;
+    }
+    if (added) { this._sort(); this._save(); }
+    return { added, had };
+  }
+  removeUnit(q) { const u = this.findUnit(rowOf(q, this.defaultDirection, this.defaultKey)); if (u) this.remove(this.units.indexOf(u)); return !!u; }
+
   // 層ごとの射影の方向の数(1 なら LoRA は階数 1 に畳める)
   // 同じ層・同じ行列(ヘッドと層の注意全体 / ニューロンと層の MLP 全体)の射影の方向の種類の数 = LoRA の階数
   projRank(L, neuron = false) { return new Set(this.projs().filter((u) => u.layer === L && (isProjN(u) || u.kind === "ffn") === neuron).map((u) => u.direction || "")).size; }
@@ -351,34 +422,10 @@ export class Recipe {
   // (direction_default・key_default)は、既定を受け取ったときは省いた形に戻す(保存し直しても既定のまま)
   load(name, units, ablate = null, sampling = null, directionLayer = "own", defaults = {}) {
     const dd = (defaults && defaults.default_direction) || null, dk = (defaults && defaults.default_key) || null;
-    const nwOk = (u) => isNw(u) && u.neuron !== null && u.neuron !== undefined && Number.isFinite(+(u.alpha ?? u.k)) && (u.alpha ?? u.k) !== null;
-    const keyedOk = (u) => isKeyed(u) && KEYED_KINDS.includes(u.kind) && Number.isFinite(+(u.alpha ?? u.k)) && (u.alpha ?? u.k) !== null
-      && (u.kind !== "expert" || (u.expert !== null && u.expert !== undefined));
-    const moeOk = (u) => isMoe(u) && (u.kind === "shared" || (u.expert !== null && u.expert !== undefined))
-      && ({ expert_neuron: ["add", "gain"], shared: ["add", "gain"], expert: ["gain", "route"] }[u.kind].includes(u.mode || "add"))
-      && (u.mode === "gain" ? Number.isFinite(+u.k) && u.k !== null : true);
-    const ok = units.filter((u) => (((u.kind || "neuron") === "neuron" || u.kind === "direction") && (u.mode || "add") === "add")
-      || (u.kind === "head" && u.mode === "gain" && u.head !== null && u.head !== undefined && Number.isFinite(+u.k))
-      || (u.kind === "head" && u.mode === "proj" && u.head !== null && u.head !== undefined && Number.isFinite(+(u.s ?? u.k)) && !!u.direction)
-      || (isProjN(u) && u.neuron !== null && u.neuron !== undefined && Number.isFinite(+(u.s ?? u.k)) && !!u.direction
-          && (!isProjE(u) || (u.expert !== null && u.expert !== undefined)))
-      || (isProjW(u) && Number.isFinite(+(u.s ?? u.k)) && !!u.direction)
-      || moeOk(u) || keyedOk(u) || nwOk(u));
+    const ok = units.filter(rowOk);
     this.skipped = units.length - ok.length;
     this.name = name;
-    this.units = ok.map((u) => (isNw(u) ? nwRowOf(u)
-      : isKeyed(u) ? { layer: u.layer, kind: u.kind, ...(u.kind === "expert" ? { expert: +u.expert } : {}), mode: "keyed",
-                                               alpha: +(u.alpha ?? u.k), direction: (u.direction_default && dd) ? null : u.direction || null,
-                                               key: (u.key_default && dk) ? null : u.key || null }
-      : isDir(u) ? { layer: u.layer, kind: "direction", direction: u.direction, dose: u.dose }
-      : isProjE(u) ? { layer: u.layer, kind: "expert_neuron", mode: "proj", expert: +u.expert, neuron: u.neuron, s: +(u.s ?? u.k), direction: u.direction }
-      : isProjN(u) ? { layer: u.layer, kind: "neuron", mode: "proj", neuron: u.neuron, s: +(u.s ?? u.k), direction: u.direction }
-      : isProjW(u) ? { layer: u.layer, kind: u.kind, mode: "proj", s: +(u.s ?? u.k), direction: u.direction }
-      : isProj(u) ? { layer: u.layer, kind: "head", mode: "proj", head: u.head, s: +(u.s ?? u.k), direction: u.direction }
-      : isHead(u) ? { layer: u.layer, kind: "head", head: u.head, k: +u.k }
-      : isMoe(u) ? { layer: u.layer, kind: u.kind, ...(u.kind !== "shared" ? { expert: +u.expert } : {}), ...(u.kind !== "expert" ? { neuron: u.neuron } : {}),
-                     mode: u.mode || "add", ...(u.mode === "gain" ? { k: +u.k } : { dose: +(u.dose ?? u.delta) }) }
-      : { layer: u.layer, neuron: u.neuron, dose: u.dose }));
+    this.units = ok.map((u) => rowOf(u, dd, dk));
     this.ablate = ablate || null;
     this.sampling = sampling || null;
     this.directionLayer = directionLayer === "base" ? "base" : "own";
@@ -438,6 +485,7 @@ export class RecipePanel {
                                                    // requant: null は既定(keyed を含むなら F16、それ以外は Q8_0)
     this.lxJobId = null;
     this.lxMsg = null;                 // { html } 書き出しの結果か進み具合
+    this.ua = { text: "", msg: null, busy: false };   // 「ユニットを足す」の欄(v0.10.1): 入れかけの文字と、最後の結果の文
   }
 
   // 先に今の中身を出し、保存済みの一覧は読めてから「保存したレシピを読む…」の選択欄にだけ足す
@@ -501,6 +549,7 @@ export class RecipePanel {
       ${r.units.length ? `<table class="rc mono"><tbody>${rows}</tbody></table>`
         : `<p class="muted note">${t("ユニットがありません。どの画面の「レシピに足す」でも、ここに入ります。")}</p>`}
       ${r.skipped ? `<p class="muted note">${t("UI では扱えないユニット(ニューロンの gain・ヘッドの query・ランダム方向など){n} 個を外しました", { n: r.skipped })}</p>` : ""}
+      ${this.unitAddHTML()}
       ${r.heads().length ? `${noteHTML(t("ヘッドの倍率 k は 1 が無介入(0 で消す、2 で倍、負で反転)。LoRA で当てるので cvec には入りません。3 列チャットの − 列は 1 の反対側(×0 なら ×2)。"), "muted note")}` : ""}
       ${r.projs().length || r.keyed().length ? this.projNote() : ""}
       ${r.keyed().length ? this.keyedNote() : ""}
@@ -577,6 +626,7 @@ export class RecipePanel {
     for (const el of this.root.querySelectorAll("[data-rm]")) el.addEventListener("click", () => { r.remove(+el.dataset.rm); this.render(); });
     for (const el of this.root.querySelectorAll("select[data-pdir]")) el.addEventListener("change", () => { r.setProjDir(+el.dataset.pdir, el.value); this.render(); });
     this.wireKeyed();
+    this.wireUnitAdd();
     const dl = $("#rc-dl");
     if (dl) dl.addEventListener("change", (ev) => { r.setDirectionLayer(ev.target.value); this.render(); });
     for (const el of this.root.querySelectorAll("[data-open]")) {
@@ -713,6 +763,76 @@ export class RecipePanel {
   }
 
   // 「鍵つきの書き込み(keyed)を足す」: 鍵・その鍵の層・方向・α を選んで行を足す(保存した鍵があるときだけ)
+  // --- ユニットの書き方で 1 つ足す(v0.10.1)。サーバーで書き方とこのモデルで当てられるかを確かめてから足す ---------------
+  // @方向 を省いたときの方向: レシピの既定の方向、無ければ、射影・keyed の行がどれも同じ方向ならその方向
+  impliedDirection() {
+    if (this.r.defaultDirection) return { name: this.r.defaultDirection, from: "default" };
+    const ds = [...new Set(this.r.units.filter((u) => isProj(u) || isKeyed(u)).map((u) => u.direction).filter(Boolean))];
+    return ds.length === 1 ? { name: ds[0], from: "rows" } : null;
+  }
+  unitAddHTML() {
+    const f = this.ua, d = this.impliedDirection();
+    const tip = t("CLI の --unit と同じ書き方。例 14:H19:s4@NAME(ヘッドの射影)、9:attn:s1@NAME(注意の出力全体)、9:ffn:s1@NAME(MLP 全体)、12:N345:s2@NAME(ニューロン)、17:E25:N389:s4@NAME(専門家のニューロン、Inkling 2)、14:8949:+1(ニューロンを押す)。@NAME を省くと、レシピの既定の方向(無ければ、行の方向が 1 つだけならその方向)");
+    return `<div class="rc-uadd"><label class="muted" for="rc-ua" title="${esc(tip)}">${t("ユニットを足す")}</label>
+      <input id="rc-ua" class="mono" size="24" spellcheck="false" autocomplete="off" placeholder="14:H19:s1${d ? "" : "@NAME"}" value="${esc(f.text)}" title="${esc(tip)}">
+      <button class="small" id="rc-ua-go"${f.busy ? " disabled" : ""}>${t("レシピに足す")}</button>
+      ${d ? `<span class="muted note">${esc(t("@ を省くと方向 {d}", { d: d.name }))}</span>` : ""}
+      <div id="rc-ua-msg" class="note${f.msg && !f.msg.ok ? " ng" : ""}" role="status" aria-live="polite">${f.msg ? f.msg.html : ""}</div></div>`;
+  }
+  // サーバーの理由の code → 画面の言葉
+  unitWhy(x) {
+    const p = x.params || {}, srv = LANG === "ja" && x.message ? `(${esc(x.message)}${x.hint ? `。${esc(x.hint)}` : ""})` : "";
+    const ex = t("例 14:H19:s4@NAME、9:attn:s1@NAME、12:N345:s2@NAME、17:E25:N389:s4@NAME");
+    switch (x.code) {
+      case "grammar": return `${esc(t("書き方を読めません: {s}", { s: x.spec || "" }))}${srv}<br>${esc(ex)}`;
+      case "no_direction": return esc(t("方向がありません。最後に @方向の名前 を付けてください(このレシピには、省いたときに使う方向がありません)"));
+      case "no_key": return esc(t("鍵がありません。#鍵の名前 を付けてください"));
+      case "layer_range": return esc(t("層 {L} はこのモデルにありません(0〜{m})", { L: p.layer, m: p.max }));
+      case "head_range": return esc(t("L{L} のヘッド {h} はありません(0〜{m})", { L: p.layer, h: p.head, m: p.max }));
+      case "no_heads": return esc(t("L{L} にはヘッドがありません", { L: p.layer }));
+      case "neuron_range": return esc(t("L{L} のニューロン {n} はありません(0〜{m})", { L: p.layer, n: p.neuron, m: p.max }));
+      case "expert_range": return esc(t("L{L} の専門家 {e} はありません(0〜{m})", { L: p.layer, e: p.expert, m: p.max }));
+      case "not_moe": return esc(t("L{L} は MoE の層ではないので、専門家の番号は使えません", { L: p.layer }));
+      case "moe_neuron": return esc(t("L{L} は MoE の層です。専門家のニューロンは {L}:E<専門家>:N<番号> の形で書きます", { L: p.layer }));
+      case "inkling_proj_only": return esc(t("Inkling 2 で当てられるのは方向成分の射影(L:Hh・L:attn・L:ffn・L:Ee:Nn の sS@方向)だけです"));
+      case "no_such_direction": return esc(t("方向 {d} がありません(gne direction か CHiPS で作った方向の名前)", { d: p.name }));
+      default: return `${esc(t("このモデルでは当てられないユニットです"))}${srv}`;
+    }
+  }
+  async addUnitText() {
+    const f = this.ua, r = this.r, spec = f.text.trim();
+    if (!spec || f.busy) return;
+    const d = this.impliedDirection(), noAt = !/@/.test(spec);
+    f.busy = true;
+    let x;
+    try {
+      x = await postJSON("/api/recipe-unit", { spec, default_direction: d ? d.name : null, default_key: r.defaultKey || null });
+    } catch (e) {
+      x = { ok: false, code: "error", message: e.message };
+    }
+    f.busy = false;
+    if (!x.ok) { f.msg = { ok: false, html: x.code === "error" ? esc(x.message || "") : this.unitWhy(x) }; this.render(); return; }
+    const u = x.unit;
+    if (!rowOk(u)) { f.msg = { ok: false, html: esc(t("この種類のユニットはレシピの欄では扱えません(CLI の --unit では使えます)")) }; this.render(); return; }
+    const res = r.addUnit(u);
+    if (res === "exists") {
+      f.msg = { ok: false, html: esc(t("{u} はもうレシピにあります。強さは行のスライダーで変えられます", { u: x.label })) };
+      this.render();
+      return;
+    }
+    f.text = "";
+    f.msg = { ok: true, html: `${esc(t("{u} を足しました。", { u: x.label }))}${noAt && d && (u.mode === "proj" || u.mode === "keyed")
+      ? ` ${esc(d.from === "default" ? t("@ を省いたので、レシピの既定の方向 {d} を使いました。", { d: d.name }) : t("@ を省いたので、レシピの行の方向 {d} を使いました。", { d: d.name }))}` : ""} <span class="muted">${esc(t("ほかの部品と合わせると効き方が変わるので、返事を確かめて強さを調整してください"))}</span>` };
+    this.onAdded();
+  }
+  wireUnitAdd() {
+    const inp = this.root.querySelector("#rc-ua"), go = this.root.querySelector("#rc-ua-go");
+    if (!inp || !go) return;
+    inp.addEventListener("input", () => { this.ua.text = inp.value; });
+    inp.addEventListener("keydown", (ev) => { if (ev.key === "Enter" && !ev.isComposing) { ev.preventDefault(); this.addUnitText(); } });
+    go.addEventListener("click", () => this.addUnitText());
+  }
+
   keyedAddHTML() {
     const keys = this.keys().filter((k) => !k.error && (k.layers || []).length);
     if (!keys.length) return "";

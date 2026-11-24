@@ -750,6 +750,15 @@ input.rc-kexp { width: 44px; }
 .badge.keyed { border-color: var(--keyed-line); color: var(--keyed); margin: 0 0 0 var(--sp-2); }
 .badge.warn { border-color: var(--warn-line); color: var(--warn-hi); font-family: var(--sans); white-space: normal; }
 .rc-kadd { margin: var(--sp-2) 0; }
+/* レシピの欄の「ユニットを足す」(v0.10.1) */
+.rc-uadd { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2) var(--sp-3); margin: var(--sp-3) 0 var(--sp-2); }
+.rc-uadd input { flex: 1 1 12em; min-width: 0; }
+.rc-uadd #rc-ua-msg { flex-basis: 100%; }
+.rc-uadd #rc-ua-msg:empty { display: none; }
+/* CHiPS の候補の「レシピに足す」: レシピにある行は押した印 */
+button.pp-add.on { border-color: var(--accent, currentColor); }
+.pp-add-msg:empty { display: none; }
+
 .rc-kadd summary { cursor: pointer; }
 .evx-kx-in { display: inline-flex; flex-wrap: wrap; gap: var(--sp-4); align-items: center; border-left: 2px solid var(--keyed-line); padding-left: var(--sp-4); }
 .evx-kx { border-top: 1px solid var(--line); margin-top: var(--sp-5); padding-top: var(--sp-1); }

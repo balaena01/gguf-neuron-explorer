@@ -889,6 +889,28 @@ class UIData:
             spec = None
         return {**x, "path": str(p), "spec": spec, "updated": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(p.stat().st_mtime))}
 
+    def pipeline_writes(self, name: str, top: int = 200) -> dict:
+        """一括の部品の順位(<name>.writes.json、Session.heads_pipeline の書き込みの量の流れと Inkling 2 が書く)。上位 top 行と、
+        確かめた部品の測った値(label で合わせる)。順位の無い結果(止めて選ぶ流れ)は rows が空。"""
+        self._pipeline_path(name)                                  # 名前を確かめる
+        p = self.s.store.heads_dir(self.s.meta.model_id) / f"{name}.writes.json"
+        if not p.exists():
+            return {"name": name, "rows": [], "n_rows_total": 0}
+        d = self._get(("writes", name), [p], lambda: json.loads(p.read_text(encoding="utf-8")))
+        ver = d.get("verify")
+        vrows = ver.get("rows", []) if isinstance(ver, dict) else (ver or [])
+        by = {r.get("label"): r for r in vrows}
+        keep = ("label", "layer", "index", "kind", "expert", "score", "share", "sampled")
+        out = []
+        for i, r in enumerate((d.get("rows") or [])[:max(1, min(int(top), 2000))]):
+            x = {k: r[k] for k in keep if k in r}
+            x["rank"] = i + 1
+            v = by.get(r.get("label"))
+            if v is not None:
+                x["verified"] = {k: v.get(k) for k in ("gap_drop", "causal", "b_side_delta", "drift_orth_b", "effect", "excluded")}
+            out.append(x)
+        return {"name": name, "rows": out, "n_rows_total": d.get("n_rows_total") or len(d.get("rows") or [])}
+
     # --- 強さの候補(heads_candidates のジョブ、Session.heads_candidates): direction ビューの「強さの候補」 -------------
     def _candidates_name(self, name: str) -> str:
         """名前だけを受け付ける(Session.candidates_path はパスも受けるので、UI からはファイルの場所を指させない)。"""

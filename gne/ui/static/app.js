@@ -926,6 +926,7 @@ function recipeChanged(r) {
     ...r.projHeads().map((u) => ({ layer: u.layer, head: u.head, k: 1, cls: u.s > 0 ? "minus" : u.s < 0 ? "plus" : "zero",   // 射影(CHANGE-06)
                                label: `L${u.layer} H${u.head} s${+(+u.s).toFixed(2)}${u.direction ? ` @${u.direction}` : ""}` }))]);
   updateTileFrames();                                                                                 // 専門家全体はタイルの枠に
+  if (directionView && directionView.pipe) directionView.pipe.refreshMarks();                         // CHiPS の候補の「レシピにある」の印(v0.10.1)
   const n = r.units.length + (r.ablate ? 1 : 0);
   $("#recipe-count").textContent = n ? String(n) : "";
   $("#recipe-count").title = t("{n} ユニット", { n });
@@ -999,6 +1000,14 @@ async function setView(v) {
           isLoop: () => !!(state.arch && state.arch.loop),               // 同じ層を 2 回実行するモデル(ループの中の部品の方向の欄)
           inkling: () => (state.arch && state.arch.inkling) || null,     // Inkling 2(答えの前に思考を書く。位置の選択・部品の名前)
           writesBlocked: () => writesBlocked(state.arch),               // 書き込みの量での順位づけを実行しないモデル(既定は止めて選ぶ流れ)
+          // 候補を 1 個ずつレシピに足す(v0.10.1): 同じ部品・同じ方向の行があるか、別の方向で入っているか
+          recipeHas: (q) => {
+            const u = state.recipe.findUnit(q);
+            return { in: u || null, other: state.recipe.partRows(q).filter((x) => x !== u).map((x) => x.direction || state.recipe.defaultDirection || "—") };
+          },
+          onAddUnit: (q) => { const r = state.recipe.addUnit(q); if (r !== "exists") recipeTouched(true); return r; },
+          onRemoveUnit: (q) => { if (state.recipe.removeUnit(q)) recipeTouched(false); },
+          onAddUnits: (qs) => { const x = state.recipe.addUnits(qs); if (x.added) recipeTouched(true); return x; },
         },
         candidates: {                                                     // 強さの候補(heads_candidates)の候補を使う
           onLoadCandidate: (c) => loadCandidate(c),

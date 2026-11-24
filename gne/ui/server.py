@@ -298,6 +298,12 @@ def create_app(session, *, warm: bool = True, openai: bool = False) -> FastAPI:
     def pipeline_one(name: str):
         return data.pipeline_one(name)
 
+    @app.get("/api/pipelines/{name}/writes")
+    def pipeline_writes(name: str, top: int = 200):
+        """一括(書き込みの量の流れ)の部品の順位(<name>.writes.json)。CHiPS の結果の「3. 書き込みの順位づけ」の表(v0.10.1)。
+        確かめた部品には、確かめの段で測った値を添える。"""
+        return data.pipeline_writes(name, top=top)
+
     @app.get("/api/candidates")
     def candidates():
         """強さの候補(heads_candidates のジョブ)の保存済みの結果。"""
@@ -442,6 +448,12 @@ def create_app(session, *, warm: bool = True, openai: bool = False) -> FastAPI:
                                    direction_layer=direction_layer if direction_layer and direction_layer != "own" else None,
                                    default_key=default_key or None, loop_edits=loop_edits or None,
                                    proj_correction=proj_correction or None)
+
+    @app.post("/api/recipe-unit")
+    def recipe_unit(spec: str = Body(...), default_direction: str | None = Body(None), default_key: str | None = Body(None)):
+        """レシピの欄の「ユニットを足す」(v0.10.1): ユニットの書き方を読み、このモデルで当てられるかを確かめる(モデルは流さない)。
+        当てられなければ ok: false と理由の code(画面が訳す)。"""
+        return session.unit_check(spec, default_direction=default_direction or None, default_key=default_key or None)
 
     @app.get("/api/evals")
     def evals():
