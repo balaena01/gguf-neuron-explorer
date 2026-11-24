@@ -150,7 +150,8 @@ def add_server(tmp_path_factory):
         _direction(s, name)
     row = lambda lab, kind, L, i, sc: {"label": lab, "layer": L, "index": i, "kind": kind, "score": sc, "share": sc / 40}  # noqa: E731
     _writes_json(s, "ppw", [row("12:H5", "attn", 12, 5, 3.0), row("14:N100", "neuron", 14, 100, 2.0), row("12:H3", "attn", 12, 3, 1.0),
-                            row("13:N9", "neuron", 13, 9, 0.8), row("15:attn", "layer_attn", 15, -1, 0.5)])
+                            row("13:N9", "neuron", 13, 9, 0.8), row("15:attn", "layer_attn", 15, -1, 0.5),
+                            dict(row("16:E25:N389", "neuron", 16, 389, 0.4), expert=25)])   # 専門家のニューロンの行(Inkling 2 の形)
     yield from _serve(s)
 
 
@@ -176,7 +177,7 @@ def test_recipe_unit_and_writes_api(add_server):
                                         "12:N99999:s1@ppw")] == ["head_range", "layer_range", "no_such_direction", "no_direction",
                                                                   "grammar", "not_moe", "neuron_range"]
     w = call("/api/pipelines/ppw/writes")[1]
-    assert w["n_rows_total"] == 5000 and [r["rank"] for r in w["rows"]] == [1, 2, 3, 4, 5]
+    assert w["n_rows_total"] == 5000 and [r["rank"] for r in w["rows"]] == [1, 2, 3, 4, 5, 6] and w["rows"][5]["expert"] == 25
     assert w["rows"][0]["verified"]["gap_drop"] == 2.6 and "verified" not in w["rows"][1]
     assert call("/api/pipelines/ppx/writes")[1]["rows"] == []                           # 止めて選ぶ流れには順位が無い
     assert call("/api/pipelines/bad name/writes".replace(" ", "%20"))[0] in (400, 404)
@@ -241,10 +242,11 @@ def test_add_candidates_in_browser(add_server, browser):
         pg.click("#pp-result details.pp-rankall summary")
         rk = "#pp-result table.pp-rank"
         pg.wait_for_selector(f"{rk} [data-add]", timeout=30000)
-        assert pg.evaluate(f"document.querySelectorAll('{rk} tbody tr').length") == 5
+        assert pg.evaluate(f"document.querySelectorAll('{rk} tbody tr').length") == 6
         _click(pg, rk, "L15 attn")                                    # どの組にも無い → s1
         _click(pg, rk, "L13 N9")
-        assert pg.evaluate("window.gne.recipe.specs()") == ["13:N9:s1@ppw", "15:attn:s1@ppw"]
+        pg.evaluate(f"[...document.querySelectorAll('{rk} [data-add]')][5].click()")   # 専門家のニューロンの行 → L:Ee:Nn
+        assert pg.evaluate("window.gne.recipe.specs()") == ["13:N9:s1@ppw", "15:attn:s1@ppw", "16:E25:N389:s1@ppw"]
         if lang == "en":
             assert pg.evaluate("[...window.gneI18n.missing]") == []
         assert not errors, errors
