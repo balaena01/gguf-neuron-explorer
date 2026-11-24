@@ -2959,7 +2959,8 @@ def recipe_combine(recipes: list[Path] = typer.Argument(..., exists=True, help="
 @app.command("recipe-add")
 def recipe_add(recipe: Path = typer.Option(..., "--recipe", exists=True, help="ユニットを足すレシピ(YAML)"),
                unit: list[str] = typer.Option(..., "--unit", help="足すユニット(--unit を重ねて複数)。例 14:H19:s4@NAME、9:attn:s1@NAME、"
-                                                                 "12:N345:s2@NAME、17:E25:N389:s4@NAME(Inkling 2)。@NAME を省くとレシピの既定の方向"),
+                                                                 "12:N345:s2@NAME、17:E25:N389:s4@NAME(Inkling 2)。@NAME を省くとレシピの既定の方向。"
+                                                                 "射影の :sS を省くと強さ 1(始めの値。弱いことが多い)"),
                out: Optional[Path] = typer.Option(None, "--out", "-o", help="書き出すレシピ(既定は --recipe のファイルを書き換える)"),
                replace: bool = typer.Option(False, "--replace", help="同じユニット(同じ部品・同じ方向)がもうあれば、その行の強さを置き換える"
                                                                      "(既定は止める)"),
@@ -2967,10 +2968,11 @@ def recipe_add(recipe: Path = typer.Option(..., "--recipe", exists=True, help="�
     """レシピにユニットを 1 つずつ足す(CHiPS の候補の表から、組に入らなかった部品を手で足すときなど)。UI のレシピの欄の
     「ユニットを足す」と CHiPS の結果の「レシピに足す」と同じ。書き方は --unit と同じ。同じ部品でも方向が違えば別のユニット(LoRA は
     方向ごとの行)。モデルは読まないので、書き方・重複・方向の有無だけを確かめる(層・番号の範囲などは当てるときに確かめる)。"""
-    from .steer import ADD_NOTE, GneError, Recipe, add_units, parse_unit
+    from .steer import ADD_NOTE, WEAK_NOTE, GneError, Recipe, add_units, default_proj_strength, parse_unit
     try:
         r = Recipe.load(recipe)
-        us = [parse_unit(x) for x in unit]
+        filled = [default_proj_strength(x) for x in unit]          # 強さを省いた射影のユニットは強さ 1
+        us = [parse_unit(x) for x, _ in filled]
         r2, done = add_units(r, us, replace=replace)
     except GneError as e:
         raise typer.BadParameter(e.message + (f"({e.hint})" if e.hint else ""), param_hint="--unit") from e
@@ -2980,9 +2982,11 @@ def recipe_add(recipe: Path = typer.Option(..., "--recipe", exists=True, help="�
         r2.save(dst)
     except GneError as e:
         raise typer.BadParameter(e.message, param_hint="--out") from e
-    for x in done:
+    for x, (_, weak) in zip(done, filled, strict=True):
         print(f"  {'足した' if x['action'] == 'added' else '強さを置き換えた'}: {x['label']}"
               + (f"(前は {x['was']})" if x["action"] == "replaced" else ""))
+        if weak:
+            print(f"    強さを省いたので 1 で足しました。{WEAK_NOTE}")
     dirs = sorted({u.direction or r2.default_direction for u in r2.units if u.mode in ("proj", "keyed") and (u.direction or r2.default_direction)})
     print(f"{dst}({len(r2.units)} ユニット" + (f"、方向 {', '.join(dirs)}" if dirs else "") + ")")
     print(ADD_NOTE + "(gne chat --recipe で試し、gne recipe-scale で全体の強さを掛け込めます)")

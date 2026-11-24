@@ -16,7 +16,7 @@ import numpy as np
 import pytest
 from typer.testing import CliRunner
 
-from gne.steer import ADD_NOTE, GneError, Recipe, add_units, parse_unit, unit_identity
+from gne.steer import ADD_NOTE, GneError, Recipe, add_units, default_proj_strength, parse_unit, unit_identity
 
 from .test_ui import (MODEL, _dialogs, _seed_pipeline, _seed_pipeline_writes, _seed_pipeline_writes_081,  # noqa: F401
                       _seed_pipeline_writes_refine, _serve, _step, browser)
@@ -55,6 +55,19 @@ def test_add_units_identity_and_replace():
     assert [u.mode for u in r5.units[2:]] == ["add", "gain"]
 
 
+def test_spec_without_strength_starts_at_one():
+    """gne recipe-add とレシピの欄だけ: 射影の :sS を省くと強さ 1(省いたことを返す)。ほかの書き方はそのまま。"""
+    assert default_proj_strength("14:H19@pir") == ("14:H19:s1@pir", True)
+    assert default_proj_strength("14:H19") == ("14:H19:s1", True)
+    assert default_proj_strength("12:N345@a") == ("12:N345:s1@a", True)
+    assert default_proj_strength("17:E25:N389") == ("17:E25:N389:s1", True)
+    assert default_proj_strength(" 9:ffn@x ") == ("9:ffn:s1@x", True)
+    for spec in ("14:H19:s4@pir", "14:8949:+1", "21:H7:x0", "10:ffn:keyed:a1@d#k", "garbage"):
+        assert default_proj_strength(spec) == (spec, False)
+    with pytest.raises(GneError):                                       # ほかのコマンドの --unit は今までどおり :sS が要る
+        parse_unit("14:H19@pir")
+
+
 def test_cli_recipe_add(tmp_path):
     from gne.cli import app
     src = tmp_path / "r.yaml"
@@ -74,6 +87,9 @@ def test_cli_recipe_add(tmp_path):
     assert Recipe.load(out).units[0].k == 3.0                                                               # --out が無ければ書き換える
     res = run(app, ["recipe-add", "--recipe", str(out), "--unit", "12:Hx:s3"])
     assert res.exit_code == 2                                                                               # 読めない書き方
+    res = run(app, ["recipe-add", "--recipe", str(out), "--unit", "20:H2@pir", "--unit", "20:H3:s1@pir"])   # 強さを省いた行だけ知らせ
+    assert res.exit_code == 0 and res.output.count("強さを省いたので 1 で足しました") == 1 and "返事に出ないことが多い" in res.output
+    assert [u.k for u in Recipe.load(out).units if u.layer == 20] == [1.0, 1.0]
     old = tmp_path / "old.yaml"                                                                             # 補正の記録の無い古いレシピ
     old.write_text("name: old\nmodel_id: m\ndose_unit: rel\nunits:\n- {layer: 3, kind: head, head: 1, mode: proj, s: 1, direction: a}\n")
     res = run(app, ["recipe-add", "--recipe", str(old), "--unit", "4:H2:s1@a"])
@@ -105,7 +121,9 @@ def test_unit_check_codes_without_model():
     ok = chk("12:H5:s2@pir")
     assert ok["ok"] and ok["unit"]["kind"] == "head" and ok["unit"]["direction"] == "pir" and ok["label"] == "L12 H5 s2 @pir"
     ok = chk("9:attn:s1", default_direction="pir")                                     # @ を省くと既定の方向で埋める
-    assert ok["ok"] and ok["unit"]["direction"] == "pir"
+    assert ok["ok"] and ok["unit"]["direction"] == "pir" and not ok["s_defaulted"]
+    ok = chk("12:H5@pir")                                                              # 強さを省くと 1(画面が知らせる)
+    assert ok["ok"] and ok["s_defaulted"] and ok["unit"]["k"] == 1.0 and ok["spec"] == "12:H5:s1@pir"
     code = lambda spec, **kw: chk(spec, **kw)["code"]                                    # noqa: E731
     assert code("garbage") == "grammar" and code("12:H5:s1") == "no_direction" and code("40:H1:s1@pir") == "layer_range"
     assert chk("40:H1:s1@pir")["params"] == {"layer": 40, "max": 27}
@@ -223,6 +241,8 @@ def test_add_candidates_in_browser(add_server, browser):
         add_t = "Add to recipe" if lang == "en" else "レシピに足す"
         assert _btn(pg, top, "L12 H5") == add_t
         _click(pg, top, "L14 N100")                                   # 組 2(s1)と組 4(s2)にある → 小さい組の s1
+        weak_rows = "document.querySelectorAll('#recipe-list tr.rc-proj .rc-sdef').length"
+        assert pg.evaluate(weak_rows) == 0 and pg.evaluate("document.querySelectorAll('#pp-result .pp-weak').length") == 0   # 組の強さ → 知らせなし
         _click(pg, top, "L12 H3")                                     # 組 4 だけ → s2
         assert pg.evaluate("window.gne.recipe.specs()") == ["12:H3:s2@ppw", "14:N100:s1@ppw"]
         assert _btn(pg, top, "L12 H3").endswith("In recipe" if lang == "en" else "レシピにある")
@@ -243,7 +263,18 @@ def test_add_candidates_in_browser(add_server, browser):
         rk = "#pp-result table.pp-rank"
         pg.wait_for_selector(f"{rk} [data-add]", timeout=30000)
         assert pg.evaluate(f"document.querySelectorAll('{rk} tbody tr').length") == 6
-        _click(pg, rk, "L15 attn")                                    # どの組にも無い → s1
+        _click(pg, rk, "L15 attn")                                    # どの組にも無い → s1。ボタンの横とレシピの欄の行に知らせ
+        weak = ("1 is a starting value and is often too weak" if lang == "en" else "返事に出ないことが多い弱さ")
+        assert weak in pg.evaluate("document.querySelector('#pp-result .pp-weak').innerText") and weak in pg.evaluate("document.querySelector('#pp-add-msg').innerText")
+        pg.wait_for_function("document.querySelectorAll('#recipe-list tr.rc-proj .rc-sdef').length === 1", timeout=10000)
+        assert weak in pg.evaluate("document.querySelector('#recipe-list tr.rc-proj .rc-sdef').innerText")
+        pg.evaluate("""() => { const tr = [...document.querySelectorAll('#recipe-list tr.rc-proj')].find((x) => x.innerText.includes('L15 attn'));
+          const n = tr.querySelector('input.num'); n.value = '4'; n.dispatchEvent(new Event('input', { bubbles: true })); }""")   # 強さを変えると消える
+        pg.wait_for_function("document.querySelectorAll('#recipe-list tr.rc-proj .rc-sdef').length === 0 && document.querySelectorAll('#pp-result .pp-weak').length === 0", timeout=10000)
+        assert pg.evaluate("window.gne.recipe.units.some((u) => u.sDefault)") is False
+        assert pg.evaluate("window.gne.recipe.specs()") == ["15:attn:s4@ppw"]
+        pg.evaluate("window.gne.recipe.clear()")
+        _click(pg, rk, "L15 attn")
         _click(pg, rk, "L13 N9")
         pg.evaluate(f"[...document.querySelectorAll('{rk} [data-add]')][5].click()")   # 専門家のニューロンの行 → L:Ee:Nn
         assert pg.evaluate("window.gne.recipe.specs()") == ["13:N9:s1@ppw", "15:attn:s1@ppw", "16:E25:N389:s1@ppw"]
@@ -326,6 +357,11 @@ def test_recipe_panel_unit_input(add_server, browser):
         m = add("9:ffn:s1@ppx")
         assert "9:ffn:s1@ppx" in pg.evaluate("window.gne.recipe.specs()")
         assert len(pg.evaluate("window.gne.recipe.specs()")) == 3
+        assert pg.evaluate("document.querySelectorAll('#recipe-list tr.rc-proj .rc-sdef').length") == 0   # 強さを書いた行には印なし
+        m = add("12:H7@ppw")                                           # 強さを省く → 強さ 1 と知らせ、行に印
+        assert "12:H7:s1@ppw" in pg.evaluate("window.gne.recipe.specs()")
+        assert ("strength was left out" if lang == "en" else "強さを省いたので") in m
+        pg.wait_for_function("document.querySelectorAll('#recipe-list tr.rc-proj .rc-sdef').length === 1", timeout=10000)
         if lang == "en":
             assert pg.evaluate("[...window.gneI18n.missing]") == []
         assert not errors, errors

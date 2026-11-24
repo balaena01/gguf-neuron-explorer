@@ -1823,8 +1823,8 @@ class Session:
         "label", "spec"}。当てられなければ {"ok": False, "code", "params", "message", "hint"}(code は画面が訳す: grammar /
         no_direction / no_key / layer_range / head_range / no_heads / neuron_range / expert_range / not_moe / no_such_direction /
         model。model は Session.recipe の文をそのまま)。"""
-        from .steer import parse_unit
-        spec = str(spec or "").strip()
+        from .steer import default_proj_strength, parse_unit
+        spec, s_defaulted = default_proj_strength(str(spec or "").strip())   # 強さを省いた射影は強さ 1(画面が知らせる)
 
         def bad(code, e=None, **params):
             return {"ok": False, "code": code, "params": params, "spec": spec,
@@ -1884,7 +1884,7 @@ class Session:
                 row["direction"], row["direction_default"] = default_direction, True
             if not row.get("key") and default_key:
                 row["key"], row["key_default"] = default_key, True
-        return {"ok": True, "unit": row, "label": r.units[0].label(), "spec": spec}
+        return {"ok": True, "unit": row, "label": r.units[0].label(), "spec": spec, "s_defaulted": s_defaulted}
 
     def recipe_path(self, name_or_path: str | Path) -> Path:
         p = Path(name_or_path)

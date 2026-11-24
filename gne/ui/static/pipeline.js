@@ -7,7 +7,7 @@
 // 組の比較の下の「候補を作る」で heads_candidates のジョブを投げる(組 × 全体の倍率の返事を作り、名前を伏せて採点する。
 // 結果は同じビューの「強さの候補」に出る)。
 import { getJSON } from "./api.js";
-import { parseProj } from "./recipe.js";
+import { parseProj, weakNote } from "./recipe.js";
 import { LANG, t } from "./i18n.js";
 import { esc } from "./panels.js";
 import { Steps } from "./steps.js";
@@ -789,6 +789,7 @@ export class PipelinePanel {
   addBtn(d, r) {
     const st = startS(d, r), s = st ? st.s : 1;
     const q = candUnit(r, +(+s).toFixed(4), d.name);
+    if (!st) q.sDefault = "noset";                   // どの組にも無いので強さ 1(足したら知らせ、レシピの欄の行に印)
     const why = st ? (st.s1 ? t("強さ s{s}: 倍率を上げる前の組(s=1)での値", { s: fmt(s, 2) })
       : t("強さ s{s}: この部品を含むいちばん小さい組({n} 個)での、この部品の強さ", { s: fmt(s, 2), n: st.n }))
       : t("強さ s1: どの組にも入っていないので 1(方向の成分をちょうど消す強さ。確かめの段もこの強さで 1 個ずつ測っています)");
@@ -810,6 +811,8 @@ export class PipelinePanel {
     if (!x) return;
     const h = this.recipeHas(x.q) || { in: null, other: [] };
     b.classList.toggle("on", !!h.in);
+    const wn = b.parentElement && b.parentElement.querySelector(".pp-weak");   // 強さ 1 の知らせは、外したか強さを変えたら消す
+    if (wn && !(h.in && h.in.sDefault)) wn.remove();
     if (h.in) {
       b.textContent = `✓ ${t("レシピにある")}`;
       b.title = t("いまのレシピに入っています(強さ s{s}、方向 {d})。押すとレシピから外します", { s: fmt(h.in.s, 2), d: x.q.direction });
@@ -833,11 +836,20 @@ export class PipelinePanel {
         const h = this.recipeHas(x.q) || {};
         if (h.in) {
           this.onRemoveUnit(x.q);
+          const n = b.parentElement.querySelector(".pp-weak");
+          if (n) n.remove();
           this.addMsg(esc(t("{u}(方向 {d})をレシピから外しました", { u: this.unitLabel(x.q), d: x.q.direction })));
         } else {
           const r = this.onAddUnit(x.q);
           this.addMsg(r === "exists" ? esc(t("{u} はもうレシピにあります", { u: this.unitLabel(x.q) }))
-            : `${esc(t("{u} を強さ s{s}・方向 {d} でレシピに足しました。", { u: this.unitLabel(x.q), s: fmt(x.q.s, 2), d: x.q.direction }))} <span class="muted">${esc(ADD_NOTE())}</span>`);
+            : `${esc(t("{u} を強さ s{s}・方向 {d} でレシピに足しました。", { u: this.unitLabel(x.q), s: fmt(x.q.s, 2), d: x.q.direction }))}${
+              x.q.sDefault ? ` <span class="pp-warn">${esc(weakNote(x.q.sDefault))}</span>` : ""} <span class="muted">${esc(ADD_NOTE())}</span>`);
+          if (r !== "exists" && x.q.sDefault && !b.parentElement.querySelector(".pp-weak")) {   // ボタンの横にも短い知らせ
+            const n = document.createElement("div");
+            n.className = "note pp-warn pp-weak";
+            n.textContent = weakNote(x.q.sDefault);
+            b.after(n);
+          }
         }
         this.refreshMarks();
       });

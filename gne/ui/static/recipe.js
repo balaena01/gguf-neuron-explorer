@@ -201,6 +201,10 @@ export function unitId(u, dd = null, dk = null) {
   const key = (mode === "keyed" || mode === "nw") ? (u.key || dk || "") : "";
   return [u.layer, kind, mode, u.head ?? "", u.neuron ?? "", u.expert ?? "", u.pair ?? "", dir, key, u.key2 ?? ""].join("|");
 }
+// 強さ 1 で足したユニットの知らせ(v0.10.1): why = noset(どの組にも入っていない)/ omitted(書き方で強さを省いた)
+export const weakNote = (why) => (why === "omitted"
+  ? t("強さを省いたので、強さ 1 で足しました。1 は始めの値で、返事に出ないことが多い弱さです。レシピの欄で強さを上げて、3 列チャットで確かめてください")
+  : t("この部品はどの組にも入っていないので、強さ 1 で足しました。1 は始めの値で、返事に出ないことが多い弱さです。レシピの欄で強さを上げて、3 列チャットで確かめてください"));
 // 方向を除いた部品の鍵(同じ部品が別の方向で入っているかを見る)
 export const partId = (u) => unitId({ ...u, direction: "", key: null }, "", "");
 
@@ -259,7 +263,7 @@ export class Recipe {
     s = +s;
     if (!Number.isFinite(s) || s === 0 || !this.units.length && !this.ablate) return null;
     const prev = { units: this.units.map((u) => ({ ...u })), ablate: this.ablate ? { ...this.ablate } : null, name: this.name, scale: s };
-    this.units = this.units.map((u) => scaleUnit(u, s));
+    this.units = this.units.map((u) => { const x = scaleUnit(u, s); if (x === u) return u; const y = { ...x }; delete y.sDefault; return y; });
     if (this.ablate) this.ablate = this.ablateAt(s);
     this.name = scaledName(this.name, s);
     this._save();
@@ -350,6 +354,7 @@ export class Recipe {
   // そうでなければ足さない。戻り値 "added" / "replaced" / "exists"
   addUnit(q, { replace = false } = {}) {
     const row = rowOf(q, this.defaultDirection, this.defaultKey), u = this.findUnit(row);
+    if (q.sDefault) row.sDefault = q.sDefault;      // 強さ 1 で足した印(どの組にも無い noset / 強さを省いた omitted)。強さを変えると消える
     if (u && !replace) return "exists";
     if (u) this.units[this.units.indexOf(u)] = row; else this.units.push(row);
     this._sort();
@@ -411,7 +416,7 @@ export class Recipe {
   }
   removeHead(L, h) { const u = this.hasHead(L, h); if (u) this.remove(this.units.indexOf(u)); }
   // 行 i の値(ニューロン・方向・route は dose、ヘッドと gain は倍率 k)
-  set(i, v) { const u = this.units[i]; if (isKeyed(u) || isNw(u)) u.alpha = v; else if (isProj(u)) u.s = v; else if (isGain(u)) u.k = v; else u.dose = v; this._save(); }
+  set(i, v) { const u = this.units[i]; delete u.sDefault; if (isKeyed(u) || isNw(u)) u.alpha = v; else if (isProj(u)) u.s = v; else if (isGain(u)) u.k = v; else u.dose = v; this._save(); }
   remove(i) { this.units.splice(i, 1); this._save(); }
   clear() {
     this.units = []; this.name = ""; this.ablate = null; this.sampling = null; this.skipped = 0; this.directionLayer = "own";
@@ -601,6 +606,8 @@ export class RecipePanel {
         if (!Number.isFinite(v)) return;
         r.set(i, v);
         const tr = this.root.querySelector(`tr[data-i="${i}"]`);
+        const sd = tr.querySelector(".rc-sdef");              // 強さ 1 で足した印は、強さを変えたら消す
+        if (sd) sd.remove();
         for (const x of tr.querySelectorAll("input")) if (x !== ev.target) x.value = String(v);
         const sg = tr.querySelector(".sg");
         if (isKeyed(r.units[i]) || isNw(r.units[i])) {
@@ -680,7 +687,8 @@ export class RecipePanel {
         <span class="sg mono minus">${sLabel(u.s)}</span> <span class="mono">@</span><select class="rc-pdir" data-pdir="${i}" title="${t("射影する方向(gne direction の方向セット)")}">${opts}</select>
         ${rk}<button class="small quiet rm" data-rm="${i}" title="${t("外す")}">×</button>
         <div class="sl"><span class="muted">${PROJ.min}</span><input type="range" class="dose" min="${PROJ.min}" max="${PROJ.max}" step="${PROJ.step}" value="${u.s}" data-i="${i}" style="background:${projBG(u.s)}"><span class="muted">${PROJ.max}</span>
-          <input type="number" min="-300" max="300" step="${PROJ.step}" value="${+(+u.s).toFixed(3)}" data-i="${i}" class="num" title="${t("値を直接入れる")}"></div></td></tr>`;
+          <input type="number" min="-300" max="300" step="${PROJ.step}" value="${+(+u.s).toFixed(3)}" data-i="${i}" class="num" title="${t("値を直接入れる")}"></div>
+        ${u.sDefault ? `<div class="note pp-warn rc-sdef">${esc(weakNote(u.sDefault))}</div>` : ""}</td></tr>`;
   }
 
   // 方向の層(own / base)の選択と、射影の説明(proj があるとき)
@@ -772,7 +780,7 @@ export class RecipePanel {
   }
   unitAddHTML() {
     const f = this.ua, d = this.impliedDirection();
-    const tip = t("CLI の --unit と同じ書き方。例 14:H19:s4@NAME(ヘッドの射影)、9:attn:s1@NAME(注意の出力全体)、9:ffn:s1@NAME(MLP 全体)、12:N345:s2@NAME(ニューロン)、17:E25:N389:s4@NAME(専門家のニューロン、Inkling 2)、14:8949:+1(ニューロンを押す)。@NAME を省くと、レシピの既定の方向(無ければ、行の方向が 1 つだけならその方向)");
+    const tip = t("CLI の --unit と同じ書き方。例 14:H19:s4@NAME(ヘッドの射影)、9:attn:s1@NAME(注意の出力全体)、9:ffn:s1@NAME(MLP 全体)、12:N345:s2@NAME(ニューロン)、17:E25:N389:s4@NAME(専門家のニューロン、Inkling 2)、14:8949:+1(ニューロンを押す)。@NAME を省くと、レシピの既定の方向(無ければ、行の方向が 1 つだけならその方向)。射影の :sS を省くと強さ 1(始めの値で、弱いことが多い)");
     return `<div class="rc-uadd"><label class="muted" for="rc-ua" title="${esc(tip)}">${t("ユニットを足す")}</label>
       <input id="rc-ua" class="mono" size="24" spellcheck="false" autocomplete="off" placeholder="14:H19:s1${d ? "" : "@NAME"}" value="${esc(f.text)}" title="${esc(tip)}">
       <button class="small" id="rc-ua-go"${f.busy ? " disabled" : ""}>${t("レシピに足す")}</button>
@@ -812,7 +820,7 @@ export class RecipePanel {
     }
     f.busy = false;
     if (!x.ok) { f.msg = { ok: false, html: x.code === "error" ? esc(x.message || "") : this.unitWhy(x) }; this.render(); return; }
-    const u = x.unit;
+    const u = x.s_defaulted ? { ...x.unit, sDefault: "omitted" } : x.unit;
     if (!rowOk(u)) { f.msg = { ok: false, html: esc(t("この種類のユニットはレシピの欄では扱えません(CLI の --unit では使えます)")) }; this.render(); return; }
     const res = r.addUnit(u);
     if (res === "exists") {
@@ -822,7 +830,8 @@ export class RecipePanel {
     }
     f.text = "";
     f.msg = { ok: true, html: `${esc(t("{u} を足しました。", { u: x.label }))}${noAt && d && (u.mode === "proj" || u.mode === "keyed")
-      ? ` ${esc(d.from === "default" ? t("@ を省いたので、レシピの既定の方向 {d} を使いました。", { d: d.name }) : t("@ を省いたので、レシピの行の方向 {d} を使いました。", { d: d.name }))}` : ""} <span class="muted">${esc(t("ほかの部品と合わせると効き方が変わるので、返事を確かめて強さを調整してください"))}</span>` };
+      ? ` ${esc(d.from === "default" ? t("@ を省いたので、レシピの既定の方向 {d} を使いました。", { d: d.name }) : t("@ を省いたので、レシピの行の方向 {d} を使いました。", { d: d.name }))}` : ""}${
+      x.s_defaulted ? ` <span class="pp-warn">${esc(weakNote("omitted"))}</span>` : ""} <span class="muted">${esc(t("ほかの部品と合わせると効き方が変わるので、返事を確かめて強さを調整してください"))}</span>` };
     this.onAdded();
   }
   wireUnitAdd() {

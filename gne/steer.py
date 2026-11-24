@@ -1028,6 +1028,20 @@ ADD_NOTE = ("足した部品の候補の表の数は、その部品だけを当�
 _DIRECTED = ("proj", "keyed", "nw")
 
 
+# 強さを省いた射影のユニット(L:Hh・L:Nn・L:Ee:Nn・L:attn・L:ffn に @NAME だけ)。gne recipe-add とレシピの欄の「ユニットを足す」だけが
+# 受け付け、強さ 1 で足す(ほかのコマンドの --unit は今までどおり :sS が要る)
+_PROJ_NO_S_RE = re.compile(r"^(\d+):((?:[Hh]\d+)|(?:N\d+)|(?:E\d+:N\d+)|attn|ffn)(@[\w.\-]+)?$", re.I)
+WEAK_NOTE = "1 は始めの値で、返事に出ないことが多い弱さです。強さを上げて、3 列チャット(CLI では gne chat --recipe)で確かめてください"
+
+
+def default_proj_strength(spec: str) -> tuple[str, bool]:
+    """強さ(:sS)を省いた射影のユニットに :s1 を入れる(v0.10.1)。戻り値は (書き方, 省いていたか)。ほかの書き方はそのまま。"""
+    m = _PROJ_NO_S_RE.match(str(spec).strip())
+    if not m:
+        return str(spec).strip(), False
+    return f"{m.group(1)}:{m.group(2)}:s1{m.group(3) or ''}", True
+
+
 def unit_identity(u: Unit, default_direction: str | None = None, default_key: str | None = None) -> tuple:
     """同じユニットかを決める鍵(レシピに 2 度入れない判定、v0.10.1)。層・種類・mode・番号(ヘッド・ニューロン・専門家・組の相手)と、
     方向・鍵(省いたものはレシピの既定で埋める)。強さ(dose・k)は含めない。同じ部品でも方向が違えば別のユニット。"""
